@@ -279,6 +279,7 @@ export function Design() {
           <p className="text-caption text-on-surface-variant">Caption — secondary detail text</p>
           <p className="text-data-md text-on-surface">Data medium — $1,234.56 (+2.10%)</p>
           <p className="text-data-lg text-on-surface">Data large — $1,234.56</p>
+          <p className="text-data-xl text-on-surface">Data XL — $1,234.56</p>
         </div>
       </Section>
 

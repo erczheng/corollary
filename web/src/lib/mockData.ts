@@ -424,6 +424,12 @@ export const ACCOUNT_SUMMARY = {
 
 export const VOLUME_24H = 18_420.55
 
+export const DASHBOARD_TRENDS = {
+  balance: { changePct: 2.4, comparedTo: 'vs last 24h' },
+  volume: { changePct: 15.2, comparedTo: 'vs last 24h' },
+  winRate: { changePct: -1.2, comparedTo: 'vs 30d avg' },
+}
+
 // ---------------------------------------------------------------------- //
 // Risk limits + audit log (Settings page)
 // ---------------------------------------------------------------------- //

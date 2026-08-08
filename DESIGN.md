@@ -189,6 +189,12 @@ typography:
     fontWeight: '600'
     lineHeight: 28px
     fontVariantNumeric: tabular-nums
+  data-xl:
+    fontFamily: JetBrains Mono
+    fontSize: 32px
+    fontWeight: '600'
+    lineHeight: 40px
+    fontVariantNumeric: tabular-nums
 fontStacks:
   display: "'Montserrat Variable', Montserrat, system-ui, sans-serif"
   label: "'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', system-ui, sans-serif"

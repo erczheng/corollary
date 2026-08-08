@@ -1,13 +1,15 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { StatTile } from '../components/StatTile'
+import { StatCard } from '../components/StatCard'
 import { PerformanceChart } from '../components/PerformanceChart'
 import { RefreshButton } from '../components/RefreshButton'
 import { Chip } from '../components/Chip'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
   ACTIVITY_STATUS_LABEL,
+  DASHBOARD_TRENDS,
   OPEN_POSITIONS,
   PORTFOLIO_HISTORY,
   RECENT_ACTIVITY,
@@ -39,6 +41,7 @@ export function Dashboard() {
   const halt = useUIStore((s) => s.halt)
   const resume = useUIStore((s) => s.resume)
   const flatten = useUIStore((s) => s.flatten)
+  const accountMode = useUIStore((s) => s.accountMode)
   const [confirmingFlatten, setConfirmingFlatten] = useState(false)
   const [activityFilter, setActivityFilter] = useState<(typeof ACTIVITY_FILTERS)[number]>('all')
 
@@ -52,57 +55,92 @@ export function Dashboard() {
   return (
     <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-16">
       <div className="flex flex-wrap items-start justify-between gap-6">
-        <div className="flex gap-8">
-          <StatTile label="Total balance" value={formatUsd(balance)} />
-          <StatTile label="24h volume" value={formatUsd(VOLUME_24H)} />
-          <StatTile
-            label="Strategy win rate"
-            value={`${winRate}%`}
-            valueClassName={winRate >= 50 ? 'text-bullish' : 'text-bearish'}
-          />
+        <div>
+          <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
+          <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
+            Monitor your total balance, 24h performance, and today's recommended trades.
+          </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          {isHalted && <Chip variant="caution">Halted</Chip>}
-          <label className="flex items-center gap-2 text-label-md text-on-surface-variant">
-            Strategy
-            <select
-              value={activeStrategyId}
-              onChange={(e) => setActiveStrategyId(e.target.value)}
-              className="rounded border border-outline bg-surface px-2 py-1.5 text-body-md text-on-surface focus:border-primary"
-            >
-              {STRATEGIES.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} (v{s.version})
-                </option>
-              ))}
-            </select>
-          </label>
-          {isHalted ? (
+        <div className="flex flex-col items-end gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            {/* The trading-state pill — primary, per DESIGN.md's Colors
+                section ("the trading-state pill"). This mirrors the
+                Paper/Cash and Manual/Auto state already set in the header;
+                it's a status readout here, not a second control. */}
+            <span className="flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
+              <span
+                className={`h-2 w-2 rounded-full ${isHalted ? 'bg-caution' : 'bg-bullish'}`}
+                aria-hidden="true"
+              />
+              {isHalted ? 'Halted' : 'Trading On'} ({accountMode === 'cash' ? 'Cash' : 'Paper'})
+            </span>
+            <div className="relative">
+              <select
+                value={activeStrategyId}
+                onChange={(e) => setActiveStrategyId(e.target.value)}
+                className="appearance-none rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
+              >
+                {STRATEGIES.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    Strategy: {s.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDownIcon className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-on-surface-variant" />
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {isHalted ? (
+              <button
+                type="button"
+                onClick={resume}
+                className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
+              >
+                Resume trading
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={halt}
+                className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
+              >
+                Halt
+              </button>
+            )}
             <button
               type="button"
-              onClick={resume}
-              className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
+              onClick={() => setConfirmingFlatten(true)}
+              className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
             >
-              Resume trading
+              Flatten
             </button>
-          ) : (
-            <button
-              type="button"
-              onClick={halt}
-              className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
-            >
-              Halt
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setConfirmingFlatten(true)}
-            className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
-          >
-            Flatten
-          </button>
+          </div>
         </div>
+      </div>
+
+      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard
+          label="Total balance"
+          value={formatUsd(balance)}
+          icon={<BankIcon />}
+          changePct={DASHBOARD_TRENDS.balance.changePct}
+          comparedTo={DASHBOARD_TRENDS.balance.comparedTo}
+        />
+        <StatCard
+          label="24h volume"
+          value={formatUsd(VOLUME_24H)}
+          icon={<TrendingUpIcon />}
+          changePct={DASHBOARD_TRENDS.volume.changePct}
+          comparedTo={DASHBOARD_TRENDS.volume.comparedTo}
+        />
+        <StatCard
+          label="Strategy win rate"
+          value={`${winRate}%`}
+          icon={<TargetIcon />}
+          changePct={DASHBOARD_TRENDS.winRate.changePct}
+          comparedTo={DASHBOARD_TRENDS.winRate.comparedTo}
+        />
       </div>
 
       <section className="mt-12 rounded-lg border border-outline-warm bg-surface-container-lowest p-6">

@@ -362,6 +362,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+@utility text-data-xl {
+  font-family: var(--font-data);
+  font-weight: 600;
+  font-size: 32px;
+  line-height: 40px;
+  font-variant-numeric: tabular-nums;
+}
+
 /** Hides the scrollbar on a fixed-height inner panel (e.g. a scrollable
  * list card) while keeping it scrollable by wheel/trackpad/keyboard. Not
  * for the page itself — the main window scrollbar stays, since it's the
