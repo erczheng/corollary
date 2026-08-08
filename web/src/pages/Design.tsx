@@ -208,7 +208,7 @@ function pnlClass(value: number): string {
 
 export function Design() {
   return (
-    <div className="mx-auto max-w-[1140px] px-4 py-20 lg:px-8">
+    <div className="mx-auto max-w-[1425px] px-4 py-20 lg:px-12">
       <h1 className="text-display-lg text-on-surface">Design system</h1>
       <p className="mt-3 max-w-prose text-body-md text-on-surface-variant">
         Every token and primitive from DESIGN.md, rendered so the system can

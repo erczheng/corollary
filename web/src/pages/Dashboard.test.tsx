@@ -8,6 +8,10 @@ import { formatUsd } from '../lib/format'
 const initialState = useUIStore.getState()
 
 beforeEach(() => {
+  // BrowserRouter reads window.location, and these tests navigate. Without
+  // this, a test that ran after a navigation starts on the wrong page.
+  // Same guard Activity.test.tsx carries, for the same reason.
+  window.history.pushState({}, '', '/')
   useUIStore.setState(initialState, true)
 })
 
@@ -174,43 +178,84 @@ describe('Confidence slot', () => {
   })
 })
 
-describe('Executions status column', () => {
-  it('is headed Status, not P&L / Status', () => {
+describe('Executions P&L column', () => {
+  /** This reverses an earlier decision. The column used to be headed Status
+   * and show P&L only when a row had one; it is now a P&L column and shows
+   * nothing else. The status word is gone from the table body entirely —
+   * see the em-dash test below for what that costs. */
+  it('is headed P&L, not Status', () => {
     render(<App />)
     const executions = within(section('Recent Executions'))
 
-    expect(executions.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument()
-    expect(executions.queryByRole('columnheader', { name: /P&L/ })).not.toBeInTheDocument()
+    expect(executions.getByRole('columnheader', { name: 'P&L' })).toBeInTheDocument()
+    expect(executions.queryByRole('columnheader', { name: 'Status' })).not.toBeInTheDocument()
   })
 
-  it('shows the money moved on a deposit and a withdrawal, signed', () => {
+  it('carries a fill price per row', () => {
     render(<App />)
     const executions = within(section('Recent Executions'))
 
-    expect(executions.getByText('+$5,000.00')).toBeInTheDocument()
-    expect(executions.getByText('−$1,250.00')).toBeInTheDocument()
+    expect(executions.getByRole('columnheader', { name: 'Price' })).toBeInTheDocument()
   })
 
-  it('does not color a cash movement as if it were a gain or a loss', () => {
+  /** This feed is orders only. A deposit has no contract, no quantity and no
+   * fill, so it is not an execution — the account's full ledger, cash
+   * movements included, is on Activity (PRD.md §8.2). */
+  it('leaves deposits and withdrawals off the executions feed', () => {
     render(<App />)
-    const deposit = within(section('Recent Executions')).getByText('+$5,000.00')
+    const table = within(within(section('Recent Executions')).getByRole('table'))
 
-    // A deposit is money moved, not money made — DESIGN.md keeps
-    // bullish/bearish for P&L.
-    expect(deposit.className).not.toMatch(/text-bullish|text-bearish/)
+    // The paper feed carries a +$5,000 deposit and a −$1,250 withdrawal.
+    expect(table.queryByText('+$5,000.00')).not.toBeInTheDocument()
+    expect(table.queryByText('−$1,250.00')).not.toBeInTheDocument()
+    expect(table.queryByText('Deposit')).not.toBeInTheDocument()
+    expect(table.queryByText('Withdrawal')).not.toBeInTheDocument()
   })
 
-  it('still falls back to the status word where there is neither P&L nor cash moved', () => {
+  it('stretches its rows so the panel ends level with Recommended Trades', () => {
+    render(<App />)
+    const table = within(section('Recent Executions')).getByRole('table')
+
+    // The Dashboard sits this table beside another panel and the two have
+    // to end level; Activity renders the same component in normal flow and
+    // deliberately does not stretch. If these two ever get unified, one
+    // page gets the wrong layout.
+    expect(table.className).toMatch(/h-full/)
+  })
+
+  it('does not simply hide every row — the orders are still there', () => {
+    render(<App />)
+    const table = within(within(section('Recent Executions')).getByRole('table'))
+
+    // Guards the filter against being too greedy: an empty table would
+    // satisfy the assertions above just as well.
+    expect(table.getAllByRole('row').length).toBeGreaterThan(1)
+  })
+
+  it('shows an em dash, not the status word, where a row has no P&L', () => {
     render(<App />)
     // Scoped to the table, not the section — the status filter's <option>
     // elements carry these same words.
     const table = within(within(section('Recent Executions')).getByRole('table'))
 
-    // getAllBy, not getBy: the feed is deep enough now that a status word
-    // can legitimately appear on more than one visible row. The claim is
-    // that the fallback renders at all, not that it renders exactly once.
-    expect(table.getAllByText('Rejected').length).toBeGreaterThan(0)
-    expect(table.getAllByText('Canceled').length).toBeGreaterThan(0)
+    expect(table.queryByText('Rejected')).not.toBeInTheDocument()
+    expect(table.queryByText('Canceled')).not.toBeInTheDocument()
+    expect(table.getAllByText('—').length).toBeGreaterThan(0)
+  })
+
+  /** The known cost of the column above, pinned so it stays a decision
+   * rather than drifting into a surprise: on this page a rejected order and
+   * a pending one are now visually identical. Activity is where a rejection
+   * still states its reason inline (PRD.md §8.2). If that ever regresses,
+   * rejections become invisible everywhere — CLAUDE.md rule 8. */
+  it('leaves the reason on hover here, and inline on Activity', () => {
+    render(<App />)
+    const dash = within(within(section('Recent Executions')).getByRole('table'))
+    expect(dash.queryByText(/breach|limit|exceed/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: 'Activity' }))
+    const activity = within(within(section('Recent Activity')).getByRole('table'))
+    expect(activity.getAllByText(/breach|limit|exceed/i).length).toBeGreaterThan(0)
   })
 })
 

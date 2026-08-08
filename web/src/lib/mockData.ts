@@ -184,11 +184,28 @@ export const ACTIVITY_ACTION_LABEL: Record<ActivityAction, string> = {
   WITHDRAWAL: 'Withdrawal',
 }
 
-/** Text color for a status shown in place of a P&L. `rejected` takes
- * `error`, not `bearish` — DESIGN.md assigns error to "Rejections,
- * failures", and a rejected order is a system/rule outcome rather than a
- * losing position. Both clear 6.1:1 on surface in light and 10.9:1 in
- * dark; verified. */
+/** A deposit is a cash movement, not an order — nothing was bought, sold,
+ * filled or rejected. The Dashboard's Recent Executions is a trading feed
+ * and shows orders only; Activity is the account's full ledger and shows
+ * both (PRD.md §8.2). Keep the two readings apart here rather than
+ * re-deriving the distinction at each call site. */
+export function isOrderAction(action: ActivityAction): boolean {
+  return action !== 'DEPOSIT' && action !== 'WITHDRAWAL'
+}
+
+/** Text color for a rendered activity status.
+ *
+ * **Currently unrendered.** The executions table used to fall back to the
+ * status word where a row had no P&L; it is now a P&L column that shows an
+ * em dash instead, so nothing reads this map today. It is kept because the
+ * colour decisions below are the hard part and would have to be re-derived
+ * (and re-checked for contrast) the moment a status badge or column comes
+ * back. If that has not happened by the time real data lands, delete it.
+ *
+ * `rejected` takes `error`, not `bearish` — DESIGN.md assigns error to
+ * "Rejections, failures", and a rejected order is a system/rule outcome
+ * rather than a losing position. Both clear 6.1:1 on surface in light and
+ * 10.9:1 in dark; verified. */
 export const ACTIVITY_STATUS_CLASS: Record<ActivityStatus, string> = {
   filled: 'text-on-surface-variant',
   rejected: 'text-error',

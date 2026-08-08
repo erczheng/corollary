@@ -1,6 +1,5 @@
 import {
   ACTIVITY_ACTION_LABEL,
-  ACTIVITY_STATUS_CLASS,
   ACTIVITY_STATUS_LABEL,
   type ActivityItem,
   type ActivityStatus,
@@ -73,11 +72,21 @@ interface ExecutionsTableProps {
    * rejections, and a reason reachable only by hovering is a reason that
    * doesn't exist on a screenshot, on a touch device, or to a keyboard. */
   showRejectionReason?: boolean
+  /** Stretch the rows to fill the height available. The Dashboard sits this
+   * table beside Recommended Trades and the two panels have to end level;
+   * table rows distribute slack for free, where a div list would not. Off
+   * on Activity, where the table is in normal flow and stretching rows
+   * would just space a paginated list oddly. */
+  fill?: boolean
 }
 
-export function ExecutionsTable({ items, showRejectionReason = false }: ExecutionsTableProps) {
+export function ExecutionsTable({
+  items,
+  showRejectionReason = false,
+  fill = false,
+}: ExecutionsTableProps) {
   return (
-    <table className="w-full border-collapse">
+    <table className={`w-full border-collapse ${fill ? 'h-full' : ''}`}>
       <thead>
         {/* Sticky so the columns stay identifiable while the body scrolls
             inside the panel. Harmless where the table is paginated
@@ -93,8 +102,14 @@ export function ExecutionsTable({ items, showRejectionReason = false }: Executio
             Asset / Action
           </th>
           <th className="px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
+          {/* Fill price per contract. It was only in the CSV before, which
+              meant reconciling a fill against the broker took an export.
+              PRD.md §8.2 lists it as an Activity column. */}
           <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
-            Status
+            Price
+          </th>
+          <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
+            P&amp;L
           </th>
         </tr>
       </thead>
@@ -120,27 +135,43 @@ export function ExecutionsTable({ items, showRejectionReason = false }: Executio
               )}
             </td>
             <td className="px-3 py-2 align-top text-right text-data-md text-on-surface">{a.quantity ?? '—'}</td>
-            {/* The most specific thing known about the row: its P&L if the
-                trade produced one, the cash moved if it was a deposit or
-                withdrawal, otherwise the status word. An opening fill has no
-                realized P&L yet, and a rejection never will. */}
-            <td className="whitespace-nowrap px-3 py-2 align-top text-right">
+            {/* A cash movement has no fill price, and a canceled order never
+                got one. Em dash rather than a zero, which would read as a
+                free fill. */}
+            <td className="px-3 py-2 align-top text-right text-data-md text-on-surface">
+              {a.price !== null ? formatUsd(a.price) : '—'}
+            </td>
+            {/* P&L, and only P&L. This column used to fall back to the status
+                word when a row had none, which meant its header said one thing
+                and most of its cells showed another.
+
+                The cost of the split is real and worth stating: an em dash here
+                covers an opening fill, a pending order, a cancel and a
+                rejection alike, so those four no longer look different at a
+                glance. `title` keeps the status reachable on hover, but hover
+                is not a substitute — it's absent from a screenshot, a touch
+                device and a keyboard. Activity is the page that still spells
+                rejections out, inline and in `error`, via showRejectionReason
+                (PRD.md §8.2 makes it the page of record for them). */}
+            <td
+              className="whitespace-nowrap px-3 py-2 align-top text-right"
+              title={
+                a.rejectionReason
+                  ? `${ACTIVITY_STATUS_LABEL[a.status]} — ${a.rejectionReason}`
+                  : ACTIVITY_STATUS_LABEL[a.status]
+              }
+            >
               {a.pnl !== null ? (
                 <span className={`text-data-md ${signClass(a.pnl)}`}>{formatUsd(a.pnl, { signed: true })}</span>
               ) : a.amount !== null ? (
                 /* Deliberately not signClass: a deposit is money you moved,
                    not money the account made, and rendering it bullish green
                    would read as a gain. The sign still carries direction. */
-                <span
-                  className="text-data-md text-on-surface"
-                  title={`${ACTIVITY_ACTION_LABEL[a.action]} — ${ACTIVITY_STATUS_LABEL[a.status]}`}
-                >
+                <span className="text-data-md text-on-surface">
                   {formatUsd(a.amount, { signed: true })}
                 </span>
               ) : (
-                <span className={`text-caption ${ACTIVITY_STATUS_CLASS[a.status]}`} title={a.rejectionReason}>
-                  {ACTIVITY_STATUS_LABEL[a.status]}
-                </span>
+                <span className="text-data-md text-on-surface-variant">—</span>
               )}
             </td>
           </tr>

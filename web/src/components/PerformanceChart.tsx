@@ -126,7 +126,12 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
         </label>
       </div>
 
-      <div className={`relative mt-3 h-72 w-full ${dragging ? 'select-none' : ''}`}>
+      {/* select-none unconditionally, not only while dragging: the browser
+          begins its selection on the same mousedown that starts the drag,
+          so a class applied on the next render is already too late and the
+          first sweep paints a highlight over the whole plot. There is no
+          text here worth selecting anyway. */}
+      <div className="relative mt-3 h-72 w-full select-none">
         {selection && (
           <div
             role="status"
@@ -150,7 +155,11 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
           <LineChart
             data={data}
             margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
-            onMouseDown={(s) => {
+            onMouseDown={(s, e) => {
+              // Belt and braces with select-none above: preventDefault stops
+              // the drag-selection from ever starting, which also keeps the
+              // cursor from turning into a text caret mid-sweep.
+              e?.preventDefault()
               const i = toIndex(s?.activeTooltipIndex, data.length)
               if (i === null) return
               setDragFrom(i)

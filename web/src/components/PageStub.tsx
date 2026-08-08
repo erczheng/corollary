@@ -7,7 +7,7 @@ interface PageStubProps {
  * content lands per PRD.md §8 as each phase connects real data. */
 export function PageStub({ title, description }: PageStubProps) {
   return (
-    <div className="mx-auto max-w-[1140px] px-4 py-20 lg:px-8">
+    <div className="mx-auto max-w-[1425px] px-4 py-20 lg:px-12">
       <h1 className="text-headline-md text-on-surface">{title}</h1>
       <p className="mt-3 max-w-prose text-body-md text-on-surface-variant">
         {description}
