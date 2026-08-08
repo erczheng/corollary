@@ -31,7 +31,7 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 uv sync                          # install
 uv run pytest                    # backend tests
 uv run pytest -m risk            # risk manager tests only — run before any engine change
-uv run alembic upgrade head      # migrations
+uv run alembic upgrade head      # migrations — NOT YET WIRED, no alembic.ini exists yet
 uv run python -m corollary.engine    # start engine
 uv run uvicorn corollary.api:app --reload   # start API
 uv run mypy corollary            # type check, must be clean
@@ -116,6 +116,12 @@ Never auto-resume on reconnect. Reconnecting into an unverified position state i
 
 ## Layout
 
+**This is the target layout, not a description of the current tree.** As of
+Phase 1, `corollary/` is ~130 lines of package scaffolding: every module below
+exists as a stub or not at all, and `RiskManager` is nine lines. Do not go
+looking for `data/providers/alpaca.py` or `db/models.py` — write them when the
+phase calls for them. The frontend half of this tree is real.
+
 ```
 corollary/
 ├── engine/
@@ -188,7 +194,7 @@ against whatever feed produced the bars. Computed from IEX, a 5,000,000 threshol
 - **Backtesting still does not need the paid plan.** Everything older than 15 minutes is available on every feed, so the Feb 2024 → yesterday bulk download to Parquet runs fine on Basic — it just returns bars, per the point above. Only live quotes are degraded by the free tier.
 - Option symbols are OCC format: underlying + YYMMDD + C/P + 8-digit strike ×1000. `AAPL241220C00150000` is the AAPL $150 call expiring 20 Dec 2024.
 - **Watch for adjusted contracts.** After a split or special dividend, OCC issues a modified root with a numeric suffix (`AAPL1`) and the deliverable is no longer 100 shares. Sizing and P&L math that assumes a 100 multiplier will be wrong on those, which means the risk manager computes max loss wrong — exactly the failure rule 4 exists to prevent. Filter them out of the scanner universe unless they are handled explicitly.
-- Multi-leg orders require Level 3. Current account level: 
+- Multi-leg orders require Level 3. Current account level: 3.
 
 **Backtest data access:** bulk-download to Parquet once, query with DuckDB. **Never call the API inside a backtest loop** — it turns minutes into hours and burns the rate limit. Filter the contract universe on download: ±15% of spot, ≤60 DTE, minimum open interest.
 
@@ -303,6 +309,8 @@ Run `uv run pytest -m risk` before any change to the engine, no exceptions. The 
 - Log structurally (JSON) with a correlation ID per decision, so a trade can be traced from scan → LLM → risk → order → fill.
 - Prefer boring, explicit code in the engine. Cleverness there costs money later.
 - Small commits. The engine's git history is a debugging tool.
+- **The default branch is `master`, not `main`.** Tooling that assumes `main`
+  will fail with "unknown revision."
 
 ---
 
