@@ -204,6 +204,13 @@ export interface ActivityItem {
   price: number | null
   quantity: number | null
   pnl: number | null
+  /** Return on the closed trade as a percentage of cost basis. Null
+   * wherever `pnl` is null — an opening fill has realized nothing yet, and
+   * a rejection never will. Carried beside `pnl` rather than derived from
+   * it: the dollar figure and the percentage answer different questions
+   * (how much, how well), and the Activity header averages both
+   * separately (PRD.md §8.2). */
+  pnlPct: number | null
   /** Signed cash movement for DEPOSIT / WITHDRAWAL — positive in, negative
    * out. Null on trades, which report `pnl` instead. Kept separate from
    * `pnl` on purpose: money you moved into the account is not money the
@@ -213,16 +220,222 @@ export interface ActivityItem {
   rejectionReason?: string
 }
 
-export const RECENT_ACTIVITY: ActivityItem[] = [
-  { id: 'act-1', time: '2026-08-07T14:32:00Z', contract: 'AAPL $230 Call Aug 15', action: 'STC', price: 4.85, quantity: 2, pnl: 62.0, amount: null, status: 'filled' },
-  { id: 'act-2', time: '2026-08-07T13:05:00Z', contract: 'TSLA $240 Put Nov 15', action: 'BTO', price: 4.1, quantity: 1, pnl: null, amount: null, status: 'filled' },
-  { id: 'act-3', time: '2026-08-07T10:48:00Z', contract: 'SPY $430/$425 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 3, pnl: null, amount: null, status: 'filled' },
-  { id: 'act-4', time: '2026-08-06T19:58:00Z', contract: 'QQQ $370 Call Dec 20', action: 'BTO', price: 6.4, quantity: 1, pnl: null, amount: null, status: 'rejected', rejectionReason: 'max_exposure_per_underlying: QQQ already at 27% of equity (limit 25%)' },
-  { id: 'act-5', time: '2026-08-06T15:41:00Z', contract: 'NVDA $150 Put Nov 21', action: 'STC', price: 2.15, quantity: 2, pnl: -102.5, amount: null, status: 'filled' },
-  { id: 'act-6', time: '2026-08-06T09:31:00Z', contract: '—', action: 'DEPOSIT', price: null, quantity: null, pnl: null, amount: 5_000.0, status: 'filled' },
-  { id: 'act-7', time: '2026-08-05T16:02:00Z', contract: 'AMZN $185 Call Sep 19', action: 'BTO', price: 3.2, quantity: 4, pnl: null, amount: null, status: 'canceled' },
-  { id: 'act-8', time: '2026-08-04T18:12:00Z', contract: '—', action: 'WITHDRAWAL', price: null, quantity: null, pnl: null, amount: -1_250.0, status: 'filled' },
+/** A rejection is logged with the rule that produced it, never a bare
+ * "Rejected" (CLAUDE.md rule 8, PRD.md §4). These name the real limit keys
+ * from PRD.md §4, so the string read on Activity points at the same
+ * setting that is editable in Settings. */
+const REJECTION_REASONS = [
+  'max_risk_per_trade_pct: sized at 9.2% of equity (limit 7%)',
+  'max_concurrent_positions: 8 already open (limit 8)',
+  'max_net_directional_pct: net long 44% of equity (limit 40%)',
+  'max_daily_loss_pct: down 21% of starting-day equity (limit 20%) — halted',
 ]
+
+/* The hand-written head of each feed exists for *coverage*: between them
+ * these rows hit all four statuses, a deposit, a withdrawal, a rejection
+ * carrying its reason, an opening fill with no P&L yet, and a close that
+ * lost money. The generated tail below adds pages, not states — so don't
+ * thin these out, and don't rely on the tail to reach a state.
+ *
+ * `pending` in particular was unreachable before the Activity page existed:
+ * ACTIVITY_STATUS_CLASS has always had a `caution` branch for it that no
+ * fixture ever rendered. */
+const PAPER_ACTIVITY_HEAD: ActivityItem[] = [
+  { id: 'act-1', time: '2026-08-07T15:58:00Z', contract: 'MSFT $420 Call Sep 19', action: 'BTO', price: 3.75, quantity: 2, pnl: null, pnlPct: null, amount: null, status: 'pending' },
+  { id: 'act-2', time: '2026-08-07T14:32:00Z', contract: 'AAPL $230 Call Aug 15', action: 'STC', price: 4.85, quantity: 2, pnl: 62.0, pnlPct: 17.71, amount: null, status: 'filled' },
+  { id: 'act-3', time: '2026-08-07T13:05:00Z', contract: 'TSLA $240 Put Nov 15', action: 'BTO', price: 4.1, quantity: 1, pnl: null, pnlPct: null, amount: null, status: 'filled' },
+  { id: 'act-4', time: '2026-08-07T10:48:00Z', contract: 'SPY $430/$425 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 3, pnl: null, pnlPct: null, amount: null, status: 'filled' },
+  { id: 'act-5', time: '2026-08-06T19:58:00Z', contract: 'QQQ $370 Call Dec 20', action: 'BTO', price: 6.4, quantity: 1, pnl: null, pnlPct: null, amount: null, status: 'rejected', rejectionReason: 'max_exposure_per_underlying: QQQ already at 27% of equity (limit 25%)' },
+  { id: 'act-6', time: '2026-08-06T15:41:00Z', contract: 'NVDA $150 Put Nov 21', action: 'STC', price: 2.15, quantity: 2, pnl: -102.5, pnlPct: -25.0, amount: null, status: 'filled' },
+  { id: 'act-7', time: '2026-08-06T09:31:00Z', contract: '—', action: 'DEPOSIT', price: null, quantity: null, pnl: null, pnlPct: null, amount: 5_000.0, status: 'filled' },
+  { id: 'act-8', time: '2026-08-05T16:02:00Z', contract: 'AMZN $185 Call Sep 19', action: 'BTO', price: 3.2, quantity: 4, pnl: null, pnlPct: null, amount: null, status: 'canceled' },
+  { id: 'act-9', time: '2026-08-04T18:12:00Z', contract: '—', action: 'WITHDRAWAL', price: null, quantity: null, pnl: null, pnlPct: null, amount: -1_250.0, status: 'filled' },
+]
+
+const CASH_ACTIVITY_HEAD: ActivityItem[] = [
+  { id: 'cash-act-1', time: '2026-08-07T15:12:00Z', contract: 'MSFT $410/$400 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 2, pnl: null, pnlPct: null, amount: null, status: 'filled' },
+  { id: 'cash-act-2', time: '2026-08-06T17:24:00Z', contract: 'SPY $425 Put Sep 19', action: 'BTO', price: 1.86, quantity: 1, pnl: null, pnlPct: null, amount: null, status: 'filled' },
+  { id: 'cash-act-3', time: '2026-08-06T13:47:00Z', contract: 'NVDA $140 Call Oct 17', action: 'BTO', price: 5.2, quantity: 2, pnl: null, pnlPct: null, amount: null, status: 'rejected', rejectionReason: 'max_risk_per_trade_pct: $1,040 is 10.7% of equity (limit 7%)' },
+  { id: 'cash-act-4', time: '2026-08-05T13:31:00Z', contract: '—', action: 'DEPOSIT', price: null, quantity: null, pnl: null, pnlPct: null, amount: 2_000.0, status: 'filled' },
+]
+
+/** Contract strings for the generated tail. Real-looking underlyings and
+ * structures, because a scanned column of them should read as a trading
+ * log rather than as filler. */
+const TAIL_CONTRACTS = [
+  'AAPL $225 Call Sep 19',
+  'AAPL $235/$240 Call Debit Spread Oct 17',
+  'MSFT $410 Call Oct 17',
+  'NVDA $145/$140 Put Credit Spread Nov 21',
+  'SPY $560/$555 Put Credit Spread Dec 19',
+  'QQQ $495 Call Jan 16',
+  'TSLA $260 Put Sep 19',
+  'AMD $185 Call Nov 21',
+  'IWM $205 Put Oct 17',
+  'AMZN $190/$185 Put Credit Spread Sep 19',
+  'GOOGL $175 Call Dec 19',
+  'META $520 Put Nov 21',
+]
+
+/** Walks back one trading session. Same market-closed rule the price
+ * series uses — a feed with Saturday fills in it is a feed nobody trusts. */
+function previousSession(day: Date): Date {
+  const d = new Date(day)
+  do {
+    d.setUTCDate(d.getUTCDate() - 1)
+  } while (d.getUTCDay() === 0 || d.getUTCDay() === 6)
+  return d
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** Depth for the Activity page's pagination. The head above already covers
+ * every state the table can render, so this only has to look like more of
+ * the same. Runs on its own seed rather than the module-level stream, so
+ * adding it left every series above byte-identical — same reason
+ * CASH_HISTORY has its own seed.
+ *
+ * Only a *filled closing* trade carries P&L: an opening fill has realized
+ * nothing, and a rejected or canceled order never will.
+ *
+ * `maxQuantity` and `priceCeiling` are set per account so that no generated
+ * order risks more than max_risk_per_trade_pct (7%) of that account's
+ * equity. A fixture that violates the project's own risk limits is a
+ * fixture that teaches the wrong thing about what the engine allows. */
+function buildActivityTail(
+  seed: number,
+  count: number,
+  idPrefix: string,
+  startFrom: string,
+  maxQuantity: number,
+  priceCeiling: number,
+): ActivityItem[] {
+  const next = mulberry32(seed)
+  const items: ActivityItem[] = []
+  let day = new Date(`${startFrom}T00:00:00Z`)
+  let remainingToday = 0
+
+  while (items.length < count) {
+    if (remainingToday === 0) {
+      day = previousSession(day)
+      remainingToday = 1 + Math.floor(next() * 3)
+    }
+    remainingToday--
+
+    // Inside the regular session: 09:30–16:00 ET is 13:30–20:00 UTC.
+    const hour = 13 + Math.floor(next() * 7)
+    const minute = Math.floor(next() * 60)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const time = `${day.toISOString().slice(0, 10)}T${pad(hour)}:${pad(minute)}:00Z`
+    const id = `${idPrefix}-${items.length + 1}`
+
+    // A cash movement now and then, so the feed isn't uniformly trades.
+    if (next() < 0.05) {
+      const deposit = next() < 0.6
+      items.push({
+        id,
+        time,
+        contract: '—',
+        action: deposit ? 'DEPOSIT' : 'WITHDRAWAL',
+        price: null,
+        quantity: null,
+        pnl: null,
+        pnlPct: null,
+        amount: round2((deposit ? 1 : -1) * (250 + next() * 2_250)),
+        status: 'filled',
+      })
+      continue
+    }
+
+    const closing = next() < 0.5
+    const short = next() < 0.45
+    const action: ActivityAction = closing ? (short ? 'BTC' : 'STC') : short ? 'STO' : 'BTO'
+    const quantity = 1 + Math.floor(next() * maxQuantity)
+    const price = round2(0.4 + next() * priceCeiling)
+
+    const statusRoll = next()
+    const status: ActivityStatus =
+      statusRoll < 0.85 ? 'filled' : statusRoll < 0.92 ? 'rejected' : statusRoll < 0.97 ? 'canceled' : 'pending'
+
+    // Winners more often, and by a little more, than losers. These numbers
+    // are not arbitrary: the feed has to agree with what the rest of the
+    // app claims about this account. STRATEGIES.live puts strat-1 at a 71%
+    // win rate and a 1.5 profit factor, so a break-even Activity page with
+    // a 50% hit rate would have the two screens contradicting each other.
+    const realized = status === 'filled' && closing
+    const pnlPct = realized ? round2(next() < 0.64 ? 8 + next() * 46 : -(5 + next() * 32)) : null
+    const pnl = pnlPct === null ? null : round2((price * quantity * 100 * pnlPct) / 100)
+
+    items.push({
+      id,
+      time,
+      contract: TAIL_CONTRACTS[Math.floor(next() * TAIL_CONTRACTS.length)],
+      action,
+      price,
+      quantity,
+      pnl,
+      pnlPct,
+      amount: null,
+      status,
+      rejectionReason:
+        status === 'rejected' ? REJECTION_REASONS[Math.floor(next() * REJECTION_REASONS.length)] : undefined,
+    })
+  }
+
+  return items
+}
+
+/** Paper trades more, and larger, than cash — same asymmetry the portfolio
+ * series carries. Cash is real money and is sized accordingly. */
+const PAPER_ACTIVITY: ActivityItem[] = [
+  ...PAPER_ACTIVITY_HEAD,
+  ...buildActivityTail(20260809, 44, 'act-p', '2026-08-04', 4, 4.5),
+]
+
+const CASH_ACTIVITY: ActivityItem[] = [
+  ...CASH_ACTIVITY_HEAD,
+  ...buildActivityTail(20260810, 20, 'cash-act-t', '2026-08-05', 2, 2.8),
+]
+
+export interface ActivityStats {
+  /** Null where the account has no trade of that kind yet — an average
+   * over zero trades is not zero, it is unknown, and rendering it as
+   * $0.00 would claim a result that does not exist. */
+  avgWin: number | null
+  avgWinPct: number | null
+  avgLoss: number | null
+  avgLossPct: number | null
+  lifetimePnl: number
+  wins: number
+  losses: number
+}
+
+/** The Activity header stats (PRD.md §8.2), computed from the feed rather
+ * than stored as separate numbers — a header that disagrees with the rows
+ * underneath it is worse than no header at all.
+ *
+ * Only rows with a realized P&L count. An opening fill, a rejection, and a
+ * cash movement each have nothing to contribute to an average return.
+ * `amount` is excluded from lifetime P&L for the same reason it is kept off
+ * `pnl`: money you moved into the account is not money the account made. */
+export function activityStats(items: ActivityItem[]): ActivityStats {
+  const realized = items.flatMap((a) =>
+    a.pnl !== null && a.pnlPct !== null ? [{ pnl: a.pnl, pnlPct: a.pnlPct }] : [],
+  )
+  const wins = realized.filter((r) => r.pnl > 0)
+  const losses = realized.filter((r) => r.pnl < 0)
+  const mean = (xs: number[]) => (xs.length === 0 ? null : xs.reduce((t, x) => t + x, 0) / xs.length)
+
+  return {
+    avgWin: mean(wins.map((r) => r.pnl)),
+    avgWinPct: mean(wins.map((r) => r.pnlPct)),
+    avgLoss: mean(losses.map((r) => r.pnl)),
+    avgLossPct: mean(losses.map((r) => r.pnlPct)),
+    lifetimePnl: round2(realized.reduce((t, r) => t + r.pnl, 0)),
+    wins: wins.length,
+    losses: losses.length,
+  }
+}
 
 // ---------------------------------------------------------------------- //
 // Open positions (Activity page)
@@ -246,11 +459,22 @@ export interface Position {
   direction: 'long' | 'short'
 }
 
-export const OPEN_POSITIONS: Position[] = [
+/* Both books carry a long and a short, because the two close along
+ * different paths — a long is sold to close at the bid, a short is bought
+ * to close at the ask — and Close is a per-row action on Activity in both
+ * accounts. A book with only longs leaves the BTC path unexercised. */
+const PAPER_POSITIONS: Position[] = [
   { id: 'pos-1', symbol: 'AAPL', contract: '$230 Call Oct 17', last: 232.4, costBasis: 350.0, value: 412.0, quantity: 2, pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long' },
   { id: 'pos-2', symbol: 'TSLA', contract: '$240 Put Nov 15', last: 238.1, costBasis: 410.0, value: 307.5, quantity: 1, pnl: -102.5, pnlPct: -25.0, bid: 3.02, ask: 3.12, direction: 'long' },
   { id: 'pos-3', symbol: 'SPY', contract: '$430/$425 Put Credit Spread Oct 17', last: 429.88, costBasis: 210.0, value: 168.0, quantity: 3, pnl: 42.0, pnlPct: 20.0, bid: 0.55, ask: 0.6, direction: 'short' },
+  // Flat, deliberately: signClass has a zero branch and text-on-surface-variant
+  // is the one colour a P&L column reaches for that isn't a gain or a loss.
   { id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20', last: 372.4, costBasis: 640.0, value: 640.0, quantity: 1, pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long' },
+]
+
+const CASH_POSITIONS: Position[] = [
+  { id: 'cash-pos-1', symbol: 'SPY', contract: '$425 Put Sep 19', last: 429.88, costBasis: 186.0, value: 162.0, quantity: 1, pnl: -24.0, pnlPct: -12.9, bid: 1.6, ask: 1.66, direction: 'long' },
+  { id: 'cash-pos-2', symbol: 'MSFT', contract: '$410/$400 Put Credit Spread Oct 17', last: 418.35, costBasis: 140.0, value: 98.0, quantity: 2, pnl: 42.0, pnlPct: 30.0, bid: 0.47, ask: 0.52, direction: 'short' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -499,22 +723,27 @@ export interface Trend {
   comparedTo: string
 }
 
-/** The header stats that belong to the *account* rather than to the
- * strategy. Paper and Cash are two different accounts holding different
- * money, so the Paper/Cash toggle has to move these numbers — rendering
- * paper's balance while Cash is live misreports real money.
+/** Everything that belongs to the *account* rather than to the strategy.
+ * Paper and Cash are two different accounts holding different money, so the
+ * Paper/Cash toggle has to move all of it — rendering paper's balance, or
+ * paper's positions, while Cash is live misreports real money.
  *
  * Win rate is deliberately absent: it's a property of the selected
  * strategy, and it comes off STRATEGIES.live (see the Dashboard).
  *
- * Open positions are also not keyed here. Phase 1 carries one position set
- * (OPEN_POSITIONS), so Flatten in either mode clears both. Split it when
- * the Activity page needs per-account positions. */
+ * Positions and activity are keyed here as of the Activity page. They were
+ * previously a single shared set, which meant Flatten in either mode
+ * cleared both books — fine while nothing rendered a per-account position
+ * list, wrong the moment Activity did. Note the tradeoff PRD.md §3 calls
+ * out: Activity has no Paper/Cash switch on it, so the header carries a
+ * read-only account badge to say which book is on screen. */
 export interface AccountSnapshot {
   portfolioHistory: PricePoint[]
   volume24h: number
   balanceTrend: Trend
   volumeTrend: Trend
+  positions: Position[]
+  activity: ActivityItem[]
 }
 
 export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
@@ -523,13 +752,22 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     volume24h: 18_420.55,
     balanceTrend: { changePct: 2.4, comparedTo: 'vs last 24h' },
     volumeTrend: { changePct: 15.2, comparedTo: 'vs last 24h' },
+    positions: PAPER_POSITIONS,
+    activity: PAPER_ACTIVITY,
   },
   cash: {
     portfolioHistory: CASH_HISTORY,
     volume24h: 4_860.2,
     balanceTrend: { changePct: -0.8, comparedTo: 'vs last 24h' },
     volumeTrend: { changePct: 6.3, comparedTo: 'vs last 24h' },
+    positions: CASH_POSITIONS,
+    activity: CASH_ACTIVITY,
   },
+}
+
+export const ACCOUNT_LABEL: Record<AccountMode, string> = {
+  paper: 'Paper',
+  cash: 'Cash',
 }
 
 // ---------------------------------------------------------------------- //

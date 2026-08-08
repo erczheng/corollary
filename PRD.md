@@ -44,7 +44,9 @@ If a feature does not help decide a trade, place a trade, manage a trade, or mea
 
 Paper is the default on every cold start. Switching to Cash requires an explicit confirm dialog that names the account and its balance.
 
-These sat in the persistent app header through early Phase 1 and were moved to the Dashboard deliberately. The tradeoff is real and accepted: on Activity, News, Markets, Research, Account, or Settings there is no on-screen indication that the account is in **Cash**. The mitigation is that Cash is never entered accidentally — it requires the confirm dialog above, it never survives a restart, and every cold start comes up in Paper. If that stops feeling like enough, the fix is a small read-only account badge in the header, not moving the switches back.
+These sat in the persistent app header through early Phase 1 and were moved to the Dashboard deliberately. That left no on-screen indication of the live account on Activity, News, Markets, Research, Account, or Settings. It was acceptable while nothing off the Dashboard rendered account-scoped money, and it stopped being acceptable when Activity started showing per-account positions and P&L.
+
+**The fix, as anticipated, is a small read-only account badge in the header** — a pill reading Paper or Cash, not a switch. Cash takes `caution`, since real money in play is a reason to read carefully rather than a failure; Paper recedes into `neutral`. The switches themselves stay on the Dashboard. The other mitigations still hold: Cash is never entered accidentally, it requires the confirm dialog above, it never survives a restart, and every cold start comes up in Paper.
 
 **Controls.** Two distinct actions, never merged:
 
@@ -290,10 +292,13 @@ The morning page. Answers "what is my state and what should I look at."
 
 ### 8.2 Activity
 
-- **Header stats:** average win ($ and %), average loss ($ and %), lifetime P&L.
-- **Open Positions:** symbol, last price, cost basis, current value, quantity, unrealized P&L, and a **Close** action per row. Close opens a confirm dialog showing the current bid/ask and estimated proceeds.
-- **Recent Activity:** trades, deposits, withdrawals. Time, contract, action, P&L, price, quantity, status. Filterable, paginated.
-- Rejected orders appear here with their rejection reason.
+Scoped to the account whose keys are in use. Paper and Cash are separate books, and the page shows one of them at a time — never a merged view. The header carries the read-only account badge described in §3.
+
+- **Header stats:** average win ($ and %), average loss ($ and %), lifetime P&L. Computed from the feed below rather than stored separately, so the header can't disagree with the rows under it. Realized trades only — deposits and withdrawals are money moved, not money made, and are excluded. An average over zero trades renders as an em dash, never as $0.00.
+- **Open Positions:** symbol, last price, cost basis, current value, quantity, unrealized P&L, and a **Close** action per row. Close opens a confirm dialog showing the current bid/ask and the estimate. A long is sold to close at the bid, so the estimate is **proceeds**; a short is bought back at the ask, so it is a **cost to close**. Closing one position never halts the engine — that distinction is the same one §2 draws between Halt and Flatten.
+- **Recent Activity:** trades, deposits, withdrawals. Same table as the Dashboard's Recent Executions — Time, Asset/Action, Qty, and a fourth column carrying P&L, cash moved, or the status word, whichever is the most specific thing known about the row. Filterable by status, paginated. The Dashboard shows a recent window of the same feed; this page shows all of it.
+  - Price and P&L percent are not on screen — they're in the CSV export, which is what you reconcile against the broker with.
+- Rejected orders appear here with their rejection reason **as visible text**, not as a tooltip. This is the page of record for rejections (§4); a reason reachable only by hovering doesn't exist on a screenshot, on a touch device, or to a keyboard.
 
 ### 8.3 News
 
