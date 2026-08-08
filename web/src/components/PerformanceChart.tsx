@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -14,7 +15,8 @@ import {
   type ChartRange,
   type PricePoint,
 } from '../lib/mockData'
-import { formatDateET, formatUsd } from '../lib/format'
+import { rangeChange } from '../lib/chart'
+import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 
 const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
@@ -33,22 +35,65 @@ function toChartDate(iso: string): string {
   })
 }
 
+/** Recharts types this as `number | string | undefined` because some chart
+ * families index by category. On a line chart it is always the array
+ * index, but it is worth failing closed rather than trusting that. */
+function toIndex(active: unknown, length: number): number | null {
+  const i = typeof active === 'number' ? active : Number(active)
+  return Number.isInteger(i) && i >= 0 && i < length ? i : null
+}
+
 export function PerformanceChart({ history }: PerformanceChartProps) {
   const [range, setRange] = useState<ChartRange>('3M')
   const [showBenchmark, setShowBenchmark] = useState(false)
+  // Drag-to-measure: press on the chart and sweep to read the change over
+  // that window. Deliberately transient — it clears on release rather than
+  // becoming a mode you can leave the chart in and later misread.
+  const [dragFrom, setDragFrom] = useState<number | null>(null)
+  const [dragTo, setDragTo] = useState<number | null>(null)
 
-  const data = useMemo(() => {
-    const portfolio = sliceRange(history, range)
+  const { portfolio, data } = useMemo(() => {
+    const sliced = sliceRange(history, range)
     const benchmark = sliceRange(BENCHMARK_HISTORY, range)
-    return portfolio.map((p, i) => ({
-      date: p.date,
-      label: toChartDate(p.date),
-      portfolio: p.value,
-      benchmark: benchmark[i]?.value,
-    }))
+    return {
+      portfolio: sliced,
+      data: sliced.map((p, i) => ({
+        // Keyed by the ISO date, not the display label: "Aug 8" occurs
+        // twice in a 1Y window, and a duplicated category value makes the
+        // selection band ambiguous about which one it means.
+        date: p.date,
+        portfolio: p.value,
+        benchmark: benchmark[i]?.value,
+      })),
+    }
   }, [history, range])
 
-  const startDate = history[0]?.date
+  const selection =
+    dragFrom !== null && dragTo !== null ? rangeChange(portfolio, dragFrom, dragTo) : null
+
+  const clearDrag = () => {
+    setDragFrom(null)
+    setDragTo(null)
+  }
+
+  // The release that ends a drag often lands outside the plot area — off
+  // the edge of the chart, or off the window entirely. Listening on the
+  // window is what makes "it goes back to normal when I let go" true
+  // everywhere, rather than only when you release over the chart.
+  useEffect(() => {
+    if (dragFrom === null) return
+    window.addEventListener('mouseup', clearDrag)
+    return () => window.removeEventListener('mouseup', clearDrag)
+  }, [dragFrom])
+
+  // Changing range mid-drag would leave indices pointing into a series
+  // that no longer exists.
+  const selectRange = (r: ChartRange) => {
+    clearDrag()
+    setRange(r)
+  }
+
+  const dragging = dragFrom !== null
 
   return (
     <div>
@@ -58,7 +103,7 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
             <button
               key={r}
               type="button"
-              onClick={() => setRange(r)}
+              onClick={() => selectRange(r)}
               aria-pressed={range === r}
               className={
                 range === r
@@ -81,12 +126,46 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
         </label>
       </div>
 
-      <div className="mt-3 h-72 w-full">
+      <div className={`relative mt-3 h-72 w-full ${dragging ? 'select-none' : ''}`}>
+        {selection && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none absolute left-2 top-1 z-10 rounded-lg border border-outline-warm bg-surface-container-lowest px-3 py-2"
+          >
+            <p className="text-caption text-on-surface-variant">
+              {formatDateOnly(selection.from.date)} → {formatDateOnly(selection.to.date)}
+            </p>
+            {/* This one really is P&L, so bullish/bearish is the right
+                pair here — unlike a deposit, which is money moved rather
+                than money made. */}
+            <p className={`text-data-md ${signClass(selection.change)}`}>
+              {formatUsd(selection.change, { signed: true })}
+              <span className="ml-2">{formatPct(selection.changePct, { signed: true })}</span>
+            </p>
+          </div>
+        )}
+
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
+          <LineChart
+            data={data}
+            margin={{ top: 8, right: 8, left: 8, bottom: 8 }}
+            onMouseDown={(s) => {
+              const i = toIndex(s?.activeTooltipIndex, data.length)
+              if (i === null) return
+              setDragFrom(i)
+              setDragTo(i)
+            }}
+            onMouseMove={(s) => {
+              if (dragFrom === null) return
+              const i = toIndex(s?.activeTooltipIndex, data.length)
+              if (i !== null) setDragTo(i)
+            }}
+          >
             <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />
             <XAxis
-              dataKey="label"
+              dataKey="date"
+              tickFormatter={(d: string) => toChartDate(d)}
               tick={{ fill: 'var(--on-surface-variant)', fontSize: 12 }}
               tickLine={false}
               axisLine={{ stroke: 'var(--outline-warm)' }}
@@ -102,19 +181,25 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
               tickFormatter={(v: number) => formatUsd(v)}
               domain={['auto', 'auto']}
             />
-            <Tooltip
-              contentStyle={{
-                background: 'var(--surface-container-lowest)',
-                border: '1px solid var(--outline-warm)',
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-              labelStyle={{ color: 'var(--on-surface-variant)' }}
-              formatter={(value, name) => [
-                formatUsd(typeof value === 'number' ? value : Number(value)),
-                name === 'portfolio' ? 'Portfolio' : 'SPY',
-              ]}
-            />
+            {/* The hover tooltip and the drag readout answer different
+                questions and would sit on top of each other, so only one
+                is up at a time. */}
+            {!dragging && (
+              <Tooltip
+                contentStyle={{
+                  background: 'var(--surface-container-lowest)',
+                  border: '1px solid var(--outline-warm)',
+                  borderRadius: 8,
+                  fontSize: 12,
+                }}
+                labelStyle={{ color: 'var(--on-surface-variant)' }}
+                labelFormatter={(d) => formatDateOnly(String(d))}
+                formatter={(value, name) => [
+                  formatUsd(typeof value === 'number' ? value : Number(value)),
+                  name === 'portfolio' ? 'Portfolio' : 'SPY',
+                ]}
+              />
+            )}
             <Line
               type="monotone"
               dataKey="portfolio"
@@ -133,13 +218,24 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
                 isAnimationActive={false}
               />
             )}
+            {selection && (
+              <ReferenceArea
+                x1={selection.from.date}
+                x2={selection.to.date}
+                fill="var(--primary)"
+                fillOpacity={0.12}
+                stroke="var(--primary)"
+                strokeOpacity={0.35}
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
-      {startDate && (
+      {portfolio.length > 0 && (
         <p className="mt-6 text-caption text-on-surface-variant">
-          Since {formatDateET(`${startDate}T00:00:00Z`)} — Corollary's first run. No
-          pre-Corollary history is reconstructed.
+          Since {formatDateOnly(history[0].date)} — Corollary's first run. No
+          pre-Corollary history is reconstructed. Drag across the chart to measure
+          a period.
         </p>
       )}
     </div>

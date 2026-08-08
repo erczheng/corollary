@@ -117,3 +117,19 @@ const EXPIRY = new Intl.DateTimeFormat('en-US', {
 export function formatExpiry(isoDate: string): string {
   return EXPIRY.format(new Date(`${isoDate}T00:00:00Z`))
 }
+
+const DATE_ONLY = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+})
+
+/** A calendar date with its year — chart axis dates, a series start date.
+ * Same rule as formatExpiry and for the same reason: a bare 'YYYY-MM-DD'
+ * parses as UTC midnight, so rendering it in ET shows the previous day.
+ * Use this for any date-only value, not formatDateET, which is for
+ * instants. */
+export function formatDateOnly(isoDate: string): string {
+  return DATE_ONLY.format(new Date(`${isoDate}T00:00:00Z`))
+}
