@@ -179,7 +179,7 @@
      `max-w-sm`/`md`/`lg`/`xl` etc., which read from this same namespace.
      Only the values DESIGN.md names that Tailwind doesn't already cover
      get an entry. */
-  --spacing-gutter: 36px;
+  --spacing-gutter: 32px;
   --spacing-margin-mobile: 16px;
   --spacing-margin-desktop: 48px;
 

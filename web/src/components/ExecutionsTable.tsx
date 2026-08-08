@@ -36,7 +36,7 @@ export function StatusFilterSelect({
       value={value}
       onChange={(e) => onChange(e.target.value as ActivityFilter)}
       aria-label={label}
-      className="rounded border border-outline bg-surface px-2 py-1.5 text-label-md text-on-surface focus:border-primary"
+      className="rounded border border-outline bg-surface px-2 py-2 text-label-md text-on-surface focus:border-primary"
     >
       {ACTIVITY_FILTERS.map((f) => (
         <option key={f} value={f}>
@@ -131,7 +131,7 @@ export function ExecutionsTable({
               {showRejectionReason && a.rejectionReason && (
                 /* `error`, not `bearish` — a rejection is a rule outcome,
                    not a losing position (CLAUDE.md, DESIGN.md). */
-                <span className="mt-0.5 block text-caption text-error">{a.rejectionReason}</span>
+                <span className="mt-1 block text-caption text-error">{a.rejectionReason}</span>
               )}
             </td>
             <td className="px-3 py-2 align-top text-right text-data-md text-on-surface">{a.quantity ?? '—'}</td>

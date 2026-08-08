@@ -61,10 +61,10 @@ export function Activity() {
         Open positions, executions, and rejected orders for your {accountLabel} account.
       </p>
 
-      {/* Same rhythm as the Dashboard: 36px in both directions between
+      {/* Same rhythm as the Dashboard: 32px in both directions between
           blocks, and a 16px content inset so these labels line up with the
           section headings below them. */}
-      <div className="mt-9 grid grid-cols-1 gap-9 rounded-lg border border-outline-warm bg-surface-container-lowest p-4 sm:grid-cols-3">
+      <div className="mt-8 grid grid-cols-1 gap-8 rounded-lg border border-outline-warm bg-surface-container-lowest p-4 sm:grid-cols-3">
         {/* Average win and average loss are bullish/bearish because that is
             what they are. Lifetime P&L takes signClass so a flat account
             reads neutral rather than green. None of the three is ever
@@ -107,7 +107,7 @@ export function Activity() {
         />
       </div>
 
-      <section className="mt-9 rounded-lg border border-outline-warm bg-surface-container-lowest">
+      <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Open Positions</h2>
           <span className="text-label-md text-on-surface-variant">
@@ -181,7 +181,7 @@ export function Activity() {
         )}
       </section>
 
-      <section className="mt-9 rounded-lg border border-outline-warm bg-surface-container-lowest">
+      <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Recent Activity</h2>
           <div className="flex items-center gap-2">
@@ -199,7 +199,7 @@ export function Activity() {
             <button
               type="button"
               onClick={() => downloadCsv(`activity-${accountMode}.csv`, activityCsvRows(filtered))}
-              className="rounded border border-outline px-3 py-1.5 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
+              className="rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
             >
               Export CSV
             </button>

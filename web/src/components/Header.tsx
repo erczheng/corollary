@@ -92,7 +92,7 @@ export function Header() {
           <button
             type="button"
             onClick={openPalette}
-            className="rounded border border-outline px-3 py-1.5 text-label-md text-on-surface-variant hover:bg-surface-container-low"
+            className="rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant hover:bg-surface-container-low"
           >
             <kbd className="text-caption">Ctrl K</kbd>
           </button>

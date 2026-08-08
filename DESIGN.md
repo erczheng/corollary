@@ -213,7 +213,7 @@ spacing:
   md: 24px
   lg: 48px
   xl: 80px
-  gutter: 36px
+  gutter: 32px
   margin-mobile: 16px
   margin-desktop: 48px
 motion:
@@ -326,17 +326,22 @@ Note the deliberate split: `bearish` is a muted brick used for *market direction
 
 Fixed grid on desktop, fluid on mobile.
 
-- **Desktop (1200px+):** 12 columns, 1425px max content width, 36px gutters, 48px margins.
+- **Desktop (1200px+):** 12 columns, 1425px max content width, 32px gutters, 48px margins.
 - **Tablet (768–1199px):** 8 columns, fluid, 24px margins.
 - **Mobile (≤767px):** 4 columns, fluid, 16px margins.
 
-Spacing follows an 8px rhythm, with one deliberate exception noted below.
+**Every spacing value in the app is one of the tokens above — 4, 8, 12, 24, 32, 48, 80 — or a whole multiple of 8.** Nothing lands between steps. This is checkable, so check it rather than assume:
 
-**`gutter` (36px) is the one measure between blocks, and it applies in both directions.** The gap from one card down to the next and the gap from one card across to its neighbour are both 36px, so the whitespace framing any card measures the same vertically and horizontally. Dashboard and Activity are built this way; a new page should be too.
+```bash
+cd web/src && grep -rhoE '\b(m|p)[tblrxy]?-[0-9]+(\.[0-9]+)?\b|\bgap(-[xy])?-[0-9]+(\.[0-9]+)?\b' \
+  --include='*.tsx' . | sort -u
+```
+
+Any fractional Tailwind step (`p-0.5`, `py-1.5`, `px-2.5`) is 2px, 6px or 10px and does not belong. Any odd step above 3 (`mt-9`, `h-7`) is 36px or 28px and does not belong either. The one sanctioned exception is icon sizing: `h-3.5 w-3.5` (14px) is an optical size chosen against its glyphs, not a spacing value.
+
+**`gutter` (32px) is the one measure between blocks, and it applies in both directions.** The gap from one card down to the next and the gap from one card across to its neighbour are both 32px, so the whitespace framing any card measures the same vertically and horizontally. Dashboard and Activity are built this way; a new page should be too.
 
 **`margin-desktop` (48px) is the page's side padding, and it is deliberately larger than the gutter.** The page reads as inset from the window by more than its cards are separated from each other. Setting the two equal flattens that distinction and the layout stops having an edge.
-
-`gutter` at 36px is off the 8px rhythm — it is 4.5 steps, not a whole number of them. That is a considered exception, not an oversight: 24px read as cramped at the current content width and 48px pushed the fold too far down. Do not "correct" it back to 24 or 48 without looking at the page.
 
 These replace an earlier rule reserving `lg` (48px) and `xl` (80px) for separating major sections, which produced vertical gaps twice the horizontal ones — two competing rhythms rather than one. `lg` and `xl` remain in the scale for page top and bottom padding and hero spacing, not for the space between sibling blocks.
 
@@ -344,7 +349,9 @@ The **header bar** is full-bleed so its bottom rule spans the window, but its co
 
 One exception to the gutter: a heading and the deck directly beneath it pair at `base` (8px), because 36px between a title and its own subtitle separates a unit that should read as one.
 
-**Data density is the exception.** Tables run tighter than the rest of the interface: 12px vertical cell padding, 16px horizontal. Whitespace serves reading; it does not serve scanning forty option contracts.
+**Data density is the exception.** Tables run tighter than the rest of the interface: **8px vertical cell padding, 12px horizontal** (`px-3 py-2`). Whitespace serves reading; it does not serve scanning forty option contracts.
+
+This line previously read "12px vertical, 16px horizontal" — both axes larger, and swapped relative to what every table has always shipped. It described a table that never existed. The values above are what `ExecutionsTable` and Activity's positions table actually use; the looser figures are recoverable from git history if the density is ever revisited.
 
 ## Elevation & Depth
 

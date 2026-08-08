@@ -98,7 +98,7 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex rounded-full border border-outline bg-surface-container-low p-0.5 text-label-md">
+        <div className="flex rounded-full border border-outline bg-surface-container-low p-1 text-label-md">
           {RANGES.map((r) => (
             <button
               key={r}

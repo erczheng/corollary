@@ -14,7 +14,7 @@ export function AccountModeToggle() {
 
   return (
     <>
-      <div className="flex rounded-full border border-outline bg-surface-container-low p-0.5 text-label-md">
+      <div className="flex rounded-full border border-outline bg-surface-container-low p-1 text-label-md">
         <button
           type="button"
           onClick={() => setAccountMode('paper')}
