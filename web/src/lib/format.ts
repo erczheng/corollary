@@ -36,6 +36,35 @@ export function signClass(value: number): string {
   return 'text-on-surface-variant'
 }
 
+export type ConfidenceTier = 'high' | 'medium' | 'low'
+
+/** Confidence is the backtested hit rate for the setup class (PRD.md §6.3),
+ * so these cuts reuse numbers this project already treats as meaningful
+ * rather than inventing new ones: 65% is the win rate the promotion gate
+ * requires for auto-approval (§5.3), and 50% is a coin flip. */
+export function confidenceTier(confidence: number): ConfidenceTier {
+  if (confidence >= 65) return 'high'
+  if (confidence >= 50) return 'medium'
+  return 'low'
+}
+
+/** Deliberately NOT bullish/bearish. A high-confidence *bearish* trade is
+ * an ordinary thing here, and a green "71%" next to a put debit spread
+ * would read as direction rather than conviction — the same category of
+ * error as collapsing `bearish` into `error`. DESIGN.md already assigns
+ * `primary` to "high-confidence indicators" and `caution` to "medium
+ * confidence"; teal / terracotta / grey carry no directional meaning.
+ *
+ * These are container pairs, not bare tokens, because bare `neutral`
+ * (#717879) is only 4.27:1 on `surface` — the muted-grey trap DESIGN.md
+ * calls out under Accessibility. Every pair below clears 4.5:1 in both
+ * themes (lowest is 4.55:1). */
+export const CONFIDENCE_TIER_CLASS: Record<ConfidenceTier, string> = {
+  high: 'bg-primary-container text-on-primary-container',
+  medium: 'bg-caution-container text-on-caution-container',
+  low: 'bg-neutral-container text-on-neutral-container',
+}
+
 const ET_TIME = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
   hour: 'numeric',

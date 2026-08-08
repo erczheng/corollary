@@ -7,7 +7,7 @@ import { Chip } from '../components/Chip'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
-import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon } from '../components/icons'
+import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
   ACTIVITY_STATUS_LABEL,
@@ -19,9 +19,17 @@ import {
   STRATEGIES,
   VOLUME_24H,
   type ActivityStatus,
+  type Recommendation,
 } from '../lib/mockData'
 import { downloadCsv } from '../lib/csv'
-import { formatDateTimeET, formatStrategyName, formatUsd, signClass } from '../lib/format'
+import {
+  CONFIDENCE_TIER_CLASS,
+  confidenceTier,
+  formatDateTimeET,
+  formatStrategyName,
+  formatUsd,
+  signClass,
+} from '../lib/format'
 
 function recommendationsEmptyMessage(): string {
   const hourET = Number(
@@ -46,6 +54,10 @@ export function Dashboard() {
   const accountMode = useUIStore((s) => s.accountMode)
   const [confirmingFlatten, setConfirmingFlatten] = useState(false)
   const [activityFilter, setActivityFilter] = useState<(typeof ACTIVITY_FILTERS)[number]>('all')
+  const [dismissedIds, setDismissedIds] = useState<string[]>([])
+  const [tradeTarget, setTradeTarget] = useState<Recommendation | null>(null)
+
+  const visibleRecommendations = RECOMMENDATIONS.filter((r) => !dismissedIds.includes(r.id))
 
   const activeStrategy = STRATEGIES.find((s) => s.id === activeStrategyId) ?? STRATEGIES[0]
   const balance = PORTFOLIO_HISTORY[PORTFOLIO_HISTORY.length - 1].value
@@ -166,7 +178,10 @@ export function Dashboard() {
           <div className="flex items-center justify-between border-b border-outline-warm px-4 py-3">
             <h2 className="text-title-lg text-on-surface">Recommended Trades</h2>
             <div className="flex items-center gap-2">
-              <RefreshButton onRefresh={() => {}} />
+              {/* A refresh restores anything dismissed — the scanner
+                  rebuilds its candidate set, it doesn't remember what you
+                  waved off. */}
+              <RefreshButton onRefresh={() => setDismissedIds([])} />
               <Link
                 to="/research"
                 className="text-label-md text-primary transition-colors duration-base ease-standard hover:text-on-surface"
@@ -175,11 +190,11 @@ export function Dashboard() {
               </Link>
             </div>
           </div>
-          {RECOMMENDATIONS.length === 0 ? (
+          {visibleRecommendations.length === 0 ? (
             <p className="px-4 py-6 text-body-md text-on-surface-variant">{recommendationsEmptyMessage()}</p>
           ) : (
             <div className="max-h-80 overflow-y-auto no-scrollbar">
-              {RECOMMENDATIONS.map((r) => (
+              {visibleRecommendations.map((r) => (
                 <div
                   key={r.id}
                   className="flex items-center justify-between gap-3 border-t border-outline/10 px-4 py-3 first:border-t-0 hover:bg-surface-container-low"
@@ -188,13 +203,57 @@ export function Dashboard() {
                     <p className="truncate text-body-md text-on-surface">
                       {r.symbol} — {r.contract}
                     </p>
-                    <p className="text-caption text-on-surface-variant">{r.setup.replace(/_/g, ' ')}</p>
+                    <div className="mt-0.5 flex items-center gap-2">
+                      <span className="text-caption text-on-surface-variant">
+                        {r.setup.replace(/_/g, ' ')}
+                      </span>
+                      {r.unvalidated && <Chip variant="accent">Unvalidated</Chip>}
+                    </div>
                   </div>
+
                   <div className="flex shrink-0 items-center gap-2">
-                    {r.unvalidated && <Chip variant="accent">Unvalidated</Chip>}
-                    <span className="text-data-md text-on-surface">
-                      {r.confidence !== null ? `${r.confidence}%` : '—'}
-                    </span>
+                    {r.confidence !== null ? (
+                      <span
+                        className={`rounded-full px-2.5 py-1 text-data-md ${
+                          CONFIDENCE_TIER_CLASS[confidenceTier(r.confidence)]
+                        }`}
+                        title={`${confidenceTier(r.confidence)} confidence — backtested hit rate for this setup class`}
+                      >
+                        {r.confidence}%
+                      </span>
+                    ) : (
+                      /* PRD.md §6.3: where no base rate exists, confidence
+                         shows an em dash rather than a number. */
+                      <span
+                        className="px-2.5 py-1 text-data-md text-on-surface-variant"
+                        title="No backtested base rate for this setup yet"
+                      >
+                        —
+                      </span>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setTradeTarget(r)}
+                      disabled={isHalted}
+                      title={
+                        isHalted
+                          ? 'Trading is halted — resume to open new positions'
+                          : `Trade ${r.symbol} ${r.contract}`
+                      }
+                      className="rounded border border-primary px-3 py-1 text-label-md text-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50"
+                    >
+                      Trade
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDismissedIds((ids) => [...ids, r.id])}
+                      aria-label={`Dismiss ${r.symbol} ${r.contract}`}
+                      title="Dismiss"
+                      className="flex h-7 w-7 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
+                    >
+                      <XIcon className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
               ))}
@@ -289,6 +348,30 @@ export function Dashboard() {
           setConfirmingFlatten(false)
         }}
         onCancel={() => setConfirmingFlatten(false)}
+      />
+
+      <ConfirmDialog
+        open={tradeTarget !== null}
+        title="Place this trade?"
+        consequence={
+          tradeTarget && (
+            <>
+              Submits {tradeTarget.symbol} {tradeTarget.contract} to the risk manager for sizing and
+              approval, using your {accountMode === 'cash' ? 'Cash' : 'Paper'} account. It is rejected,
+              with the reason logged to Activity, if it breaches a risk limit.
+            </>
+          )
+        }
+        confirmLabel="Place trade"
+        onConfirm={() => {
+          /* Phase 1 is mock data — nothing is submitted. When this is
+             wired up in Phase 6, it goes through RiskManager.approve()
+             and nowhere else (CLAUDE.md rule 1). Do not call the broker
+             from this handler. */
+          if (tradeTarget) setDismissedIds((ids) => [...ids, tradeTarget.id])
+          setTradeTarget(null)
+        }}
+        onCancel={() => setTradeTarget(null)}
       />
     </div>
   )

@@ -56,3 +56,20 @@ export function ChevronDownIcon({ className = 'h-3.5 w-3.5' }: IconProps) {
     </svg>
   )
 }
+
+export function RefreshIcon({ className = base }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" className={className}>
+      <path d="M20.5 12a8.5 8.5 0 1 1-2.49-6.01" strokeLinecap="round" />
+      <path d="M20.5 4v5h-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function XIcon({ className = base }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+    </svg>
+  )
+}

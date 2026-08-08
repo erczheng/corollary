@@ -118,12 +118,16 @@ export interface Recommendation {
   origin: 'scanner' | 'llm'
 }
 
+/* Deliberately spans every confidence state the UI can render — high
+ * (>=65), medium (50-64), low (<50), and null — so all four are visible
+ * on screen rather than only the ones that happen to occur. */
 export const RECOMMENDATIONS: Recommendation[] = [
   { id: 'rec-1', symbol: 'SPY', contract: '$560/$555 Put Credit Spread, Nov 21', setup: 'mean_reversion', confidence: 71, unvalidated: false, origin: 'scanner' },
   { id: 'rec-2', symbol: 'AAPL', contract: '$235 Call, Dec 19', setup: 'earnings_drift', confidence: 64, unvalidated: false, origin: 'scanner' },
   { id: 'rec-3', symbol: 'NVDA', contract: '$145/$140 Put Credit Spread, Nov 21', setup: 'iv_crush', confidence: 58, unvalidated: false, origin: 'scanner' },
   { id: 'rec-4', symbol: 'QQQ', contract: '$495 Call, Jan 16', setup: 'unclassified', confidence: null, unvalidated: true, origin: 'llm' },
   { id: 'rec-5', symbol: 'TSLA', contract: '$260/$250 Put Credit Spread, Dec 19', setup: 'mean_reversion', confidence: 69, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-6', symbol: 'IWM', contract: '$205 Put, Dec 19', setup: 'gap_fade', confidence: 44, unvalidated: false, origin: 'scanner' },
 ]
 
 // ---------------------------------------------------------------------- //
