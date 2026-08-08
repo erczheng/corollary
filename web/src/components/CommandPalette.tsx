@@ -32,7 +32,7 @@ export function CommandPalette() {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="w-full max-w-lg rounded-lg border border-outline-warm bg-tertiary/70 backdrop-blur-xl p-3 shadow-hover dark:shadow-none"
+        className="w-full max-w-lg rounded-lg border border-outline-warm bg-tertiary-fixed/70 backdrop-blur-xl p-3 shadow-hover dark:shadow-none"
         onClick={(e) => e.stopPropagation()}
       >
         <input
