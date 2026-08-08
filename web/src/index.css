@@ -1,0 +1,367 @@
+@import 'tailwindcss';
+
+/* Self-hosted fonts — no CDN, no Google Fonts <link>. The terminal binds to
+   127.0.0.1 and must render correctly with no internet. See CLAUDE.md. */
+@import '@fontsource-variable/montserrat';
+@import '@fontsource-variable/plus-jakarta-sans';
+@import '@fontsource-variable/jetbrains-mono';
+
+/* ---------------------------------------------------------------------- *
+ * Token source of truth: DESIGN.md frontmatter.
+ * Light values live in `colors` + `semantic`, dark in `colorsDark` +
+ * `semanticDark`. Every key in one has a counterpart in the other, except
+ * the `*-fixed*` roles, which are identical in both themes by design and
+ * so are declared once, in :root only.
+ *
+ * Theme switching is a CSS variable swap, not a rebuild: `@theme` maps
+ * Tailwind's `--color-*` namespace onto these variables, and `.dark`
+ * overrides the variables' values. Utility classes never change; only
+ * what they resolve to does.
+ * ---------------------------------------------------------------------- */
+
+:root {
+  /* colors — light */
+  --surface: #fbfae7;
+  --surface-dim: #dbdbc8;
+  --surface-bright: #fbfae7;
+  --surface-container-lowest: #ffffff;
+  --surface-container-low: #f5f5e1;
+  --surface-container: #f0efdb;
+  --surface-container-high: #eae9d6;
+  --surface-container-highest: #e4e4d0;
+  --on-surface: #1b1c11;
+  --on-surface-variant: #414849;
+  --inverse-surface: #303124;
+  --inverse-on-surface: #f2f2de;
+  --outline: #717879;
+  --outline-variant: #c1c8c8;
+  --surface-tint: #466366;
+  --primary: #355255;
+  --on-primary: #ffffff;
+  --primary-container: #4d6a6d;
+  --on-primary-container: #cae9ec;
+  --inverse-primary: #adcccf;
+  --secondary: #855146;
+  --on-secondary: #ffffff;
+  --secondary-container: #fdb9ab;
+  --on-secondary-container: #79473c;
+  --tertiary: #455045;
+  --on-tertiary: #ffffff;
+  --tertiary-container: #5d685d;
+  --on-tertiary-container: #dbe7d8;
+  --error: #ba1a1a;
+  --on-error: #ffffff;
+  --error-container: #ffdad6;
+  --on-error-container: #93000a;
+  --background: #fbfae7;
+  --on-background: #1b1c11;
+  --surface-variant: #e4e4d0;
+  --accent: #ce8f82;
+  --on-accent: #3a1710;
+  --accent-container: #f6ddd7;
+  --on-accent-container: #5c2d24;
+  --outline-warm: #b7b7a5;
+
+  /* colors — fixed roles: identical in both themes, declared once */
+  --primary-fixed: #c9e8ec;
+  --primary-fixed-dim: #adcccf;
+  --on-primary-fixed: #002022;
+  --on-primary-fixed-variant: #2f4b4e;
+  --secondary-fixed: #ffdad3;
+  --secondary-fixed-dim: #fab6a8;
+  --on-secondary-fixed: #351009;
+  --on-secondary-fixed-variant: #693a30;
+  --tertiary-fixed: #dae6d8;
+  --tertiary-fixed-dim: #becabc;
+  --on-tertiary-fixed: #141e15;
+  --on-tertiary-fixed-variant: #3f493f;
+
+  /* semantic — light */
+  --bullish: #455045;
+  --on-bullish: #ffffff;
+  --bullish-container: #dae6d8;
+  --on-bullish-container: #293429;
+  --bearish: #a3302a;
+  --on-bearish: #ffffff;
+  --bearish-container: #ffdad6;
+  --on-bearish-container: #7a1610;
+  --neutral: #717879;
+  --on-neutral: #ffffff;
+  --neutral-container: #e4e4d0;
+  --on-neutral-container: #414849;
+  --caution: #855146;
+  --on-caution: #ffffff;
+  --caution-container: #eae7c0;
+  --on-caution-container: #5c5320;
+}
+
+.dark {
+  /* colorsDark */
+  --surface: #13140d;
+  --surface-dim: #13140d;
+  --surface-bright: #393a30;
+  --surface-container-lowest: #0e0f08;
+  --surface-container-low: #1b1c14;
+  --surface-container: #1f2018;
+  --surface-container-high: #2a2b22;
+  --surface-container-highest: #35362c;
+  --on-surface: #e4e4d0;
+  --on-surface-variant: #c1c8c8;
+  --inverse-surface: #e4e4d0;
+  --inverse-on-surface: #303124;
+  --outline: #8b9293;
+  --outline-variant: #414849;
+  --surface-tint: #adcccf;
+  --primary: #adcccf;
+  --on-primary: #173437;
+  --primary-container: #2f4b4e;
+  --on-primary-container: #cae9ec;
+  --inverse-primary: #355255;
+  --secondary: #fab6a8;
+  --on-secondary: #50231a;
+  --secondary-container: #693a30;
+  --on-secondary-container: #ffdad3;
+  --tertiary: #becabc;
+  --on-tertiary: #293429;
+  --tertiary-container: #3f493f;
+  --on-tertiary-container: #dae6d8;
+  --error: #ffb4ab;
+  --on-error: #690005;
+  --error-container: #93000a;
+  --on-error-container: #ffdad6;
+  --background: #13140d;
+  --on-background: #e4e4d0;
+  --surface-variant: #414849;
+  --accent: #ce8f82;
+  --on-accent: #3a1710;
+  --accent-container: #5c2d24;
+  --on-accent-container: #f6ddd7;
+  --outline-warm: #5c5c52;
+
+  /* semanticDark */
+  --bullish: #becabc;
+  --on-bullish: #293429;
+  --bullish-container: #3f493f;
+  --on-bullish-container: #dae6d8;
+  --bearish: #eba6a2;
+  --on-bearish: #5c1713;
+  --bearish-container: #7a1610;
+  --on-bearish-container: #ffdad6;
+  --neutral: #8b9293;
+  --on-neutral: #1f2018;
+  --neutral-container: #414849;
+  --on-neutral-container: #c1c8c8;
+  --caution: #fab6a8;
+  --on-caution: #50231a;
+  --caution-container: #5c5320;
+  --on-caution-container: #eae7c0;
+}
+
+@theme {
+  /* Fonts — see fontStacks in DESIGN.md */
+  --font-display: 'Montserrat Variable', Montserrat, system-ui, sans-serif;
+  --font-label: 'Plus Jakarta Sans Variable', 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-data: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Radii — DESIGN.md `rounded` scale */
+  --radius-sm: 0.25rem;
+  --radius-DEFAULT: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+  /* rounded-full (9999px) is Tailwind's built-in default and matches
+     DESIGN.md's `full` exactly — no override needed. */
+
+  /* Spacing — DESIGN.md `spacing` scale. `base`/xs/sm/md/lg/xl (4/8/12/
+     24/48/80px) are exactly Tailwind's default numeric multiplier scale
+     (p-1/2/3/6/12/20), so no override is needed there — and adding named
+     `sm`/`md`/`lg`/`xl` keys here would collide with Tailwind's own
+     `max-w-sm`/`md`/`lg`/`xl` etc., which read from this same namespace.
+     Only the values DESIGN.md names that Tailwind doesn't already cover
+     get an entry. */
+  --spacing-gutter: 24px;
+  --spacing-margin-mobile: 16px;
+  --spacing-margin-desktop: 64px;
+
+  /* Elevation — the one permitted shadow, tinted with primary, light
+     theme only. Dark theme uses no shadows; see DESIGN.md "Elevation". */
+  --shadow-hover: 0px 4px 20px rgba(53, 82, 85, 0.08);
+
+  /* Color tokens — colors + semantic (light) / colorsDark + semanticDark
+     (dark), resolved through the CSS variables defined above so a single
+     utility class (e.g. bg-surface) works in both themes. */
+  --color-surface: var(--surface);
+  --color-surface-dim: var(--surface-dim);
+  --color-surface-bright: var(--surface-bright);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container: var(--surface-container);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+  --color-inverse-surface: var(--inverse-surface);
+  --color-inverse-on-surface: var(--inverse-on-surface);
+  --color-outline: var(--outline);
+  --color-outline-variant: var(--outline-variant);
+  --color-surface-tint: var(--surface-tint);
+  --color-primary: var(--primary);
+  --color-on-primary: var(--on-primary);
+  --color-primary-container: var(--primary-container);
+  --color-on-primary-container: var(--on-primary-container);
+  --color-inverse-primary: var(--inverse-primary);
+  --color-secondary: var(--secondary);
+  --color-on-secondary: var(--on-secondary);
+  --color-secondary-container: var(--secondary-container);
+  --color-on-secondary-container: var(--on-secondary-container);
+  --color-tertiary: var(--tertiary);
+  --color-on-tertiary: var(--on-tertiary);
+  --color-tertiary-container: var(--tertiary-container);
+  --color-on-tertiary-container: var(--on-tertiary-container);
+  --color-error: var(--error);
+  --color-on-error: var(--on-error);
+  --color-error-container: var(--error-container);
+  --color-on-error-container: var(--on-error-container);
+  --color-primary-fixed: var(--primary-fixed);
+  --color-primary-fixed-dim: var(--primary-fixed-dim);
+  --color-on-primary-fixed: var(--on-primary-fixed);
+  --color-on-primary-fixed-variant: var(--on-primary-fixed-variant);
+  --color-secondary-fixed: var(--secondary-fixed);
+  --color-secondary-fixed-dim: var(--secondary-fixed-dim);
+  --color-on-secondary-fixed: var(--on-secondary-fixed);
+  --color-on-secondary-fixed-variant: var(--on-secondary-fixed-variant);
+  --color-tertiary-fixed: var(--tertiary-fixed);
+  --color-tertiary-fixed-dim: var(--tertiary-fixed-dim);
+  --color-on-tertiary-fixed: var(--on-tertiary-fixed);
+  --color-on-tertiary-fixed-variant: var(--on-tertiary-fixed-variant);
+  --color-background: var(--background);
+  --color-on-background: var(--on-background);
+  --color-surface-variant: var(--surface-variant);
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-accent-container: var(--accent-container);
+  --color-on-accent-container: var(--on-accent-container);
+  --color-outline-warm: var(--outline-warm);
+
+  --color-bullish: var(--bullish);
+  --color-on-bullish: var(--on-bullish);
+  --color-bullish-container: var(--bullish-container);
+  --color-on-bullish-container: var(--on-bullish-container);
+  --color-bearish: var(--bearish);
+  --color-on-bearish: var(--on-bearish);
+  --color-bearish-container: var(--bearish-container);
+  --color-on-bearish-container: var(--on-bearish-container);
+  --color-neutral: var(--neutral);
+  --color-on-neutral: var(--on-neutral);
+  --color-neutral-container: var(--neutral-container);
+  --color-on-neutral-container: var(--on-neutral-container);
+  --color-caution: var(--caution);
+  --color-on-caution: var(--on-caution);
+  --color-caution-container: var(--caution-container);
+  --color-on-caution-container: var(--on-caution-container);
+}
+
+/* ---------------------------------------------------------------------- *
+ * Typography roles — DESIGN.md `typography` block. Bundled as custom
+ * utilities (Tailwind v4 `@utility`) rather than split across the
+ * font-size/font-weight/tracking/leading namespaces, because each role is
+ * a fixed combination the design defines by name, not a set of
+ * independently mixable primitives.
+ * ---------------------------------------------------------------------- */
+
+@utility text-display-lg {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 48px;
+  line-height: 56px;
+  letter-spacing: -0.02em;
+
+  @media (width <= 767px) {
+    font-size: 32px;
+    line-height: 40px;
+    letter-spacing: -0.01em;
+  }
+}
+
+@utility text-headline-md {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 32px;
+  line-height: 40px;
+
+  @media (width <= 767px) {
+    font-size: 24px;
+    line-height: 32px;
+  }
+}
+
+@utility text-title-lg {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 22px;
+  line-height: 28px;
+}
+
+@utility text-body-lg {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 18px;
+  line-height: 28px;
+}
+
+@utility text-body-md {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 24px;
+}
+
+@utility text-label-md {
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 20px;
+  letter-spacing: 0.05em;
+}
+
+@utility text-caption {
+  font-family: var(--font-label);
+  font-weight: 500;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+@utility text-data-md {
+  font-family: var(--font-data);
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+@utility text-data-lg {
+  font-family: var(--font-data);
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-on-surface text-body-md;
+    color-scheme: light dark;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+
+  /* Every interactive element gets a visible focus ring: 2px primary,
+     2px offset in surface, so it reads against both control and page. */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
