@@ -35,7 +35,7 @@ If a feature does not help decide a trade, place a trade, manage a trade, or mea
 
 **Runtime.** A persistent Python service (the engine) runs while the laptop is on. The web UI is a thin client over REST + WebSocket. The engine does not depend on a browser being open. Target deployment is local (`127.0.0.1`); a Raspberry Pi is a later possibility and nothing in the design should preclude it.
 
-**Modes.** Two independent switches, always visible in the header:
+**Modes.** Two independent switches, living with the rest of the Dashboard controls (§8.1):
 
 | Switch | Values | Meaning |
 |---|---|---|
@@ -43,6 +43,8 @@ If a feature does not help decide a trade, place a trade, manage a trade, or mea
 | Execution | Manual / Auto | Whether the engine may place orders unattended |
 
 Paper is the default on every cold start. Switching to Cash requires an explicit confirm dialog that names the account and its balance.
+
+These sat in the persistent app header through early Phase 1 and were moved to the Dashboard deliberately. The tradeoff is real and accepted: on Activity, News, Markets, Research, Account, or Settings there is no on-screen indication that the account is in **Cash**. The mitigation is that Cash is never entered accidentally — it requires the confirm dialog above, it never survives a restart, and every cold start comes up in Paper. If that stops feeling like enough, the fix is a small read-only account badge in the header, not moving the switches back.
 
 **Controls.** Two distinct actions, never merged:
 
