@@ -17,7 +17,7 @@ export function StatTile({ label, value, valueClassName, note }: StatTileProps) 
     <div>
       <p className="text-label-md uppercase tracking-wide text-on-surface-variant">{label}</p>
       <p className={`mt-1 text-data-lg ${valueClassName ?? 'text-on-surface'}`}>{value}</p>
-      {note && <p className="mt-0.5 text-caption text-on-surface-variant">{note}</p>}
+      {note && <p className="mt-1 text-caption text-on-surface-variant">{note}</p>}
     </div>
   )
 }

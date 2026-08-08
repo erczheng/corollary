@@ -45,7 +45,7 @@ export function StatCard({
       </div>
       <p className="mt-1 text-data-xl text-on-surface">{value}</p>
       {changePct !== undefined ? (
-        <div className="mt-1 flex items-center gap-1.5 text-label-md">
+        <div className="mt-1 flex items-center gap-2 text-label-md">
           <span className={positive ? 'text-bullish' : 'text-bearish'}>
             {positive ? <ArrowUpIcon /> : <ArrowDownIcon />}
           </span>

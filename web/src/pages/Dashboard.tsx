@@ -139,7 +139,7 @@ export function Dashboard() {
         Monitor your total balance, 24h performance, and today's recommended trades.
       </p>
 
-      <div className="mt-9 flex flex-wrap items-center gap-3">
+      <div className="mt-8 flex flex-wrap items-center gap-3">
         <AccountModeToggle />
         <ExecutionModeToggle />
         <div className="relative shrink-0">
@@ -147,7 +147,7 @@ export function Dashboard() {
             value={activeStrategyId}
             onChange={(e) => setActiveStrategyId(e.target.value)}
             aria-label="Active strategy"
-            className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
+            className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-8 text-label-md text-on-surface focus:border-primary"
           >
             {STRATEGIES.map((s) => (
               <option key={s.id} value={s.id}>
@@ -203,9 +203,11 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* One number governs the space between blocks: 36px (DESIGN.md
+      {/* One number governs the space between blocks: 32px (DESIGN.md
           `gutter`), down and across alike, so the whitespace framing any card
-          measures the same in both directions.
+          measures the same in both directions. Four 8px steps — this briefly
+          sat at 36px, which is four and a half, and nothing else in the
+          system lands between steps.
 
           The page's side padding is deliberately *not* that number — it is
           48px, so the page reads as inset from the window by more than its
@@ -215,7 +217,7 @@ export function Dashboard() {
           Both values are a departure from DESIGN.md's original "use lg (48px)
           to separate major sections"; the doc's Layout section has been
           rewritten to match rather than left to contradict the app. */}
-      <div className="mt-9 grid grid-cols-1 gap-9 sm:grid-cols-3">
+      <div className="mt-8 grid grid-cols-1 gap-8 sm:grid-cols-3">
         <StatCard
           label="Total balance"
           value={formatUsd(balance)}
@@ -245,7 +247,7 @@ export function Dashboard() {
           as every section on Activity: a bordered header row, then a body.
           It used to be a plain p-6 box, which put this h2 8px right of every
           other heading on the page — a shelf you could see. */}
-      <section className="mt-9 rounded-lg border border-outline-warm bg-surface-container-lowest">
+      <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
         <div className="flex items-center justify-between border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Performance</h2>
         </div>
@@ -259,7 +261,7 @@ export function Dashboard() {
           neither leaves a band of empty card below its last row. Stretch
           alone caused that gap; stretch plus a filling body is what removes
           it. */}
-      <div className="mt-9 grid grid-cols-1 gap-9 lg:grid-cols-2">
+      <div className="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-2">
         <section className="flex flex-col rounded-lg border border-outline-warm bg-surface-container-lowest">
           <div className="flex items-center justify-between border-b border-outline-warm px-4 py-3">
             <h2 className="text-title-lg text-on-surface">Recommended Trades</h2>
@@ -296,7 +298,7 @@ export function Dashboard() {
                     {/* Reason truncates before the expiry does — a clipped
                         rationale is a nuisance, a clipped expiry is
                         misleading. */}
-                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                    <div className="mt-1 flex min-w-0 items-center gap-2">
                       <span className="truncate text-caption text-on-surface-variant">
                         {r.reason}
                       </span>
@@ -309,7 +311,7 @@ export function Dashboard() {
                   <div className="flex shrink-0 items-center gap-2">
                     {r.confidence !== null ? (
                       <span
-                        className={`rounded-full px-2.5 py-1 text-data-md ${
+                        className={`rounded-full px-3 py-1 text-data-md ${
                           CONFIDENCE_TIER_CLASS[confidenceTier(r.confidence)]
                         }`}
                         title={`${confidenceTier(r.confidence)} confidence — backtested hit rate for this setup class`}
@@ -333,7 +335,7 @@ export function Dashboard() {
                       /* PRD.md §6.3: where no base rate exists, confidence
                          shows an em dash rather than a number. */
                       <span
-                        className="px-2.5 py-1 text-data-md text-on-surface-variant"
+                        className="px-3 py-1 text-data-md text-on-surface-variant"
                         title="No backtested base rate for this setup yet"
                       >
                         —
@@ -358,7 +360,7 @@ export function Dashboard() {
                       onClick={() => setDismissedIds((ids) => [...ids, r.id])}
                       aria-label={`Dismiss ${recommendationTitle(r)}`}
                       title="Dismiss"
-                      className="flex h-7 w-7 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
                     >
                       <XIcon className="h-3.5 w-3.5" />
                     </button>
@@ -385,7 +387,7 @@ export function Dashboard() {
               <button
                 type="button"
                 onClick={() => downloadCsv('recent-executions.csv', activityCsvRows(filteredActivity))}
-                className="rounded border border-outline px-3 py-1.5 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
+                className="rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
               >
                 Export CSV
               </button>
