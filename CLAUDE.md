@@ -267,8 +267,23 @@ expect.** Every item below produced working-looking code that was wrong:
   component rewrite. Cover every state a component can render, including the
   ugly ones — a tier or empty state absent from the fixtures is one nobody
   can see.
+- `web/src/components/ExecutionsTable.tsx` — the activity/executions table,
+  its status filter, and its CSV row mapper. The Dashboard's "Recent
+  Executions" and Activity's "Recent Activity" are the same feed at
+  different depths (recent window vs. paginated in full) and render from
+  this one component so the columns and the P&L-vs-status logic cannot
+  drift apart. Don't copy the markup into a third page — add a prop.
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
+
+**Account-scoped state is keyed by `AccountMode`, not flattened.**
+`ACCOUNT_SNAPSHOTS[mode]` carries the balance history, volume, positions,
+*and* activity feed for one account, and the store holds
+`openPositions`/`activity` as `Record<AccountMode, …>`. Read them as
+`s.openPositions[s.accountMode]`. Rendering paper's positions while Cash is
+live misreports real money exactly the way rendering paper's balance would,
+and `flatten()` reaching into the other book would close positions the
+loaded credentials can't even see.
 
 **Semantic colors are not interchangeable with each other, either.** Beyond
 the `bearish` vs `error` split: confidence uses `primary`/`caution`/`neutral`,

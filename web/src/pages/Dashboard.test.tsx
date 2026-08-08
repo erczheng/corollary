@@ -124,7 +124,7 @@ describe('Trading-state pill', () => {
       within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Flatten' }),
     )
 
-    expect(useUIStore.getState().openPositions).toHaveLength(0)
+    expect(useUIStore.getState().openPositions.paper).toHaveLength(0)
     // Flatten still halts underneath — it just has nothing to say in
     // Manual. Switching to Auto has to surface it rather than come up
     // trading (CLAUDE.md rule 9: never auto-resume).
@@ -206,8 +206,11 @@ describe('Executions status column', () => {
     // elements carry these same words.
     const table = within(within(section('Recent Executions')).getByRole('table'))
 
-    expect(table.getByText('Rejected')).toBeInTheDocument()
-    expect(table.getByText('Canceled')).toBeInTheDocument()
+    // getAllBy, not getBy: the feed is deep enough now that a status word
+    // can legitimately appear on more than one visible row. The claim is
+    // that the fallback renders at all, not that it renders exactly once.
+    expect(table.getAllByText('Rejected').length).toBeGreaterThan(0)
+    expect(table.getAllByText('Canceled').length).toBeGreaterThan(0)
   })
 })
 
@@ -241,7 +244,7 @@ describe('Halt and Flatten read as different controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Flatten' }))
 
     const dialog = screen.getByRole('alertdialog')
-    const openCount = useUIStore.getState().openPositions.length
+    const openCount = useUIStore.getState().openPositions.paper.length
     expect(within(dialog).getByText(new RegExp(`Closes all ${openCount} open positions`))).toBeInTheDocument()
   })
 })

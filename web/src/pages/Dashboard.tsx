@@ -7,28 +7,28 @@ import { Chip } from '../components/Chip'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
+import {
+  ExecutionsTable,
+  StatusFilterSelect,
+  activityCsvRows,
+  type ActivityFilter,
+} from '../components/ExecutionsTable'
 import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
   ACCOUNT_SNAPSHOTS,
-  ACTIVITY_ACTION_LABEL,
-  ACTIVITY_STATUS_CLASS,
-  ACTIVITY_STATUS_LABEL,
   RECOMMENDATIONS,
   recommendationTitle,
   STRATEGIES,
-  type ActivityStatus,
   type Recommendation,
 } from '../lib/mockData'
 import { downloadCsv } from '../lib/csv'
 import {
   CONFIDENCE_TIER_CLASS,
   confidenceTier,
-  formatDateTimeET,
   formatExpiry,
   formatStrategyName,
   formatUsd,
-  signClass,
 } from '../lib/format'
 
 function recommendationsEmptyMessage(): string {
@@ -42,7 +42,10 @@ function recommendationsEmptyMessage(): string {
     : 'No candidates meet the active strategy’s criteria.'
 }
 
-const ACTIVITY_FILTERS: (ActivityStatus | 'all')[] = ['all', 'filled', 'rejected', 'pending', 'canceled']
+/** The Dashboard shows a recent window, not the whole feed — it's the
+ * morning page, and "Recent Executions" that ran to fifty rows would make
+ * the "View all" link decorative. Activity paginates the rest. */
+const RECENT_EXECUTIONS_LIMIT = 10
 
 export function Dashboard() {
   const activeStrategyId = useUIStore((s) => s.activeStrategyId)
@@ -53,10 +56,13 @@ export function Dashboard() {
   const flatten = useUIStore((s) => s.flatten)
   const accountMode = useUIStore((s) => s.accountMode)
   const executionMode = useUIStore((s) => s.executionMode)
-  const openPositions = useUIStore((s) => s.openPositions)
-  const activity = useUIStore((s) => s.activity)
+  // Both books are keyed by account. Only the account whose keys are in use
+  // is ever on screen — showing paper's positions while Cash is live would
+  // misreport real money the same way showing paper's balance would.
+  const openPositions = useUIStore((s) => s.openPositions[s.accountMode])
+  const activity = useUIStore((s) => s.activity[s.accountMode])
   const [confirmingFlatten, setConfirmingFlatten] = useState(false)
-  const [activityFilter, setActivityFilter] = useState<(typeof ACTIVITY_FILTERS)[number]>('all')
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all')
   const [dismissedIds, setDismissedIds] = useState<string[]>([])
   const [tradeTarget, setTradeTarget] = useState<Recommendation | null>(null)
 
@@ -78,6 +84,7 @@ export function Dashboard() {
 
   const filteredActivity =
     activityFilter === 'all' ? activity : activity.filter((a) => a.status === activityFilter)
+  const recentActivity = filteredActivity.slice(0, RECENT_EXECUTIONS_LIMIT)
 
   // Halt is a statement about the engine: it stops the engine opening new
   // positions. In Manual the engine opens nothing to begin with, so the
@@ -333,35 +340,18 @@ export function Dashboard() {
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
             <h2 className="text-title-lg text-on-surface">Recent Executions</h2>
             <div className="flex items-center gap-2">
-              <select
+              <StatusFilterSelect
                 value={activityFilter}
-                onChange={(e) => setActivityFilter(e.target.value as (typeof ACTIVITY_FILTERS)[number])}
-                aria-label="Filter executions by status"
-                className="rounded border border-outline bg-surface px-2 py-1.5 text-label-md text-on-surface focus:border-primary"
-              >
-                {ACTIVITY_FILTERS.map((f) => (
-                  <option key={f} value={f}>
-                    {f === 'all' ? 'All statuses' : ACTIVITY_STATUS_LABEL[f]}
-                  </option>
-                ))}
-              </select>
+                onChange={setActivityFilter}
+                label="Filter executions by status"
+              />
+              {/* Exports everything the filter matched, not just the ten
+                  rows on screen — the visible window is a reading
+                  convenience, and silently truncating an export is how you
+                  reconcile against the broker and come up short. */}
               <button
                 type="button"
-                onClick={() =>
-                  downloadCsv(
-                    'recent-executions.csv',
-                    filteredActivity.map((a) => ({
-                      time: a.time,
-                      contract: a.contract,
-                      action: a.action,
-                      price: a.price ?? '',
-                      quantity: a.quantity ?? '',
-                      pnl: a.pnl ?? '',
-                      amount: a.amount ?? '',
-                      status: a.status,
-                    })),
-                  )
-                }
+                onClick={() => downloadCsv('recent-executions.csv', activityCsvRows(filteredActivity))}
                 className="rounded border border-outline px-3 py-1.5 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
               >
                 Export CSV
@@ -374,81 +364,11 @@ export function Dashboard() {
               </Link>
             </div>
           </div>
-          {filteredActivity.length === 0 ? (
+          {recentActivity.length === 0 ? (
             <p className="px-4 py-6 text-body-md text-on-surface-variant">No activity matches this filter.</p>
           ) : (
             <div className="max-h-80 overflow-y-auto no-scrollbar">
-              <table className="w-full border-collapse">
-                <thead>
-                  {/* Sticky so the columns stay identifiable while the
-                      body scrolls inside the panel. */}
-                  <tr className="sticky top-0 bg-surface-container">
-                    <th className="whitespace-nowrap px-3 py-2 text-left text-label-md uppercase text-on-surface-variant">
-                      Time
-                    </th>
-                    {/* w-full lets this column absorb the table's slack so
-                        the contract truncates as late as possible; it's
-                        the column carrying the most information. */}
-                    <th className="w-full px-3 py-2 text-left text-label-md uppercase text-on-surface-variant">
-                      Asset / Action
-                    </th>
-                    <th className="px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
-                    <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredActivity.map((a) => (
-                    <tr key={a.id} className="border-t border-outline/10 hover:bg-surface-container-low">
-                      <td className="whitespace-nowrap px-3 py-2 text-caption text-on-surface-variant">
-                        {formatDateTimeET(a.time)}
-                      </td>
-                      <td
-                        className="max-w-0 truncate px-3 py-2 text-body-md text-on-surface"
-                        title={a.contract === '—' ? undefined : a.contract}
-                      >
-                        {a.contract === '—'
-                          ? ACTIVITY_ACTION_LABEL[a.action]
-                          : `${ACTIVITY_ACTION_LABEL[a.action]} ${a.contract}`}
-                      </td>
-                      <td className="px-3 py-2 text-right text-data-md text-on-surface">
-                        {a.quantity ?? '—'}
-                      </td>
-                      {/* The most specific thing known about the row: its
-                          P&L if the trade produced one, the cash moved if
-                          it was a deposit or withdrawal, otherwise the
-                          status word. An opening fill has no realized P&L
-                          yet, and a rejection never will. */}
-                      <td className="whitespace-nowrap px-3 py-2 text-right">
-                        {a.pnl !== null ? (
-                          <span className={`text-data-md ${signClass(a.pnl)}`}>
-                            {formatUsd(a.pnl, { signed: true })}
-                          </span>
-                        ) : a.amount !== null ? (
-                          /* Deliberately not signClass: a deposit is money
-                             you moved, not money the account made, and
-                             rendering it bullish green would read as a
-                             gain. The sign still carries the direction. */
-                          <span
-                            className="text-data-md text-on-surface"
-                            title={`${ACTIVITY_ACTION_LABEL[a.action]} — ${ACTIVITY_STATUS_LABEL[a.status]}`}
-                          >
-                            {formatUsd(a.amount, { signed: true })}
-                          </span>
-                        ) : (
-                          <span
-                            className={`text-caption ${ACTIVITY_STATUS_CLASS[a.status]}`}
-                            title={a.rejectionReason}
-                          >
-                            {ACTIVITY_STATUS_LABEL[a.status]}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <ExecutionsTable items={recentActivity} />
             </div>
           )}
         </section>
