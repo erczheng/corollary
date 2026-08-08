@@ -1,6 +1,4 @@
 import { NavLink } from 'react-router-dom'
-import { AccountModeToggle } from './AccountModeToggle'
-import { ExecutionModeToggle } from './ExecutionModeToggle'
 import { ThemeToggle } from './ThemeToggle'
 import { useUIStore } from '../lib/store'
 
@@ -39,9 +37,9 @@ export function Header() {
           ))}
         </nav>
 
+        {/* The Paper/Cash and Manual/Auto switches live on the Dashboard
+            (PRD.md §8.1 "Controls"), not here. */}
         <div className="flex items-center gap-2">
-          <AccountModeToggle />
-          <ExecutionModeToggle />
           <button
             type="button"
             onClick={openPalette}

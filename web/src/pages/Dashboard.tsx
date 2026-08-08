@@ -5,6 +5,8 @@ import { PerformanceChart } from '../components/PerformanceChart'
 import { RefreshButton } from '../components/RefreshButton'
 import { Chip } from '../components/Chip'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { AccountModeToggle } from '../components/AccountModeToggle'
+import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
 import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
@@ -54,68 +56,77 @@ export function Dashboard() {
 
   return (
     <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-8">
-      <div className="flex flex-wrap items-start justify-between gap-6">
-        <div>
-          <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
-          <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
-            Monitor your total balance, 24h performance, and today's recommended trades.
-          </p>
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
+        {/* The trading-state pill — primary, per DESIGN.md's Colors section
+            ("the trading-state pill"). Read-only: it reports whether the
+            engine is trading or halted and which account is live. The
+            controls that change either of those are in the row below.
+            The status dot uses the *-container semantics rather than
+            bare `bullish`/`caution` because those sit at nearly the same
+            lightness as `primary` in both themes, which made the dot
+            almost invisible on the pill's fill. */}
+        <span className="flex items-center gap-2 whitespace-nowrap rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${
+              isHalted ? 'bg-caution-container' : 'bg-bullish-container'
+            }`}
+            aria-hidden="true"
+          />
+          {isHalted ? 'Halted' : 'Trading On'} ({accountMode === 'cash' ? 'Cash' : 'Paper'})
+        </span>
+      </div>
+
+      <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
+        Monitor your total balance, 24h performance, and today's recommended trades.
+      </p>
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <AccountModeToggle />
+        <ExecutionModeToggle />
+        <div className="relative shrink-0">
+          <select
+            value={activeStrategyId}
+            onChange={(e) => setActiveStrategyId(e.target.value)}
+            className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
+          >
+            {STRATEGIES.map((s) => (
+              <option key={s.id} value={s.id}>
+                Strategy: {formatStrategyName(s.name)}
+              </option>
+            ))}
+          </select>
+          <ChevronDownIcon className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-on-surface-variant" />
         </div>
 
-        <div className="flex flex-col items-end gap-3">
-          <div className="flex flex-nowrap items-center justify-end gap-3">
-            {/* The trading-state pill — primary, per DESIGN.md's Colors
-                section ("the trading-state pill"). This mirrors the
-                Paper/Cash and Manual/Auto state already set in the header;
-                it's a status readout here, not a second control. */}
-            <span className="flex items-center gap-2 whitespace-nowrap rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
-              <span
-                className={`h-2 w-2 shrink-0 rounded-full ${isHalted ? 'bg-caution' : 'bg-bullish'}`}
-                aria-hidden="true"
-              />
-              {isHalted ? 'Halted' : 'Trading On'} ({accountMode === 'cash' ? 'Cash' : 'Paper'})
-            </span>
-            <div className="relative shrink-0">
-              <select
-                value={activeStrategyId}
-                onChange={(e) => setActiveStrategyId(e.target.value)}
-                className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
-              >
-                {STRATEGIES.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    Strategy: {formatStrategyName(s.name)}
-                  </option>
-                ))}
-              </select>
-              <ChevronDownIcon className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-on-surface-variant" />
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {isHalted ? (
-              <button
-                type="button"
-                onClick={resume}
-                className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
-              >
-                Resume trading
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={halt}
-                className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
-              >
-                Halt
-              </button>
-            )}
+        {/* Actions sit apart from the settings above so Flatten — the one
+            destructive control on this page — isn't adjacent to the
+            toggles you'd click casually. */}
+        <div className="flex items-center gap-3 sm:ml-auto">
+          {isHalted ? (
             <button
               type="button"
-              onClick={() => setConfirmingFlatten(true)}
-              className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
+              onClick={resume}
+              className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
             >
-              Flatten
+              Resume trading
             </button>
-          </div>
+          ) : (
+            <button
+              type="button"
+              onClick={halt}
+              className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
+            >
+              Halt
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setConfirmingFlatten(true)}
+            className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
+          >
+            Flatten
+          </button>
         </div>
       </div>
 
