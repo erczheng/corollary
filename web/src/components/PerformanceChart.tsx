@@ -10,13 +10,20 @@ import {
 } from 'recharts'
 import {
   BENCHMARK_HISTORY,
-  PORTFOLIO_HISTORY,
   sliceRange,
   type ChartRange,
+  type PricePoint,
 } from '../lib/mockData'
 import { formatDateET, formatUsd } from '../lib/format'
 
 const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
+
+interface PerformanceChartProps {
+  /** The series to plot. Passed in rather than read from a module constant
+   * because Paper and Cash are different accounts with different balances
+   * — the chart follows the account toggle. */
+  history: PricePoint[]
+}
 
 function toChartDate(iso: string): string {
   return new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-US', {
@@ -26,12 +33,12 @@ function toChartDate(iso: string): string {
   })
 }
 
-export function PerformanceChart() {
+export function PerformanceChart({ history }: PerformanceChartProps) {
   const [range, setRange] = useState<ChartRange>('3M')
   const [showBenchmark, setShowBenchmark] = useState(false)
 
   const data = useMemo(() => {
-    const portfolio = sliceRange(PORTFOLIO_HISTORY, range)
+    const portfolio = sliceRange(history, range)
     const benchmark = sliceRange(BENCHMARK_HISTORY, range)
     return portfolio.map((p, i) => ({
       date: p.date,
@@ -39,9 +46,9 @@ export function PerformanceChart() {
       portfolio: p.value,
       benchmark: benchmark[i]?.value,
     }))
-  }, [range])
+  }, [history, range])
 
-  const startDate = PORTFOLIO_HISTORY[0]?.date
+  const startDate = history[0]?.date
 
   return (
     <div>

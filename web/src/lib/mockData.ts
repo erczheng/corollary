@@ -29,48 +29,53 @@ const rand = mulberry32(20260807)
 // Portfolio performance history (Dashboard)
 // ---------------------------------------------------------------------- //
 
+/** Which Alpaca account's keys are in use. Defined here rather than in the
+ * UI store because it keys the fixtures below; the store imports it back.
+ * In Phase 2 this keys the API request instead. */
+export type AccountMode = 'paper' | 'cash'
+
 export interface PricePoint {
   date: string // ISO date
   value: number
 }
 
-/** A one-year daily series, portfolio and SPY-benchmark, both indexed to
- * the same starting value so the overlay is visually comparable. First run
- * was 2025-08-08 per Corollary's rule of seeding at t0 — no
- * pre-Corollary reconstruction. */
-export const PORTFOLIO_HISTORY: PricePoint[] = (() => {
+/** One year of daily closes. `next` is the PRNG draw, passed in so a series
+ * can either share the module-level stream or run on its own seed. The
+ * paper and benchmark series must keep drawing from `rand` in this order or
+ * their values shift. First run was 2025-08-08 per Corollary's rule of
+ * seeding at t0 — no pre-Corollary reconstruction. */
+function buildSeries(
+  next: () => number,
+  startValue: number,
+  drift: number,
+  noiseSpread: number,
+  noiseCenter: number,
+): PricePoint[] {
   const points: PricePoint[] = []
-  let value = 25_000
+  let value = startValue
   const start = new Date('2025-08-08T00:00:00Z')
   for (let i = 0; i < 365; i++) {
     const date = new Date(start)
     date.setUTCDate(date.getUTCDate() + i)
     const day = date.getUTCDay()
     if (day === 0 || day === 6) continue // market closed weekends
-    const drift = 0.0006 // slight upward bias
-    const noise = (rand() - 0.48) * 0.018
+    const noise = (next() - noiseCenter) * noiseSpread
     value = value * (1 + drift + noise)
     points.push({ date: date.toISOString().slice(0, 10), value: Math.round(value * 100) / 100 })
   }
   return points
-})()
+}
 
-export const BENCHMARK_HISTORY: PricePoint[] = (() => {
-  const points: PricePoint[] = []
-  let value = 25_000
-  const start = new Date('2025-08-08T00:00:00Z')
-  for (let i = 0; i < 365; i++) {
-    const date = new Date(start)
-    date.setUTCDate(date.getUTCDate() + i)
-    const day = date.getUTCDay()
-    if (day === 0 || day === 6) continue
-    const drift = 0.00035
-    const noise = (rand() - 0.5) * 0.01
-    value = value * (1 + drift + noise)
-    points.push({ date: date.toISOString().slice(0, 10), value: Math.round(value * 100) / 100 })
-  }
-  return points
-})()
+/** Paper and the SPY benchmark are indexed to the same starting value so
+ * the overlay is visually comparable. */
+const PAPER_HISTORY = buildSeries(rand, 25_000, 0.0006, 0.018, 0.48)
+
+export const BENCHMARK_HISTORY: PricePoint[] = buildSeries(rand, 25_000, 0.00035, 0.01, 0.5)
+
+/** Cash runs on its own seed so that adding it left the paper series
+ * byte-identical. Smaller and calmer than paper — it's real money, sized
+ * accordingly. */
+const CASH_HISTORY = buildSeries(mulberry32(20260808), 8_000, 0.00042, 0.013, 0.485)
 
 export type ChartRange = '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'All'
 
@@ -137,7 +142,12 @@ export function recommendationTitle(r: Recommendation): string {
 
 /* Deliberately spans every confidence state the UI can render — high
  * (>=65), medium (50-64), low (<50), and null — so all four are visible
- * on screen rather than only the ones that happen to occur. */
+ * on screen rather than only the ones that happen to occur.
+ *
+ * Null splits two ways in the confidence slot, and both need a row: an
+ * unvalidated LLM origination (rec-4) shows the tag, while a scanner
+ * candidate whose setup class has no base rate yet (rec-7) shows the em
+ * dash. Without rec-7 the em-dash branch is unreachable on screen. */
 export const RECOMMENDATIONS: Recommendation[] = [
   { id: 'rec-1', symbol: 'SPY', strike: '$560/$555', structure: 'Put Credit Spread', expiry: '2026-11-21', setup: 'mean_reversion', reason: 'RSI 28, below 20d SMA', confidence: 71, unvalidated: false, origin: 'scanner' },
   { id: 'rec-2', symbol: 'AAPL', strike: '$235', structure: 'Call', expiry: '2026-12-19', setup: 'earnings_drift', reason: 'Beat by 6%, drift intact', confidence: 64, unvalidated: false, origin: 'scanner' },
@@ -145,6 +155,7 @@ export const RECOMMENDATIONS: Recommendation[] = [
   { id: 'rec-4', symbol: 'QQQ', strike: '$495', structure: 'Call', expiry: '2027-01-16', setup: 'unclassified', reason: 'LLM: momentum + soft CPI', confidence: null, unvalidated: true, origin: 'llm' },
   { id: 'rec-5', symbol: 'TSLA', strike: '$260/$250', structure: 'Put Credit Spread', expiry: '2026-12-19', setup: 'mean_reversion', reason: 'RSI 31, held support at $250', confidence: 69, unvalidated: false, origin: 'scanner' },
   { id: 'rec-6', symbol: 'IWM', strike: '$205', structure: 'Put', expiry: '2026-12-19', setup: 'gap_fade', reason: 'Gapped 2.1% on no news', confidence: 44, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-7', symbol: 'AMD', strike: '$185/$180', structure: 'Put Credit Spread', expiry: '2027-01-16', setup: 'post_split_drift', reason: 'New setup class, 4 samples', confidence: null, unvalidated: false, origin: 'scanner' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -193,18 +204,24 @@ export interface ActivityItem {
   price: number | null
   quantity: number | null
   pnl: number | null
+  /** Signed cash movement for DEPOSIT / WITHDRAWAL — positive in, negative
+   * out. Null on trades, which report `pnl` instead. Kept separate from
+   * `pnl` on purpose: money you moved into the account is not money the
+   * account made, and summing the two would overstate performance. */
+  amount: number | null
   status: ActivityStatus
   rejectionReason?: string
 }
 
 export const RECENT_ACTIVITY: ActivityItem[] = [
-  { id: 'act-1', time: '2026-08-07T14:32:00Z', contract: 'AAPL $230 Call Aug 15', action: 'STC', price: 4.85, quantity: 2, pnl: 62.0, status: 'filled' },
-  { id: 'act-2', time: '2026-08-07T13:05:00Z', contract: 'TSLA $240 Put Nov 15', action: 'BTO', price: 4.1, quantity: 1, pnl: null, status: 'filled' },
-  { id: 'act-3', time: '2026-08-07T10:48:00Z', contract: 'SPY $430/$425 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 3, pnl: null, status: 'filled' },
-  { id: 'act-4', time: '2026-08-06T19:58:00Z', contract: 'QQQ $370 Call Dec 20', action: 'BTO', price: 6.4, quantity: 1, pnl: null, status: 'rejected', rejectionReason: 'max_exposure_per_underlying: QQQ already at 27% of equity (limit 25%)' },
-  { id: 'act-5', time: '2026-08-06T15:41:00Z', contract: 'NVDA $150 Put Nov 21', action: 'STC', price: 2.15, quantity: 2, pnl: -102.5, status: 'filled' },
-  { id: 'act-6', time: '2026-08-06T09:31:00Z', contract: '—', action: 'DEPOSIT', price: null, quantity: null, pnl: null, status: 'filled' },
-  { id: 'act-7', time: '2026-08-05T16:02:00Z', contract: 'AMZN $185 Call Sep 19', action: 'BTO', price: 3.2, quantity: 4, pnl: null, status: 'canceled' },
+  { id: 'act-1', time: '2026-08-07T14:32:00Z', contract: 'AAPL $230 Call Aug 15', action: 'STC', price: 4.85, quantity: 2, pnl: 62.0, amount: null, status: 'filled' },
+  { id: 'act-2', time: '2026-08-07T13:05:00Z', contract: 'TSLA $240 Put Nov 15', action: 'BTO', price: 4.1, quantity: 1, pnl: null, amount: null, status: 'filled' },
+  { id: 'act-3', time: '2026-08-07T10:48:00Z', contract: 'SPY $430/$425 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 3, pnl: null, amount: null, status: 'filled' },
+  { id: 'act-4', time: '2026-08-06T19:58:00Z', contract: 'QQQ $370 Call Dec 20', action: 'BTO', price: 6.4, quantity: 1, pnl: null, amount: null, status: 'rejected', rejectionReason: 'max_exposure_per_underlying: QQQ already at 27% of equity (limit 25%)' },
+  { id: 'act-5', time: '2026-08-06T15:41:00Z', contract: 'NVDA $150 Put Nov 21', action: 'STC', price: 2.15, quantity: 2, pnl: -102.5, amount: null, status: 'filled' },
+  { id: 'act-6', time: '2026-08-06T09:31:00Z', contract: '—', action: 'DEPOSIT', price: null, quantity: null, pnl: null, amount: 5_000.0, status: 'filled' },
+  { id: 'act-7', time: '2026-08-05T16:02:00Z', contract: 'AMZN $185 Call Sep 19', action: 'BTO', price: 3.2, quantity: 4, pnl: null, amount: null, status: 'canceled' },
+  { id: 'act-8', time: '2026-08-04T18:12:00Z', contract: '—', action: 'WITHDRAWAL', price: null, quantity: null, pnl: null, amount: -1_250.0, status: 'filled' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -223,13 +240,17 @@ export interface Position {
   pnlPct: number
   bid: number
   ask: number
+  /** Which side the position is on. Determines how it closes — a long is
+   * sold to close at the bid, a short is bought to close at the ask — so
+   * Flatten cannot generate a correct execution without it. */
+  direction: 'long' | 'short'
 }
 
 export const OPEN_POSITIONS: Position[] = [
-  { id: 'pos-1', symbol: 'AAPL', contract: '$230 Call Oct 17', last: 232.4, costBasis: 350.0, value: 412.0, quantity: 2, pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08 },
-  { id: 'pos-2', symbol: 'TSLA', contract: '$240 Put Nov 15', last: 238.1, costBasis: 410.0, value: 307.5, quantity: 1, pnl: -102.5, pnlPct: -25.0, bid: 3.02, ask: 3.12 },
-  { id: 'pos-3', symbol: 'SPY', contract: '$430/$425 Put Credit Spread Oct 17', last: 429.88, costBasis: 210.0, value: 168.0, quantity: 3, pnl: 42.0, pnlPct: 20.0, bid: 0.55, ask: 0.6 },
-  { id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20', last: 372.4, costBasis: 640.0, value: 640.0, quantity: 1, pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45 },
+  { id: 'pos-1', symbol: 'AAPL', contract: '$230 Call Oct 17', last: 232.4, costBasis: 350.0, value: 412.0, quantity: 2, pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long' },
+  { id: 'pos-2', symbol: 'TSLA', contract: '$240 Put Nov 15', last: 238.1, costBasis: 410.0, value: 307.5, quantity: 1, pnl: -102.5, pnlPct: -25.0, bid: 3.02, ask: 3.12, direction: 'long' },
+  { id: 'pos-3', symbol: 'SPY', contract: '$430/$425 Put Credit Spread Oct 17', last: 429.88, costBasis: 210.0, value: 168.0, quantity: 3, pnl: 42.0, pnlPct: 20.0, bid: 0.55, ask: 0.6, direction: 'short' },
+  { id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20', last: 372.4, costBasis: 640.0, value: 640.0, quantity: 1, pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -398,6 +419,12 @@ export interface Strategy {
   version: number
   status: StrategyStatus
   backtest: { winRate: number; profitFactor: number; maxDrawdown: number; trades: number }
+  /** An undifferentiated aggregate for now. PRD.md §8.1 scopes the
+   * Dashboard's win rate to validated trades only, excluding LLM-originated
+   * `unvalidated` ones (§6.2) — but that split belongs with the Research
+   * origination panel (§8.5), which owns the validated/unvalidated
+   * breakdown, and it lands when that page is built. Deferred deliberately;
+   * don't nest the split in here from the Dashboard side. */
   live: { winRate: number; profitFactor: number; maxDrawdown: number; trades: number } | null
 }
 
@@ -464,15 +491,45 @@ export const ACCOUNT_SUMMARY = {
 }
 
 // ---------------------------------------------------------------------- //
-// Dashboard header stats
+// Dashboard header stats, per account (PRD.md §8.1)
 // ---------------------------------------------------------------------- //
 
-export const VOLUME_24H = 18_420.55
+export interface Trend {
+  changePct: number
+  comparedTo: string
+}
 
-export const DASHBOARD_TRENDS = {
-  balance: { changePct: 2.4, comparedTo: 'vs last 24h' },
-  volume: { changePct: 15.2, comparedTo: 'vs last 24h' },
-  winRate: { changePct: -1.2, comparedTo: 'vs 30d avg' },
+/** The header stats that belong to the *account* rather than to the
+ * strategy. Paper and Cash are two different accounts holding different
+ * money, so the Paper/Cash toggle has to move these numbers — rendering
+ * paper's balance while Cash is live misreports real money.
+ *
+ * Win rate is deliberately absent: it's a property of the selected
+ * strategy, and it comes off STRATEGIES.live (see the Dashboard).
+ *
+ * Open positions are also not keyed here. Phase 1 carries one position set
+ * (OPEN_POSITIONS), so Flatten in either mode clears both. Split it when
+ * the Activity page needs per-account positions. */
+export interface AccountSnapshot {
+  portfolioHistory: PricePoint[]
+  volume24h: number
+  balanceTrend: Trend
+  volumeTrend: Trend
+}
+
+export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
+  paper: {
+    portfolioHistory: PAPER_HISTORY,
+    volume24h: 18_420.55,
+    balanceTrend: { changePct: 2.4, comparedTo: 'vs last 24h' },
+    volumeTrend: { changePct: 15.2, comparedTo: 'vs last 24h' },
+  },
+  cash: {
+    portfolioHistory: CASH_HISTORY,
+    volume24h: 4_860.2,
+    balanceTrend: { changePct: -0.8, comparedTo: 'vs last 24h' },
+    volumeTrend: { changePct: 6.3, comparedTo: 'vs last 24h' },
+  },
 }
 
 // ---------------------------------------------------------------------- //
