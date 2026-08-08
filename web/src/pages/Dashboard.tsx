@@ -19,7 +19,7 @@ import {
   type ActivityStatus,
 } from '../lib/mockData'
 import { downloadCsv } from '../lib/csv'
-import { formatDateTimeET, formatUsd, signClass } from '../lib/format'
+import { formatDateTimeET, formatStrategyName, formatUsd, signClass } from '../lib/format'
 
 function recommendationsEmptyMessage(): string {
   const hourET = Number(
@@ -53,7 +53,7 @@ export function Dashboard() {
     activityFilter === 'all' ? RECENT_ACTIVITY : RECENT_ACTIVITY.filter((a) => a.status === activityFilter)
 
   return (
-    <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-16">
+    <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-8">
       <div className="flex flex-wrap items-start justify-between gap-6">
         <div>
           <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
@@ -63,27 +63,27 @@ export function Dashboard() {
         </div>
 
         <div className="flex flex-col items-end gap-3">
-          <div className="flex flex-wrap items-center justify-end gap-3">
+          <div className="flex flex-nowrap items-center justify-end gap-3">
             {/* The trading-state pill — primary, per DESIGN.md's Colors
                 section ("the trading-state pill"). This mirrors the
                 Paper/Cash and Manual/Auto state already set in the header;
                 it's a status readout here, not a second control. */}
-            <span className="flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
+            <span className="flex items-center gap-2 whitespace-nowrap rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
               <span
-                className={`h-2 w-2 rounded-full ${isHalted ? 'bg-caution' : 'bg-bullish'}`}
+                className={`h-2 w-2 shrink-0 rounded-full ${isHalted ? 'bg-caution' : 'bg-bullish'}`}
                 aria-hidden="true"
               />
               {isHalted ? 'Halted' : 'Trading On'} ({accountMode === 'cash' ? 'Cash' : 'Paper'})
             </span>
-            <div className="relative">
+            <div className="relative shrink-0">
               <select
                 value={activeStrategyId}
                 onChange={(e) => setActiveStrategyId(e.target.value)}
-                className="appearance-none rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
+                className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
               >
                 {STRATEGIES.map((s) => (
                   <option key={s.id} value={s.id}>
-                    Strategy: {s.name}
+                    Strategy: {formatStrategyName(s.name)}
                   </option>
                 ))}
               </select>

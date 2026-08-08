@@ -215,7 +215,7 @@ spacing:
   xl: 80px
   gutter: 24px
   margin-mobile: 16px
-  margin-desktop: 64px
+  margin-desktop: 32px
 motion:
   duration:
     fast: 100ms
@@ -326,7 +326,7 @@ Note the deliberate split: `bearish` is a muted brick used for *market direction
 
 Fixed grid on desktop, fluid on mobile.
 
-- **Desktop (1200px+):** 12 columns, 1140px max content width, 24px gutters, 64px margins.
+- **Desktop (1200px+):** 12 columns, 1140px max content width, 24px gutters, 32px margins.
 - **Tablet (768–1199px):** 8 columns, fluid, 24px margins.
 - **Mobile (≤767px):** 4 columns, fluid, 16px margins.
 

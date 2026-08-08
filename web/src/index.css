@@ -181,7 +181,7 @@
      get an entry. */
   --spacing-gutter: 24px;
   --spacing-margin-mobile: 16px;
-  --spacing-margin-desktop: 64px;
+  --spacing-margin-desktop: 32px;
 
   /* Motion — DESIGN.md `motion` scale. Two easing curves cover the whole
      system on purpose: `standard` for anything appearing/expanding,

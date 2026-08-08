@@ -18,13 +18,13 @@ export function StatCard({ label, value, icon, changePct, comparedTo }: StatCard
   const positive = changePct >= 0
 
   return (
-    <div className="rounded-lg border border-outline-warm bg-surface-container-lowest p-6">
+    <div className="rounded-lg border border-outline-warm bg-surface-container-lowest p-4">
       <div className="flex items-center justify-between">
         <p className="text-label-md uppercase tracking-wide text-on-surface-variant">{label}</p>
         <span className="text-on-surface-variant">{icon}</span>
       </div>
-      <p className="mt-3 text-data-xl text-on-surface">{value}</p>
-      <div className="mt-2 flex items-center gap-1.5 text-label-md">
+      <p className="mt-1 text-data-xl text-on-surface">{value}</p>
+      <div className="mt-1 flex items-center gap-1.5 text-label-md">
         <span className={positive ? 'text-bullish' : 'text-bearish'}>
           {positive ? <ArrowUpIcon /> : <ArrowDownIcon />}
         </span>

@@ -18,6 +18,16 @@ export function formatCompactNumber(value: number): string {
   return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }
 
+/** "spx_mean_reversion" -> "Spx Mean Reversion" — reads as a name rather
+ * than a snake_case identifier. Doesn't drop any part of the name; a
+ * shorter display would risk misrepresenting which strategy it is. */
+export function formatStrategyName(name: string): string {
+  return name
+    .split('_')
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ')
+}
+
 /** Text color for a signed value — bullish/bearish per DESIGN.md, never
  * error (a loss is not a system failure). */
 export function signClass(value: number): string {
