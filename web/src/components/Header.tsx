@@ -19,8 +19,8 @@ export function Header() {
 
   return (
     <header className="border-b border-outline-warm bg-surface">
-      <div className="flex items-center gap-6 px-4 py-3 lg:px-16">
-        <span className="text-title-lg text-primary">corollary</span>
+      <div className="flex items-center gap-6 px-4 py-2 lg:px-16">
+        <span className="text-title-lg font-bold text-primary">corollary</span>
 
         <nav className="flex flex-1 items-center gap-1">
           {PAGES.map((page) => (
