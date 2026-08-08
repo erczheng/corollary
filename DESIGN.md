@@ -54,7 +54,7 @@ colors:
   on-accent-container: '#5c2d24'
   outline-warm: '#b7b7a5'
 semantic:
-  bullish: '#455045'
+  bullish: '#186b36'
   on-bullish: '#ffffff'
   bullish-container: '#dae6d8'
   on-bullish-container: '#293429'
@@ -233,7 +233,7 @@ The palette is earthy and desaturated. Saturation is scarce on purpose: it is sp
 - **Primary — `#355255`.** Deep teal. Active navigation, primary buttons, the trading-state pill, chart lines, high-confidence indicators. This is the color the interface is built around.
 - **Primary container — `#4d6a6d`.** A lighter teal for filled containers and secondary emphasis on primary-tinted surfaces.
 - **Secondary — `#855146`.** Muted terracotta. Used sparingly for medium-confidence states, caution, and highlights that need to read as *warm* rather than *wrong*. It is deliberately not a warning yellow.
-- **Tertiary — `#455045`.** Dark moss green. Supporting text, non-interactive elements, and positive financial states.
+- **Tertiary — `#455045`.** Dark moss green. Supporting text and non-interactive elements.
 - **Surface — `#fbfae7`.** Warm parchment cream. The base background, and softer than white for long sessions.
 - **On-surface — `#1b1c11`.** Near-black with an olive cast, so text sits *in* the palette rather than on top of it.
 - **On-surface variant — `#414849`.** The secondary text color: captions, placeholders, column subheads, anything that must recede but still be read. 8.9:1 on `surface`.
@@ -282,13 +282,15 @@ A trading interface needs color to carry meaning, not decoration. These are deri
 
 | Meaning | Token | Light | Dark | Used for |
 |---|---|---|---|---|
-| Bullish / positive | `bullish` | `#455045` | `#becabc` | Gains, BULL tags, BTO, upside |
+| Bullish / positive | `bullish` | `#186b36` | `#becabc` | Gains, BULL tags, BTO, upside |
 | Bearish / negative | `bearish` | `#a3302a` | `#eba6a2` | Losses, BEAR tags, STC, downside |
 | Neutral | `neutral` | `#717879` | `#8b9293` | NEUT tags, unchanged, no data |
 | Caution | `caution` | `#855146` | `#fab6a8` | Medium confidence, pending, unvalidated |
 | Error | `error` | `#ba1a1a` | `#ffb4ab` | Rejections, failures, destructive confirms |
 
 Note the deliberate split: `bearish` is a muted brick used for *market direction and P&L*, while `error` is a brighter true red reserved for *system failure*. A losing position is not an error, and the interface should never imply it is. **This split holds in both themes** — `bearish #eba6a2` and `error #ffb4ab` are distinct in dark just as `#a3302a` and `#ba1a1a` are in light. Collapsing them in dark mode would discard the distinction at exactly the hour the terminal is most used.
+
+`bullish` (light) used to reuse `tertiary #455045` outright, on the theory that a supporting-text green and a gains green were the same idea. In practice `tertiary` is tuned to recede — exactly wrong for a number that needs to register as a gain at a glance in a scanned table — so `bullish` now has its own value, `#186b36`, a step more saturated and legible while staying in the same forest-green family. `tertiary` keeps `#455045` for supporting text and non-interactive elements.
 
 **Color is never the only signal.** Every positive or negative value carries an explicit `+` or `−`. Every sentiment tag carries its label. This survives screenshots, colorblindness, and grayscale printing.
 
@@ -366,7 +368,7 @@ Not announced in the UI, but always met: responsive to mobile, visible keyboard 
 |---|---|---|
 | `on-surface #1b1c11` | 16.3:1 | Any text |
 | `on-surface-variant #414849` | 8.9:1 | Any text, including placeholders and captions |
-| `bullish #455045` | 8.0:1 | Any text |
+| `bullish #186b36` | 6.2:1 | Any text |
 | `bearish #a3302a` | 6.6:1 | Any text |
 | `outline #717879` | 4.3:1 | Borders and disabled states only — **not text** |
 | `outline-warm #b7b7a5` | 1.9:1 | Large surfaces and disabled states only — **not text** |
