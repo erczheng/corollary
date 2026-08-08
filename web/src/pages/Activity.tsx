@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { StatTile } from '../components/StatTile'
+import { StatCard } from '../components/StatCard'
+import { AccountModeToggle } from '../components/AccountModeToggle'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Pagination } from '../components/Pagination'
+import { BankIcon, TrendingDownIcon, TrendingUpIcon } from '../components/icons'
 import {
   ExecutionsTable,
   StatusFilterSelect,
@@ -53,24 +55,32 @@ export function Activity() {
 
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
-      <h1 className="text-display-lg text-on-surface">Activity</h1>
-      {/* Names the account outright. The Paper/Cash switch is on the
-          Dashboard (PRD.md §8.1), so this page and the header badge are the
-          only things telling you whose money is on screen. */}
+      {/* The switch sits on the title line because everything below it is
+          account-scoped — the positions, the feed, and all three stats. On
+          the Dashboard the same control governs the balance and the chart;
+          here it governs the entire page, so it belongs at the top of it
+          rather than a page away. The header badge still names the account
+          for the pages that have no switch of their own. */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="text-display-lg text-on-surface">Activity</h1>
+        <AccountModeToggle />
+      </div>
       <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
         Open positions, executions, and rejected orders for your {accountLabel} account.
       </p>
 
-      {/* Same rhythm as the Dashboard: 32px in both directions between
-          blocks, and a 16px content inset so these labels line up with the
-          section headings below them. */}
-      <div className="mt-8 grid grid-cols-1 gap-8 rounded-lg border border-outline-warm bg-surface-container-lowest p-4 sm:grid-cols-3">
-        {/* Average win and average loss are bullish/bearish because that is
-            what they are. Lifetime P&L takes signClass so a flat account
-            reads neutral rather than green. None of the three is ever
-            `error` — a losing account is not a broken one. */}
-        <StatTile
+      {/* Three cards in a row, the same treatment the Dashboard gives its
+          header stats — these are peer figures, not one composite reading,
+          and a single panel implied they were.
+
+          Average win and average loss are bullish/bearish because that is
+          what they are. Lifetime P&L takes signClass so a flat account
+          reads neutral rather than green. None of the three is ever
+          `error` — a losing account is not a broken one. */}
+      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard
           label="Average win"
+          icon={<TrendingUpIcon />}
           value={
             stats.avgWin === null || stats.avgWinPct === null ? (
               '—'
@@ -84,8 +94,9 @@ export function Activity() {
           valueClassName={stats.avgWin === null ? 'text-on-surface-variant' : 'text-bullish'}
           note={stats.wins === 1 ? 'over 1 winning trade' : `over ${stats.wins} winning trades`}
         />
-        <StatTile
+        <StatCard
           label="Average loss"
+          icon={<TrendingDownIcon />}
           value={
             stats.avgLoss === null || stats.avgLossPct === null ? (
               '—'
@@ -99,8 +110,9 @@ export function Activity() {
           valueClassName={stats.avgLoss === null ? 'text-on-surface-variant' : 'text-bearish'}
           note={stats.losses === 1 ? 'over 1 losing trade' : `over ${stats.losses} losing trades`}
         />
-        <StatTile
+        <StatCard
           label="Lifetime P&L"
+          icon={<BankIcon />}
           value={formatUsd(stats.lifetimePnl, { signed: true })}
           valueClassName={signClass(stats.lifetimePnl)}
           note="realized only — deposits and withdrawals excluded"
@@ -214,7 +226,7 @@ export function Activity() {
             {/* Rejections spell out the rule that rejected them, inline —
                 this is the page of record for them (PRD.md §8.2, CLAUDE.md
                 rule 8), so the reason can't live on hover alone. */}
-            <ExecutionsTable items={pageItems} showRejectionReason />
+            <ExecutionsTable items={pageItems} layout="full" showRejectionReason />
             <Pagination page={page} pageCount={pageCount} onChange={setPage} />
           </>
         )}

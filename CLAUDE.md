@@ -270,9 +270,13 @@ expect.** Every item below produced working-looking code that was wrong:
 - `web/src/components/ExecutionsTable.tsx` — the activity/executions table,
   its status filter, and its CSV row mapper. The Dashboard's "Recent
   Executions" and Activity's "Recent Activity" are the same feed at
-  different depths (recent window vs. paginated in full) and render from
-  this one component so the columns and the P&L-vs-status logic cannot
-  drift apart. Don't copy the markup into a third page — add a prop.
+  different depths and render from this one component so the cell logic
+  cannot drift apart. The two column sets live in `COLUMN_LAYOUTS` and are
+  written out in full rather than assembled from conditions — they differ
+  in order as well as in membership (`summary` puts Qty before Price and
+  ends on P&L; `full` leads with P&L and ends on Status), and inline
+  ternaries made it far too easy to change one while meaning to change the
+  other. Don't copy the markup into a third page — add a layout.
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
 
