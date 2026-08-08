@@ -129,7 +129,7 @@ export function Dashboard() {
           {RECOMMENDATIONS.length === 0 ? (
             <p className="px-4 py-6 text-body-md text-on-surface-variant">{recommendationsEmptyMessage()}</p>
           ) : (
-            <div className="max-h-80 overflow-y-auto">
+            <div className="max-h-80 overflow-y-auto no-scrollbar">
               {RECOMMENDATIONS.map((r) => (
                 <div
                   key={r.id}
@@ -199,7 +199,7 @@ export function Dashboard() {
           {filteredActivity.length === 0 ? (
             <p className="px-4 py-6 text-body-md text-on-surface-variant">No activity matches this filter.</p>
           ) : (
-            <div className="max-h-80 overflow-y-auto">
+            <div className="max-h-80 overflow-y-auto no-scrollbar">
               <table className="w-full border-collapse">
                 <tbody>
                   {filteredActivity.map((a) => (

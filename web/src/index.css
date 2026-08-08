@@ -362,6 +362,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+/** Hides the scrollbar on a fixed-height inner panel (e.g. a scrollable
+ * list card) while keeping it scrollable by wheel/trackpad/keyboard. Not
+ * for the page itself — the main window scrollbar stays, since it's the
+ * affordance that shows how much of the page there is. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 @layer base {
   body {
     @apply bg-surface text-on-surface text-body-md;

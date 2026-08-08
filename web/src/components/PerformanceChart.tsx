@@ -76,20 +76,22 @@ export function PerformanceChart() {
 
       <div className="mt-3 h-72 w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
+          <LineChart data={data} margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
             <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />
             <XAxis
               dataKey="label"
               tick={{ fill: 'var(--on-surface-variant)', fontSize: 12 }}
               tickLine={false}
               axisLine={{ stroke: 'var(--outline-warm)' }}
+              tickMargin={16}
               minTickGap={40}
             />
             <YAxis
               tick={{ fill: 'var(--on-surface-variant)', fontSize: 12 }}
               tickLine={false}
               axisLine={false}
-              width={72}
+              tickMargin={12}
+              width={84}
               tickFormatter={(v: number) => formatUsd(v)}
               domain={['auto', 'auto']}
             />
@@ -128,7 +130,7 @@ export function PerformanceChart() {
         </ResponsiveContainer>
       </div>
       {startDate && (
-        <p className="mt-1 text-caption text-on-surface-variant">
+        <p className="mt-6 text-caption text-on-surface-variant">
           Since {formatDateET(`${startDate}T00:00:00Z`)} — Corollary's first run. No
           pre-Corollary history is reconstructed.
         </p>
