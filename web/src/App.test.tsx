@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import App from './App'
 
 beforeEach(() => {
@@ -8,7 +8,7 @@ beforeEach(() => {
 })
 
 describe('App shell', () => {
-  it('renders the wordmark and all seven page links', () => {
+  it('renders the wordmark and reaches all seven pages', () => {
     render(<App />)
 
     expect(screen.getByText('corollary')).toBeInTheDocument()
@@ -24,6 +24,59 @@ describe('App shell', () => {
     ]) {
       expect(screen.getByRole('link', { name: label })).toBeInTheDocument()
     }
+  })
+
+  /** Five worded destinations on the left; Account and Settings move to the
+   * tool cluster on the right as icons. The icons keep their accessible
+   * names via aria-label — an icon link that announces as nothing is not a
+   * link anyone can use. */
+  describe('header layout', () => {
+    it('keeps only the five trading pages in the main nav', () => {
+      render(<App />)
+      const nav = within(screen.getByRole('navigation', { name: 'Main' }))
+
+      expect(nav.getAllByRole('link').map((l) => l.textContent)).toEqual([
+        'Dashboard',
+        'Activity',
+        'News',
+        'Markets',
+        'Research',
+      ])
+    })
+
+    it('puts Account and Settings outside the nav, still named', () => {
+      render(<App />)
+      const nav = screen.getByRole('navigation', { name: 'Main' })
+
+      for (const label of ['Account', 'Settings']) {
+        const link = screen.getByRole('link', { name: label })
+        expect(nav.contains(link)).toBe(false)
+        // Icon-only, so the name has to come from aria-label rather than
+        // from text content.
+        expect(link.textContent).toBe('')
+        expect(link).toHaveAttribute('aria-label', label)
+      }
+    })
+
+    it('sits notifications between Account and Settings', () => {
+      render(<App />)
+
+      const account = screen.getByRole('link', { name: 'Account' })
+      const bell = screen.getByRole('button', { name: 'Notifications' })
+      const settings = screen.getByRole('link', { name: 'Settings' })
+
+      // Node.compareDocumentPosition: 4 === "argument follows this node".
+      expect(account.compareDocumentPosition(bell)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+      expect(bell.compareDocumentPosition(settings)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    })
+
+    it('carries no unread badge on a bell with no feed behind it', () => {
+      render(<App />)
+
+      // An unread count nothing can produce would be a decoration that
+      // lies. When notifications land, this is the test to change.
+      expect(screen.getByRole('button', { name: 'Notifications' }).textContent).toBe('')
+    })
   })
 
   it('takes you back to the Dashboard from the wordmark', () => {

@@ -1,17 +1,57 @@
 import { Link, NavLink } from 'react-router-dom'
 import { ThemeToggle } from './ThemeToggle'
+import { BellIcon, GearIcon, UserIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { ACCOUNT_LABEL } from '../lib/mockData'
 
-const PAGES = [
+/** The five pages you move between while trading. They keep their words:
+ * these are destinations you pick deliberately, and a row of five unlabeled
+ * glyphs is a guessing game. */
+const NAV_PAGES = [
   { to: '/', label: 'Dashboard' },
   { to: '/activity', label: 'Activity' },
   { to: '/news', label: 'News' },
   { to: '/markets', label: 'Markets' },
   { to: '/research', label: 'Research' },
-  { to: '/account', label: 'Account' },
-  { to: '/settings', label: 'Settings' },
 ]
+
+/** Icon controls in the right-hand cluster share one shape so the row reads
+ * as a set. */
+const ICON_BUTTON =
+  'flex h-9 w-9 items-center justify-center rounded transition-colors duration-base ease-standard'
+
+const ICON_IDLE = 'text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface'
+
+/** Account and Settings are utilities rather than destinations — visited
+ * occasionally and by intent — so they join the tool cluster on the right
+ * as icons instead of taking a word each in the main nav. Both glyphs are
+ * conventional enough (person, gear) to carry the meaning unlabeled, which
+ * would not be true of Markets or Research.
+ *
+ * The word survives as `aria-label` and `title`: an icon link with no
+ * accessible name is announced as nothing at all. `h-4 w-4` is explicit
+ * because a custom className on these icon components *replaces* their
+ * default sizing rather than merging with it (CLAUDE.md). */
+function IconNavLink({
+  to,
+  label,
+  children,
+}: {
+  to: string
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <NavLink
+      to={to}
+      aria-label={label}
+      title={label}
+      className={({ isActive }) => `${ICON_BUTTON} ${isActive ? 'text-primary' : ICON_IDLE}`}
+    >
+      {children}
+    </NavLink>
+  )
+}
 
 export function Header() {
   const openPalette = useUIStore((s) => s.openPalette)
@@ -46,8 +86,8 @@ export function Header() {
           corollary
         </Link>
 
-        <nav className="flex flex-1 items-center gap-1">
-          {PAGES.map((page) => (
+        <nav aria-label="Main" className="flex flex-1 items-center gap-1">
+          {NAV_PAGES.map((page) => (
             <NavLink
               key={page.to}
               to={page.to}
@@ -88,18 +128,44 @@ export function Header() {
         >
           {ACCOUNT_LABEL[accountMode]}
         </span>
-        <div className="flex items-center gap-2">
+        {/* Search, then the utility icons, then the theme toggle. Account and
+            Settings sit between the two so the cluster runs from "find
+            something" through "your stuff" to "how it looks". */}
+        <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={openPalette}
-            className="rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant hover:bg-surface-container-low"
+            aria-label="Search"
+            className="mr-1 rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
           >
             <kbd className="text-caption">Ctrl K</kbd>
           </button>
+
+          <IconNavLink to="/account" label="Account">
+            <UserIcon className="h-4 w-4" />
+          </IconNavLink>
+
+          {/* Notifications has no feed behind it yet — the events are routed
+              in Settings, and the bell that receives them lands with them.
+              Deliberately badge-free until then: an unread count that
+              nothing can produce is a decoration that lies. */}
+          <button
+            type="button"
+            aria-label="Notifications"
+            title="Notifications — no unread"
+            className={`${ICON_BUTTON} ${ICON_IDLE}`}
+          >
+            <BellIcon className="h-4 w-4" />
+          </button>
+
+          <IconNavLink to="/settings" label="Settings">
+            <GearIcon className="h-4 w-4" />
+          </IconNavLink>
+
           <ThemeToggle />
           <NavLink
             to="/design"
-            className="text-caption text-on-surface-variant underline decoration-outline-variant hover:text-on-surface"
+            className="ml-1 text-caption text-on-surface-variant underline decoration-outline-variant hover:text-on-surface"
           >
             Design
           </NavLink>
