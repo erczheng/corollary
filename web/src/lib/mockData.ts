@@ -195,12 +195,10 @@ export function isOrderAction(action: ActivityAction): boolean {
 
 /** Text color for a rendered activity status.
  *
- * **Currently unrendered.** The executions table used to fall back to the
- * status word where a row had no P&L; it is now a P&L column that shows an
- * em dash instead, so nothing reads this map today. It is kept because the
- * colour decisions below are the hard part and would have to be re-derived
- * (and re-checked for contrast) the moment a status badge or column comes
- * back. If that has not happened by the time real data lands, delete it.
+ * Read by the `full` layout of ExecutionsTable — Activity's Status column.
+ * The Dashboard's `summary` layout has no room for one and puts the status
+ * on hover instead, so this map is live on one page of the two. Keeping it
+ * here rather than beside either table is what lets the two agree.
  *
  * `rejected` takes `error`, not `bearish` — DESIGN.md assigns error to
  * "Rejections, failures", and a rejected order is a system/rule outcome

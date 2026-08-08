@@ -78,15 +78,28 @@ describe('Cash movements in the ledger', () => {
 })
 
 describe('Header stats', () => {
+  /** Three peer figures, so three cards — the same treatment the Dashboard
+   * gives its header stats. Each is its own labelled group, which is also
+   * what makes these assertions scopeable. */
+  it('stands each stat up as its own card', () => {
+    gotoActivity()
+
+    for (const label of ['Average win', 'Average loss', 'Lifetime P&L']) {
+      expect(screen.getByRole('group', { name: label })).toBeInTheDocument()
+    }
+  })
+
   it('averages wins and losses separately, in dollars and percent', () => {
     gotoActivity()
     const stats = activityStats(PAPER.activity)
 
-    const win = screen.getByRole('heading', { name: 'Activity' }).parentElement!
-    expect(within(win).getByText(formatUsd(stats.avgWin!, { signed: true }))).toBeInTheDocument()
-    expect(within(win).getByText(formatPct(stats.avgWinPct!, { signed: true }))).toBeInTheDocument()
-    expect(within(win).getByText(formatUsd(stats.avgLoss!, { signed: true }))).toBeInTheDocument()
-    expect(within(win).getByText(formatPct(stats.avgLossPct!, { signed: true }))).toBeInTheDocument()
+    const win = within(screen.getByRole('group', { name: 'Average win' }))
+    expect(win.getByText(formatUsd(stats.avgWin!, { signed: true }))).toBeInTheDocument()
+    expect(win.getByText(formatPct(stats.avgWinPct!, { signed: true }))).toBeInTheDocument()
+
+    const loss = within(screen.getByRole('group', { name: 'Average loss' }))
+    expect(loss.getByText(formatUsd(stats.avgLoss!, { signed: true }))).toBeInTheDocument()
+    expect(loss.getByText(formatPct(stats.avgLossPct!, { signed: true }))).toBeInTheDocument()
   })
 
   it('sums lifetime P&L over realized trades only, excluding deposits', () => {
@@ -191,6 +204,99 @@ describe('Open Positions', () => {
   })
 })
 
+describe('Recent Activity columns', () => {
+  it('runs Time, Asset, Action, P&L, Price, Qty, Status — in that order', () => {
+    gotoActivity()
+    const feed = within(section('Recent Activity'))
+
+    expect(feed.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+      'Time',
+      'Asset',
+      'Action',
+      'P&L',
+      'Price',
+      'Qty',
+      'Status',
+    ])
+  })
+
+  it('keeps the Dashboard on its narrower summary columns', () => {
+    render(<App />)
+    const executions = within(section('Recent Executions'))
+
+    // The half-width panel merges Asset/Action and has no Status column.
+    // Same component, same cell logic, different layout.
+    expect(executions.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+      'Time',
+      'Asset / Action',
+      'Qty',
+      'Price',
+      'P&L',
+    ])
+  })
+
+  it('gives the action its own column rather than prefixing the contract', () => {
+    gotoActivity()
+
+    const trade = PAPER.activity.find((a) => a.action === 'STC' && a.contract !== '—')!
+    const row = within(section('Recent Activity'))
+      .getAllByRole('row')
+      .find((r) => r.textContent?.includes(trade.contract))!
+    const cells = within(row).getAllByRole('cell')
+
+    // Asset holds the contract alone; Action stands on its own beside it.
+    expect(cells[1].textContent).toContain(trade.contract)
+    expect(cells[1].textContent).not.toContain('STC')
+    expect(cells[2].textContent).toBe('STC')
+  })
+
+  it('renders the status word, which the summary layout can only put on hover', () => {
+    gotoActivity()
+    const feed = within(section('Recent Activity'))
+
+    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
+      target: { value: 'pending' },
+    })
+
+    const rows = feed.getAllByRole('row').slice(1)
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      const cells = within(row).getAllByRole('cell')
+      expect(cells[6].textContent).toBe('Pending')
+    }
+  })
+
+  it('colors a rejection error and a pending order caution, never bearish', () => {
+    gotoActivity()
+    const feed = within(section('Recent Activity'))
+
+    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
+      target: { value: 'rejected' },
+    })
+
+    const status = within(feed.getAllByRole('row')[1]).getAllByRole('cell')[6]
+    // A rejected order is a rule outcome, not a losing position.
+    expect(status.querySelector('span')!.className).toMatch(/text-error/)
+    expect(status.querySelector('span')!.className).not.toMatch(/text-bearish/)
+  })
+
+  it('shows an em dash for the asset on a cash movement, and names it in Action', () => {
+    gotoActivity()
+
+    const deposit = PAPER.activity.find((a) => a.action === 'DEPOSIT')!
+    const feed = within(section('Recent Activity'))
+    const row = feed
+      .getAllByRole('row')
+      .find((r) => within(r).queryAllByRole('cell')[2]?.textContent === 'Deposit')!
+
+    const cells = within(row).getAllByRole('cell')
+    // A deposit has no contract and no fill price — em dashes, not zeros.
+    expect(cells[1].textContent).toBe('—')
+    expect(cells[4].textContent).toBe('—')
+    expect(cells[3].textContent).toBe(formatUsd(deposit.amount!, { signed: true }))
+  })
+})
+
 describe('Recent Activity', () => {
   it('paginates the whole feed rather than scrolling it', () => {
     gotoActivity()
@@ -248,14 +354,41 @@ describe('Rejection reasons', () => {
 })
 
 describe('The page is scoped to one account', () => {
+  /** Switches from the toggle on Activity's own title line, rather than
+   * going back to the Dashboard for it. Everything on this page is
+   * account-scoped, so the control that scopes it lives here too. */
   function switchToCash() {
-    render(<App />)
+    gotoActivity()
     fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
     fireEvent.click(
       within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
     )
-    fireEvent.click(screen.getByRole('link', { name: 'Activity' }))
   }
+
+  it('carries the Paper/Cash toggle on the title line', () => {
+    gotoActivity()
+
+    const titleRow = screen.getByRole('heading', { name: 'Activity', level: 1 }).parentElement!
+    expect(within(titleRow).getByRole('button', { name: 'Paper' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(within(titleRow).getByRole('button', { name: 'Cash' })).toBeInTheDocument()
+  })
+
+  it('still demands the confirm dialog before Cash goes live', () => {
+    gotoActivity()
+
+    // CLAUDE.md rule 5 — entering Cash is never one click, wherever the
+    // switch happens to be rendered.
+    fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
+    expect(useUIStore.getState().accountMode).toBe('paper')
+
+    fireEvent.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
+    )
+    expect(useUIStore.getState().accountMode).toBe('cash')
+  })
 
   it('shows the cash book, and none of paper’s positions, once Cash is live', () => {
     switchToCash()
@@ -278,11 +411,12 @@ describe('The page is scoped to one account', () => {
     expect(screen.queryByText(formatUsd(paper.lifetimePnl, { signed: true }))).not.toBeInTheDocument()
   })
 
-  it('names the account, since the switch itself lives on the Dashboard', () => {
+  it('names the account in prose and in the header badge', () => {
     switchToCash()
 
-    // PRD.md §3: the read-only header badge is the stated mitigation for
-    // account-scoped money on a page with no account switch.
+    // The badge covers News, Markets, Research and the rest, which have no
+    // switch of their own (PRD.md §3). It stays on Activity so the answer
+    // to "whose money is this" is in the same place on every page.
     expect(screen.getByLabelText('Account: Cash')).toBeInTheDocument()
     expect(screen.getByText(/for your Cash account/)).toBeInTheDocument()
   })

@@ -3,7 +3,15 @@ import { ArrowDownIcon, ArrowUpIcon } from './icons'
 
 interface StatCardProps {
   label: string
-  value: string
+  /** A node, not a string, so a card can pair a headline figure with a
+   * secondary one — Activity's "+$141.00 +31.90%". Keep the tabular
+   * numerals on both halves. */
+  value: ReactNode
+  /** Overrides the value colour. Activity's average win is `bullish` and
+   * its average loss `bearish`; the Dashboard's balances stay neutral
+   * because a balance has no sign to report. Never `error` — a losing
+   * trade is not a system failure. */
+  valueClassName?: string
   icon: ReactNode
   /** Omit when the stat has nothing to compare against — pass `note`
    * instead. A trend line is a claim about a baseline, so inventing one
@@ -25,6 +33,7 @@ interface StatCardProps {
 export function StatCard({
   label,
   value,
+  valueClassName,
   icon,
   changePct,
   comparedTo,
@@ -43,7 +52,7 @@ export function StatCard({
         <p className="text-label-md uppercase tracking-wide text-on-surface-variant">{label}</p>
         <span className="text-on-surface-variant">{icon}</span>
       </div>
-      <p className="mt-1 text-data-xl text-on-surface">{value}</p>
+      <p className={`mt-1 text-data-xl ${valueClassName ?? 'text-on-surface'}`}>{value}</p>
       {changePct !== undefined ? (
         <div className="mt-1 flex items-center gap-2 text-label-md">
           <span className={positive ? 'text-bullish' : 'text-bearish'}>
