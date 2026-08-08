@@ -111,23 +111,40 @@ export function sliceRange(points: PricePoint[], range: ChartRange): PricePoint[
 export interface Recommendation {
   id: string
   symbol: string
-  contract: string
+  /** Strike or strike pair, pre-formatted for display: '$235', '$560/$555'. */
+  strike: string
+  /** Contract structure: 'Call', 'Put', 'Put Credit Spread'. */
+  structure: string
+  /** Calendar date (YYYY-MM-DD), not an instant — render with
+   * format.ts#formatExpiry, which formats in UTC. Formatting this in ET
+   * shifts it a day earlier. */
+  expiry: string
+  /** Setup class from the taxonomy. Drives the confidence base rate
+   * (PRD.md §6.3) — not the same thing as the human-readable reason. */
   setup: string
+  /** Why this surfaced: the scanner rule that matched, or the LLM's
+   * annotation (PRD.md §6.1). */
+  reason: string
   confidence: number | null // null renders as "—" — no base rate yet
   unvalidated: boolean
   origin: 'scanner' | 'llm'
+}
+
+/** `SPY $560/$555 Put Credit Spread` */
+export function recommendationTitle(r: Recommendation): string {
+  return `${r.symbol} ${r.strike} ${r.structure}`
 }
 
 /* Deliberately spans every confidence state the UI can render — high
  * (>=65), medium (50-64), low (<50), and null — so all four are visible
  * on screen rather than only the ones that happen to occur. */
 export const RECOMMENDATIONS: Recommendation[] = [
-  { id: 'rec-1', symbol: 'SPY', contract: '$560/$555 Put Credit Spread, Nov 21', setup: 'mean_reversion', confidence: 71, unvalidated: false, origin: 'scanner' },
-  { id: 'rec-2', symbol: 'AAPL', contract: '$235 Call, Dec 19', setup: 'earnings_drift', confidence: 64, unvalidated: false, origin: 'scanner' },
-  { id: 'rec-3', symbol: 'NVDA', contract: '$145/$140 Put Credit Spread, Nov 21', setup: 'iv_crush', confidence: 58, unvalidated: false, origin: 'scanner' },
-  { id: 'rec-4', symbol: 'QQQ', contract: '$495 Call, Jan 16', setup: 'unclassified', confidence: null, unvalidated: true, origin: 'llm' },
-  { id: 'rec-5', symbol: 'TSLA', contract: '$260/$250 Put Credit Spread, Dec 19', setup: 'mean_reversion', confidence: 69, unvalidated: false, origin: 'scanner' },
-  { id: 'rec-6', symbol: 'IWM', contract: '$205 Put, Dec 19', setup: 'gap_fade', confidence: 44, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-1', symbol: 'SPY', strike: '$560/$555', structure: 'Put Credit Spread', expiry: '2026-11-21', setup: 'mean_reversion', reason: 'RSI 28, below 20d SMA', confidence: 71, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-2', symbol: 'AAPL', strike: '$235', structure: 'Call', expiry: '2026-12-19', setup: 'earnings_drift', reason: 'Beat by 6%, drift intact', confidence: 64, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-3', symbol: 'NVDA', strike: '$145/$140', structure: 'Put Credit Spread', expiry: '2026-11-21', setup: 'iv_crush', reason: 'IV rank 82, earnings passed', confidence: 58, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-4', symbol: 'QQQ', strike: '$495', structure: 'Call', expiry: '2027-01-16', setup: 'unclassified', reason: 'LLM: momentum + soft CPI', confidence: null, unvalidated: true, origin: 'llm' },
+  { id: 'rec-5', symbol: 'TSLA', strike: '$260/$250', structure: 'Put Credit Spread', expiry: '2026-12-19', setup: 'mean_reversion', reason: 'RSI 31, held support at $250', confidence: 69, unvalidated: false, origin: 'scanner' },
+  { id: 'rec-6', symbol: 'IWM', strike: '$205', structure: 'Put', expiry: '2026-12-19', setup: 'gap_fade', reason: 'Gapped 2.1% on no news', confidence: 44, unvalidated: false, origin: 'scanner' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -143,6 +160,30 @@ export const ACTIVITY_STATUS_LABEL: Record<ActivityStatus, string> = {
   canceled: 'Canceled',
 }
 export type ActivityAction = 'BTO' | 'STC' | 'STO' | 'BTC' | 'DEPOSIT' | 'WITHDRAWAL'
+
+/** Order actions keep their standard options abbreviations — BTO/STC/STO/
+ * BTC are the jargon, not shorthand to be expanded. Cash movements are
+ * not orders and read as plain words. */
+export const ACTIVITY_ACTION_LABEL: Record<ActivityAction, string> = {
+  BTO: 'BTO',
+  STC: 'STC',
+  STO: 'STO',
+  BTC: 'BTC',
+  DEPOSIT: 'Deposit',
+  WITHDRAWAL: 'Withdrawal',
+}
+
+/** Text color for a status shown in place of a P&L. `rejected` takes
+ * `error`, not `bearish` — DESIGN.md assigns error to "Rejections,
+ * failures", and a rejected order is a system/rule outcome rather than a
+ * losing position. Both clear 6.1:1 on surface in light and 10.9:1 in
+ * dark; verified. */
+export const ACTIVITY_STATUS_CLASS: Record<ActivityStatus, string> = {
+  filled: 'text-on-surface-variant',
+  rejected: 'text-error',
+  pending: 'text-caution',
+  canceled: 'text-on-surface-variant',
+}
 
 export interface ActivityItem {
   id: string

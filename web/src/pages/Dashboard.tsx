@@ -10,12 +10,15 @@ import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
 import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
+  ACTIVITY_ACTION_LABEL,
+  ACTIVITY_STATUS_CLASS,
   ACTIVITY_STATUS_LABEL,
   DASHBOARD_TRENDS,
   OPEN_POSITIONS,
   PORTFOLIO_HISTORY,
   RECENT_ACTIVITY,
   RECOMMENDATIONS,
+  recommendationTitle,
   STRATEGIES,
   VOLUME_24H,
   type ActivityStatus,
@@ -26,6 +29,7 @@ import {
   CONFIDENCE_TIER_CLASS,
   confidenceTier,
   formatDateTimeET,
+  formatExpiry,
   formatStrategyName,
   formatUsd,
   signClass,
@@ -201,11 +205,17 @@ export function Dashboard() {
                 >
                   <div className="min-w-0">
                     <p className="truncate text-body-md text-on-surface">
-                      {r.symbol} — {r.contract}
+                      {recommendationTitle(r)}
                     </p>
-                    <div className="mt-0.5 flex items-center gap-2">
-                      <span className="text-caption text-on-surface-variant">
-                        {r.setup.replace(/_/g, ' ')}
+                    {/* Reason truncates before the expiry does — a clipped
+                        rationale is a nuisance, a clipped expiry is
+                        misleading. */}
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                      <span className="truncate text-caption text-on-surface-variant">
+                        {r.reason}
+                      </span>
+                      <span className="shrink-0 text-caption text-on-surface-variant">
+                        · Exp {formatExpiry(r.expiry)}
                       </span>
                       {r.unvalidated && <Chip variant="accent">Unvalidated</Chip>}
                     </div>
@@ -239,7 +249,7 @@ export function Dashboard() {
                       title={
                         isHalted
                           ? 'Trading is halted — resume to open new positions'
-                          : `Trade ${r.symbol} ${r.contract}`
+                          : `Trade ${recommendationTitle(r)}`
                       }
                       className="rounded border border-primary px-3 py-1 text-label-md text-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50"
                     >
@@ -248,7 +258,7 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={() => setDismissedIds((ids) => [...ids, r.id])}
-                      aria-label={`Dismiss ${r.symbol} ${r.contract}`}
+                      aria-label={`Dismiss ${recommendationTitle(r)}`}
                       title="Dismiss"
                       className="flex h-7 w-7 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
                     >
@@ -309,18 +319,57 @@ export function Dashboard() {
           ) : (
             <div className="max-h-80 overflow-y-auto no-scrollbar">
               <table className="w-full border-collapse">
+                <thead>
+                  {/* Sticky so the columns stay identifiable while the
+                      body scrolls inside the panel. */}
+                  <tr className="sticky top-0 bg-surface-container">
+                    <th className="whitespace-nowrap px-3 py-2 text-left text-label-md uppercase text-on-surface-variant">
+                      Time
+                    </th>
+                    {/* w-full lets this column absorb the table's slack so
+                        the contract truncates as late as possible; it's
+                        the column carrying the most information. */}
+                    <th className="w-full px-3 py-2 text-left text-label-md uppercase text-on-surface-variant">
+                      Asset / Action
+                    </th>
+                    <th className="px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
+                      P&amp;L / Status
+                    </th>
+                  </tr>
+                </thead>
                 <tbody>
                   {filteredActivity.map((a) => (
-                    <tr key={a.id} className="border-t border-outline/10 first:border-t-0 hover:bg-surface-container-low">
-                      <td className="px-4 py-3 text-caption text-on-surface-variant">{formatDateTimeET(a.time)}</td>
-                      <td className="px-4 py-3 text-body-md text-on-surface">
-                        {a.action} {a.contract !== '—' ? a.contract : ''}
+                    <tr key={a.id} className="border-t border-outline/10 hover:bg-surface-container-low">
+                      <td className="whitespace-nowrap px-3 py-2 text-caption text-on-surface-variant">
+                        {formatDateTimeET(a.time)}
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right text-data-md text-on-surface">
+                      <td
+                        className="max-w-0 truncate px-3 py-2 text-body-md text-on-surface"
+                        title={a.contract === '—' ? undefined : a.contract}
+                      >
+                        {a.contract === '—'
+                          ? ACTIVITY_ACTION_LABEL[a.action]
+                          : `${ACTIVITY_ACTION_LABEL[a.action]} ${a.contract}`}
+                      </td>
+                      <td className="px-3 py-2 text-right text-data-md text-on-surface">
+                        {a.quantity ?? '—'}
+                      </td>
+                      {/* P&L when the trade produced one, otherwise the
+                          status — an opening fill has no realized P&L yet,
+                          and a rejection never will. */}
+                      <td className="whitespace-nowrap px-3 py-2 text-right">
                         {a.pnl !== null ? (
-                          <span className={signClass(a.pnl)}>{formatUsd(a.pnl, { signed: true })}</span>
+                          <span className={`text-data-md ${signClass(a.pnl)}`}>
+                            {formatUsd(a.pnl, { signed: true })}
+                          </span>
                         ) : (
-                          '—'
+                          <span
+                            className={`text-caption ${ACTIVITY_STATUS_CLASS[a.status]}`}
+                            title={a.rejectionReason}
+                          >
+                            {ACTIVITY_STATUS_LABEL[a.status]}
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -356,7 +405,8 @@ export function Dashboard() {
         consequence={
           tradeTarget && (
             <>
-              Submits {tradeTarget.symbol} {tradeTarget.contract} to the risk manager for sizing and
+              Submits {recommendationTitle(tradeTarget)}, expiring {formatExpiry(tradeTarget.expiry)}, to the
+              risk manager for sizing and
               approval, using your {accountMode === 'cash' ? 'Cash' : 'Paper'} account. It is rejected,
               with the reason logged to Activity, if it breaches a risk limit.
             </>

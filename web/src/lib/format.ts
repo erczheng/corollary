@@ -99,3 +99,21 @@ export function formatDateTimeET(iso: string): string {
 export function formatDateET(iso: string): string {
   return ET_DATE.format(new Date(iso))
 }
+
+const EXPIRY = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  month: 'short',
+  day: 'numeric',
+})
+
+/** A contract expiry is a calendar date, not an instant, so it is the one
+ * thing here that is NOT rendered in America/New_York. A bare
+ * 'YYYY-MM-DD' parses as UTC midnight, and ET is behind UTC, so
+ * formatting it in ET renders the *previous day* — a Nov 21 expiry
+ * displays as Nov 20. Verified; format date-only values in UTC.
+ *
+ * The year is omitted deliberately: a recommended contract is always
+ * forward-dated, so "Jan 16" seen in August can only mean next January. */
+export function formatExpiry(isoDate: string): string {
+  return EXPIRY.format(new Date(`${isoDate}T00:00:00Z`))
+}
