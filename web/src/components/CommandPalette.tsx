@@ -24,7 +24,7 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-inverse-surface/5 pt-32"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-tertiary/70 backdrop-blur-xl pt-32"
       role="presentation"
       onClick={close}
     >
