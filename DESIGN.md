@@ -213,9 +213,9 @@ spacing:
   md: 24px
   lg: 48px
   xl: 80px
-  gutter: 24px
+  gutter: 36px
   margin-mobile: 16px
-  margin-desktop: 32px
+  margin-desktop: 48px
 motion:
   duration:
     fast: 100ms
@@ -326,11 +326,23 @@ Note the deliberate split: `bearish` is a muted brick used for *market direction
 
 Fixed grid on desktop, fluid on mobile.
 
-- **Desktop (1200px+):** 12 columns, 1140px max content width, 24px gutters, 32px margins.
+- **Desktop (1200px+):** 12 columns, 1425px max content width, 36px gutters, 48px margins.
 - **Tablet (768–1199px):** 8 columns, fluid, 24px margins.
 - **Mobile (≤767px):** 4 columns, fluid, 16px margins.
 
-Spacing follows an 8px rhythm. Use `lg` (48px) and `xl` (80px) to separate major sections — the minimalism depends on vertical breathing room, and compressing it is what makes a layout read as generic.
+Spacing follows an 8px rhythm, with one deliberate exception noted below.
+
+**`gutter` (36px) is the one measure between blocks, and it applies in both directions.** The gap from one card down to the next and the gap from one card across to its neighbour are both 36px, so the whitespace framing any card measures the same vertically and horizontally. Dashboard and Activity are built this way; a new page should be too.
+
+**`margin-desktop` (48px) is the page's side padding, and it is deliberately larger than the gutter.** The page reads as inset from the window by more than its cards are separated from each other. Setting the two equal flattens that distinction and the layout stops having an edge.
+
+`gutter` at 36px is off the 8px rhythm — it is 4.5 steps, not a whole number of them. That is a considered exception, not an oversight: 24px read as cramped at the current content width and 48px pushed the fold too far down. Do not "correct" it back to 24 or 48 without looking at the page.
+
+These replace an earlier rule reserving `lg` (48px) and `xl` (80px) for separating major sections, which produced vertical gaps twice the horizontal ones — two competing rhythms rather than one. `lg` and `xl` remain in the scale for page top and bottom padding and hero spacing, not for the space between sibling blocks.
+
+The **header bar** is full-bleed so its bottom rule spans the window, but its contents ride the same 1425px container and 48px padding, so the wordmark lines up with the page title beneath it. Changing the page container means changing `Header.tsx` to match.
+
+One exception to the gutter: a heading and the deck directly beneath it pair at `base` (8px), because 36px between a title and its own subtitle separates a unit that should read as one.
 
 **Data density is the exception.** Tables run tighter than the rest of the interface: 12px vertical cell padding, 16px horizontal. Whitespace serves reading; it does not serve scanning forty option contracts.
 

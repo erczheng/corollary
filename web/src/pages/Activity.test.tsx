@@ -35,6 +35,48 @@ function positionRows(): HTMLElement[] {
   return within(section('Open Positions')).getAllByRole('row').slice(1)
 }
 
+/** Activity is the account's full ledger, so cash movements belong here —
+ * the Dashboard's Recent Executions is orders only (PRD.md §8.2). These
+ * assertions used to live in the Dashboard suite; the rendering they cover
+ * is unchanged, only where it is reachable. */
+describe('Cash movements in the ledger', () => {
+  it('shows the money moved on a deposit and a withdrawal, signed', () => {
+    gotoActivity()
+    const feed = within(within(section('Recent Activity')).getByRole('table'))
+
+    expect(feed.getByText('+$5,000.00')).toBeInTheDocument()
+    expect(feed.getByText('−$1,250.00')).toBeInTheDocument()
+  })
+
+  it('does not color a cash movement as if it were a gain or a loss', () => {
+    gotoActivity()
+    const deposit = within(within(section('Recent Activity')).getByRole('table')).getByText(
+      '+$5,000.00',
+    )
+
+    // A deposit is money moved, not money made — DESIGN.md keeps
+    // bullish/bearish for P&L.
+    expect(deposit.className).not.toMatch(/text-bullish|text-bearish/)
+  })
+
+  it('does not stretch its rows — that is the Dashboard panel, not this page', () => {
+    gotoActivity()
+    const table = within(section('Recent Activity')).getByRole('table')
+
+    expect(table.className).not.toMatch(/h-full/)
+  })
+
+  it('leaves the price column empty on a cash movement rather than showing zero', () => {
+    gotoActivity()
+    const depositRow = within(within(section('Recent Activity')).getByRole('table'))
+      .getByText('+$5,000.00')
+      .closest('tr')!
+
+    // A zero would read as a free fill; there was no fill at all.
+    expect(within(depositRow).getAllByText('—').length).toBeGreaterThan(0)
+  })
+})
+
 describe('Header stats', () => {
   it('averages wins and losses separately, in dollars and percent', () => {
     gotoActivity()

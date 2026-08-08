@@ -17,6 +17,7 @@ import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '..
 import { useUIStore } from '../lib/store'
 import {
   ACCOUNT_SNAPSHOTS,
+  isOrderAction,
   RECOMMENDATIONS,
   recommendationTitle,
   STRATEGIES,
@@ -82,8 +83,13 @@ export function Dashboard() {
   const live = activeStrategy.live
   const winRateDelta = live ? live.winRate - activeStrategy.backtest.winRate : undefined
 
+  // Orders only. A deposit isn't an execution — it has no contract, no
+  // quantity and no fill — and mixing cash movements into a trading feed
+  // makes "what did the engine do today" harder to read at a glance. The
+  // full ledger, deposits included, is on Activity.
+  const orders = activity.filter((a) => isOrderAction(a.action))
   const filteredActivity =
-    activityFilter === 'all' ? activity : activity.filter((a) => a.status === activityFilter)
+    activityFilter === 'all' ? orders : orders.filter((a) => a.status === activityFilter)
   const recentActivity = filteredActivity.slice(0, RECENT_EXECUTIONS_LIMIT)
 
   // Halt is a statement about the engine: it stops the engine opening new
@@ -95,8 +101,8 @@ export function Dashboard() {
   const engineHalted = isAuto && isHalted
 
   return (
-    <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
         {/* The trading-state pill — primary, per DESIGN.md's Colors section
             ("the trading-state pill"). Read-only: it reports whether the
@@ -133,7 +139,7 @@ export function Dashboard() {
         Monitor your total balance, 24h performance, and today's recommended trades.
       </p>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3">
+      <div className="mt-9 flex flex-wrap items-center gap-3">
         <AccountModeToggle />
         <ExecutionModeToggle />
         <div className="relative shrink-0">
@@ -197,7 +203,19 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {/* One number governs the space between blocks: 36px (DESIGN.md
+          `gutter`), down and across alike, so the whitespace framing any card
+          measures the same in both directions.
+
+          The page's side padding is deliberately *not* that number — it is
+          48px, so the page reads as inset from the window by more than its
+          cards are separated from each other. Equal would flatten the two
+          into one undifferentiated field.
+
+          Both values are a departure from DESIGN.md's original "use lg (48px)
+          to separate major sections"; the doc's Layout section has been
+          rewritten to match rather than left to contradict the app. */}
+      <div className="mt-9 grid grid-cols-1 gap-9 sm:grid-cols-3">
         <StatCard
           label="Total balance"
           value={formatUsd(balance)}
@@ -223,15 +241,26 @@ export function Dashboard() {
         />
       </div>
 
-      <section className="mt-12 rounded-lg border border-outline-warm bg-surface-container-lowest p-6">
-        <h2 className="text-title-lg text-on-surface">Performance</h2>
-        <div className="mt-3">
+      {/* Same shell as Recommended Trades and Recent Executions below, and
+          as every section on Activity: a bordered header row, then a body.
+          It used to be a plain p-6 box, which put this h2 8px right of every
+          other heading on the page — a shelf you could see. */}
+      <section className="mt-9 rounded-lg border border-outline-warm bg-surface-container-lowest">
+        <div className="flex items-center justify-between border-b border-outline-warm px-4 py-3">
+          <h2 className="text-title-lg text-on-surface">Performance</h2>
+        </div>
+        <div className="p-4">
           <PerformanceChart history={account.portfolioHistory} />
         </div>
       </section>
 
-      <div className="mt-12 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <section className="rounded-lg border border-outline-warm bg-surface-container-lowest">
+      {/* Both panels share the row's height (grid's default stretch) and
+          both bodies flex to fill it, so they end level with each other and
+          neither leaves a band of empty card below its last row. Stretch
+          alone caused that gap; stretch plus a filling body is what removes
+          it. */}
+      <div className="mt-9 grid grid-cols-1 gap-9 lg:grid-cols-2">
+        <section className="flex flex-col rounded-lg border border-outline-warm bg-surface-container-lowest">
           <div className="flex items-center justify-between border-b border-outline-warm px-4 py-3">
             <h2 className="text-title-lg text-on-surface">Recommended Trades</h2>
             <div className="flex items-center gap-2">
@@ -250,7 +279,11 @@ export function Dashboard() {
           {visibleRecommendations.length === 0 ? (
             <p className="px-4 py-6 text-body-md text-on-surface-variant">{recommendationsEmptyMessage()}</p>
           ) : (
-            <div className="max-h-80 overflow-y-auto no-scrollbar">
+            /* flex-1 to fill the shared row height, min-h-0 so the scroll
+               actually engages inside a flex column, and a ceiling so a long
+               candidate list can't drive the whole row taller than the
+               screen. */
+            <div className="min-h-0 max-h-[32rem] flex-1 overflow-y-auto no-scrollbar">
               {visibleRecommendations.map((r) => (
                 <div
                   key={r.id}
@@ -336,7 +369,7 @@ export function Dashboard() {
           )}
         </section>
 
-        <section className="rounded-lg border border-outline-warm bg-surface-container-lowest">
+        <section className="flex flex-col rounded-lg border border-outline-warm bg-surface-container-lowest">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
             <h2 className="text-title-lg text-on-surface">Recent Executions</h2>
             <div className="flex items-center gap-2">
@@ -365,10 +398,17 @@ export function Dashboard() {
             </div>
           </div>
           {recentActivity.length === 0 ? (
-            <p className="px-4 py-6 text-body-md text-on-surface-variant">No activity matches this filter.</p>
+            <p className="px-4 py-6 text-body-md text-on-surface-variant">
+              No {activityFilter === 'all' ? '' : `${activityFilter} `}orders in this account yet.
+            </p>
           ) : (
-            <div className="max-h-80 overflow-y-auto no-scrollbar">
-              <ExecutionsTable items={recentActivity} />
+            /* No scroll region: the list is capped at RECENT_EXECUTIONS_LIMIT
+               rows and simply ends. A short scrollbar inside a panel hides
+               how much it holds, and "View all" is the way to the rest.
+               `fill` lets the rows take up any slack so this panel ends level
+               with Recommended Trades beside it. */
+            <div className="min-h-0 flex-1">
+              <ExecutionsTable items={recentActivity} fill />
             </div>
           )}
         </section>
