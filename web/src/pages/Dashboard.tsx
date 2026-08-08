@@ -10,17 +10,13 @@ import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
 import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
 import {
+  ACCOUNT_SNAPSHOTS,
   ACTIVITY_ACTION_LABEL,
   ACTIVITY_STATUS_CLASS,
   ACTIVITY_STATUS_LABEL,
-  DASHBOARD_TRENDS,
-  OPEN_POSITIONS,
-  PORTFOLIO_HISTORY,
-  RECENT_ACTIVITY,
   RECOMMENDATIONS,
   recommendationTitle,
   STRATEGIES,
-  VOLUME_24H,
   type ActivityStatus,
   type Recommendation,
 } from '../lib/mockData'
@@ -56,6 +52,9 @@ export function Dashboard() {
   const resume = useUIStore((s) => s.resume)
   const flatten = useUIStore((s) => s.flatten)
   const accountMode = useUIStore((s) => s.accountMode)
+  const executionMode = useUIStore((s) => s.executionMode)
+  const openPositions = useUIStore((s) => s.openPositions)
+  const activity = useUIStore((s) => s.activity)
   const [confirmingFlatten, setConfirmingFlatten] = useState(false)
   const [activityFilter, setActivityFilter] = useState<(typeof ACTIVITY_FILTERS)[number]>('all')
   const [dismissedIds, setDismissedIds] = useState<string[]>([])
@@ -64,11 +63,29 @@ export function Dashboard() {
   const visibleRecommendations = RECOMMENDATIONS.filter((r) => !dismissedIds.includes(r.id))
 
   const activeStrategy = STRATEGIES.find((s) => s.id === activeStrategyId) ?? STRATEGIES[0]
-  const balance = PORTFOLIO_HISTORY[PORTFOLIO_HISTORY.length - 1].value
-  const winRate = activeStrategy.live?.winRate ?? activeStrategy.backtest.winRate
+
+  // Paper and Cash are different accounts holding different money, so the
+  // balance, the volume, and the chart all follow the toggle.
+  const account = ACCOUNT_SNAPSHOTS[accountMode]
+  const balance = account.portfolioHistory[account.portfolioHistory.length - 1].value
+
+  // PRD.md §8.1 specifies this stat as the *live* win rate. A strategy that
+  // has never traded live has no live win rate, and showing its backtested
+  // number in the same slot would present a simulation as a result — the
+  // backtest goes in the note underneath instead, where it's labeled.
+  const live = activeStrategy.live
+  const winRateDelta = live ? live.winRate - activeStrategy.backtest.winRate : undefined
 
   const filteredActivity =
-    activityFilter === 'all' ? RECENT_ACTIVITY : RECENT_ACTIVITY.filter((a) => a.status === activityFilter)
+    activityFilter === 'all' ? activity : activity.filter((a) => a.status === activityFilter)
+
+  // Halt is a statement about the engine: it stops the engine opening new
+  // positions. In Manual the engine opens nothing to begin with, so the
+  // halted state has nothing to say and isn't shown or offered. It stays in
+  // the store either way — flatten still sets it, and switching to Auto
+  // surfaces it rather than quietly resuming (CLAUDE.md rule 9).
+  const isAuto = executionMode === 'auto'
+  const engineHalted = isAuto && isHalted
 
   return (
     <div className="mx-auto max-w-[1140px] px-4 py-12 lg:px-8">
@@ -76,20 +93,32 @@ export function Dashboard() {
         <h1 className="text-display-lg text-on-surface">Portfolio Overview</h1>
         {/* The trading-state pill — primary, per DESIGN.md's Colors section
             ("the trading-state pill"). Read-only: it reports whether the
-            engine is trading or halted and which account is live. The
-            controls that change either of those are in the row below.
-            The status dot uses the *-container semantics rather than
-            bare `bullish`/`caution` because those sit at nearly the same
-            lightness as `primary` in both themes, which made the dot
+            engine is placing orders on its own and which account is live.
+            The controls that change either of those are in the row below.
+
+            "Trading On" is reserved for Auto, because that is the only
+            state in which the engine acts unattended. In Manual it says
+            Manual — claiming the terminal is "trading" when nothing moves
+            without a click is the sort of overstatement you'd only notice
+            the day it mattered.
+
+            The status dot uses the *-container semantics rather than bare
+            `bullish`/`caution`/`neutral` because those sit at nearly the
+            same lightness as `primary` in both themes, which made the dot
             almost invisible on the pill's fill. */}
         <span className="flex items-center gap-2 whitespace-nowrap rounded-full bg-primary px-4 py-2 text-label-md text-on-primary">
           <span
             className={`h-2 w-2 shrink-0 rounded-full ${
-              isHalted ? 'bg-caution-container' : 'bg-bullish-container'
+              !isAuto
+                ? 'bg-neutral-container'
+                : isHalted
+                  ? 'bg-caution-container'
+                  : 'bg-bullish-container'
             }`}
             aria-hidden="true"
           />
-          {isHalted ? 'Halted' : 'Trading On'} ({accountMode === 'cash' ? 'Cash' : 'Paper'})
+          {!isAuto ? 'Manual' : isHalted ? 'Halted' : 'Trading On'} (
+          {accountMode === 'cash' ? 'Cash' : 'Paper'})
         </span>
       </div>
 
@@ -104,6 +133,7 @@ export function Dashboard() {
           <select
             value={activeStrategyId}
             onChange={(e) => setActiveStrategyId(e.target.value)}
+            aria-label="Active strategy"
             className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-9 text-label-md text-on-surface focus:border-primary"
           >
             {STRATEGIES.map((s) => (
@@ -119,27 +149,41 @@ export function Dashboard() {
             destructive control on this page — isn't adjacent to the
             toggles you'd click casually. */}
         <div className="flex items-center gap-3 sm:ml-auto">
-          {isHalted ? (
-            <button
-              type="button"
-              onClick={resume}
-              className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
-            >
-              Resume trading
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={halt}
-              className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
-            >
-              Halt
-            </button>
-          )}
+          {/* Halt only appears in Auto. There is nothing for it to stop in
+              Manual, and a control that does nothing visible is worse than
+              an absent one. Flatten stays in both modes — open positions
+              are open regardless of how they were opened. */}
+          {isAuto &&
+            (isHalted ? (
+              <button
+                type="button"
+                onClick={resume}
+                className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
+              >
+                Resume trading
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={halt}
+                className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
+              >
+                Halt
+              </button>
+            ))}
+          {/* Distinct from Halt in what it does, so also distinct in when
+              it's available: with nothing open there is nothing to close,
+              and Halt remains the control that stops new entries. */}
           <button
             type="button"
             onClick={() => setConfirmingFlatten(true)}
-            className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
+            disabled={openPositions.length === 0}
+            title={
+              openPositions.length === 0
+                ? 'No open positions to close'
+                : `Close all ${openPositions.length} open positions, then halt`
+            }
+            className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50"
           >
             Flatten
           </button>
@@ -151,29 +195,31 @@ export function Dashboard() {
           label="Total balance"
           value={formatUsd(balance)}
           icon={<BankIcon />}
-          changePct={DASHBOARD_TRENDS.balance.changePct}
-          comparedTo={DASHBOARD_TRENDS.balance.comparedTo}
+          changePct={account.balanceTrend.changePct}
+          comparedTo={account.balanceTrend.comparedTo}
         />
         <StatCard
           label="24h volume"
-          value={formatUsd(VOLUME_24H)}
+          value={formatUsd(account.volume24h)}
           icon={<TrendingUpIcon />}
-          changePct={DASHBOARD_TRENDS.volume.changePct}
-          comparedTo={DASHBOARD_TRENDS.volume.comparedTo}
+          changePct={account.volumeTrend.changePct}
+          comparedTo={account.volumeTrend.comparedTo}
         />
         <StatCard
-          label="Strategy win rate"
-          value={`${winRate}%`}
+          label="Live win rate"
+          value={live ? `${live.winRate}%` : '—'}
           icon={<TargetIcon />}
-          changePct={DASHBOARD_TRENDS.winRate.changePct}
-          comparedTo={DASHBOARD_TRENDS.winRate.comparedTo}
+          changePct={winRateDelta}
+          changeUnit="pts"
+          comparedTo={live ? `vs backtest, ${live.trades} live trades` : undefined}
+          note={`Not traded live yet — backtested ${activeStrategy.backtest.winRate}% over ${activeStrategy.backtest.trades} trades`}
         />
       </div>
 
       <section className="mt-12 rounded-lg border border-outline-warm bg-surface-container-lowest p-6">
         <h2 className="text-title-lg text-on-surface">Performance</h2>
         <div className="mt-3">
-          <PerformanceChart />
+          <PerformanceChart history={account.portfolioHistory} />
         </div>
       </section>
 
@@ -217,7 +263,6 @@ export function Dashboard() {
                       <span className="shrink-0 text-caption text-on-surface-variant">
                         · Exp {formatExpiry(r.expiry)}
                       </span>
-                      {r.unvalidated && <Chip variant="accent">Unvalidated</Chip>}
                     </div>
                   </div>
 
@@ -231,6 +276,19 @@ export function Dashboard() {
                       >
                         {r.confidence}%
                       </span>
+                    ) : r.unvalidated ? (
+                      /* An unvalidated origination has no base rate by
+                         construction (PRD.md §6.2 — no setup match), so the
+                         tag goes in the slot the number would have taken
+                         rather than competing with the reason text. It says
+                         the same thing the em dash would, with the reason
+                         why. */
+                      <Chip
+                        variant="accent"
+                        title="Unvalidated — no setup match, so no backtested base rate. Capped at ⅓ normal size."
+                      >
+                        Untested
+                      </Chip>
                     ) : (
                       /* PRD.md §6.3: where no base rate exists, confidence
                          shows an em dash rather than a number. */
@@ -245,9 +303,9 @@ export function Dashboard() {
                     <button
                       type="button"
                       onClick={() => setTradeTarget(r)}
-                      disabled={isHalted}
+                      disabled={engineHalted}
                       title={
-                        isHalted
+                        engineHalted
                           ? 'Trading is halted — resume to open new positions'
                           : `Trade ${recommendationTitle(r)}`
                       }
@@ -278,6 +336,7 @@ export function Dashboard() {
               <select
                 value={activityFilter}
                 onChange={(e) => setActivityFilter(e.target.value as (typeof ACTIVITY_FILTERS)[number])}
+                aria-label="Filter executions by status"
                 className="rounded border border-outline bg-surface px-2 py-1.5 text-label-md text-on-surface focus:border-primary"
               >
                 {ACTIVITY_FILTERS.map((f) => (
@@ -298,6 +357,7 @@ export function Dashboard() {
                       price: a.price ?? '',
                       quantity: a.quantity ?? '',
                       pnl: a.pnl ?? '',
+                      amount: a.amount ?? '',
                       status: a.status,
                     })),
                   )
@@ -334,7 +394,7 @@ export function Dashboard() {
                     </th>
                     <th className="px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
                     <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
-                      P&amp;L / Status
+                      Status
                     </th>
                   </tr>
                 </thead>
@@ -355,13 +415,26 @@ export function Dashboard() {
                       <td className="px-3 py-2 text-right text-data-md text-on-surface">
                         {a.quantity ?? '—'}
                       </td>
-                      {/* P&L when the trade produced one, otherwise the
-                          status — an opening fill has no realized P&L yet,
-                          and a rejection never will. */}
+                      {/* The most specific thing known about the row: its
+                          P&L if the trade produced one, the cash moved if
+                          it was a deposit or withdrawal, otherwise the
+                          status word. An opening fill has no realized P&L
+                          yet, and a rejection never will. */}
                       <td className="whitespace-nowrap px-3 py-2 text-right">
                         {a.pnl !== null ? (
                           <span className={`text-data-md ${signClass(a.pnl)}`}>
                             {formatUsd(a.pnl, { signed: true })}
+                          </span>
+                        ) : a.amount !== null ? (
+                          /* Deliberately not signClass: a deposit is money
+                             you moved, not money the account made, and
+                             rendering it bullish green would read as a
+                             gain. The sign still carries the direction. */
+                          <span
+                            className="text-data-md text-on-surface"
+                            title={`${ACTIVITY_ACTION_LABEL[a.action]} — ${ACTIVITY_STATUS_LABEL[a.status]}`}
+                          >
+                            {formatUsd(a.amount, { signed: true })}
                           </span>
                         ) : (
                           <span
@@ -386,7 +459,7 @@ export function Dashboard() {
         title="Flatten all positions?"
         consequence={
           <>
-            Closes all {OPEN_POSITIONS.length} open positions at market, then halts new entries. Existing managed
+            Closes all {openPositions.length} open positions at market, then halts new entries. Existing managed
             exits on any position that doesn't fill immediately are canceled.
           </>
         }

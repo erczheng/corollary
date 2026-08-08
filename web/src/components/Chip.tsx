@@ -11,9 +11,22 @@ const VARIANT_CLASSES: Record<ChipVariant, string> = {
   accent: 'bg-accent-container text-on-accent-container',
 }
 
-export function Chip({ variant, children }: { variant: ChipVariant; children: ReactNode }) {
+export function Chip({
+  variant,
+  title,
+  children,
+}: {
+  variant: ChipVariant
+  /** Hover text. A chip is often an abbreviation of something longer — the
+   * full meaning has to be reachable without leaving the row. */
+  title?: string
+  children: ReactNode
+}) {
   return (
-    <span className={`inline-flex items-center rounded-full px-3 py-1 text-label-md ${VARIANT_CLASSES[variant]}`}>
+    <span
+      title={title}
+      className={`inline-flex items-center rounded-full px-3 py-1 text-label-md ${VARIANT_CLASSES[variant]}`}
+    >
       {children}
     </span>
   )
