@@ -210,6 +210,15 @@ spacing:
   gutter: 24px
   margin-mobile: 16px
   margin-desktop: 64px
+motion:
+  duration:
+    fast: 100ms
+    base: 200ms
+    moderate: 300ms
+    slow: 500ms
+  easing:
+    standard: cubic-bezier(0.2, 0, 0, 1)
+    accelerate: cubic-bezier(0.3, 0, 1, 1)
 ---
 
 > **Token authority.** The frontmatter above is the single source of truth. Every color in the prose below is quoted from it. If the two ever disagree again, the frontmatter wins.
@@ -336,6 +345,28 @@ Rounded, to humanize the geometric type.
 - **1rem (16px)** — cards and primary containers.
 - **1.5rem (24px)** — hero elements and modals.
 - **`full` (9999px)** — chips, tags, sentiment pills, and the trading-state pill. Pills read as status; rectangles read as controls, and the distinction should be legible at a glance in a dense table.
+
+## Motion
+
+Motion signals a state change, not decoration. This interface gets watched for hours at a stretch — motion that's confident and quick reads as responsive; motion that lingers or bounces reads as slow, which is the last thing a trading terminal should feel like.
+
+**Duration.**
+
+| Token | Value | Used for |
+|---|---|---|
+| `fast` | 100ms | Button press, checkbox/toggle flip, immediate feedback |
+| `base` | 200ms | Hover, focus ring, color/border transitions |
+| `moderate` | 300ms | Menus, dropdowns, the command palette, view-more expand/collapse |
+| `slow` | 500ms | Modal/dialog enter, larger surface reveals, ambient background motion |
+
+Pick the shortest duration that still reads as intentional. When in doubt, `base`.
+
+**Easing.** Two curves cover the system — inventing a third per component is how timing stops feeling like one system, the same failure mode as an uncoordinated color or spacing choice.
+
+- `standard` — `cubic-bezier(0.2, 0, 0, 1)`. Decelerating. Default for anything appearing, expanding, or settling into place: menus opening, a palette sliding in, a "view more" panel expanding, a value updating.
+- `accelerate` — `cubic-bezier(0.3, 0, 1, 1)`. Accelerating. For anything leaving or dismissing: a menu closing, a dialog dismissing, a chip being removed. Content that's going away should get out of the way quickly rather than linger at the same pace it arrived.
+
+**Reduced motion.** `prefers-reduced-motion: reduce` collapses every transition and animation to near-zero globally, at the token layer — not a per-component opt-out someone has to remember to add. This is the same requirement named in the Accessibility floor below; it's enforced once, here, rather than left to each component.
 
 ## Components
 

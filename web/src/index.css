@@ -183,6 +183,21 @@
   --spacing-margin-mobile: 16px;
   --spacing-margin-desktop: 64px;
 
+  /* Motion — DESIGN.md `motion` scale. Two easing curves cover the whole
+     system on purpose: `standard` for anything appearing/expanding,
+     `accelerate` for anything leaving/dismissing. Pick the shortest
+     duration that still reads as intentional — see DESIGN.md "Motion". */
+  /* the `duration-*` utility resolves named values against
+     --transition-duration-*, not --duration-* — unlike `ease-*`, which
+     really does read from --ease-*. Confirmed against the compiled
+     output; don't rename this back without re-checking. */
+  --transition-duration-fast: 100ms;
+  --transition-duration-base: 200ms;
+  --transition-duration-moderate: 300ms;
+  --transition-duration-slow: 500ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
+
   /* Elevation — the one permitted shadow, tinted with primary, light
      theme only. Dark theme uses no shadows; see DESIGN.md "Elevation". */
   --shadow-hover: 0px 4px 20px rgba(53, 82, 85, 0.08);
@@ -355,7 +370,8 @@
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    transition: background-color 0.15s ease, color 0.15s ease;
+    transition: background-color var(--transition-duration-base) var(--ease-standard),
+      color var(--transition-duration-base) var(--ease-standard);
   }
 
   /* Every interactive element gets a visible focus ring: 2px primary,
@@ -363,5 +379,20 @@
   :focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
+  }
+
+  /* Accessibility floor: prefers-reduced-motion collapses every
+     transition and animation to near-zero, globally — enforced once
+     here rather than left to each component to remember. See
+     DESIGN.md "Motion". */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

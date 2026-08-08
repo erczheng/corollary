@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 /* ------------------------------------------------------------------------ *
  * /design — renders every token and component from DESIGN.md so the token
@@ -13,6 +13,51 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <h2 className="text-title-lg text-on-surface">{title}</h2>
       <div className="mt-3">{children}</div>
     </section>
+  )
+}
+
+/** Exercises the motion scale on a real interaction: expand uses
+ * `duration-moderate` + `ease-standard`, collapse uses the same duration
+ * but `ease-accelerate` — content leaving should get out of the way
+ * quickly rather than linger at the pace it arrived. See DESIGN.md
+ * "Motion". */
+function ViewMoreDisclosure() {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="rounded-lg border border-outline-warm p-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between text-label-md text-primary"
+      >
+        <span>View more</span>
+        <span
+          className={
+            'inline-block transition-transform duration-moderate ' +
+            (open ? 'ease-standard rotate-180' : 'ease-accelerate rotate-0')
+          }
+          aria-hidden="true"
+        >
+          ↓
+        </span>
+      </button>
+      <div
+        className={
+          'grid transition-[grid-template-rows] duration-moderate ' +
+          (open ? 'ease-standard grid-rows-[1fr]' : 'ease-accelerate grid-rows-[0fr]')
+        }
+      >
+        <div className="overflow-hidden">
+          <p className="mt-3 text-body-md text-on-surface-variant">
+            This panel expands and collapses on the same duration, but a
+            different curve each direction — that asymmetry is the whole
+            point of having two easings instead of one.
+          </p>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -264,18 +309,41 @@ export function Design() {
 
       <Section title="Buttons">
         <div className="flex flex-wrap items-center gap-3">
-          <button type="button" className="rounded bg-primary px-4 py-2 text-label-md text-on-primary">
+          <button
+            type="button"
+            className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container"
+          >
             Primary action
           </button>
-          <button type="button" className="rounded border border-outline px-4 py-2 text-label-md text-on-surface">
+          <button
+            type="button"
+            className="rounded border border-outline px-4 py-2 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
+          >
             Secondary action
           </button>
-          <button type="button" className="rounded border border-error px-4 py-2 text-label-md text-error">
+          <button
+            type="button"
+            className="rounded border border-error px-4 py-2 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
+          >
             Flatten
           </button>
           <button type="button" disabled className="rounded border border-outline-warm px-4 py-2 text-label-md text-on-surface-variant opacity-60">
             Disabled
           </button>
+        </div>
+      </Section>
+
+      <Section title="Motion">
+        <p className="text-caption text-on-surface-variant">
+          Hover the buttons above to feel `duration-base` + `ease-standard`.
+          The disclosure below uses `duration-moderate` to expand
+          (`ease-standard`) and collapse (`ease-accelerate`) — see
+          DESIGN.md &quot;Motion&quot; for the full scale, including `fast`
+          (100ms) and `slow` (500ms), which read as sub-perceptible in a
+          static demo like this one.
+        </p>
+        <div className="mt-3 max-w-sm">
+          <ViewMoreDisclosure />
         </div>
       </Section>
 
