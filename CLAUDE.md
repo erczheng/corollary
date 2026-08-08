@@ -14,7 +14,7 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 
 | Layer | Choice |
 |---|---|
-| Backend | Python 3.12, FastAPI, uvicorn |
+| Backend | Python ≥3.12, FastAPI, uvicorn — `.python-version` pins **3.14**, because uv's managed 3.12 build fails to launch on this machine (missing runtime DLL, not a policy block) |
 | Package manager | `uv` (not pip, not poetry) |
 | Frontend | React 18 + Vite + TypeScript |
 | Styling | Tailwind v4, CSS-first config via `@theme`, no `tailwind.config.js` |
@@ -34,8 +34,16 @@ uv run pytest -m risk            # risk manager tests only — run before any en
 uv run alembic upgrade head      # migrations
 uv run python -m corollary.engine    # start engine
 uv run uvicorn corollary.api:app --reload   # start API
-npm run dev                      # frontend
+uv run mypy corollary            # type check, must be clean
+```
+
+Frontend commands run from `web/`:
+
+```bash
+npm run dev                      # 127.0.0.1:5173
 npm run typecheck                # tsc, must pass before commit
+npm run build                    # also the only way to inspect generated CSS — see below
+npm run test                     # Vitest
 ```
 
 ---
@@ -218,6 +226,55 @@ Borders have three tokens and they are not interchangeable: `outline-warm` for c
 - Loading and empty states are designed, not afterthoughts. An empty Recommended Trades list at 3pm means something different than at 8am; say which.
 - `accent` is capped at two roles per screen, ranked in `DESIGN.md`. It only works while it stays rare.
 
+### Tailwind v4 traps — all four of these shipped silent bugs before being caught
+
+Adding a token to `@theme` is not self-verifying. **After adding or renaming
+one, run `npm run build` and grep `dist/assets/*.css` for the utility you
+expect.** Every item below produced working-looking code that was wrong:
+
+- **Don't add named `--spacing-{xs,sm,md,lg,xl}` keys.** `max-w-*`, `w-*`, and
+  friends resolve names from the same `--spacing-*` namespace, so
+  `--spacing-md: 24px` silently redefines `max-w-md` from 28rem to 24px
+  app-wide. It broke a modal into a 24px sliver. DESIGN.md's 4/8/12/24/48/80px
+  scale is already Tailwind's numeric scale (`p-1`/`2`/`3`/`6`/`12`/`20`) —
+  use that. Only genuinely new names (`gutter`, `margin-desktop`) get entries.
+- **`duration-*` reads `--transition-duration-*`, not `--duration-*`** —
+  inconsistent with `ease-*`, which really is `--ease-*`. Getting this wrong
+  emits no utility classes at all, no error.
+- **Unreferenced `@theme` variables are tree-shaken out of the build.** A token
+  nothing uses yet vanishes, so "I added it" and "it exists" are different
+  claims. Exercise new tokens on `/design`.
+- **A custom `className` on an icon component replaces its default sizing**
+  rather than merging, so the SVG renders at browser-default size. Pass `h-*
+  w-*` explicitly when overriding.
+
+### Where frontend logic lives — check here before writing a new helper
+
+- `web/src/lib/format.ts` — all money, percent, sign, and timestamp
+  formatting, plus the confidence-tier mapping. Never inline this.
+  **Date-only values (option expiries) format in UTC, not ET**: a bare
+  `YYYY-MM-DD` parses as UTC midnight, and ET is behind UTC, so ET rendering
+  shows the *previous day* — a Nov 21 expiry displays as Nov 20.
+- `web/src/lib/mockData.ts` — Phase 1 fixtures. Deterministic (seeded PRNG,
+  never `Math.random()`) so screenshots and tests don't flake, and typed to
+  match the eventual API shape so Phase 2 is a data-source swap, not a
+  component rewrite. Cover every state a component can render, including the
+  ugly ones — a tier or empty state absent from the fixtures is one nobody
+  can see.
+- `web/src/pages/Design.tsx` — the `/design` route, which proves the token
+  system. New tokens get exercised here.
+
+**Semantic colors are not interchangeable with each other, either.** Beyond
+the `bearish` vs `error` split: confidence uses `primary`/`caution`/`neutral`,
+*never* `bullish`/`bearish`. A high-confidence bearish trade is ordinary here,
+and a green `71%` beside a put debit spread reads as direction rather than
+conviction. And a rejected order is `error` (a rule outcome), while a losing
+position is `bearish`.
+
+**`neutral` (#717879) is the same value as `outline` — 4.27:1, below the text
+floor.** It is not a text color. Use the `*-container` / `on-*-container` pair,
+or `on-surface-variant`.
+
 ---
 
 ## Testing expectations
@@ -251,7 +308,7 @@ Run `uv run pytest -m risk` before any change to the engine, no exceptions. The 
 
 ## Working style
 
-Address me as Eric at the start of each response.
+Before delivering any response, you MUST address me as Eric at the start of each response.
 
 ---
 
