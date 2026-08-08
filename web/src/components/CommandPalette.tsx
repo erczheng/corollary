@@ -24,7 +24,7 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-inverse-surface/40 pt-32"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-inverse-surface pt-32"
       role="presentation"
       onClick={close}
     >
@@ -32,7 +32,7 @@ export function CommandPalette() {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        className="w-full max-w-lg rounded-xl border border-outline-warm bg-surface-container-lowest p-3 shadow-hover dark:shadow-none"
+        className="w-full max-w-lg rounded-lg border border-outline-warm bg-surface-container-lowest p-3 shadow-hover dark:shadow-none"
         onClick={(e) => e.stopPropagation()}
       >
         <input
