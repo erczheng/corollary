@@ -326,6 +326,35 @@ describe('the price tick', () => {
     }
   })
 
+  /** Volatility is stated per second and scaled by the tick, so update
+   * frequency and price movement are independent knobs. Stated per tick
+   * they are welded together, and raising the rate to make the page feel
+   * more responsive would also make it that much more volatile. */
+  it('scales movement to the time a tick covers, not to how often it fires', () => {
+    const before = useUIStore.getState().openPositions.paper.map((p) => p.last)
+    useUIStore.getState().tick(50)
+    const after = useUIStore.getState().openPositions.paper.map((p) => p.last)
+
+    after.forEach((price, i) => {
+      // 50ms at 1.8%/s is at most 0.09%, plus a cent of rounding.
+      const bound = before[i] * 0.0009 + 0.005
+      expect(Math.abs(price - before[i])).toBeLessThanOrEqual(bound + 1e-9)
+    })
+  })
+
+  it('moves further over a longer tick', () => {
+    const before = useUIStore.getState().openPositions.paper.map((p) => p.last)
+    useUIStore.getState().tick(4_000)
+    const after = useUIStore.getState().openPositions.paper.map((p) => p.last)
+
+    // 4s at 1.8%/s permits up to 7.2% — far outside what 50ms allows, so
+    // this fails if the elapsed argument is ever ignored.
+    after.forEach((price, i) => {
+      expect(Math.abs(price - before[i])).toBeLessThanOrEqual(before[i] * 0.072 + 0.005 + 1e-9)
+    })
+    expect(after.some((price, i) => Math.abs(price - before[i]) > before[i] * 0.0009)).toBe(true)
+  })
+
   it('records when the last price arrived', () => {
     expect(useUIStore.getState().lastTickAt).toBeNull()
     useUIStore.getState().tick()
