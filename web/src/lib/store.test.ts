@@ -212,6 +212,30 @@ describe('submitPositionOrder — closing', () => {
   })
 })
 
+/** `closeQuantity` leaves `pnlPct` untouched while `addQuantity`
+ * recomputes it, which looks like an inconsistency and is not: a partial
+ * close divides `pnl` and `costBasis` by the same fraction, so the ratio
+ * is unchanged. This pins that, because the next person to read those two
+ * functions will have the same doubt and should get an answer from the
+ * suite rather than from arithmetic on a napkin. */
+describe('pnlPct stays consistent with pnl over costBasis', () => {
+  const sequences: ('close' | 'add')[][] = [['close'], ['add'], ['close', 'add'], ['add', 'close']]
+
+  for (const seq of sequences) {
+    it(`holds after ${seq.join(' then ')}`, () => {
+      const target = PAPER.positions.find((p) => p.quantity > 1)!
+      for (const mode of seq) {
+        useUIStore.getState().submitPositionOrder(target.id, { ...closeDraft(1), mode })
+      }
+
+      const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
+      const derived = (after.pnl / after.costBasis) * 100
+      // Within rounding: every field is stored to the cent.
+      expect(Math.abs(after.pnlPct - derived)).toBeLessThan(0.01)
+    })
+  }
+})
+
 describe('submitPositionOrder — adding', () => {
   it('adds to a long by buying to open and to a short by selling to open', () => {
     const long = PAPER.positions.find((p) => p.direction === 'long')!
