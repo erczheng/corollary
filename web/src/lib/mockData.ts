@@ -256,7 +256,10 @@ const REJECTION_REASONS = [
  * ACTIVITY_STATUS_CLASS has always had a `caution` branch for it that no
  * fixture ever rendered. */
 const PAPER_ACTIVITY_HEAD: ActivityItem[] = [
-  { id: 'act-1', time: '2026-08-07T15:58:00Z', contract: 'MSFT $420 Call Sep 19', action: 'BTO', price: 3.75, quantity: 2, pnl: null, pnlPct: null, amount: null, status: 'pending' },
+  // Pending, and the counterpart of WORKING_ORDERS' wo-1 below: a limit
+  // sell that hasn't filled. The two are linked by id so cancelling the
+  // order flips this row rather than appending a second one.
+  { id: 'act-1', time: '2026-08-07T15:58:00Z', contract: 'TSLA $240 Put Nov 15', action: 'STC', price: 3.4, quantity: 1, pnl: null, pnlPct: null, amount: null, status: 'pending' },
   { id: 'act-2', time: '2026-08-07T14:32:00Z', contract: 'AAPL $230 Call Aug 15', action: 'STC', price: 4.85, quantity: 2, pnl: 62.0, pnlPct: 17.71, amount: null, status: 'filled' },
   { id: 'act-3', time: '2026-08-07T13:05:00Z', contract: 'TSLA $240 Put Nov 15', action: 'BTO', price: 4.1, quantity: 1, pnl: null, pnlPct: null, amount: null, status: 'filled' },
   { id: 'act-4', time: '2026-08-07T10:48:00Z', contract: 'SPY $430/$425 Put Credit Spread Oct 17', action: 'STO', price: 0.7, quantity: 3, pnl: null, pnlPct: null, amount: null, status: 'filled' },
@@ -465,6 +468,11 @@ export const CONTRACT_MULTIPLIER = 100
 
 export type OrderType = 'market' | 'limit' | 'stop' | 'stop_limit'
 
+/** The four order sides, in the jargon. Defined here rather than in
+ * orders.ts because `WorkingOrder` below needs it and orders.ts already
+ * imports this file — putting it there would make the two circular. */
+export type OrderSide = 'BTO' | 'STC' | 'STO' | 'BTC'
+
 export const ORDER_TYPE_LABEL: Record<OrderType, string> = {
   market: 'Market',
   limit: 'Limit',
@@ -550,6 +558,11 @@ export interface Position {
   legs: PositionLeg[]
   /** Which strategy manages this position, or null once detached. */
   strategyId: string | null
+  /** Which strategy opened it. Never cleared, so detaching is reversible:
+   * without this, reattaching could only guess, and the obvious guess —
+   * whichever strategy happens to be active now — is wrong whenever you've
+   * switched strategies since the position was opened. */
+  openedByStrategyId: string
   managedExit: ManagedExit | null
   attachedExit: AttachedExit | null
   /** Position value over the life of the position. Starts at `costBasis`
@@ -609,6 +622,7 @@ const PAPER_POSITIONS: Position[] = [
     pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long',
     legs: [{ symbol: 'AAPL261017C00230000', strike: 230, right: 'call', side: 'long', ratio: 1 }],
     strategyId: 'strat-1',
+    openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
     attachedExit: null,
     valueHistory: buildValueHistory(20260901, 350.0, 412.0, 24),
@@ -619,6 +633,7 @@ const PAPER_POSITIONS: Position[] = [
     pnl: -100.0, pnlPct: -25.0, bid: 2.96, ask: 3.04, direction: 'long',
     legs: [{ symbol: 'TSLA261115P00240000', strike: 240, right: 'put', side: 'long', ratio: 1 }],
     strategyId: 'strat-1',
+    openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
     attachedExit: null,
     valueHistory: buildValueHistory(20260902, 400.0, 300.0, 18),
@@ -632,6 +647,7 @@ const PAPER_POSITIONS: Position[] = [
       { symbol: 'SPY261017P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 },
     ],
     strategyId: 'strat-1',
+    openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
     attachedExit: null,
     valueHistory: buildValueHistory(20260903, 210.0, 168.0, 21),
@@ -646,6 +662,7 @@ const PAPER_POSITIONS: Position[] = [
     pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long',
     legs: [{ symbol: 'QQQ261220C00370000', strike: 370, right: 'call', side: 'long', ratio: 1 }],
     strategyId: null,
+    openedByStrategyId: 'strat-1',
     managedExit: null,
     attachedExit: { takeProfit: 9.6, stopPrice: 4.5, stopLimitPrice: 4.4, timeInForce: 'gtc', heldBy: 'broker' },
     valueHistory: buildValueHistory(20260904, 640.0, 640.0, 15),
@@ -659,6 +676,7 @@ const CASH_POSITIONS: Position[] = [
     pnl: -24.0, pnlPct: -12.9, bid: 1.6, ask: 1.66, direction: 'long',
     legs: [{ symbol: 'SPY260919P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 }],
     strategyId: 'strat-2',
+    openedByStrategyId: 'strat-2',
     managedExit: { profitTargetPct: 40, stopLossPct: 150, timeStopDte: 3 },
     attachedExit: null,
     valueHistory: buildValueHistory(20260905, 186.0, 162.0, 12),
@@ -674,11 +692,67 @@ const CASH_POSITIONS: Position[] = [
     // Detached and Corollary-managed, so the counterpart to pos-4's
     // broker-held exit is on screen somewhere too.
     strategyId: null,
+    openedByStrategyId: 'strat-2',
     managedExit: null,
     attachedExit: { takeProfit: 0.2, stopPrice: 1.1, stopLimitPrice: null, timeInForce: 'day', heldBy: 'corollary' },
     valueHistory: buildValueHistory(20260906, 140.0, 98.0, 16),
   },
 ]
+
+// ---------------------------------------------------------------------- //
+// Working orders (Activity page)
+// ---------------------------------------------------------------------- //
+
+/** An order that has been placed and hasn't filled.
+ *
+ * Only non-market orders appear here: a market order fills, it does not
+ * sit and work. Until this existed the terminal had no concept of "an
+ * order I placed that hasn't happened yet", which made Activity a record
+ * of the past rather than the ledger of record it claims to be.
+ *
+ * Attached exits are deliberately *not* modelled here. They live on the
+ * position, which is where they are edited and cancelled, and duplicating
+ * them into a second list would give the same thing two homes that could
+ * disagree. */
+export interface WorkingOrder {
+  id: string
+  positionId: string
+  /** Denormalised for display, so the list renders without resolving the
+   * position — which may have been closed out from under it. */
+  contract: string
+  side: OrderSide
+  orderType: Exclude<OrderType, 'market'>
+  quantity: number
+  limitPrice: number | null
+  stopPrice: number | null
+  timeInForce: TimeInForce
+  placedAt: string
+  /** The pending row this order wrote to the activity feed. Cancelling
+   * flips that row to `canceled` rather than appending a second one — the
+   * order had one life and the ledger should show it once. */
+  activityId: string
+}
+
+/** Paper carries one so the populated state is on screen; cash carries
+ * none so the empty state is too. Both are reachable by toggling the
+ * account rather than by contriving a sequence of clicks. */
+const PAPER_WORKING_ORDERS: WorkingOrder[] = [
+  {
+    id: 'wo-1',
+    positionId: 'pos-2',
+    contract: 'TSLA $240 Put Nov 15',
+    side: 'STC',
+    orderType: 'limit',
+    quantity: 1,
+    limitPrice: 3.4,
+    stopPrice: null,
+    timeInForce: 'gtc',
+    placedAt: '2026-08-07T15:58:00Z',
+    activityId: 'act-1',
+  },
+]
+
+const CASH_WORKING_ORDERS: WorkingOrder[] = []
 
 // ---------------------------------------------------------------------- //
 // News (News page)
@@ -947,6 +1021,7 @@ export interface AccountSnapshot {
   volumeTrend: Trend
   positions: Position[]
   activity: ActivityItem[]
+  workingOrders: WorkingOrder[]
 }
 
 export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
@@ -957,6 +1032,7 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     volumeTrend: { changePct: 15.2, comparedTo: 'vs last 24h' },
     positions: PAPER_POSITIONS,
     activity: PAPER_ACTIVITY,
+    workingOrders: PAPER_WORKING_ORDERS,
   },
   cash: {
     portfolioHistory: CASH_HISTORY,
@@ -965,6 +1041,7 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     volumeTrend: { changePct: 6.3, comparedTo: 'vs last 24h' },
     positions: CASH_POSITIONS,
     activity: CASH_ACTIVITY,
+    workingOrders: CASH_WORKING_ORDERS,
   },
 }
 

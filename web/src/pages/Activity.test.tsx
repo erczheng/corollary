@@ -215,11 +215,33 @@ describe('Open Positions', () => {
   })
 
   it('explains an empty book rather than showing a bare table', () => {
+    // Driven through the store rather than by closing four positions: a
+    // multi-leg position can only take a limit order, so closing one
+    // *works* an order rather than removing it, and the book cannot be
+    // emptied from this page at all. That is covered separately below.
+    useUIStore.setState({
+      openPositions: { paper: [], cash: [] },
+      workingOrders: { paper: [], cash: [] },
+    })
     gotoActivity()
 
-    for (const p of PAPER.positions) closeWholePosition(p.contract)
-
     expect(within(section('Open Positions')).getByText(/No open positions in this account/)).toBeInTheDocument()
+  })
+
+  it('fills a market close immediately, and only works a limit one', () => {
+    gotoActivity()
+
+    const single = PAPER.positions.find((p) => p.legs.length === 1)!
+    closeWholePosition(single.contract)
+    // Market: gone from the book, and in the ledger as filled.
+    expect(positionRows().some((r) => r.textContent?.includes(single.contract))).toBe(false)
+
+    const spread = PAPER.positions.find((p) => p.legs.length > 1)!
+    closeWholePosition(spread.contract)
+    // Limit, because a spread accepts nothing else: still open, now with
+    // an order working against it.
+    expect(positionRows().some((r) => r.textContent?.includes(spread.contract))).toBe(true)
+    expect(useUIStore.getState().workingOrders.paper.some((o) => o.positionId === spread.id)).toBe(true)
   })
 })
 
@@ -402,6 +424,142 @@ describe('Attaching an exit', () => {
     // Manual replaces managed — one party responsible for closing it.
     expect(after.strategyId).toBeNull()
     expect(screen.getByText(/Manually managed/)).toBeInTheDocument()
+  })
+})
+
+/** Until this section existed the terminal had no concept of "an order I
+ * placed that hasn't happened yet" — everything filled on click, which
+ * made Activity a record of the past rather than the ledger of record it
+ * claims to be. */
+describe('Working Orders', () => {
+  it('lists the orders that are placed and unfilled', () => {
+    gotoActivity()
+    const working = within(section('Working Orders'))
+
+    expect(working.getByText('TSLA $240 Put Nov 15')).toBeInTheDocument()
+    expect(working.getByText('STC')).toBeInTheDocument()
+    expect(working.getByText('1 working in Paper')).toBeInTheDocument()
+  })
+
+  it('shows an empty state on an account with none, pointing at where exits live', () => {
+    gotoActivity()
+    fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
+    fireEvent.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
+    )
+
+    const working = within(section('Working Orders'))
+    expect(working.getByText(/No working orders/)).toBeInTheDocument()
+    // Attached exits are not duplicated in here, so the empty state has to
+    // say where they actually are or it reads as "you have no exits".
+    expect(working.getByText(/live on that position/)).toBeInTheDocument()
+  })
+
+  it('shows both prices on a stop-limit, which has two and they differ', () => {
+    useUIStore.setState({
+      workingOrders: {
+        paper: [
+          {
+            id: 'wo-sl',
+            positionId: 'pos-1',
+            contract: 'AAPL $230 Call Oct 17',
+            side: 'STC',
+            orderType: 'stop_limit',
+            quantity: 1,
+            limitPrice: 1.4,
+            stopPrice: 1.5,
+            timeInForce: 'gtc',
+            placedAt: '2026-08-07T15:00:00Z',
+            activityId: 'act-1',
+          },
+        ],
+        cash: [],
+      },
+    })
+    gotoActivity()
+
+    expect(within(section('Working Orders')).getByText('$1.50 → $1.40')).toBeInTheDocument()
+  })
+
+  it('cancels an order and flips its ledger row rather than adding a second', () => {
+    gotoActivity()
+    const before = useUIStore.getState().activity.paper.length
+
+    fireEvent.click(within(section('Working Orders')).getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel order' }))
+
+    const s = useUIStore.getState()
+    expect(s.workingOrders.paper).toHaveLength(0)
+    // One order, one life, one row in the ledger.
+    expect(s.activity.paper).toHaveLength(before)
+    expect(s.activity.paper.find((a) => a.id === 'act-1')!.status).toBe('canceled')
+  })
+
+  it('says cancelling an order is not closing the trade', () => {
+    gotoActivity()
+    fireEvent.click(within(section('Working Orders')).getByRole('button', { name: 'Cancel' }))
+
+    expect(
+      within(screen.getByRole('alertdialog')).getByText(/position itself is untouched/),
+    ).toBeInTheDocument()
+  })
+
+  it('takes working orders with the position when it closes out', () => {
+    gotoActivity()
+    // wo-1 works against pos-2, which is single-leg and can close at market.
+    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
+    closeWholePosition(target.contract)
+
+    // An order against a position that no longer exists can never fill.
+    expect(useUIStore.getState().workingOrders.paper.some((o) => o.positionId === 'pos-2')).toBe(false)
+  })
+})
+
+describe('Loading states', () => {
+  it('shows skeletons rather than an empty book while refreshing', () => {
+    gotoActivity()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh activity' }))
+
+    // A slow account and an empty account mean very different things at
+    // 9:31am, and a blank panel cannot tell them apart.
+    expect(screen.getByText('Loading open positions')).toBeInTheDocument()
+    expect(screen.getByText('Loading working orders')).toBeInTheDocument()
+    expect(screen.getByText('Loading activity')).toBeInTheDocument()
+    expect(screen.queryByText(/No open positions/)).not.toBeInTheDocument()
+  })
+
+  it('announces loading to a screen reader without reading out the bars', () => {
+    gotoActivity()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh activity' }))
+
+    const status = screen.getAllByRole('status')
+    expect(status.length).toBeGreaterThan(0)
+    for (const s of status) expect(s).toHaveAttribute('aria-busy', 'true')
+  })
+})
+
+describe('Reattaching to a strategy', () => {
+  it('names the strategy that opened the position, not the active one', () => {
+    gotoActivity()
+    const detached = PAPER.positions.find((p) => p.strategyId === null)!
+
+    fireEvent.click(within(rowFor(detached.contract)).getByRole('button', { name: /^More actions for/ }))
+
+    // Reattaching to whichever strategy happens to be active now would
+    // quietly move the position onto different exit rules.
+    expect(screen.getByRole('button', { name: /^Reattach to / })).toBeInTheDocument()
+  })
+
+  it('restores the opening strategy and clears the manual exit', () => {
+    gotoActivity()
+    const detached = PAPER.positions.find((p) => p.strategyId === null)!
+
+    fireEvent.click(within(rowFor(detached.contract)).getByRole('button', { name: /^More actions for/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Reattach to / }))
+
+    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === detached.id)!
+    expect(after.strategyId).toBe(detached.openedByStrategyId)
+    expect(after.attachedExit).toBeNull()
   })
 })
 

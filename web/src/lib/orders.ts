@@ -10,6 +10,7 @@
 
 import {
   CONTRACT_MULTIPLIER,
+  type OrderSide,
   type OrderType,
   type Position,
   type PositionLeg,
@@ -20,10 +21,17 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 
 export type TicketMode = 'close' | 'add' | 'exit'
 
-/** The four order sides, in the jargon. BTO/STC/STO/BTC are what the
- * industry calls them and what the fill will come back as — they are not
- * abbreviations to be helpfully expanded away. */
-export type OrderSide = 'BTO' | 'STC' | 'STO' | 'BTC'
+/** BTO/STC/STO/BTC are what the industry calls these and what the fill
+ * comes back as — not abbreviations to be helpfully expanded away. The
+ * type itself lives in mockData so `WorkingOrder` can use it without the
+ * two modules importing each other. */
+export type { OrderSide }
+
+/** A market order fills. Anything else sits and works until it does, or
+ * until you cancel it. */
+export function isWorkingOrderType(type: OrderType): type is Exclude<OrderType, 'market'> {
+  return type !== 'market'
+}
 
 export const ORDER_SIDE_LABEL: Record<OrderSide, string> = {
   BTO: 'Buy to open (BTO)',
