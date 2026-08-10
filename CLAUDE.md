@@ -297,10 +297,22 @@ expect.** Every item below produced working-looking code that was wrong:
 stands in for the Alpaca WebSocket: it re-marks positions, fills working
 orders whose price has been reached, and triggers attached exits. It
 decides what the *market* did — never what is *allowed*, which stays with
-`RiskManager.approve()` in Phase 2. Its price stream is seeded like every
-other fixture, so a session replays identically. Only the active account
-ticks, and `lastTickAt === null` is what drives the loading skeletons —
-loading is a real condition, not a timer.
+`RiskManager.approve()` in Phase 2. It moves the contract *and* its
+underlying — streaming one while the other sits frozen is only half live.
+Its price stream is seeded like every other fixture, so a session replays
+identically. Only the active account ticks, and `lastTickAt === null` is
+what drives the loading skeletons — loading is a real condition, not a
+timer. Past ~15s without a price the status pill reads `stale`; a badge
+saying "Live" over a frozen timestamp is worse than no badge.
+
+**Dates that are dates, not instants.** `Position.expiry` and `MARKET_TODAY`
+are both `YYYY-MM-DD` and both parse as **UTC** midnight — `daysToExpiry`
+parses both sides that way deliberately, because mixing in a local-time
+`new Date()` puts them an offset apart and produces an off-by-one on any
+afternoon in New York. Same trap `formatExpiry` documents. DTE is measured
+from `MARKET_TODAY` rather than the real clock so fixtures don't rot: tied
+to the wall clock, the near-expiry position silently becomes an expired one
+next week and that state stops being reachable.
 
 **`Position.last` is the contract's price, not the underlying's.** It sits
 within `[bid, ask]`, and `Position.underlying` carries the underlying

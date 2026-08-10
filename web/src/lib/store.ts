@@ -3,6 +3,8 @@ import {
   ACCOUNT_SNAPSHOTS,
   CONTRACT_MULTIPLIER,
   mulberry32,
+  UNDERLYINGS,
+  type UnderlyingQuote,
   type AccountMode,
   type ActivityItem,
   type AttachedExit,
@@ -53,6 +55,14 @@ interface UIState {
    * orders land here — a market order fills immediately. Attached exits
    * are not duplicated in here; they live on the position. */
   workingOrders: Record<AccountMode, WorkingOrder[]>
+  /** Live underlying quotes, keyed by symbol.
+   *
+   * In the store rather than read straight from the fixture because the
+   * tick moves them — a page that streams contract prices while the stock
+   * behind them sits frozen is only half live, and the payoff chart's
+   * "now" marker would never move. Keyed by symbol because two positions
+   * can share an underlying and must never disagree about its price. */
+  underlyings: Record<string, UnderlyingQuote>
   toggleTheme: () => void
   setAccountMode: (mode: AccountMode) => void
   setExecutionMode: (mode: ExecutionMode) => void
@@ -264,6 +274,7 @@ export const useUIStore = create<UIState>((set) => ({
     paper: ACCOUNT_SNAPSHOTS.paper.workingOrders,
     cash: ACCOUNT_SNAPSHOTS.cash.workingOrders,
   },
+  underlyings: UNDERLYINGS,
   toggleTheme: () =>
     set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
   setAccountMode: (accountMode) => set({ accountMode }),
@@ -390,12 +401,38 @@ export const useUIStore = create<UIState>((set) => ({
       const closedIds = new Set<string>()
       const consumedOrderIds = new Set<string>()
 
+      // The stocks behind the positions this account holds — one symbol
+      // per position, which is what keeps the subscription inside the
+      // 30-symbol cap the Basic plan imposes (CLAUDE.md).
+      const streamed = new Set(s.openPositions[mode].map((p) => p.symbol))
+      const underlyings: Record<string, UnderlyingQuote> = { ...s.underlyings }
+      for (const symbol of streamed) {
+        const quote = underlyings[symbol]
+        if (!quote) continue
+        const price = round2(quote.price * (1 + (priceStream() - 0.5) * 0.006))
+        const change = round2(price - quote.previousClose)
+        underlyings[symbol] = {
+          ...quote,
+          price,
+          change,
+          changePct: round2((change / quote.previousClose) * 100),
+          // Today's point *is* today's price so far, so it moves rather
+          // than a new daily close being appended every two seconds.
+          history: [...quote.history.slice(0, -1), { date: quote.history[quote.history.length - 1].date, value: price }],
+        }
+      }
+
       const positions = s.openPositions[mode].map((position) => {
         // ±1.8% a tick, which is brisk for a stock and ordinary for an
         // option. Enough movement that a resting order is reachable
         // without waiting all afternoon to see the feature work.
         const drift = (priceStream() - 0.5) * 0.036
-        const marked = remark(position, position.last * (1 + drift), at)
+        const marked = {
+          ...remark(position, position.last * (1 + drift), at),
+          // Kept in step with the quote rather than drifting on its own:
+          // two positions on the same stock must agree about its price.
+          underlying: underlyings[position.symbol]?.price ?? position.underlying,
+        }
 
         const exit = marked.attachedExit
         const trigger = exit ? exitTrigger(marked, exit, marked.last) : null
@@ -437,6 +474,7 @@ export const useUIStore = create<UIState>((set) => ({
       if (filled.length === 0 && consumedOrderIds.size === 0) {
         return {
           openPositions: { ...s.openPositions, [mode]: positions },
+          underlyings,
           lastTickAt: at,
         }
       }
@@ -464,6 +502,7 @@ export const useUIStore = create<UIState>((set) => ({
         },
         workingOrders: { ...s.workingOrders, [mode]: remainingOrders },
         activity: { ...s.activity, [mode]: [...filled, ...activity] },
+        underlyings,
         lastTickAt: at,
       }
     }),

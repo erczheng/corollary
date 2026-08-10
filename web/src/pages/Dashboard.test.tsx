@@ -13,9 +13,9 @@ beforeEach(() => {
   // Same guard Activity.test.tsx carries, for the same reason.
   window.history.pushState({}, '', '/')
   // `lastTickAt` seeded for the one test that navigates to Activity, which
-  // renders skeletons until a price has arrived. Same reason and same
-  // value as Activity.test.tsx.
-  useUIStore.setState({ ...initialState, lastTickAt: '2026-08-07T20:00:00Z' }, true)
+  // renders skeletons until a price has arrived. Same reason as
+  // Activity.test.tsx.
+  useUIStore.setState({ ...initialState, lastTickAt: new Date().toISOString() }, true)
 })
 
 function lastValue(history: { value: number }[]): number {

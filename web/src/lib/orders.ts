@@ -201,6 +201,42 @@ export function validateExit(position: Position, draft: ExitDraft): string[] {
 }
 
 // -------------------------------------------------------------------- //
+// Expiry
+// -------------------------------------------------------------------- //
+
+/** Calendar days from `today` to `expiry`, both date-only.
+ *
+ * Parsed as UTC on both sides. A bare `YYYY-MM-DD` is UTC midnight, so
+ * mixing in a local-time `new Date()` would put the two an offset apart
+ * and produce an off-by-one on any afternoon in New York — the same trap
+ * `formatExpiry` documents. */
+export function daysToExpiry(expiry: string, today: string): number {
+  const ms = Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)
+  return Math.round(ms / 86_400_000)
+}
+
+/** How close to expiry counts as close.
+ *
+ * A position managed by a strategy uses that strategy's own `time_stop_dte`
+ * (PRD.md §5.1) — the point at which the engine would close it anyway, so
+ * it is the number that actually matters for that position. Anything
+ * detached falls back to a week, which is where gamma starts to bite. */
+export const DEFAULT_EXPIRY_WARNING_DTE = 7
+
+export function expiryWarningDte(position: Position): number {
+  return position.managedExit?.timeStopDte ?? DEFAULT_EXPIRY_WARNING_DTE
+}
+
+export type ExpiryUrgency = 'expired' | 'today' | 'near' | 'normal'
+
+export function expiryUrgency(position: Position, today: string): ExpiryUrgency {
+  const dte = daysToExpiry(position.expiry, today)
+  if (dte < 0) return 'expired'
+  if (dte === 0) return 'today'
+  return dte <= expiryWarningDte(position) ? 'near' : 'normal'
+}
+
+// -------------------------------------------------------------------- //
 // What a moving price does to a resting order
 // -------------------------------------------------------------------- //
 

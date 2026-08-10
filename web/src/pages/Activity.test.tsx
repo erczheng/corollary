@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent } from '@testing-library/react'
 import App from '../App'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_SNAPSHOTS, UNDERLYINGS, activityStats } from '../lib/mockData'
-import { formatPct, formatUsd } from '../lib/format'
+import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS, activityStats } from '../lib/mockData'
+import { daysToExpiry, expiryUrgency } from '../lib/orders'
+import { formatExpiry, formatPct, formatUsd } from '../lib/format'
 
 const initialState = useUIStore.getState()
 
@@ -18,11 +19,13 @@ beforeEach(() => {
   // BrowserRouter reads window.location, and these tests navigate. Without
   // this, a test that ran after a navigation starts on the wrong page.
   window.history.pushState({}, '', '/')
-  // `lastTickAt` seeded, so the page is past "connecting" and rendering
-  // content rather than skeletons. Nothing has actually ticked — the
-  // interval is 2s and these tests take milliseconds — so every fixture
-  // value is still the one the assertions expect.
-  useUIStore.setState({ ...initialState, lastTickAt: '2026-08-07T20:00:00Z' }, true)
+  // `lastTickAt` seeded to *now*, so the page is past "connecting" and
+  // rendering content rather than skeletons. It has to be now rather than
+  // a fixed date, because the pill goes stale on elapsed time and a
+  // hardcoded timestamp is permanently stale. Nothing has actually ticked
+  // — the interval is 2s and these tests take milliseconds — so every
+  // fixture value is still the one the assertions expect.
+  useUIStore.setState({ ...initialState, lastTickAt: new Date().toISOString() }, true)
 })
 
 function section(heading: string): HTMLElement {
@@ -590,6 +593,104 @@ describe('Live status', () => {
     // these numbers current". A Refresh button answered it once.
     expect(screen.getByLabelText(/^Live — last price /)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
+  })
+
+  it('stops claiming to be live once prices stop arriving', () => {
+    useUIStore.setState(
+      { ...initialState, lastTickAt: new Date(Date.now() - 60_000).toISOString() },
+      true,
+    )
+    gotoActivity()
+
+    // A badge reading "Live" beside a timestamp that stopped moving is a
+    // status indicator lying about the one thing it exists for.
+    expect(screen.getByLabelText(/^Stale — no price since /)).toBeInTheDocument()
+    expect(screen.queryByLabelText(/^Live /)).not.toBeInTheDocument()
+  })
+})
+
+describe('Expiry', () => {
+  it('counts down the days on every position', () => {
+    gotoActivity()
+
+    for (const p of PAPER.positions) {
+      const dte = daysToExpiry(p.expiry, MARKET_TODAY)
+      expect(within(rowFor(p.contract)).getByTitle(`Expires ${formatExpiry(p.expiry)}`)).toHaveTextContent(
+        `${dte}d`,
+      )
+    }
+  })
+
+  it('flags a position near expiry in caution, never in error', () => {
+    gotoActivity()
+
+    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
+    const cell = within(rowFor(near.contract)).getByTitle(`Expires ${formatExpiry(near.expiry)}`)
+      .parentElement!
+
+    // Running out of time is a deadline, not a system failure.
+    expect(cell.className).toMatch(/text-caution/)
+    expect(cell.className).not.toMatch(/text-error/)
+  })
+
+  it('leaves a position with room to run unflagged', () => {
+    gotoActivity()
+
+    const far = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'normal')!
+    const cell = within(rowFor(far.contract)).getByTitle(`Expires ${formatExpiry(far.expiry)}`).parentElement!
+
+    expect(cell.className).not.toMatch(/text-caution/)
+  })
+})
+
+describe('Searching the ledger', () => {
+  function search(text: string) {
+    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
+      target: { value: text },
+    })
+  }
+
+  it('narrows the feed to one symbol', () => {
+    gotoActivity()
+    search('AAPL')
+
+    const rows = within(section('Recent Activity')).getAllByRole('row').slice(1)
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) expect(row.textContent).toContain('AAPL')
+  })
+
+  it('combines with the status filter rather than replacing it', () => {
+    gotoActivity()
+    const feed = within(section('Recent Activity'))
+
+    search('SPY')
+    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
+      target: { value: 'filled' },
+    })
+
+    for (const row of feed.getAllByRole('row').slice(1)) {
+      expect(row.textContent).toContain('SPY')
+    }
+  })
+
+  it('explains an empty result instead of looking like an empty account', () => {
+    gotoActivity()
+    search('NOTATICKER')
+
+    // "No activity in this account yet" would be a lie with 50 rows behind
+    // the search.
+    expect(within(section('Recent Activity')).getByText(/Nothing matching/)).toBeInTheDocument()
+  })
+
+  it('returns to the first page when the search changes', () => {
+    gotoActivity()
+    const feed = within(section('Recent Activity'))
+
+    fireEvent.click(feed.getByRole('button', { name: 'Next' }))
+    expect(feed.getByText(/^Page 2 of/)).toBeInTheDocument()
+
+    search('S')
+    expect(feed.getByText(/^Page 1 of/)).toBeInTheDocument()
   })
 })
 
