@@ -25,8 +25,11 @@ export function useLiveTick(intervalMs: number) {
 
     let id: ReturnType<typeof setInterval> | null = null
 
+    // The interval is passed through so the store scales price movement to
+    // the time the tick covers. Without it, raising the rate would raise
+    // volatility with it.
     const start = () => {
-      if (id === null) id = setInterval(tick, intervalMs)
+      if (id === null) id = setInterval(() => tick(intervalMs), intervalMs)
     }
     const stop = () => {
       if (id !== null) {

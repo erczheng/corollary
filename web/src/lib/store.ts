@@ -124,8 +124,11 @@ interface UIState {
    * This is the mock **broker**, not the risk manager. Fills and exit
    * triggers are simulated here because there is no market to get them
    * from; nothing in this function decides whether an order is *allowed*.
-   * That stays with `RiskManager.approve()` in Phase 2. */
-  tick: () => void
+   * That stays with `RiskManager.approve()` in Phase 2.
+   *
+   * `elapsedMs` is how much time the tick covers, which scales how far
+   * prices move. Frequency and volatility stay independent that way. */
+  tick: (elapsedMs?: number) => void
 }
 
 /** A long is sold to close, a short is bought to close — and each crosses
@@ -219,6 +222,22 @@ function addQuantity(position: Position, quantity: number, price: number, at: st
  * screenshot taken twice looks the same — the rule the fixtures already
  * follow, extended to the thing that moves them. */
 const priceStream = mulberry32(20261101)
+
+/* Volatility is stated **per second**, not per tick, and scaled by how
+ * long the tick actually covered.
+ *
+ * This is what keeps update frequency and price volatility independent.
+ * Per-tick figures tie them together: raising the rate five times would
+ * move prices the same distance five times as often, so a stream that was
+ * only meant to feel more responsive would also become five times as
+ * volatile and run the fixtures away from their starting values within a
+ * minute. Change TICK_MS freely; these stay put. */
+const CONTRACT_VOLATILITY_PER_SECOND = 0.018
+const UNDERLYING_VOLATILITY_PER_SECOND = 0.003
+
+/** A tick with no argument is assumed to cover a second — the shape tests
+ * use, where the interval is not in play. */
+const DEFAULT_TICK_MS = 1_000
 
 /** Re-marks a position at a new contract price, carrying bid, ask, value
  * and P&L with it so the row stays internally consistent — the same
@@ -393,10 +412,11 @@ export const useUIStore = create<UIState>((set) => ({
       }
     }),
   lastTickAt: null,
-  tick: () =>
+  tick: (elapsedMs = DEFAULT_TICK_MS) =>
     set((s) => {
       const mode = s.accountMode
       const at = new Date().toISOString()
+      const seconds = elapsedMs / 1_000
       const filled: ActivityItem[] = []
       const closedIds = new Set<string>()
       const consumedOrderIds = new Set<string>()
@@ -409,7 +429,8 @@ export const useUIStore = create<UIState>((set) => ({
       for (const symbol of streamed) {
         const quote = underlyings[symbol]
         if (!quote) continue
-        const price = round2(quote.price * (1 + (priceStream() - 0.5) * 0.006))
+        const move = (priceStream() - 0.5) * 2 * UNDERLYING_VOLATILITY_PER_SECOND * seconds
+        const price = round2(quote.price * (1 + move))
         const change = round2(price - quote.previousClose)
         underlyings[symbol] = {
           ...quote,
@@ -423,10 +444,10 @@ export const useUIStore = create<UIState>((set) => ({
       }
 
       const positions = s.openPositions[mode].map((position) => {
-        // ±1.8% a tick, which is brisk for a stock and ordinary for an
-        // option. Enough movement that a resting order is reachable
-        // without waiting all afternoon to see the feature work.
-        const drift = (priceStream() - 0.5) * 0.036
+        // Brisk for a stock, ordinary for an option — enough movement that
+        // a resting order is reachable without waiting all afternoon to
+        // see the feature work.
+        const drift = (priceStream() - 0.5) * 2 * CONTRACT_VOLATILITY_PER_SECOND * seconds
         const marked = {
           ...remark(position, position.last * (1 + drift), at),
           // Kept in step with the quote rather than drifting on its own:

@@ -36,8 +36,13 @@ const POSITION_COLUMNS = 8
  * There was a Refresh button here and it was the wrong affordance. The
  * question you have on a positions screen is "are these numbers current",
  * and prices arriving on their own answer it continuously where a button
- * answers it once, for the instant after you press it. */
-const TICK_MS = 2_000
+ * answers it once, for the instant after you press it.
+ *
+ * Safe to change. The store states volatility per second and scales it by
+ * the interval, so this controls how *often* prices move and not how far
+ * they travel. Below ~250ms the P&L column starts to be genuinely hard to
+ * read, which is a legibility limit rather than a technical one. */
+const TICK_MS = 400
 
 export function Activity() {
   const accountMode = useUIStore((s) => s.accountMode)
