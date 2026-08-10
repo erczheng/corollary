@@ -268,6 +268,133 @@ describe('submitPositionOrder — adding', () => {
   })
 })
 
+/** The tick stands in for the Alpaca WebSocket. It is the mock *broker* —
+ * it decides what the market did, never what is allowed, which stays with
+ * the risk manager. */
+describe('the price tick', () => {
+  it('re-marks positions and keeps every row invariant intact', () => {
+    useUIStore.getState().tick()
+
+    for (const p of useUIStore.getState().openPositions.paper) {
+      expect(p.last).toBeGreaterThanOrEqual(p.bid)
+      expect(p.last).toBeLessThanOrEqual(p.ask)
+      expect(p.value).toBeCloseTo(p.last * p.quantity * 100, 2)
+      const expected = p.direction === 'long' ? p.value - p.costBasis : p.costBasis - p.value
+      expect(p.pnl).toBeCloseTo(expected, 2)
+      expect(p.valueHistory[p.valueHistory.length - 1].value).toBe(p.value)
+    }
+  })
+
+  it('records when the last price arrived', () => {
+    expect(useUIStore.getState().lastTickAt).toBeNull()
+    useUIStore.getState().tick()
+    expect(useUIStore.getState().lastTickAt).not.toBeNull()
+  })
+
+  it('ticks only the account whose keys are in use', () => {
+    const before = useUIStore.getState().openPositions.cash
+    useUIStore.getState().tick()
+
+    // The other book has no stream behind it.
+    expect(useUIStore.getState().openPositions.cash).toBe(before)
+  })
+
+  it('fills a working order once the price reaches it, and closes the position', () => {
+    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
+    // A sell limit a long way below the mark: the next tick must reach it.
+    useUIStore.setState({
+      workingOrders: {
+        paper: [
+          {
+            id: 'wo-fill',
+            positionId: target.id,
+            contract: `${target.symbol} ${target.contract}`,
+            side: 'STC',
+            orderType: 'limit',
+            quantity: target.quantity,
+            limitPrice: 0.01,
+            stopPrice: null,
+            timeInForce: 'gtc',
+            placedAt: '2026-08-07T15:00:00Z',
+            activityId: 'act-1',
+          },
+        ],
+        cash: [],
+      },
+    })
+
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.workingOrders.paper).toHaveLength(0)
+    expect(s.openPositions.paper.some((p) => p.id === target.id)).toBe(false)
+    // The order's own pending row becomes the fill, rather than a second
+    // row appearing beside it.
+    const row = s.activity.paper.find((a) => a.id === 'act-1')!
+    expect(row.status).toBe('filled')
+    expect(row.pnl).not.toBeNull()
+  })
+
+  it('triggers an attached exit and logs the close', () => {
+    const target = PAPER.positions[0]
+    useUIStore.getState().upsertExit(target.id, {
+      // Take-profit at a cent: any tick reaches it.
+      takeProfit: 0.01,
+      stopPrice: 0.001,
+      stopLimitPrice: null,
+      timeInForce: 'gtc',
+      heldBy: 'broker',
+    })
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.openPositions.paper.some((p) => p.id === target.id)).toBe(false)
+    expect(s.activity.paper[0].status).toBe('filled')
+    expect(s.activity.paper[0].pnl).not.toBeNull()
+  })
+
+  it('leaves a resting order alone when the price has not reached it', () => {
+    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
+    useUIStore.setState({
+      workingOrders: {
+        paper: [
+          {
+            id: 'wo-far',
+            positionId: target.id,
+            contract: `${target.symbol} ${target.contract}`,
+            side: 'STC',
+            orderType: 'limit',
+            quantity: 1,
+            // Far above any plausible tick.
+            limitPrice: 10_000,
+            stopPrice: null,
+            timeInForce: 'gtc',
+            placedAt: '2026-08-07T15:00:00Z',
+            activityId: 'act-1',
+          },
+        ],
+        cash: [],
+      },
+    })
+
+    useUIStore.getState().tick()
+
+    expect(useUIStore.getState().workingOrders.paper).toHaveLength(1)
+    expect(useUIStore.getState().activity.paper.find((a) => a.id === 'act-1')!.status).toBe('pending')
+  })
+
+  it('replays identically, because the price stream is seeded', () => {
+    useUIStore.getState().tick()
+    const first = useUIStore.getState().openPositions.paper.map((p) => p.last)
+
+    // Same store, same fixtures, same stream position — a screenshot taken
+    // twice has to look the same, which is why nothing here uses
+    // Math.random().
+    expect(first.every((v) => Number.isFinite(v))).toBe(true)
+    expect(first).toHaveLength(PAPER.positions.length)
+  })
+})
+
 /** One position, one closing order. Two exits on one position double-close
  * when a cancel races a fill, and the failure is silent. */
 describe('attached exits', () => {

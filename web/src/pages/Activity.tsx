@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { StatCard } from '../components/StatCard'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { Pagination } from '../components/Pagination'
 import { PositionRow } from '../components/PositionRow'
 import { WorkingOrders } from '../components/WorkingOrders'
 import { StatCardSkeleton, TableSkeleton } from '../components/Skeleton'
-import { RefreshButton } from '../components/RefreshButton'
+import { LiveStatus } from '../components/LiveStatus'
+import { useLiveTick } from '../hooks/useLiveTick'
 import { BankIcon, TrendingDownIcon, TrendingUpIcon } from '../components/icons'
 import {
   ExecutionsTable,
@@ -29,14 +30,14 @@ const PAGE_SIZE = 15
  * header below or the panel will be narrower than the table. */
 const POSITION_COLUMNS = 7
 
-/** How long the loading state is held on a manual refresh.
+/** How often a price arrives. Stands in for the Alpaca WebSocket, which
+ * Phase 2 puts in its place.
  *
- * Phase 1 has nothing to wait for — the fixtures are already in memory —
- * so this stands in for a round trip. In Phase 2 it comes off entirely and
- * the flag is TanStack Query's `isFetching`. The state is wired up now
- * rather than later because a loading state nobody has ever seen is a
- * loading state nobody has designed. */
-const REFRESH_MS = 700
+ * There was a Refresh button here and it was the wrong affordance. The
+ * question you have on a positions screen is "are these numbers current",
+ * and prices arriving on their own answer it continuously where a button
+ * answers it once, for the instant after you press it. */
+const TICK_MS = 2_000
 
 export function Activity() {
   const accountMode = useUIStore((s) => s.accountMode)
@@ -46,13 +47,15 @@ export function Activity() {
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [ticketMode, setTicketMode] = useState<TicketMode>('close')
-  const [loading, setLoading] = useState(false)
+  // Prices stream while the page is open. Only the active account ticks —
+  // the other book's keys aren't loaded, so nothing is subscribed to it.
+  useLiveTick(TICK_MS)
 
-  useEffect(() => {
-    if (!loading) return
-    const id = setTimeout(() => setLoading(false), REFRESH_MS)
-    return () => clearTimeout(id)
-  }, [loading])
+  // Loading is a real condition, not a timer: until the first price
+  // arrives there is nothing current to show, which is exactly the state
+  // Phase 2 is in while the first snapshot is in flight. Faking a delay
+  // to make the skeletons appear would have been theatre.
+  const loading = useUIStore((s) => s.lastTickAt) === null
 
   const filtered = filter === 'all' ? activity : activity.filter((a) => a.status === filter)
   const { page, pageCount, pageItems, setPage } = usePagination(filtered, PAGE_SIZE)
@@ -75,11 +78,7 @@ export function Activity() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-display-lg text-on-surface">Activity</h1>
         <div className="flex items-center gap-3">
-          <RefreshButton
-            label="Refresh activity"
-            cooldownMs={0}
-            onRefresh={() => setLoading(true)}
-          />
+          <LiveStatus />
           <AccountModeToggle />
         </div>
       </div>

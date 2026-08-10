@@ -12,7 +12,7 @@
 // Seeded PRNG (mulberry32) — small, deterministic, no dependency.
 // ---------------------------------------------------------------------- //
 
-function mulberry32(seed: number) {
+export function mulberry32(seed: number) {
   let a = seed
   return () => {
     a |= 0
@@ -698,6 +698,67 @@ const CASH_POSITIONS: Position[] = [
     valueHistory: buildValueHistory(20260906, 140.0, 98.0, 16),
   },
 ]
+
+// ---------------------------------------------------------------------- //
+// Underlyings (Activity page — the underlying behind an option)
+// ---------------------------------------------------------------------- //
+
+export interface UnderlyingQuote {
+  symbol: string
+  price: number
+  /** Yesterday's close. The daily change is measured from here, not from
+   * the first point of the series — a 60-session chart's left edge is two
+   * months ago and "today" measured against it is not today. */
+  previousClose: number
+  change: number
+  changePct: number
+  history: PricePoint[]
+}
+
+/** Keyed by symbol, not carried on the position, because two positions can
+ * share an underlying — SPY backs both a paper spread and a cash put here.
+ * Storing a copy per position would let the same stock show two different
+ * prices on two rows of the same page. */
+function buildUnderlying(symbol: string, price: number, seed: number, sessions: number): UnderlyingQuote {
+  const next = mulberry32(seed)
+  const points: PricePoint[] = []
+
+  // Walk backwards from today's price so the series *ends* where the
+  // position says the underlying is, then reverse. Generating forwards and
+  // hoping to land on the right number would put the chart and the row in
+  // disagreement.
+  let value = price
+  const day = new Date('2026-08-07T00:00:00Z')
+  for (let i = 0; i < sessions; i++) {
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) {
+      points.push({ date: day.toISOString().slice(0, 10), value: Math.round(value * 100) / 100 })
+      value = value * (1 - (next() - 0.5) * 0.022)
+    }
+    day.setUTCDate(day.getUTCDate() - 1)
+  }
+  points.reverse()
+
+  const previousClose = points[points.length - 2].value
+  const change = Math.round((price - previousClose) * 100) / 100
+  return {
+    symbol,
+    price,
+    previousClose,
+    change,
+    changePct: Math.round((change / previousClose) * 10_000) / 100,
+    history: points,
+  }
+}
+
+/** Prices here must match every `Position.underlying` that names the same
+ * symbol; `orders.test.ts` asserts it. */
+export const UNDERLYINGS: Record<string, UnderlyingQuote> = {
+  AAPL: buildUnderlying('AAPL', 232.4, 20261001, 62),
+  TSLA: buildUnderlying('TSLA', 238.1, 20261002, 62),
+  SPY: buildUnderlying('SPY', 429.88, 20261003, 62),
+  QQQ: buildUnderlying('QQQ', 372.4, 20261004, 62),
+  MSFT: buildUnderlying('MSFT', 418.35, 20261005, 62),
+}
 
 // ---------------------------------------------------------------------- //
 // Working orders (Activity page)

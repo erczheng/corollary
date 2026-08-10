@@ -12,7 +12,10 @@ beforeEach(() => {
   // this, a test that ran after a navigation starts on the wrong page.
   // Same guard Activity.test.tsx carries, for the same reason.
   window.history.pushState({}, '', '/')
-  useUIStore.setState(initialState, true)
+  // `lastTickAt` seeded for the one test that navigates to Activity, which
+  // renders skeletons until a price has arrived. Same reason and same
+  // value as Activity.test.tsx.
+  useUIStore.setState({ ...initialState, lastTickAt: '2026-08-07T20:00:00Z' }, true)
 })
 
 function lastValue(history: { value: number }[]): number {

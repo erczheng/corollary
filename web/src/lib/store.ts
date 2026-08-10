@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   ACCOUNT_SNAPSHOTS,
   CONTRACT_MULTIPLIER,
+  mulberry32,
   type AccountMode,
   type ActivityItem,
   type AttachedExit,
@@ -10,7 +11,13 @@ import {
   type PricePoint,
   type WorkingOrder,
 } from './mockData'
-import { estimate, isWorkingOrderType, type OrderDraft } from './orders'
+import {
+  estimate,
+  exitTrigger,
+  isWorkingOrderType,
+  orderWouldFill,
+  type OrderDraft,
+} from './orders'
 
 export type Theme = 'light' | 'dark'
 export type ExecutionMode = 'manual' | 'auto'
@@ -92,6 +99,23 @@ interface UIState {
    * `canceled`, rather than appending a second row — the order had one
    * life and the feed should show it once. */
   cancelWorkingOrder: (id: string) => void
+  /** When the last price update arrived, or null before the first one. The
+   * header reads this to say whether the page is actually live rather than
+   * merely claiming to be. */
+  lastTickAt: string | null
+  /** One price update.
+   *
+   * Stands in for the Alpaca WebSocket, which Phase 2 puts in its place.
+   * Only the active account ticks: `accountMode` is which keys are in use,
+   * so the other book has no stream behind it. CLAUDE.md also caps the
+   * stream at 30 symbols on the Basic plan and scopes it to open
+   * positions — which is what this does, one symbol per position.
+   *
+   * This is the mock **broker**, not the risk manager. Fills and exit
+   * triggers are simulated here because there is no market to get them
+   * from; nothing in this function decides whether an order is *allowed*.
+   * That stays with `RiskManager.approve()` in Phase 2. */
+  tick: () => void
 }
 
 /** A long is sold to close, a short is bought to close — and each crosses
@@ -177,6 +201,32 @@ function addQuantity(position: Position, quantity: number, price: number, at: st
     value,
     pnl,
     pnlPct: costBasis === 0 ? 0 : round2((pnl / costBasis) * 100),
+    valueHistory: withValuePoint(position, at, value),
+  }
+}
+
+/** The tick's price stream. Seeded, so a session replays identically and a
+ * screenshot taken twice looks the same — the rule the fixtures already
+ * follow, extended to the thing that moves them. */
+const priceStream = mulberry32(20261101)
+
+/** Re-marks a position at a new contract price, carrying bid, ask, value
+ * and P&L with it so the row stays internally consistent — the same
+ * invariants `orders.test.ts` asserts about the fixtures. */
+function remark(position: Position, price: number, at: string): Position {
+  const half = round2((position.ask - position.bid) / 2)
+  const last = round2(Math.max(price, 0.01))
+  const value = round2(last * position.quantity * CONTRACT_MULTIPLIER)
+  const pnl = round2(position.direction === 'long' ? value - position.costBasis : position.costBasis - value)
+
+  return {
+    ...position,
+    last,
+    bid: round2(Math.max(last - half, 0.01)),
+    ask: round2(last + half),
+    value,
+    pnl,
+    pnlPct: position.costBasis === 0 ? 0 : round2((pnl / position.costBasis) * 100),
     valueHistory: withValuePoint(position, at, value),
   }
 }
@@ -329,6 +379,92 @@ export const useUIStore = create<UIState>((set) => ({
         workingOrders: closedOut
           ? { ...s.workingOrders, [mode]: s.workingOrders[mode].filter((o) => o.positionId !== id) }
           : s.workingOrders,
+      }
+    }),
+  lastTickAt: null,
+  tick: () =>
+    set((s) => {
+      const mode = s.accountMode
+      const at = new Date().toISOString()
+      const filled: ActivityItem[] = []
+      const closedIds = new Set<string>()
+      const consumedOrderIds = new Set<string>()
+
+      const positions = s.openPositions[mode].map((position) => {
+        // ±1.8% a tick, which is brisk for a stock and ordinary for an
+        // option. Enough movement that a resting order is reachable
+        // without waiting all afternoon to see the feature work.
+        const drift = (priceStream() - 0.5) * 0.036
+        const marked = remark(position, position.last * (1 + drift), at)
+
+        const exit = marked.attachedExit
+        const trigger = exit ? exitTrigger(marked, exit, marked.last) : null
+        if (exit && trigger) {
+          const price = trigger === 'take_profit' ? exit.takeProfit : (exit.stopLimitPrice ?? exit.stopPrice)
+          filled.push({
+            id: `act-exit-${marked.id}-${at}`,
+            time: at,
+            contract: `${marked.symbol} ${marked.contract}`,
+            action: marked.direction === 'long' ? 'STC' : 'BTC',
+            price,
+            quantity: marked.quantity,
+            pnl: marked.pnl,
+            pnlPct: marked.pnlPct,
+            amount: null,
+            status: 'filled',
+          })
+          closedIds.add(marked.id)
+          return marked
+        }
+
+        return marked
+      })
+
+      // Working orders fill against the price their own position just
+      // reached. An order on a position that closed out this same tick can
+      // no longer fill, so it is dropped rather than matched.
+      const byId = new Map(positions.map((p) => [p.id, p]))
+      const remainingOrders = s.workingOrders[mode].filter((order) => {
+        const position = byId.get(order.positionId)
+        if (!position || closedIds.has(position.id)) return false
+        if (!orderWouldFill(order, position.last)) return true
+
+        consumedOrderIds.add(order.id)
+        if (order.side === 'STC' || order.side === 'BTC') closedIds.add(position.id)
+        return false
+      })
+
+      if (filled.length === 0 && consumedOrderIds.size === 0) {
+        return {
+          openPositions: { ...s.openPositions, [mode]: positions },
+          lastTickAt: at,
+        }
+      }
+
+      // A working order that filled turns its pending ledger row into a
+      // fill, rather than writing a second row beside it.
+      const activity = s.activity[mode].map((a) => {
+        const order = s.workingOrders[mode].find((o) => o.activityId === a.id && consumedOrderIds.has(o.id))
+        if (!order) return a
+        const position = byId.get(order.positionId)
+        const closing = order.side === 'STC' || order.side === 'BTC'
+        return {
+          ...a,
+          status: 'filled' as const,
+          price: order.limitPrice ?? order.stopPrice,
+          pnl: closing && position ? position.pnl : null,
+          pnlPct: closing && position ? position.pnlPct : null,
+        }
+      })
+
+      return {
+        openPositions: {
+          ...s.openPositions,
+          [mode]: positions.filter((p) => !closedIds.has(p.id)),
+        },
+        workingOrders: { ...s.workingOrders, [mode]: remainingOrders },
+        activity: { ...s.activity, [mode]: [...filled, ...activity] },
+        lastTickAt: at,
       }
     }),
   cancelWorkingOrder: (id) =>

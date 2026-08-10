@@ -293,6 +293,15 @@ expect.** Every item below produced working-looking code that was wrong:
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
 
+**The Activity page is live, and `store.tick()` is the mock broker.** It
+stands in for the Alpaca WebSocket: it re-marks positions, fills working
+orders whose price has been reached, and triggers attached exits. It
+decides what the *market* did — never what is *allowed*, which stays with
+`RiskManager.approve()` in Phase 2. Its price stream is seeded like every
+other fixture, so a session replays identically. Only the active account
+ticks, and `lastTickAt === null` is what drives the loading skeletons —
+loading is a real condition, not a timer.
+
 **`Position.last` is the contract's price, not the underlying's.** It sits
 within `[bid, ask]`, and `Position.underlying` carries the underlying
 separately — read by the payoff curve and nothing else. The row used to

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent } from '@testing-library/react'
 import App from '../App'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_SNAPSHOTS, activityStats } from '../lib/mockData'
+import { ACCOUNT_SNAPSHOTS, UNDERLYINGS, activityStats } from '../lib/mockData'
 import { formatPct, formatUsd } from '../lib/format'
 
 const initialState = useUIStore.getState()
@@ -18,7 +18,11 @@ beforeEach(() => {
   // BrowserRouter reads window.location, and these tests navigate. Without
   // this, a test that ran after a navigation starts on the wrong page.
   window.history.pushState({}, '', '/')
-  useUIStore.setState(initialState, true)
+  // `lastTickAt` seeded, so the page is past "connecting" and rendering
+  // content rather than skeletons. Nothing has actually ticked — the
+  // interval is 2s and these tests take milliseconds — so every fixture
+  // value is still the one the assertions expect.
+  useUIStore.setState({ ...initialState, lastTickAt: '2026-08-07T20:00:00Z' }, true)
 })
 
 function section(heading: string): HTMLElement {
@@ -327,15 +331,35 @@ describe('Expanding a position', () => {
     expect(screen.getByText(/target 50%, stop 200%, 2 DTE/)).toBeInTheDocument()
   })
 
-  it('states the underlying price, which no column shows', () => {
+  it('states the underlying price and its day, which no column shows', () => {
     gotoActivity()
     expandRow(single.contract)
 
     // The Last column is the *contract's* mark — the price you close at.
-    // Without this line the price the payoff curve is drawn against
-    // appears nowhere as a number.
+    // The stock's own price and day, which is what actually moved the
+    // position, appear nowhere else.
+    const quote = UNDERLYINGS[single.symbol]
     expect(screen.getByText(`${single.symbol} underlying`)).toBeInTheDocument()
-    expect(screen.getByText(formatUsd(single.underlying))).toBeInTheDocument()
+    expect(screen.getByText(formatUsd(quote.price))).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`${formatPct(quote.changePct, { signed: true })} today`))).toBeInTheDocument()
+  })
+
+  it('charts the underlying, with previous close and every strike marked', () => {
+    gotoActivity()
+    expandRow(spread.contract)
+
+    const chart = within(screen.getByRole('group', { name: 'Chart view' }))
+    fireEvent.click(chart.getByRole('button', { name: 'Underlying' }))
+
+    const quote = UNDERLYINGS[spread.symbol]
+    expect(screen.getByText('Previous close')).toBeInTheDocument()
+    expect(screen.getByText(formatUsd(quote.previousClose))).toBeInTheDocument()
+    // Where the stock sits relative to the strikes is the question a
+    // credit spread actually raises.
+    const strikes = spread.legs
+      .map((l) => `${l.side === 'short' ? 'Short' : 'Long'} ${formatUsd(l.strike)}`)
+      .join(' · ')
+    expect(screen.getByText(strikes)).toBeInTheDocument()
   })
 
   it('says where an already-attached exit is held', () => {
@@ -515,13 +539,21 @@ describe('Working Orders', () => {
   })
 })
 
+/** Loading here is a real condition rather than a timer: before the first
+ * price arrives there is nothing current to show, which is exactly the
+ * state Phase 2 is in while the opening snapshot is in flight. */
 describe('Loading states', () => {
-  it('shows skeletons rather than an empty book while refreshing', () => {
+  function beforeFirstPrice() {
+    useUIStore.setState({ ...initialState, lastTickAt: null }, true)
     gotoActivity()
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh activity' }))
+  }
 
-    // A slow account and an empty account mean very different things at
-    // 9:31am, and a blank panel cannot tell them apart.
+  it('shows skeletons rather than an empty book before the first price', () => {
+    beforeFirstPrice()
+
+    // A stream that hasn't connected and an account with nothing in it
+    // mean very different things at 9:31am, and a blank panel cannot tell
+    // them apart.
     expect(screen.getByText('Loading open positions')).toBeInTheDocument()
     expect(screen.getByText('Loading working orders')).toBeInTheDocument()
     expect(screen.getByText('Loading activity')).toBeInTheDocument()
@@ -529,12 +561,35 @@ describe('Loading states', () => {
   })
 
   it('announces loading to a screen reader without reading out the bars', () => {
-    gotoActivity()
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh activity' }))
+    beforeFirstPrice()
 
-    const status = screen.getAllByRole('status')
-    expect(status.length).toBeGreaterThan(0)
-    for (const s of status) expect(s).toHaveAttribute('aria-busy', 'true')
+    const busy = screen.getAllByRole('status').filter((s) => s.getAttribute('aria-busy') === 'true')
+    expect(busy.length).toBeGreaterThan(0)
+  })
+
+  it('replaces the skeletons once a price has arrived', () => {
+    gotoActivity()
+
+    expect(screen.queryByText('Loading open positions')).not.toBeInTheDocument()
+    expect(positionRows()).toHaveLength(PAPER.positions.length)
+  })
+})
+
+describe('Live status', () => {
+  it('reads Connecting until the first price', () => {
+    useUIStore.setState({ ...initialState, lastTickAt: null }, true)
+    gotoActivity()
+
+    expect(screen.getByLabelText('Connecting to price stream')).toBeInTheDocument()
+  })
+
+  it('reports the time of the last price once streaming', () => {
+    gotoActivity()
+
+    // The question a positions screen has to answer continuously is "are
+    // these numbers current". A Refresh button answered it once.
+    expect(screen.getByLabelText(/^Live — last price /)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
   })
 })
 
