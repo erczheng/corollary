@@ -30,9 +30,32 @@ function gotoActivity() {
   fireEvent.click(screen.getByRole('link', { name: 'Activity' }))
 }
 
+/** Position rows only — not the header, and not the panel an expanded row
+ * opens underneath itself, which is also a <tr>.
+ *
+ * Identified by the ⋯ menu rather than by the Close button: the ticket
+ * inside the expanded panel has a "Close" mode button of its own, so that
+ * would match the panel too. */
 function positionRows(): HTMLElement[] {
-  // Row 0 is the header row.
-  return within(section('Open Positions')).getAllByRole('row').slice(1)
+  return within(section('Open Positions'))
+    .getAllByRole('row')
+    .filter((r) => within(r).queryByRole('button', { name: /^More actions for/ }) !== null)
+}
+
+function rowFor(contract: string): HTMLElement {
+  return positionRows().find((r) => r.textContent?.includes(contract))!
+}
+
+/** Close opens the ticket; it does not submit. Getting from a row to a
+ * closed position is: Close → Review close → confirm. */
+function openTicket(contract: string, action = 'Close') {
+  fireEvent.click(within(rowFor(contract)).getByRole('button', { name: action }))
+}
+
+function closeWholePosition(contract: string) {
+  openTicket(contract)
+  fireEvent.click(screen.getByRole('button', { name: 'Review close' }))
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close position' }))
 }
 
 /** Activity is the account's full ledger, so cash movements belong here —
@@ -145,44 +168,46 @@ describe('Open Positions', () => {
     }
   })
 
+  it('opens the ticket rather than submitting — Close alone changes nothing', () => {
+    gotoActivity()
+
+    const target = PAPER.positions[0]
+    openTicket(target.contract)
+
+    // The whole point of Close-as-order-button: the irreversible thing is
+    // one confirm further along, not on the first click.
+    expect(positionRows()).toHaveLength(PAPER.positions.length)
+    expect(screen.getByRole('button', { name: 'Review close' })).toBeInTheDocument()
+  })
+
   it('states bid, ask and estimated proceeds when closing a long', () => {
     gotoActivity()
 
     const long = PAPER.positions.find((p) => p.direction === 'long')!
-    const row = positionRows().find((r) => r.textContent?.includes(long.contract))!
-    fireEvent.click(within(row).getByRole('button', { name: 'Close' }))
+    openTicket(long.contract)
 
-    const dialog = within(screen.getByRole('alertdialog'))
     // A long is sold to close at the bid, and that pays you.
-    expect(dialog.getByText(/Sells/)).toBeInTheDocument()
-    expect(dialog.getByText(new RegExp(`estimated proceeds`))).toBeInTheDocument()
-    expect(
-      dialog.getByText(new RegExp(formatUsd(long.bid * long.quantity * 100).replace(/\$/g, '\\$'))),
-    ).toBeInTheDocument()
+    expect(screen.getByText('Sell to close (STC)')).toBeInTheDocument()
+    expect(screen.getByText('Estimated proceeds')).toBeInTheDocument()
+    expect(screen.getByText(`${formatUsd(long.bid)} / ${formatUsd(long.ask)}`)).toBeInTheDocument()
+    expect(screen.getByText(formatUsd(long.bid * long.quantity * 100))).toBeInTheDocument()
   })
 
   it('calls a short close a cost, not proceeds — it is a debit', () => {
     gotoActivity()
 
     const short = PAPER.positions.find((p) => p.direction === 'short')!
-    const row = positionRows().find((r) => r.textContent?.includes(short.contract))!
-    fireEvent.click(within(row).getByRole('button', { name: 'Close' }))
+    openTicket(short.contract)
 
-    const dialog = within(screen.getByRole('alertdialog'))
-    expect(dialog.getByText(/Buys back/)).toBeInTheDocument()
-    expect(dialog.getByText(/estimated cost to close/)).toBeInTheDocument()
-    expect(dialog.queryByText(/estimated proceeds/)).not.toBeInTheDocument()
+    expect(screen.getByText('Buy to close (BTC)')).toBeInTheDocument()
+    expect(screen.getByText('Estimated cost')).toBeInTheDocument()
+    expect(screen.queryByText('Estimated proceeds')).not.toBeInTheDocument()
   })
 
   it('closes only that position, and does not halt the engine', () => {
     gotoActivity()
 
-    const target = PAPER.positions[0]
-    const row = positionRows().find((r) => r.textContent?.includes(target.contract))!
-    fireEvent.click(within(row).getByRole('button', { name: 'Close' }))
-    fireEvent.click(
-      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close position' }),
-    )
+    closeWholePosition(PAPER.positions[0].contract)
 
     expect(positionRows()).toHaveLength(PAPER.positions.length - 1)
     // Close is to Flatten what Flatten is to Halt (CLAUDE.md rule 7).
@@ -192,15 +217,180 @@ describe('Open Positions', () => {
   it('explains an empty book rather than showing a bare table', () => {
     gotoActivity()
 
-    for (const p of PAPER.positions) {
-      const row = positionRows().find((r) => r.textContent?.includes(p.contract))!
-      fireEvent.click(within(row).getByRole('button', { name: 'Close' }))
-      fireEvent.click(
-        within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close position' }),
-      )
-    }
+    for (const p of PAPER.positions) closeWholePosition(p.contract)
 
     expect(within(section('Open Positions')).getByText(/No open positions in this account/)).toBeInTheDocument()
+  })
+})
+
+describe('Expanding a position', () => {
+  const single = PAPER.positions.find((p) => p.legs.length === 1)!
+  const spread = PAPER.positions.find((p) => p.legs.length > 1)!
+
+  function expandRow(contract: string) {
+    fireEvent.click(within(rowFor(contract)).getByRole('button', { name: /^Details for/ }))
+  }
+
+  it('opens a chart and a ticket in place, without covering the table', () => {
+    gotoActivity()
+    expandRow(single.contract)
+
+    expect(screen.getByRole('group', { name: 'Chart view' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Ticket mode' })).toBeInTheDocument()
+    // Nothing is modal — the rest of the book is still on screen.
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(positionRows()).toHaveLength(PAPER.positions.length)
+  })
+
+  it('keeps one row open at a time', () => {
+    gotoActivity()
+    expandRow(single.contract)
+    expandRow(spread.contract)
+
+    expect(screen.getAllByRole('group', { name: 'Ticket mode' })).toHaveLength(1)
+  })
+
+  it('collapses again on a second click', () => {
+    gotoActivity()
+    expandRow(single.contract)
+    expandRow(single.contract)
+
+    expect(screen.queryByRole('group', { name: 'Ticket mode' })).not.toBeInTheDocument()
+  })
+
+  it('offers four order types on a single-leg position and limit alone on a spread', () => {
+    gotoActivity()
+
+    expandRow(single.contract)
+    const singleTypes = within(screen.getByLabelText('Order type')).getAllByRole('option')
+    expect(singleTypes.map((o) => o.textContent)).toEqual(['Market', 'Limit', 'Stop', 'Stop-Limit'])
+
+    expandRow(spread.contract)
+    const spreadTypes = within(screen.getByLabelText('Order type')).getAllByRole('option')
+    expect(spreadTypes.map((o) => o.textContent)).toEqual(['Limit'])
+    // And says why, rather than silently offering less.
+    expect(screen.getByText(/limit orders only/i)).toBeInTheDocument()
+  })
+
+  it('reveals the stop field only for the order types that use one', () => {
+    gotoActivity()
+    expandRow(single.contract)
+
+    expect(screen.queryByLabelText('Stop price')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Order type'), { target: { value: 'stop_limit' } })
+    expect(screen.getByLabelText('Stop price')).toBeInTheDocument()
+    expect(screen.getByLabelText('Limit price')).toBeInTheDocument()
+  })
+
+  it('switches the chart between value and payoff', () => {
+    gotoActivity()
+    expandRow(single.contract)
+
+    const chart = within(screen.getByRole('group', { name: 'Chart view' }))
+    expect(chart.getByRole('button', { name: 'Value since entry' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(chart.getByRole('button', { name: 'Payoff at expiry' }))
+    // The payoff view carries the three numbers you'd otherwise read off
+    // the curve by eye.
+    expect(screen.getByText('Max loss')).toBeInTheDocument()
+    expect(screen.getByText('Max profit')).toBeInTheDocument()
+  })
+
+  it('names the strategy managing the position, and the exits it applies', () => {
+    gotoActivity()
+    const managed = PAPER.positions.find((p) => p.strategyId !== null)!
+    expandRow(managed.contract)
+
+    expect(screen.getByText(/Managed by/)).toBeInTheDocument()
+    expect(screen.getByText(/target 50%, stop 200%, 2 DTE/)).toBeInTheDocument()
+  })
+
+  it('says where an already-attached exit is held', () => {
+    gotoActivity()
+    const withExit = PAPER.positions.find((p) => p.attachedExit !== null)!
+    expandRow(withExit.contract)
+
+    // A broker-held exit survives Corollary being down; a Corollary-held
+    // one does not. The row is where that difference is visible.
+    expect(screen.getByText(/exit held at broker/)).toBeInTheDocument()
+  })
+})
+
+describe('Adding to a position', () => {
+  it('calls adding to a short a sell to open, not a buy', () => {
+    gotoActivity()
+    const short = PAPER.positions.find((p) => p.direction === 'short')!
+
+    fireEvent.click(within(rowFor(short.contract)).getByRole('button', { name: /^More actions for/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
+
+    // A button reading "Buy" here would name the opposite of the order.
+    expect(screen.getByText('Sell to open (STO)')).toBeInTheDocument()
+  })
+
+  it('grows the position and logs an opening fill with no P&L', () => {
+    gotoActivity()
+    const target = PAPER.positions[0]
+
+    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Review add' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Add to position' }))
+
+    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
+    expect(after.quantity).toBe(target.quantity + 1)
+    expect(useUIStore.getState().activity.paper[0].pnl).toBeNull()
+  })
+
+  it('shows the added risk as an estimate, never as an approval', () => {
+    gotoActivity()
+    const target = PAPER.positions[0]
+
+    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
+
+    // CLAUDE.md rule 4 — the engine enforces, the client never approves.
+    expect(screen.getByText(/The risk manager decides; this is an estimate/)).toBeInTheDocument()
+  })
+})
+
+describe('Attaching an exit', () => {
+  const target = PAPER.positions.find((p) => p.strategyId !== null && p.legs.length === 1)!
+
+  function openExitTicket() {
+    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Attach exit' }))
+  }
+
+  it('refuses a stop that is not clear of the take-profit', () => {
+    gotoActivity()
+    openExitTicket()
+
+    fireEvent.change(screen.getByLabelText('Take profit'), { target: { value: '3.00' } })
+    fireEvent.change(screen.getByLabelText('Stop'), { target: { value: '3.00' } })
+
+    // Alpaca rejects an OCO whose stop is not a cent clear of its base.
+    expect(screen.getByText(/at least \$0.01 below the take-profit/)).toBeInTheDocument()
+  })
+
+  it('attaches the exit and takes the position off its strategy', () => {
+    gotoActivity()
+    openExitTicket()
+
+    fireEvent.change(screen.getByLabelText('Take profit'), { target: { value: '3.00' } })
+    fireEvent.change(screen.getByLabelText('Stop'), { target: { value: '1.50' } })
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Ticket mode' }).parentElement!)
+        .getAllByRole('button', { name: 'Attach exit' })
+        .at(-1)!,
+    )
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Attach exit' }))
+
+    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
+    expect(after.attachedExit).not.toBeNull()
+    // Manual replaces managed — one party responsible for closing it.
+    expect(after.strategyId).toBeNull()
+    expect(screen.getByText(/Manually managed/)).toBeInTheDocument()
   })
 })
 

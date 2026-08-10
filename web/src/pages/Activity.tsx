@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { StatCard } from '../components/StatCard'
 import { AccountModeToggle } from '../components/AccountModeToggle'
-import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Pagination } from '../components/Pagination'
+import { PositionRow } from '../components/PositionRow'
 import { BankIcon, TrendingDownIcon, TrendingUpIcon } from '../components/icons'
 import {
   ExecutionsTable,
@@ -13,45 +13,37 @@ import {
 import { usePagination } from '../hooks/usePagination'
 import { useUIStore } from '../lib/store'
 import { downloadCsv } from '../lib/csv'
-import { ACCOUNT_LABEL, activityStats, type Position } from '../lib/mockData'
+import { ACCOUNT_LABEL, ACCOUNT_SNAPSHOTS, activityStats } from '../lib/mockData'
+import type { TicketMode } from '../lib/orders'
 import { formatPct, formatUsd, signClass } from '../lib/format'
 
 /** Deep enough that pagination is doing real work, short enough that the
  * whole page fits without the table becoming its own scroll region. */
 const PAGE_SIZE = 15
 
-/** Standard options multiplier. Note the trap CLAUDE.md flags: after a
- * split or special dividend, OCC issues an adjusted root (`AAPL1`) whose
- * deliverable is no longer 100 shares, and this arithmetic is wrong on
- * those. Phase 1 fixtures carry no adjusted contracts; when real positions
- * arrive in Phase 2 the multiplier has to come off the contract, not from
- * here. */
-const CONTRACT_MULTIPLIER = 100
-
-/** A long is sold to close at the bid and pays you; a short is bought back
- * at the ask and costs you. Presenting both as "proceeds" would show a
- * debit as though it were a credit — on the one screen where you're
- * deciding whether to take the trade off. */
-function closeEstimate(position: Position) {
-  const long = position.direction === 'long'
-  const price = long ? position.bid : position.ask
-  return { long, price, total: price * position.quantity * CONTRACT_MULTIPLIER }
-}
+/** Position, Last, Cost basis, Value, Qty, Unrealized P&L, Actions. The
+ * expanded panel spans all of them, so this has to stay in step with the
+ * header below or the panel will be narrower than the table. */
+const POSITION_COLUMNS = 7
 
 export function Activity() {
   const accountMode = useUIStore((s) => s.accountMode)
   const openPositions = useUIStore((s) => s.openPositions[s.accountMode])
   const activity = useUIStore((s) => s.activity[s.accountMode])
-  const closePosition = useUIStore((s) => s.closePosition)
 
   const [filter, setFilter] = useState<ActivityFilter>('all')
-  const [closeTarget, setCloseTarget] = useState<Position | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [ticketMode, setTicketMode] = useState<TicketMode>('close')
 
   const filtered = filter === 'all' ? activity : activity.filter((a) => a.status === filter)
   const { page, pageCount, pageItems, setPage } = usePagination(filtered, PAGE_SIZE)
 
   const stats = activityStats(activity)
   const accountLabel = ACCOUNT_LABEL[accountMode]
+  // Latest balance for this account, used only for the ticket's advisory
+  // risk estimate. The engine enforces the limit; this number informs.
+  const history = ACCOUNT_SNAPSHOTS[accountMode].portfolioHistory
+  const equity = history[history.length - 1].value
 
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
@@ -158,35 +150,22 @@ export function Activity() {
             </thead>
             <tbody>
               {openPositions.map((p) => (
-                <tr key={p.id} className="border-t border-outline/10 hover:bg-surface-container-low">
-                  <td className="max-w-0 px-3 py-2 text-body-md text-on-surface">
-                    <span className="block truncate" title={`${p.symbol} ${p.contract}`}>
-                      <span className="text-data-md">{p.symbol}</span> {p.contract}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-right text-data-md text-on-surface">{formatUsd(p.last)}</td>
-                  <td className="px-3 py-2 text-right text-data-md text-on-surface">
-                    {formatUsd(p.costBasis)}
-                  </td>
-                  <td className="px-3 py-2 text-right text-data-md text-on-surface">{formatUsd(p.value)}</td>
-                  <td className="px-3 py-2 text-right text-data-md text-on-surface">{p.quantity}</td>
-                  {/* Sign is carried textually as well as by colour — an
-                      explicit + or − on both figures (CLAUDE.md). */}
-                  <td className={`whitespace-nowrap px-3 py-2 text-right text-data-md ${signClass(p.pnl)}`}>
-                    {formatUsd(p.pnl, { signed: true })}
-                    <span className="ml-2 text-caption">{formatPct(p.pnlPct, { signed: true })}</span>
-                  </td>
-                  <td className="px-3 py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={() => setCloseTarget(p)}
-                      title={`Close ${p.symbol} ${p.contract}`}
-                      className="rounded border border-error px-3 py-1 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
-                    >
-                      Close
-                    </button>
-                  </td>
-                </tr>
+                <PositionRow
+                  key={p.id}
+                  position={p}
+                  columnCount={POSITION_COLUMNS}
+                  equity={equity}
+                  expanded={expandedId === p.id}
+                  mode={expandedId === p.id ? ticketMode : 'close'}
+                  // One row open at a time. With a handful of positions an
+                  // accordion keeps the page short and makes the target of
+                  // an action unambiguous.
+                  onToggle={() => setExpandedId((id) => (id === p.id ? null : p.id))}
+                  onSelectMode={(mode) => {
+                    setExpandedId(p.id)
+                    setTicketMode(mode)
+                  }}
+                />
               ))}
             </tbody>
           </table>
@@ -231,37 +210,6 @@ export function Activity() {
           </>
         )}
       </section>
-
-      <ConfirmDialog
-        open={closeTarget !== null}
-        title="Close this position?"
-        consequence={
-          closeTarget &&
-          (() => {
-            const { long, price, total } = closeEstimate(closeTarget)
-            return (
-              <>
-                {long ? 'Sells' : 'Buys back'} {closeTarget.quantity} × {closeTarget.symbol}{' '}
-                {closeTarget.contract} at market, crossing the {long ? 'bid' : 'ask'} at{' '}
-                {formatUsd(price)}. Current bid {formatUsd(closeTarget.bid)} / ask{' '}
-                {formatUsd(closeTarget.ask)}, so estimated {long ? 'proceeds' : 'cost to close'}{' '}
-                {formatUsd(total)}. Your other {openPositions.length - 1} position
-                {openPositions.length - 1 === 1 ? '' : 's'} and the engine's trading state are unchanged.
-              </>
-            )
-          })()
-        }
-        confirmLabel="Close position"
-        destructive
-        onConfirm={() => {
-          /* Phase 1 is mock data — nothing is submitted. When this is wired
-             up, the close goes through RiskManager.approve() like every
-             other order (CLAUDE.md rule 1). Do not call the broker here. */
-          if (closeTarget) closePosition(closeTarget.id)
-          setCloseTarget(null)
-        }}
-        onCancel={() => setCloseTarget(null)}
-      />
     </div>
   )
 }

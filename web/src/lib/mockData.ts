@@ -456,11 +456,83 @@ export function activityStats(items: ActivityItem[]): ActivityStats {
 // Open positions (Activity page)
 // ---------------------------------------------------------------------- //
 
+/** The standard options multiplier. One contract deliverable is 100
+ * shares — except on an adjusted contract (`AAPL1`, issued after a split
+ * or special dividend), where it is not, and every calculation here is
+ * wrong. Phase 1 carries no adjusted contracts; Phase 2 must read the
+ * multiplier off the contract rather than from this constant. */
+export const CONTRACT_MULTIPLIER = 100
+
+export type OrderType = 'market' | 'limit' | 'stop' | 'stop_limit'
+
+export const ORDER_TYPE_LABEL: Record<OrderType, string> = {
+  market: 'Market',
+  limit: 'Limit',
+  stop: 'Stop',
+  stop_limit: 'Stop-Limit',
+}
+
+/** Day and GTC are the only two an option order accepts — IOC, FOK, OPG
+ * and CLS are all rejected. Verified against Alpaca's order-type matrix. */
+export type TimeInForce = 'day' | 'gtc'
+
+export const TIME_IN_FORCE_LABEL: Record<TimeInForce, string> = {
+  day: 'Day',
+  gtc: 'GTC',
+}
+
+/** Where an attached exit physically lives. The difference is whether it
+ * survives Corollary being down: a broker-side OCO fires regardless, a
+ * Corollary-managed exit does not exist while the engine is stopped. The
+ * row says which, because that is not a detail. */
+export type ExitHolder = 'broker' | 'corollary'
+
+export interface PositionLeg {
+  /** OCC format: underlying + YYMMDD + C/P + 8-digit strike ×1000. */
+  symbol: string
+  strike: number
+  right: 'call' | 'put'
+  side: 'long' | 'short'
+  /** Alpaca requires leg ratios in simplest form — the GCD across a
+   * multi-leg order's ratios must be 1, or the order is rejected. */
+  ratio: number
+}
+
+/** A manual exit attached to a position, modelled on Alpaca's
+ * `order_class: oco`: a take-profit limit paired with a stop, where
+ * supplying `stopLimitPrice` makes the stop leg a stop-limit.
+ *
+ * A position holds at most one of these. Editing replaces it in place —
+ * cancelling and re-submitting would leave a window with no exit on the
+ * position at all, which is the window a fast market runs through. */
+export interface AttachedExit {
+  takeProfit: number
+  stopPrice: number
+  stopLimitPrice: number | null
+  timeInForce: TimeInForce
+  heldBy: ExitHolder
+}
+
+/** The exits a strategy manages on its own positions (PRD.md §5.1). These
+ * stop applying the moment the position is detached. */
+export interface ManagedExit {
+  profitTargetPct: number
+  stopLossPct: number
+  timeStopDte: number
+}
+
 export interface Position {
   id: string
   symbol: string
   contract: string
+  /** The **contract's** last traded price, not the underlying's — it sits
+   * between `bid` and `ask`, which is what anyone reading a row of three
+   * price columns already assumes. It held the underlying's price until
+   * the Open Positions rework; one row carrying two instruments with
+   * nothing in the names to say so was a bug waiting for a chart. */
   last: number
+  /** The underlying's price. Read by the payoff curve and nothing else. */
+  underlying: number
   costBasis: number
   value: number
   quantity: number
@@ -472,24 +544,140 @@ export interface Position {
    * sold to close at the bid, a short is bought to close at the ask — so
    * Flatten cannot generate a correct execution without it. */
   direction: 'long' | 'short'
+  /** More than one leg means multi-leg, which Alpaca will only accept as a
+   * limit order. Order-type availability is derived from this, never
+   * hardcoded per position. */
+  legs: PositionLeg[]
+  /** Which strategy manages this position, or null once detached. */
+  strategyId: string | null
+  managedExit: ManagedExit | null
+  attachedExit: AttachedExit | null
+  /** Position value over the life of the position. Starts at `costBasis`
+   * and ends at `value` — see buildValueHistory. */
+  valueHistory: PricePoint[]
+}
+
+/** Position value from entry to now. The endpoints are pinned rather than
+ * generated: the series has to start at the position's cost basis and end
+ * at its current value, or the chart quietly contradicts the row it
+ * expands from, which is worse than drawing no chart at all. The random
+ * walk only shapes the path between two fixed points. */
+function buildValueHistory(seed: number, costBasis: number, value: number, days: number): PricePoint[] {
+  const next = mulberry32(seed)
+  const points: PricePoint[] = []
+  const start = new Date('2026-08-07T00:00:00Z')
+  start.setUTCDate(start.getUTCDate() - days)
+
+  let day = new Date(start)
+  const sessions: Date[] = []
+  while (sessions.length < days) {
+    if (day.getUTCDay() !== 0 && day.getUTCDay() !== 6) sessions.push(new Date(day))
+    day.setUTCDate(day.getUTCDate() + 1)
+  }
+
+  const span = value - costBasis
+  sessions.forEach((d, i) => {
+    const t = i / (sessions.length - 1)
+    // Drift from cost basis to current value, wobbling around the line.
+    // Amplitude tapers to zero at both ends so the pinned endpoints don't
+    // arrive as a visible discontinuity.
+    const wobble = (next() - 0.5) * costBasis * 0.18 * Math.sin(Math.PI * t)
+    const raw = costBasis + span * t + wobble
+    points.push({ date: d.toISOString().slice(0, 10), value: Math.round(Math.max(raw, 1) * 100) / 100 })
+  })
+
+  points[0] = { ...points[0], value: costBasis }
+  points[points.length - 1] = { ...points[points.length - 1], value }
+  return points
 }
 
 /* Both books carry a long and a short, because the two close along
  * different paths — a long is sold to close at the bid, a short is bought
  * to close at the ask — and Close is a per-row action on Activity in both
- * accounts. A book with only longs leaves the BTC path unexercised. */
+ * accounts. A book with only longs leaves the BTC path unexercised. Each
+ * book also carries a multi-leg position, so the limit-only order path is
+ * reachable in either account.
+ *
+ * Every position here is internally consistent, and `mockData.test.ts`
+ * asserts it: `last` sits within [bid, ask], `value` equals
+ * last × quantity × 100, and `pnl` runs the right way for the direction —
+ * a long gains as value rises, a short as it falls. */
 const PAPER_POSITIONS: Position[] = [
-  { id: 'pos-1', symbol: 'AAPL', contract: '$230 Call Oct 17', last: 232.4, costBasis: 350.0, value: 412.0, quantity: 2, pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long' },
-  { id: 'pos-2', symbol: 'TSLA', contract: '$240 Put Nov 15', last: 238.1, costBasis: 410.0, value: 307.5, quantity: 1, pnl: -102.5, pnlPct: -25.0, bid: 3.02, ask: 3.12, direction: 'long' },
-  { id: 'pos-3', symbol: 'SPY', contract: '$430/$425 Put Credit Spread Oct 17', last: 429.88, costBasis: 210.0, value: 168.0, quantity: 3, pnl: 42.0, pnlPct: 20.0, bid: 0.55, ask: 0.6, direction: 'short' },
+  {
+    id: 'pos-1', symbol: 'AAPL', contract: '$230 Call Oct 17',
+    last: 2.06, underlying: 232.4, costBasis: 350.0, value: 412.0, quantity: 2,
+    pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long',
+    legs: [{ symbol: 'AAPL261017C00230000', strike: 230, right: 'call', side: 'long', ratio: 1 }],
+    strategyId: 'strat-1',
+    managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260901, 350.0, 412.0, 24),
+  },
+  {
+    id: 'pos-2', symbol: 'TSLA', contract: '$240 Put Nov 15',
+    last: 3.0, underlying: 238.1, costBasis: 400.0, value: 300.0, quantity: 1,
+    pnl: -100.0, pnlPct: -25.0, bid: 2.96, ask: 3.04, direction: 'long',
+    legs: [{ symbol: 'TSLA261115P00240000', strike: 240, right: 'put', side: 'long', ratio: 1 }],
+    strategyId: 'strat-1',
+    managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260902, 400.0, 300.0, 18),
+  },
+  {
+    id: 'pos-3', symbol: 'SPY', contract: '$430/$425 Put Credit Spread Oct 17',
+    last: 0.56, underlying: 429.88, costBasis: 210.0, value: 168.0, quantity: 3,
+    pnl: 42.0, pnlPct: 20.0, bid: 0.55, ask: 0.6, direction: 'short',
+    legs: [
+      { symbol: 'SPY261017P00430000', strike: 430, right: 'put', side: 'short', ratio: 1 },
+      { symbol: 'SPY261017P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 },
+    ],
+    strategyId: 'strat-1',
+    managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260903, 210.0, 168.0, 21),
+  },
   // Flat, deliberately: signClass has a zero branch and text-on-surface-variant
   // is the one colour a P&L column reaches for that isn't a gain or a loss.
-  { id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20', last: 372.4, costBasis: 640.0, value: 640.0, quantity: 1, pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long' },
+  // Also the one position already carrying a manual exit, so the "Edit exit"
+  // state and the broker/Corollary label are both reachable on load.
+  {
+    id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20',
+    last: 6.4, underlying: 372.4, costBasis: 640.0, value: 640.0, quantity: 1,
+    pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long',
+    legs: [{ symbol: 'QQQ261220C00370000', strike: 370, right: 'call', side: 'long', ratio: 1 }],
+    strategyId: null,
+    managedExit: null,
+    attachedExit: { takeProfit: 9.6, stopPrice: 4.5, stopLimitPrice: 4.4, timeInForce: 'gtc', heldBy: 'broker' },
+    valueHistory: buildValueHistory(20260904, 640.0, 640.0, 15),
+  },
 ]
 
 const CASH_POSITIONS: Position[] = [
-  { id: 'cash-pos-1', symbol: 'SPY', contract: '$425 Put Sep 19', last: 429.88, costBasis: 186.0, value: 162.0, quantity: 1, pnl: -24.0, pnlPct: -12.9, bid: 1.6, ask: 1.66, direction: 'long' },
-  { id: 'cash-pos-2', symbol: 'MSFT', contract: '$410/$400 Put Credit Spread Oct 17', last: 418.35, costBasis: 140.0, value: 98.0, quantity: 2, pnl: 42.0, pnlPct: 30.0, bid: 0.47, ask: 0.52, direction: 'short' },
+  {
+    id: 'cash-pos-1', symbol: 'SPY', contract: '$425 Put Sep 19',
+    last: 1.62, underlying: 429.88, costBasis: 186.0, value: 162.0, quantity: 1,
+    pnl: -24.0, pnlPct: -12.9, bid: 1.6, ask: 1.66, direction: 'long',
+    legs: [{ symbol: 'SPY260919P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 }],
+    strategyId: 'strat-2',
+    managedExit: { profitTargetPct: 40, stopLossPct: 150, timeStopDte: 3 },
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260905, 186.0, 162.0, 12),
+  },
+  {
+    id: 'cash-pos-2', symbol: 'MSFT', contract: '$410/$400 Put Credit Spread Oct 17',
+    last: 0.49, underlying: 418.35, costBasis: 140.0, value: 98.0, quantity: 2,
+    pnl: 42.0, pnlPct: 30.0, bid: 0.47, ask: 0.52, direction: 'short',
+    legs: [
+      { symbol: 'MSFT261017P00410000', strike: 410, right: 'put', side: 'short', ratio: 1 },
+      { symbol: 'MSFT261017P00400000', strike: 400, right: 'put', side: 'long', ratio: 1 },
+    ],
+    // Detached and Corollary-managed, so the counterpart to pos-4's
+    // broker-held exit is on screen somewhere too.
+    strategyId: null,
+    managedExit: null,
+    attachedExit: { takeProfit: 0.2, stopPrice: 1.1, stopLimitPrice: null, timeInForce: 'day', heldBy: 'corollary' },
+    valueHistory: buildValueHistory(20260906, 140.0, 98.0, 16),
+  },
 ]
 
 // ---------------------------------------------------------------------- //
