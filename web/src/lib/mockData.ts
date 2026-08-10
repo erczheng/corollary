@@ -34,6 +34,15 @@ const rand = mulberry32(20260807)
  * In Phase 2 this keys the API request instead. */
 export type AccountMode = 'paper' | 'cash'
 
+/** The session every fixture is written relative to.
+ *
+ * Days-to-expiry is measured from here rather than from the real clock, so
+ * a fixture doesn't rot: tied to `new Date()`, a position written five
+ * days from expiry silently becomes an expired one next week and the
+ * near-expiry state stops being reachable. Phase 2 replaces this with the
+ * market calendar's today. */
+export const MARKET_TODAY = '2026-08-07'
+
 export interface PricePoint {
   date: string // ISO date
   value: number
@@ -556,6 +565,12 @@ export interface Position {
    * limit order. Order-type availability is derived from this, never
    * hardcoded per position. */
   legs: PositionLeg[]
+  /** Calendar date (YYYY-MM-DD), not an instant — the single most
+   * time-sensitive fact about an option, and until now it existed only
+   * inside the contract string and the legs' OCC symbols, where nothing
+   * could count it down. Render with `formatExpiry`, which formats in UTC;
+   * formatting a date-only value in ET shows the previous day. */
+  expiry: string
   /** Which strategy manages this position, or null once detached. */
   strategyId: string | null
   /** Which strategy opened it. Never cleared, so detaching is reversible:
@@ -621,6 +636,7 @@ const PAPER_POSITIONS: Position[] = [
     last: 2.06, underlying: 232.4, costBasis: 350.0, value: 412.0, quantity: 2,
     pnl: 62.0, pnlPct: 17.71, bid: 2.04, ask: 2.08, direction: 'long',
     legs: [{ symbol: 'AAPL261017C00230000', strike: 230, right: 'call', side: 'long', ratio: 1 }],
+    expiry: '2026-10-17',
     strategyId: 'strat-1',
     openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
@@ -632,6 +648,7 @@ const PAPER_POSITIONS: Position[] = [
     last: 3.0, underlying: 238.1, costBasis: 400.0, value: 300.0, quantity: 1,
     pnl: -100.0, pnlPct: -25.0, bid: 2.96, ask: 3.04, direction: 'long',
     legs: [{ symbol: 'TSLA261115P00240000', strike: 240, right: 'put', side: 'long', ratio: 1 }],
+    expiry: '2026-11-15',
     strategyId: 'strat-1',
     openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
@@ -646,6 +663,7 @@ const PAPER_POSITIONS: Position[] = [
       { symbol: 'SPY261017P00430000', strike: 430, right: 'put', side: 'short', ratio: 1 },
       { symbol: 'SPY261017P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 },
     ],
+    expiry: '2026-10-17',
     strategyId: 'strat-1',
     openedByStrategyId: 'strat-1',
     managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
@@ -657,10 +675,11 @@ const PAPER_POSITIONS: Position[] = [
   // Also the one position already carrying a manual exit, so the "Edit exit"
   // state and the broker/Corollary label are both reachable on load.
   {
-    id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Dec 20',
+    id: 'pos-4', symbol: 'QQQ', contract: '$370 Call Aug 14',
     last: 6.4, underlying: 372.4, costBasis: 640.0, value: 640.0, quantity: 1,
     pnl: 0, pnlPct: 0, bid: 6.35, ask: 6.45, direction: 'long',
-    legs: [{ symbol: 'QQQ261220C00370000', strike: 370, right: 'call', side: 'long', ratio: 1 }],
+    legs: [{ symbol: 'QQQ260814C00370000', strike: 370, right: 'call', side: 'long', ratio: 1 }],
+    expiry: '2026-08-14',
     strategyId: null,
     openedByStrategyId: 'strat-1',
     managedExit: null,
@@ -675,6 +694,7 @@ const CASH_POSITIONS: Position[] = [
     last: 1.62, underlying: 429.88, costBasis: 186.0, value: 162.0, quantity: 1,
     pnl: -24.0, pnlPct: -12.9, bid: 1.6, ask: 1.66, direction: 'long',
     legs: [{ symbol: 'SPY260919P00425000', strike: 425, right: 'put', side: 'long', ratio: 1 }],
+    expiry: '2026-09-19',
     strategyId: 'strat-2',
     openedByStrategyId: 'strat-2',
     managedExit: { profitTargetPct: 40, stopLossPct: 150, timeStopDte: 3 },
@@ -691,6 +711,7 @@ const CASH_POSITIONS: Position[] = [
     ],
     // Detached and Corollary-managed, so the counterpart to pos-4's
     // broker-held exit is on screen somewhere too.
+    expiry: '2026-10-17',
     strategyId: null,
     openedByStrategyId: 'strat-2',
     managedExit: null,

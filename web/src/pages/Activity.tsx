@@ -25,10 +25,10 @@ import { formatPct, formatUsd, signClass } from '../lib/format'
  * whole page fits without the table becoming its own scroll region. */
 const PAGE_SIZE = 15
 
-/** Position, Last, Cost basis, Value, Qty, Unrealized P&L, Actions. The
- * expanded panel spans all of them, so this has to stay in step with the
- * header below or the panel will be narrower than the table. */
-const POSITION_COLUMNS = 7
+/** Position, DTE, Last, Cost basis, Value, Qty, Unrealized P&L, Actions.
+ * The expanded panel spans all of them, so this has to stay in step with
+ * the header below or the panel will be narrower than the table. */
+const POSITION_COLUMNS = 8
 
 /** How often a price arrives. Stands in for the Alpaca WebSocket, which
  * Phase 2 puts in its place.
@@ -45,6 +45,7 @@ export function Activity() {
   const activity = useUIStore((s) => s.activity[s.accountMode])
 
   const [filter, setFilter] = useState<ActivityFilter>('all')
+  const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [ticketMode, setTicketMode] = useState<TicketMode>('close')
   // Prices stream while the page is open. Only the active account ticks —
@@ -57,7 +58,15 @@ export function Activity() {
   // to make the skeletons appear would have been theatre.
   const loading = useUIStore((s) => s.lastTickAt) === null
 
-  const filtered = filter === 'all' ? activity : activity.filter((a) => a.status === filter)
+  // Symbol search. Matches the contract text, which carries the symbol —
+  // "everything I did in AAPL" is the question a 50-row ledger raises and
+  // a status filter cannot answer.
+  const query = search.trim().toLowerCase()
+  const filtered = activity.filter(
+    (a) =>
+      (filter === 'all' || a.status === filter) &&
+      (query === '' || a.contract.toLowerCase().includes(query) || a.action.toLowerCase().includes(query)),
+  )
   const { page, pageCount, pageItems, setPage } = usePagination(filtered, PAGE_SIZE)
 
   const stats = activityStats(activity)
@@ -168,6 +177,9 @@ export function Activity() {
                   Position
                 </th>
                 <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
+                  DTE
+                </th>
+                <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
                   Last
                 </th>
                 <th className="whitespace-nowrap px-3 py-2 text-right text-label-md uppercase text-on-surface-variant">
@@ -215,6 +227,17 @@ export function Activity() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Recent Activity</h2>
           <div className="flex items-center gap-2">
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value)
+                setPage(1)
+              }}
+              aria-label="Search activity by symbol or contract"
+              placeholder="Search symbol…"
+              className="w-44 rounded border border-outline bg-surface px-2 py-2 text-label-md text-on-surface placeholder:text-on-surface-variant focus:border-primary"
+            />
             <StatusFilterSelect
               value={filter}
               onChange={(next) => {
@@ -239,9 +262,11 @@ export function Activity() {
           <TableSkeleton rows={6} columns={7} label="Loading activity" />
         ) : filtered.length === 0 ? (
           <p className="px-4 py-6 text-body-md text-on-surface-variant">
-            {filter === 'all'
-              ? 'No activity in this account yet. Fills, rejections and cash movements all land here.'
-              : `No ${filter} activity in this account. Other statuses may have rows — clear the filter to see them.`}
+            {query !== ''
+              ? `Nothing matching “${search.trim()}”${filter === 'all' ? '' : ` with status ${filter}`}. Clear the search to see the rest of the ledger.`
+              : filter === 'all'
+                ? 'No activity in this account yet. Fills, rejections and cash movements all land here.'
+                : `No ${filter} activity in this account. Other statuses may have rows — clear the filter to see them.`}
           </p>
         ) : (
           <>

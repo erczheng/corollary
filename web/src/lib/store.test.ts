@@ -285,6 +285,47 @@ describe('the price tick', () => {
     }
   })
 
+  it('moves the underlying too, not just the contract', () => {
+    const before = useUIStore.getState().underlyings
+    useUIStore.getState().tick()
+    const after = useUIStore.getState().underlyings
+
+    // A page that streams contract prices while the stock behind them sits
+    // frozen is only half live, and the payoff chart's "now" marker would
+    // never move.
+    const held = new Set(PAPER.positions.map((p) => p.symbol))
+    for (const symbol of held) {
+      expect(after[symbol].price).not.toBe(before[symbol].price)
+      // Today's point *is* today's price, so it moves rather than a new
+      // daily close being appended every two seconds.
+      expect(after[symbol].history).toHaveLength(before[symbol].history.length)
+      expect(after[symbol].history[after[symbol].history.length - 1].value).toBe(after[symbol].price)
+      // The day is still measured from yesterday's close.
+      expect(after[symbol].change).toBeCloseTo(after[symbol].price - after[symbol].previousClose, 2)
+    }
+  })
+
+  it('keeps every position in step with the quote for its symbol', () => {
+    useUIStore.getState().tick()
+
+    for (const p of useUIStore.getState().openPositions.paper) {
+      expect(p.underlying).toBe(useUIStore.getState().underlyings[p.symbol].price)
+    }
+  })
+
+  it('streams only the symbols the active account actually holds', () => {
+    const before = useUIStore.getState().underlyings
+    useUIStore.getState().tick()
+    const after = useUIStore.getState().underlyings
+
+    // The 30-symbol cap on the Basic plan is why the subscription is
+    // scoped to open positions rather than to every symbol we know about.
+    const held = new Set(PAPER.positions.map((p) => p.symbol))
+    for (const symbol of Object.keys(before)) {
+      if (!held.has(symbol)) expect(after[symbol]).toBe(before[symbol])
+    }
+  })
+
   it('records when the last price arrived', () => {
     expect(useUIStore.getState().lastTickAt).toBeNull()
     useUIStore.getState().tick()

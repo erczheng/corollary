@@ -1,13 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { ACCOUNT_SNAPSHOTS, UNDERLYINGS, type Position } from './mockData'
+import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS, type Position } from './mockData'
 import {
   MULTI_LEG_NOTE,
   availableOrderTypes,
   breakevens,
   crossingPrice,
+  daysToExpiry,
   estimate,
   exitTrigger,
+  expiryUrgency,
+  expiryWarningDte,
   orderWouldFill,
+  DEFAULT_EXPIRY_WARNING_DTE,
   isMultiLeg,
   maxLoss,
   maxProfit,
@@ -264,6 +268,56 @@ describe('payoff at expiry', () => {
 /** Sells fill at or above their limit and trigger at or below their stop;
  * buys are the mirror. The asymmetry is the whole point of the two order
  * types and is trivially easy to write backwards. */
+describe('expiry', () => {
+  it('counts calendar days in UTC on both sides', () => {
+    expect(daysToExpiry('2026-08-14', '2026-08-07')).toBe(7)
+    expect(daysToExpiry('2026-08-07', '2026-08-07')).toBe(0)
+    // Past expiries go negative rather than clamping — an expired position
+    // is a different state from one expiring today.
+    expect(daysToExpiry('2026-08-01', '2026-08-07')).toBe(-6)
+  })
+
+  it('crosses a month boundary without drifting', () => {
+    expect(daysToExpiry('2026-09-01', '2026-08-31')).toBe(1)
+    expect(daysToExpiry('2026-10-17', '2026-08-07')).toBe(71)
+  })
+
+  it('uses the strategy’s own time stop as the warning threshold', () => {
+    const managed = PAPER.find((p) => p.managedExit !== null)!
+    // The point at which the engine would close it anyway is the number
+    // that matters for that position.
+    expect(expiryWarningDte(managed)).toBe(managed.managedExit!.timeStopDte)
+
+    const detached = PAPER.find((p) => p.managedExit === null)!
+    expect(expiryWarningDte(detached)).toBe(DEFAULT_EXPIRY_WARNING_DTE)
+  })
+
+  it('separates expired, expiring today, near and normal', () => {
+    const p = PAPER[0]
+    expect(expiryUrgency({ ...p, expiry: '2026-08-01' }, '2026-08-07')).toBe('expired')
+    expect(expiryUrgency({ ...p, expiry: '2026-08-07' }, '2026-08-07')).toBe('today')
+    expect(expiryUrgency({ ...p, expiry: '2026-08-08', managedExit: null }, '2026-08-07')).toBe('near')
+    expect(expiryUrgency({ ...p, expiry: '2026-12-01', managedExit: null }, '2026-08-07')).toBe('normal')
+  })
+
+  it('agrees with the OCC symbol on every leg', () => {
+    // OCC format: underlying + YYMMDD + C/P + strike. The expiry field and
+    // the symbols have to say the same thing, or the countdown is
+    // counting down to a different contract than the one being held.
+    for (const p of [...PAPER, ...CASH]) {
+      const yymmdd = p.expiry.slice(2).replace(/-/g, '')
+      for (const leg of p.legs) {
+        expect(leg.symbol).toContain(yymmdd)
+        expect(leg.symbol.startsWith(p.symbol)).toBe(true)
+      }
+    }
+  })
+
+  it('keeps at least one position near expiry, so the state is reachable', () => {
+    expect([...PAPER, ...CASH].some((p) => expiryUrgency(p, MARKET_TODAY) !== 'normal')).toBe(true)
+  })
+})
+
 describe('orderWouldFill', () => {
   const sellLimit = { side: 'STC' as const, orderType: 'limit' as const, limitPrice: 3, stopPrice: null }
   const buyLimit = { side: 'BTC' as const, orderType: 'limit' as const, limitPrice: 3, stopPrice: null }

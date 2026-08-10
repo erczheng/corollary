@@ -4,8 +4,9 @@ import { OrderTicket } from './OrderTicket'
 import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { formatStrategyName, formatPct, formatUsd, signClass } from '../lib/format'
-import { STRATEGIES, TIME_IN_FORCE_LABEL, UNDERLYINGS, type Position } from '../lib/mockData'
-import { isMultiLeg, type TicketMode } from '../lib/orders'
+import { MARKET_TODAY, STRATEGIES, TIME_IN_FORCE_LABEL, type Position } from '../lib/mockData'
+import { daysToExpiry, expiryUrgency, isMultiLeg, type TicketMode } from '../lib/orders'
+import { formatExpiry } from '../lib/format'
 
 const CELL = 'px-3 py-2 text-right text-data-md text-on-surface'
 
@@ -145,7 +146,9 @@ export function PositionRow({
   // it back to — not whichever strategy is active now.
   const openedBy = STRATEGIES.find((s) => s.id === position.openedByStrategyId)
   const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
-  const underlying = UNDERLYINGS[position.symbol] ?? null
+  const underlying = useUIStore((s) => s.underlyings[position.symbol]) ?? null
+  const dte = daysToExpiry(position.expiry, MARKET_TODAY)
+  const urgency = expiryUrgency(position, MARKET_TODAY)
 
   return (
     <>
@@ -175,6 +178,16 @@ export function PositionRow({
               </span>
             )}
           </button>
+        </td>
+        {/* Days to expiry. The most time-sensitive fact about an option,
+            and the page said nothing about it until now — it lived only
+            inside the contract string, where nothing could count it down.
+            `caution`, never `error`: a position running out of time is
+            not a system failure, it's a deadline. */}
+        <td className={`${CELL} ${urgency === 'normal' ? '' : 'text-caution'}`}>
+          <span title={`Expires ${formatExpiry(position.expiry)}`}>
+            {dte < 0 ? 'Expired' : dte === 0 ? 'Today' : `${dte}d`}
+          </span>
         </td>
         <td className={CELL}>{formatUsd(position.last)}</td>
         <td className={CELL}>{formatUsd(position.costBasis)}</td>

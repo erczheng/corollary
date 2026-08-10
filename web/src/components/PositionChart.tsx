@@ -9,7 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { UNDERLYINGS, type Position } from '../lib/mockData'
+import { type Position } from '../lib/mockData'
+import { useUIStore } from '../lib/store'
 import { breakevens, maxLoss, maxProfit, payoffCurve } from '../lib/orders'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 
@@ -39,7 +40,10 @@ export function PositionChart({ position }: { position: Position }) {
 
   const payoff = useMemo(() => payoffCurve(position), [position])
   const payoffBreakevens = useMemo(() => breakevens(payoff), [payoff])
-  const underlying = UNDERLYINGS[position.symbol] ?? null
+  // From the store, not the fixture: the tick moves these, and a chart
+  // reading the frozen module constant would sit still while the row above
+  // it changed.
+  const underlying = useUIStore((s) => s.underlyings[position.symbol]) ?? null
 
   return (
     <div>
