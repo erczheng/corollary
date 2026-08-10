@@ -401,6 +401,30 @@
     outline-offset: 2px;
   }
 
+  /* ...but not when you drove the focus with a mouse.
+     `:focus-visible` does not cover this on its own: per spec a text field
+     matches it whenever it is focused, clicked or tabbed, so every input
+     and select rang on click while buttons correctly stayed quiet. The
+     modality comes from useFocusModality, and defaults to keyboard — an
+     unnecessary ring is a much cheaper mistake than an interface you
+     cannot see your way around.
+
+     `!important` because Recharts and a few third-party controls set their
+     own focus outlines inline. */
+  html[data-modality='pointer'] :focus,
+  html[data-modality='pointer'] :focus-visible {
+    outline: none !important;
+  }
+
+  /* A chart is not a control you focus deliberately. Recharts makes its
+     wrapper focusable and rings it on click; nothing about that helps
+     anyone, in either modality. */
+  .recharts-wrapper:focus,
+  .recharts-wrapper *:focus,
+  .recharts-surface:focus {
+    outline: none;
+  }
+
   /* Accessibility floor: prefers-reduced-motion collapses every
      transition and animation to near-zero, globally — enforced once
      here rather than left to each component to remember. See

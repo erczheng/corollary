@@ -203,8 +203,16 @@ export function PositionRow({
       {expanded && (
         <tr className="border-t border-outline/10 bg-surface-container-lowest">
           <td colSpan={columnCount} className="px-3 py-4">
-            <div className="mb-4">
+            <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
               <ExitStatus position={position} strategyName={strategyName} />
+              {/* The underlying, stated. The Last column shows the
+                  *contract's* mark, which is what you close at — so
+                  without this the price the payoff curve is drawn against
+                  appears nowhere as a number. */}
+              <p className="whitespace-nowrap text-label-md text-on-surface-variant">
+                {position.symbol} underlying{' '}
+                <span className="text-data-md text-on-surface">{formatUsd(position.underlying)}</span>
+              </p>
             </div>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
               <PositionChart position={position} />
