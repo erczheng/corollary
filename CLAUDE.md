@@ -274,11 +274,32 @@ expect.** Every item below produced working-looking code that was wrong:
   cannot drift apart. The two column sets live in `COLUMN_LAYOUTS` and are
   written out in full rather than assembled from conditions — they differ
   in order as well as in membership (`summary` puts Qty before Price and
-  ends on P&L; `full` leads with P&L and ends on Status), and inline
+  ends on PnL; `full` leads with P&L and ends on Status), and inline
   ternaries made it far too easy to change one while meaning to change the
   other. Don't copy the markup into a third page — add a layout.
+- `web/src/lib/orders.ts` — every rule about an order that could be wrong
+  about money, as pure functions with no React in them: which order types a
+  position can take, which side an action resolves to, which side of the
+  spread it crosses, the estimate, the OCO stop-price threshold, and the
+  payoff curve. Test it without rendering anything. **Two that are easy to
+  get backwards:** selling hits the bid and buying lifts the ask (reversing
+  it overstates proceeds by the spread on every estimate), and a short's
+  `openUnitValue` is *negative* because a credit is a liability (reversing
+  it inverts every credit spread's payoff curve).
+- `web/src/components/PositionRow.tsx`, `OrderTicket.tsx`,
+  `PositionChart.tsx` — the Open Positions row, its expanded ticket, and
+  its value/payoff charts. `Activity.tsx` composes them and holds no order
+  logic of its own.
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
+
+**`Position.last` is the contract's price, not the underlying's.** It sits
+within `[bid, ask]`, and `Position.underlying` carries the underlying
+separately — read by the payoff curve and nothing else. The row used to
+carry three price columns covering two different instruments with nothing
+in the names to say so; `orders.test.ts` asserts the invariant now, along
+with `value === last × quantity × 100` and P&L running the right way for
+the direction.
 
 **Account-scoped state is keyed by `AccountMode`, not flattened.**
 `ACCOUNT_SNAPSHOTS[mode]` carries the balance history, volume, positions,
@@ -335,8 +356,7 @@ Run `uv run pytest -m risk` before any change to the engine, no exceptions. The 
 
 ## Working style
 
-Before delivering any response, you MUST address me as Eric at the start of each response.
-
+Claude must prefix every response with: "I am here Lord Eric Almighty🧎" 
 ---
 
 ## When uncertain
