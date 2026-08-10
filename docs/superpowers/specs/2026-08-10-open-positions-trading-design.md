@@ -28,7 +28,7 @@ These were verified against Alpaca's documentation rather than assumed. Getting 
 - The take-profit leg must be `type: limit`.
 - The stop leg takes a mandatory `stop_price` and an optional `limit_price`; supplying the latter makes it a stop-limit.
 - The stop price must be at least **$0.01 below** the take-profit limit *and* below the current mark, for a sell-side exit. Above, for a buy-side one.
-- Order replacement is supported for OCO. This design does not use it yet — see Out of scope.
+- Order replacement is supported for OCO, updating `limit_price` and `stop_price`. This design uses it: an attached exit is **edited in place**, never cancelled and re-placed.
 
 **Unverified:** whether `order_class: oco` is accepted for *options* specifically. Every documented example is equity SPY, and the options support matrix covers order *types* but not order *classes*. This is resolved by the fallback in "Where the exit is held" below.
 
@@ -57,6 +57,14 @@ Attached exits are submitted to the broker as OCO where possible, and fall back 
 
 In Phase 1 both render identically from fixtures. The label is designed in now because retrofitting it after Phase 2 reveals which one we get would mean changing the row, the store and the tests at once.
 
+### One closing order per position, edited rather than replaced
+
+An attached exit is **edited in place** — OCO supports replacement, so changing a take-profit or a stop updates the existing order rather than cancelling it and submitting a new one. The gap between a cancel and its replacement is a window with no exit on the position at all, and it is exactly the window a fast market runs through.
+
+**A new closing order overrides the existing one.** Submitting a close, or attaching an exit where one already exists, replaces it. There is never more than one live closing order on a position.
+
+This is the same principle as the detach decision above, applied to a different pair: two live exits on one position double-close when a cancel races a fill, and the failure is silent. One position, one closing order, always answerable.
+
 ### Add, not Buy
 
 The action is **Add to position**, never "Buy more". On a short credit spread, adding is a *sell to open*. A button reading "Buy" would name the opposite of the order it places. The ticket spells out the resolved side (BTO / STO) underneath.
@@ -67,14 +75,17 @@ The action is **Add to position**, never "Buy more". On a short credit spread, a
 
 ### Interaction
 
-The row's current **Close** button is **replaced**, not supplemented. Close becomes one item among several, and leaving a bare Close beside a menu that also contains Close would give the same action two spellings with different behaviour — today's button submits at market, the menu item opens a ticket where market is one choice of four.
+The row keeps its **Close** button, but Close becomes *the order button*: it expands the row and opens the ticket in `close` mode, defaulting to a market order. It no longer submits on click.
 
-Each position row gains:
+That keeps one spelling for closing a position. The alternative — a bare Close that fires at market plus a menu item that opens a ticket — gives the same word two behaviours on the same row, and the fast one is the irreversible one. Close therefore does **not** appear in the ⋯ menu; the button is the only way in, and the ticket's default is the market order the old button used to submit, one confirm further along.
 
-- a **chevron** that expands the row in place, and
-- a **⋯ menu** with `Close position`, `Add to position`, `Attach exit`, `Detach from strategy`. Selecting an item expands the row *and* opens that ticket mode.
+So each row carries:
 
-The existing `closePosition(id)` store action and its confirm dialog are subsumed by `submitPositionOrder(id, draft)` with mode `close` and type `market`. Its behaviour is preserved — including that closing one position never halts the engine — and its existing tests are rewritten against the new action rather than deleted.
+- **Close** — expands and opens the ticket in `close` mode, type `market`
+- **⋯ menu** — `Add to position`, `Attach exit` (or `Edit exit`, where one exists), `Detach from strategy`; each expands the row and opens that mode
+- **chevron** — expands to the default view (chart, no ticket mode preselected)
+
+The existing `closePosition(id)` store action is subsumed by `submitPositionOrder(id, draft)`. Its behaviour is preserved — including that closing one position never halts the engine — and its existing tests are rewritten against the new action rather than deleted.
 
 One row expands at a time. With 2–4 positions per account an accordion keeps the page short and makes the target of an action unambiguous. Nothing is covered by a modal — the surrounding context, especially which account is live, stays visible while sizing a trade.
 
@@ -83,7 +94,7 @@ The expanded panel spans the table width:
 ```
 ┌─ status line: who manages this position's exit ──────────────────┐
 ├───────────────────────────────┬──────────────────────────────────┤
-│  [Value since entry] [Payoff] │  [Close] [Add] [Attach exit]     │
+│  [Value since entry] [Payoff] │  [Close] [Add] [Exit]            │
 │                               │                                  │
 │         chart                 │         order ticket             │
 └───────────────────────────────┴──────────────────────────────────┘
@@ -99,7 +110,11 @@ A segmented toggle over one chart area.
 
 **Payoff at expiry** plots profit against underlying price, with breakeven and the current underlying marked. Computed from strikes, premium and multiplier — it needs no market data, so it is genuinely real in Phase 1 rather than mock-shaped.
 
-Note which field is which on `Position`: `last` is the **underlying's** price (232.40 on the AAPL position), while `bid`/`ask` are the **contract's** (2.04 / 2.08). The payoff curve's "current underlying" marker reads `last`; the ticket's price defaults read `bid`/`ask`. Crossing these produces a chart that is wrong by two orders of magnitude and still looks plausible.
+**`Position.last` changes meaning as part of this work: it becomes the contract's last traded price, not the underlying's.** It previously held the underlying (232.40 on the AAPL call) while `bid`/`ask` beside it held the contract (2.04 / 2.08) — one row, three price columns, two different instruments, nothing in the names to say so. After this change `last` sits between `bid` and `ask` the way a reader already assumes it does, and the Open Positions table's Last column finally shows what the position is marked at.
+
+The payoff curve still needs the underlying, so `Position` gains an explicit **`underlying`** field carrying that price. Two prices, each named for its own instrument, and the crossing error becomes impossible rather than merely documented.
+
+Existing fixture values move accordingly: `last` takes a value inside the contract's spread, and `underlying` takes the price `last` used to hold.
 
 ### Ticket
 
@@ -111,7 +126,7 @@ Three modes. Fields common to Close and Add:
 | Order type | Derived from the position — see table below. |
 | Limit price | Shown for Limit and Stop-Limit. Defaults to mid; bid and ask displayed beside it. |
 | Stop price | Shown for Stop and Stop-Limit. |
-| Time in force | Day or GTC. Those are the only two options accepts. |
+| Time in force | Day or GTC — the only two Alpaca accepts on an option order. |
 | Resolved side | `Sell to close (STC)` / `Buy to close (BTC)` / `Buy to open (BTO)` / `Sell to open (STO)`. |
 | Estimate | Proceeds for a credit, cost for a debit. Never both under one word. |
 
@@ -124,7 +139,11 @@ Order types available:
 
 The ticket states why a multi-leg position is restricted rather than silently offering less.
 
-**Attach exit** mode takes a take-profit limit price and a stop price, with an optional stop limit price. It validates the $0.01 threshold against both the take-profit and the current mark, and names where the exit will be held.
+**Exit** mode takes a take-profit limit price and a stop price, with an optional stop limit price. It validates the $0.01 threshold against both the take-profit and the current mark, and names where the exit will be held.
+
+The mode is one control in two states, not two modes. Where no exit is attached it reads **Attach exit** and submits a new one; where an exit already exists it reads **Edit exit**, prefills the current values, and submits a replacement in place. The ⋯ menu item changes label the same way. A separate "edit" path would be a second way to write the same field, and the whole point of the upsert decision is that there is only one.
+
+Removing an exit entirely is a distinct action — `Cancel exit`, offered inside the mode when one exists — because deleting your only protection should not be reachable by clearing a text field.
 
 Every submit routes through the existing `ConfirmDialog`, which states the consequence in concrete terms — contracts, side, prices, and the resulting estimate.
 
@@ -185,12 +204,17 @@ interface ManagedExit {
   managedExit: ManagedExit | null
   attachedExit: AttachedExit | null
   valueHistory: PricePoint[]
+  underlying: number            // the underlying's price
+
+// Position changes meaning:
+  last: number                  // now the CONTRACT's last price, was the underlying's
 ```
 
 Store actions added to `web/src/lib/store.ts`, all account-scoped like the existing ones:
 
-- `submitPositionOrder(positionId, draft)` — Close or Add
-- `attachExit(positionId, exit)` / `cancelAttachedExit(positionId)`
+- `submitPositionOrder(positionId, draft)` — Close or Add. A close draft replaces any existing closing order on that position.
+- `upsertExit(positionId, exit)` — attaches, or edits in place if one exists. Not `attachExit` + `cancelAttachedExit`: naming it upsert is what stops a caller from doing cancel-then-attach and reopening the unprotected window.
+- `cancelExit(positionId)` — removes the attached exit outright, a deliberate act rather than half of an edit.
 - `detachFromStrategy(positionId)` / `reattachToStrategy(positionId)`
 
 Every one appends to the account's activity feed exactly as a broker fill would, so the ledger stays the single record of what happened.
@@ -219,8 +243,15 @@ Every one appends to the account's activity feed exactly as a broker fill would,
 - Confirm dialog wording differs correctly for long vs short, close vs add.
 - Detaching flips the status line and stops showing the strategy's exits.
 - Chart toggle switches series without unmounting the panel.
+- **Close opens the ticket rather than submitting.** Clicking Close leaves the position open and the book unchanged; only confirming the ticket closes it.
 
-**Fixture:** the `valueHistory` invariant above.
+**Store — the one-closing-order invariant:**
+
+- `upsertExit` on a position that already has one edits it; the position still holds exactly one `attachedExit`.
+- Submitting a close over an existing attached exit replaces it, and never leaves two.
+- `cancelExit` removes it; `upsertExit` afterwards attaches a fresh one.
+
+**Fixture:** the `valueHistory` invariant above, plus `last` sitting within `[bid, ask]` on every position — the assertion that would have caught the old underlying-in-`last` confusion.
 
 ---
 
@@ -229,5 +260,4 @@ Every one appends to the account's activity feed exactly as a broker fill would,
 - Rolling a position (Alpaca rejects a roll of a short spread as an uncovered MLeg leg).
 - Trailing stops — not in the options order-type matrix.
 - Greeks and IV in the ticket.
-- Editing an attached exit in place. OCO supports replacement; this design cancels and re-places. Worth revisiting once Phase 2 confirms OCO works for options at all.
 - Any real order path. Phase 1 mutates the store. Phase 2 routes through `RiskManager.approve()` and nowhere else.
