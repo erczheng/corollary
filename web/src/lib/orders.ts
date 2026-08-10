@@ -10,6 +10,7 @@
 
 import {
   CONTRACT_MULTIPLIER,
+  type AttachedExit,
   type OrderSide,
   type OrderType,
   type Position,
@@ -197,6 +198,59 @@ export function validateExit(position: Position, draft: ExitDraft): string[] {
   }
 
   return errors
+}
+
+// -------------------------------------------------------------------- //
+// What a moving price does to a resting order
+// -------------------------------------------------------------------- //
+
+/** Whether a working order would fill at `price`.
+ *
+ * Sells fill at or above their limit and trigger at or below their stop;
+ * buys are the mirror. The asymmetry is the whole point of the two order
+ * types and is easy to write backwards, which is why it is one function
+ * with a test rather than a condition inlined at the call site.
+ *
+ * A stop-limit is treated as filling when its *stop* is touched. That is a
+ * simplification: in a real market the limit can then go unfilled, and
+ * `backtest/spread.py` will have to model that properly. Phase 1 has no
+ * order book to miss against. */
+export function orderWouldFill(
+  order: { side: OrderSide; orderType: Exclude<OrderType, 'market'>; limitPrice: number | null; stopPrice: number | null },
+  price: number,
+): boolean {
+  const selling = isSelling(order.side)
+
+  if (order.orderType === 'limit') {
+    if (order.limitPrice === null) return false
+    return selling ? price >= order.limitPrice : price <= order.limitPrice
+  }
+
+  if (order.stopPrice === null) return false
+  // A sell stop is protective: it triggers when the price falls to it.
+  return selling ? price <= order.stopPrice : price >= order.stopPrice
+}
+
+export type ExitTrigger = 'take_profit' | 'stop'
+
+/** Which leg of an attached exit, if either, `price` has reached.
+ *
+ * Take-profit is checked first. When a single tick jumps past both — a gap
+ * through the whole range — filling at the favourable one is the wrong
+ * assumption to bake in silently, so this is stated: the take-profit wins
+ * ties here, and a real broker would fill whichever the market touched
+ * first. Phase 2 gets this from the fill, not from a guess. */
+export function exitTrigger(position: Position, exit: AttachedExit, price: number): ExitTrigger | null {
+  const selling = exitIsSell(position)
+
+  if (selling) {
+    if (price >= exit.takeProfit) return 'take_profit'
+    if (price <= exit.stopPrice) return 'stop'
+  } else {
+    if (price <= exit.takeProfit) return 'take_profit'
+    if (price >= exit.stopPrice) return 'stop'
+  }
+  return null
 }
 
 // -------------------------------------------------------------------- //

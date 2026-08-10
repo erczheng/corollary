@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { ACCOUNT_SNAPSHOTS, type Position } from './mockData'
+import { ACCOUNT_SNAPSHOTS, UNDERLYINGS, type Position } from './mockData'
 import {
   MULTI_LEG_NOTE,
   availableOrderTypes,
   breakevens,
   crossingPrice,
   estimate,
+  exitTrigger,
+  orderWouldFill,
   isMultiLeg,
   maxLoss,
   maxProfit,
@@ -259,6 +261,56 @@ describe('payoff at expiry', () => {
   })
 })
 
+/** Sells fill at or above their limit and trigger at or below their stop;
+ * buys are the mirror. The asymmetry is the whole point of the two order
+ * types and is trivially easy to write backwards. */
+describe('orderWouldFill', () => {
+  const sellLimit = { side: 'STC' as const, orderType: 'limit' as const, limitPrice: 3, stopPrice: null }
+  const buyLimit = { side: 'BTC' as const, orderType: 'limit' as const, limitPrice: 3, stopPrice: null }
+  const sellStop = { side: 'STC' as const, orderType: 'stop' as const, limitPrice: null, stopPrice: 2 }
+  const buyStop = { side: 'BTC' as const, orderType: 'stop' as const, limitPrice: null, stopPrice: 4 }
+
+  it('fills a sell limit at or above its price, never below', () => {
+    expect(orderWouldFill(sellLimit, 3.5)).toBe(true)
+    expect(orderWouldFill(sellLimit, 3)).toBe(true)
+    expect(orderWouldFill(sellLimit, 2.99)).toBe(false)
+  })
+
+  it('fills a buy limit at or below its price, never above', () => {
+    expect(orderWouldFill(buyLimit, 2.5)).toBe(true)
+    expect(orderWouldFill(buyLimit, 3)).toBe(true)
+    expect(orderWouldFill(buyLimit, 3.01)).toBe(false)
+  })
+
+  it('triggers a sell stop on the way down — it is protective', () => {
+    expect(orderWouldFill(sellStop, 1.9)).toBe(true)
+    expect(orderWouldFill(sellStop, 2.1)).toBe(false)
+  })
+
+  it('triggers a buy stop on the way up', () => {
+    expect(orderWouldFill(buyStop, 4.1)).toBe(true)
+    expect(orderWouldFill(buyStop, 3.9)).toBe(false)
+  })
+})
+
+describe('exitTrigger', () => {
+  const sellExit = { takeProfit: 3, stopPrice: 1.5, stopLimitPrice: null, timeInForce: 'gtc' as const, heldBy: 'broker' as const }
+  const buyExit = { takeProfit: 0.2, stopPrice: 1.1, stopLimitPrice: null, timeInForce: 'day' as const, heldBy: 'broker' as const }
+
+  it('takes profit on a long when the mark rises to it', () => {
+    expect(exitTrigger(longCall, sellExit, 3.1)).toBe('take_profit')
+    expect(exitTrigger(longCall, sellExit, 2)).toBeNull()
+    expect(exitTrigger(longCall, sellExit, 1.4)).toBe('stop')
+  })
+
+  it('inverts entirely for a short, which exits by buying back', () => {
+    // Cheaper is better when you owe it: take profit *below*, stop above.
+    expect(exitTrigger(cashShortSpread, buyExit, 0.15)).toBe('take_profit')
+    expect(exitTrigger(cashShortSpread, buyExit, 0.6)).toBeNull()
+    expect(exitTrigger(cashShortSpread, buyExit, 1.2)).toBe('stop')
+  })
+})
+
 describe('added risk is advisory', () => {
   it('scales with quantity against equity', () => {
     // 1.75 per unit × 2 contracts × 100 = 350, against 35,000 equity.
@@ -299,6 +351,36 @@ describe('fixtures are internally consistent', () => {
     for (const p of all) {
       expect(p.valueHistory[0].value).toBe(p.costBasis)
       expect(p.valueHistory[p.valueHistory.length - 1].value).toBe(p.value)
+    }
+  })
+
+  it('agrees with the underlying quote every position names', () => {
+    // Two positions can share an underlying — SPY backs a paper spread and
+    // a cash put. If the quote lived on the position instead of being
+    // keyed by symbol, the same stock could show two prices on one page.
+    for (const p of all) {
+      expect(UNDERLYINGS[p.symbol]).toBeDefined()
+      expect(UNDERLYINGS[p.symbol].price).toBe(p.underlying)
+    }
+  })
+
+  it('ends every underlying series at its current price', () => {
+    for (const u of Object.values(UNDERLYINGS)) {
+      expect(u.history[u.history.length - 1].value).toBe(u.price)
+      // And measures the day from yesterday's close, not from the left
+      // edge of a two-month chart.
+      expect(u.previousClose).toBe(u.history[u.history.length - 2].value)
+      expect(u.change).toBeCloseTo(u.price - u.previousClose, 2)
+    }
+  })
+
+  it('never puts a weekend on an underlying chart', () => {
+    for (const u of Object.values(UNDERLYINGS)) {
+      for (const p of u.history) {
+        const day = new Date(`${p.date}T00:00:00Z`).getUTCDay()
+        expect(day).not.toBe(0)
+        expect(day).not.toBe(6)
+      }
     }
   })
 

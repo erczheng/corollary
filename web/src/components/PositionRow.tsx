@@ -4,7 +4,7 @@ import { OrderTicket } from './OrderTicket'
 import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { formatStrategyName, formatPct, formatUsd, signClass } from '../lib/format'
-import { STRATEGIES, TIME_IN_FORCE_LABEL, type Position } from '../lib/mockData'
+import { STRATEGIES, TIME_IN_FORCE_LABEL, UNDERLYINGS, type Position } from '../lib/mockData'
 import { isMultiLeg, type TicketMode } from '../lib/orders'
 
 const CELL = 'px-3 py-2 text-right text-data-md text-on-surface'
@@ -145,6 +145,7 @@ export function PositionRow({
   // it back to — not whichever strategy is active now.
   const openedBy = STRATEGIES.find((s) => s.id === position.openedByStrategyId)
   const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
+  const underlying = UNDERLYINGS[position.symbol] ?? null
 
   return (
     <>
@@ -213,13 +214,25 @@ export function PositionRow({
           <td colSpan={columnCount} className="px-3 py-4">
             <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
               <ExitStatus position={position} strategyName={strategyName} />
-              {/* The underlying, stated. The Last column shows the
-                  *contract's* mark, which is what you close at — so
-                  without this the price the payoff curve is drawn against
-                  appears nowhere as a number. */}
+              {/* The underlying, stated, with its day. The Last column
+                  shows the *contract's* mark, which is what you close at,
+                  so without this the price the payoff curve is drawn
+                  against appears nowhere as a number — and the stock's own
+                  day, which is what actually moved your position, appears
+                  nowhere at all. */}
               <p className="whitespace-nowrap text-label-md text-on-surface-variant">
                 {position.symbol} underlying{' '}
-                <span className="text-data-md text-on-surface">{formatUsd(position.underlying)}</span>
+                <span className="text-data-md text-on-surface">
+                  {formatUsd(underlying?.price ?? position.underlying)}
+                </span>
+                {underlying && (
+                  <span className={`ml-2 text-data-md ${signClass(underlying.change)}`}>
+                    {formatUsd(underlying.change, { signed: true })}{' '}
+                    <span className="text-caption">
+                      {formatPct(underlying.changePct, { signed: true })} today
+                    </span>
+                  </span>
+                )}
               </p>
             </div>
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">

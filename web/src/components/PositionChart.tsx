@@ -9,15 +9,16 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import type { Position } from '../lib/mockData'
+import { UNDERLYINGS, type Position } from '../lib/mockData'
 import { breakevens, maxLoss, maxProfit, payoffCurve } from '../lib/orders'
-import { formatDateOnly, formatUsd, signClass } from '../lib/format'
+import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 
-type ChartMode = 'value' | 'payoff'
+type ChartMode = 'value' | 'payoff' | 'underlying'
 
 const MODES: { key: ChartMode; label: string }[] = [
   { key: 'value', label: 'Value since entry' },
   { key: 'payoff', label: 'Payoff at expiry' },
+  { key: 'underlying', label: 'Underlying' },
 ]
 
 const AXIS_TICK = { fill: 'var(--on-surface-variant)', fontSize: 12 }
@@ -38,6 +39,7 @@ export function PositionChart({ position }: { position: Position }) {
 
   const payoff = useMemo(() => payoffCurve(position), [position])
   const payoffBreakevens = useMemo(() => breakevens(payoff), [payoff])
+  const underlying = UNDERLYINGS[position.symbol] ?? null
 
   return (
     <div>
@@ -103,6 +105,72 @@ export function PositionChart({ position }: { position: Position }) {
               />
               <Line type="monotone" dataKey="value" stroke="var(--primary)" strokeWidth={2} dot={false} />
             </LineChart>
+          ) : mode === 'underlying' ? (
+            <LineChart
+              data={underlying?.history ?? []}
+              margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+            >
+              <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />
+              <XAxis
+                dataKey="date"
+                tickFormatter={formatDateOnly}
+                tick={AXIS_TICK}
+                tickLine={false}
+                axisLine={{ stroke: 'var(--outline-warm)' }}
+                minTickGap={40}
+              />
+              <YAxis
+                tick={AXIS_TICK}
+                tickLine={false}
+                axisLine={false}
+                width={72}
+                domain={['auto', 'auto']}
+                tickFormatter={(v: number) => formatUsd(v)}
+              />
+              <Tooltip
+                contentStyle={{
+                  background: 'var(--surface-container-lowest)',
+                  border: '1px solid var(--outline-warm)',
+                  borderRadius: 8,
+                  color: 'var(--on-surface)',
+                }}
+                labelFormatter={(d) => formatDateOnly(String(d))}
+                formatter={(value) => [formatUsd(Number(value)), position.symbol]}
+              />
+              {/* Yesterday's close, so the day's move is the distance from
+                  this line rather than something to work out. */}
+              {underlying && (
+                <ReferenceLine
+                  y={underlying.previousClose}
+                  stroke="var(--outline)"
+                  strokeDasharray="4 4"
+                  label={{
+                    value: 'Prev close',
+                    position: 'insideTopLeft',
+                    fill: 'var(--on-surface-variant)',
+                    fontSize: 12,
+                  }}
+                />
+              )}
+              {/* Every strike this position holds, so you can see where the
+                  underlying sits relative to the thing that decides
+                  whether the trade works. */}
+              {position.legs.map((leg) => (
+                <ReferenceLine
+                  key={leg.symbol}
+                  y={leg.strike}
+                  stroke="var(--accent)"
+                  strokeDasharray="2 4"
+                  label={{
+                    value: `${leg.side === 'short' ? 'Short' : 'Long'} ${formatUsd(leg.strike)}`,
+                    position: 'insideBottomRight',
+                    fill: 'var(--on-surface-variant)',
+                    fontSize: 12,
+                  }}
+                />
+              ))}
+              <Line type="monotone" dataKey="value" stroke="var(--primary)" strokeWidth={2} dot={false} />
+            </LineChart>
           ) : (
             <LineChart data={payoff} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />
@@ -149,6 +217,40 @@ export function PositionChart({ position }: { position: Position }) {
           )}
         </ResponsiveContainer>
       </div>
+
+      {mode === 'underlying' && underlying && (
+        <dl className="mt-3 grid grid-cols-3 gap-4 text-label-md">
+          <div>
+            <dt className="text-on-surface-variant">Price</dt>
+            <dd className="text-data-md text-on-surface">{formatUsd(underlying.price)}</dd>
+          </div>
+          <div>
+            <dt className="text-on-surface-variant">Today</dt>
+            {/* Sign carried textually as well as by colour, on both
+                figures — the rule that applies to every P&L here. */}
+            <dd className={`text-data-md ${signClass(underlying.change)}`}>
+              {formatUsd(underlying.change, { signed: true })}{' '}
+              <span className="text-caption">{formatPct(underlying.changePct, { signed: true })}</span>
+            </dd>
+          </div>
+          <div>
+            <dt className="text-on-surface-variant">Previous close</dt>
+            <dd className="text-data-md text-on-surface">{formatUsd(underlying.previousClose)}</dd>
+          </div>
+          {/* The strikes as text, not only as lines on the chart. Where
+              the stock sits relative to them is the question a spread
+              actually raises, and a gridline you have to read off an axis
+              is a poor way to answer it. */}
+          <div className="col-span-3">
+            <dt className="text-on-surface-variant">Strikes</dt>
+            <dd className="text-data-md text-on-surface">
+              {position.legs
+                .map((leg) => `${leg.side === 'short' ? 'Short' : 'Long'} ${formatUsd(leg.strike)}`)
+                .join(' · ')}
+            </dd>
+          </div>
+        </dl>
+      )}
 
       {mode === 'payoff' && (
         /* The three numbers you would otherwise read off the curve by eye.
