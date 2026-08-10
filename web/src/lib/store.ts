@@ -8,8 +8,9 @@ import {
   type ManagedExit,
   type Position,
   type PricePoint,
+  type WorkingOrder,
 } from './mockData'
-import { estimate, type OrderDraft } from './orders'
+import { estimate, isWorkingOrderType, type OrderDraft } from './orders'
 
 export type Theme = 'light' | 'dark'
 export type ExecutionMode = 'manual' | 'auto'
@@ -41,6 +42,10 @@ interface UIState {
    * these as `openPositions[accountMode]`, never as a merged book. */
   openPositions: Record<AccountMode, Position[]>
   activity: Record<AccountMode, ActivityItem[]>
+  /** Orders that have been placed and haven't filled. Only non-market
+   * orders land here — a market order fills immediately. Attached exits
+   * are not duplicated in here; they live on the position. */
+  workingOrders: Record<AccountMode, WorkingOrder[]>
   toggleTheme: () => void
   setAccountMode: (mode: AccountMode) => void
   setExecutionMode: (mode: ExecutionMode) => void
@@ -77,9 +82,16 @@ interface UIState {
    * edit. The position stays detached; reattaching is its own action. */
   cancelExit: (id: string) => void
   detachFromStrategy: (id: string) => void
-  /** Hands the position back to its strategy, which means dropping any
-   * manual exit — the strategy's own rules resume, and both cannot run. */
-  reattachToStrategy: (id: string, strategyId: string) => void
+  /** Hands the position back to **the strategy that opened it**, which
+   * means dropping any manual exit — the strategy's own rules resume, and
+   * both cannot run. Deliberately takes no strategy argument: reattaching
+   * to whichever strategy happens to be active now would silently move the
+   * position to a different set of exit rules than it was opened under. */
+  reattachToStrategy: (id: string) => void
+  /** Cancels a working order and flips its pending row in the ledger to
+   * `canceled`, rather than appending a second row — the order had one
+   * life and the feed should show it once. */
+  cancelWorkingOrder: (id: string) => void
 }
 
 /** A long is sold to close, a short is bought to close — and each crosses
@@ -198,6 +210,10 @@ export const useUIStore = create<UIState>((set) => ({
     paper: ACCOUNT_SNAPSHOTS.paper.activity,
     cash: ACCOUNT_SNAPSHOTS.cash.activity,
   },
+  workingOrders: {
+    paper: ACCOUNT_SNAPSHOTS.paper.workingOrders,
+    cash: ACCOUNT_SNAPSHOTS.cash.workingOrders,
+  },
   toggleTheme: () =>
     set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
   setAccountMode: (accountMode) => set({ accountMode }),
@@ -223,6 +239,10 @@ export const useUIStore = create<UIState>((set) => ({
           ...s.activity,
           [mode]: [...s.openPositions[mode].map((p) => closeExecution(p, at, 'act-flat-')), ...s.activity[mode]],
         },
+        // Flatten closes everything, so every working order in this book is
+        // now an order against a position that no longer exists. Leaving
+        // them would show orders that can never fill.
+        workingOrders: { ...s.workingOrders, [mode]: [] },
         isHalted: true,
       }
     }),
@@ -235,11 +255,49 @@ export const useUIStore = create<UIState>((set) => ({
       const at = new Date().toISOString()
       const { pricePerContract, side } = estimate(position, draft)
       const quantity = Math.min(draft.quantity, draft.mode === 'close' ? position.quantity : draft.quantity)
+      const contract = `${position.symbol} ${position.contract}`
+
+      // A market order fills. Anything else sits and works until it does,
+      // which is the whole reason working orders exist — a terminal that
+      // fills every order instantly cannot show you an order you regret.
+      if (isWorkingOrderType(draft.orderType)) {
+        const activityId = `act-${draft.mode}-${position.id}-${at}`
+        const pending: ActivityItem = {
+          id: activityId,
+          time: at,
+          contract,
+          action: side,
+          price: draft.limitPrice ?? draft.stopPrice,
+          quantity,
+          // Nothing has happened yet, so there is nothing to report.
+          pnl: null,
+          pnlPct: null,
+          amount: null,
+          status: 'pending',
+        }
+        const order: WorkingOrder = {
+          id: `wo-${position.id}-${at}`,
+          positionId: position.id,
+          contract,
+          side,
+          orderType: draft.orderType,
+          quantity,
+          limitPrice: draft.limitPrice,
+          stopPrice: draft.stopPrice,
+          timeInForce: draft.timeInForce,
+          placedAt: at,
+          activityId,
+        }
+        return {
+          workingOrders: { ...s.workingOrders, [mode]: [order, ...s.workingOrders[mode]] },
+          activity: { ...s.activity, [mode]: [pending, ...s.activity[mode]] },
+        }
+      }
 
       const fill: ActivityItem = {
         id: `act-${draft.mode}-${position.id}-${at}`,
         time: at,
-        contract: `${position.symbol} ${position.contract}`,
+        contract,
         action: side,
         price: pricePerContract,
         quantity,
@@ -254,17 +312,39 @@ export const useUIStore = create<UIState>((set) => ({
         draft.mode === 'close'
           ? closeQuantity(position, quantity, at)
           : addQuantity(position, quantity, pricePerContract, at)
+      const closedOut = next === null
 
       // Note what this does *not* do: it never sets isHalted. Acting on one
       // position is not a book-wide event (CLAUDE.md rule 7).
       return {
         openPositions: {
           ...s.openPositions,
-          [mode]: next === null
+          [mode]: closedOut
             ? s.openPositions[mode].filter((p) => p.id !== id)
             : s.openPositions[mode].map((p) => (p.id === id ? next : p)),
         },
         activity: { ...s.activity, [mode]: [fill, ...s.activity[mode]] },
+        // A working order against a position that no longer exists is an
+        // order that can never fill. Closing out takes its orders with it.
+        workingOrders: closedOut
+          ? { ...s.workingOrders, [mode]: s.workingOrders[mode].filter((o) => o.positionId !== id) }
+          : s.workingOrders,
+      }
+    }),
+  cancelWorkingOrder: (id) =>
+    set((s) => {
+      const mode = s.accountMode
+      const order = s.workingOrders[mode].find((o) => o.id === id)
+      if (!order) return s
+
+      return {
+        workingOrders: { ...s.workingOrders, [mode]: s.workingOrders[mode].filter((o) => o.id !== id) },
+        activity: {
+          ...s.activity,
+          [mode]: s.activity[mode].map((a) =>
+            a.id === order.activityId ? { ...a, status: 'canceled' } : a,
+          ),
+        },
       }
     }),
   upsertExit: (id, exit) =>
@@ -278,10 +358,12 @@ export const useUIStore = create<UIState>((set) => ({
   cancelExit: (id) => set((s) => updatePosition(s, id, (p) => ({ ...p, attachedExit: null }))),
   detachFromStrategy: (id) =>
     set((s) => updatePosition(s, id, (p) => ({ ...p, strategyId: null, managedExit: null }))),
-  reattachToStrategy: (id, strategyId) =>
+  reattachToStrategy: (id) =>
     set((s) => updatePosition(s, id, (p) => ({
       ...p,
-      strategyId,
+      // Back to the strategy that opened it, not to whichever one is
+      // active now — those are different sets of exit rules.
+      strategyId: p.openedByStrategyId,
       managedExit: DEFAULT_MANAGED_EXIT,
       // The strategy's rules and a manual exit cannot both run.
       attachedExit: null,

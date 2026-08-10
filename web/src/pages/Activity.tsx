@@ -1,8 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { StatCard } from '../components/StatCard'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { Pagination } from '../components/Pagination'
 import { PositionRow } from '../components/PositionRow'
+import { WorkingOrders } from '../components/WorkingOrders'
+import { StatCardSkeleton, TableSkeleton } from '../components/Skeleton'
+import { RefreshButton } from '../components/RefreshButton'
 import { BankIcon, TrendingDownIcon, TrendingUpIcon } from '../components/icons'
 import {
   ExecutionsTable,
@@ -26,6 +29,15 @@ const PAGE_SIZE = 15
  * header below or the panel will be narrower than the table. */
 const POSITION_COLUMNS = 7
 
+/** How long the loading state is held on a manual refresh.
+ *
+ * Phase 1 has nothing to wait for — the fixtures are already in memory —
+ * so this stands in for a round trip. In Phase 2 it comes off entirely and
+ * the flag is TanStack Query's `isFetching`. The state is wired up now
+ * rather than later because a loading state nobody has ever seen is a
+ * loading state nobody has designed. */
+const REFRESH_MS = 700
+
 export function Activity() {
   const accountMode = useUIStore((s) => s.accountMode)
   const openPositions = useUIStore((s) => s.openPositions[s.accountMode])
@@ -34,6 +46,13 @@ export function Activity() {
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [ticketMode, setTicketMode] = useState<TicketMode>('close')
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!loading) return
+    const id = setTimeout(() => setLoading(false), REFRESH_MS)
+    return () => clearTimeout(id)
+  }, [loading])
 
   const filtered = filter === 'all' ? activity : activity.filter((a) => a.status === filter)
   const { page, pageCount, pageItems, setPage } = usePagination(filtered, PAGE_SIZE)
@@ -55,7 +74,14 @@ export function Activity() {
           for the pages that have no switch of their own. */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-display-lg text-on-surface">Activity</h1>
-        <AccountModeToggle />
+        <div className="flex items-center gap-3">
+          <RefreshButton
+            label="Refresh activity"
+            cooldownMs={0}
+            onRefresh={() => setLoading(true)}
+          />
+          <AccountModeToggle />
+        </div>
       </div>
       <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
         Open positions, executions, and rejected orders for your {accountLabel} account.
@@ -70,6 +96,14 @@ export function Activity() {
           reads neutral rather than green. None of the three is ever
           `error` — a losing account is not a broken one. */}
       <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {loading ? (
+          <>
+            <StatCardSkeleton label="Loading average win" />
+            <StatCardSkeleton label="Loading average loss" />
+            <StatCardSkeleton label="Loading lifetime P&L" />
+          </>
+        ) : (
+          <>
         <StatCard
           label="Average win"
           icon={<TrendingUpIcon />}
@@ -109,16 +143,20 @@ export function Activity() {
           valueClassName={signClass(stats.lifetimePnl)}
           note="realized only — deposits and withdrawals excluded"
         />
+          </>
+        )}
       </div>
 
       <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Open Positions</h2>
           <span className="text-label-md text-on-surface-variant">
-            {openPositions.length} open in {accountLabel}
+            {loading ? 'Loading…' : `${openPositions.length} open in ${accountLabel}`}
           </span>
         </div>
-        {openPositions.length === 0 ? (
+        {loading ? (
+          <TableSkeleton rows={3} columns={POSITION_COLUMNS} label="Loading open positions" />
+        ) : openPositions.length === 0 ? (
           <p className="px-4 py-6 text-body-md text-on-surface-variant">
             No open positions in this account. New candidates appear on the Dashboard under Recommended
             Trades.
@@ -172,6 +210,8 @@ export function Activity() {
         )}
       </section>
 
+      <WorkingOrders loading={loading} accountLabel={accountLabel} />
+
       <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
           <h2 className="text-title-lg text-on-surface">Recent Activity</h2>
@@ -196,9 +236,13 @@ export function Activity() {
             </button>
           </div>
         </div>
-        {filtered.length === 0 ? (
+        {loading ? (
+          <TableSkeleton rows={6} columns={7} label="Loading activity" />
+        ) : filtered.length === 0 ? (
           <p className="px-4 py-6 text-body-md text-on-surface-variant">
-            No {filter === 'all' ? '' : `${filter} `}activity in this account yet.
+            {filter === 'all'
+              ? 'No activity in this account yet. Fills, rejections and cash movements all land here.'
+              : `No ${filter} activity in this account. Other statuses may have rows — clear the filter to see them.`}
           </p>
         ) : (
           <>

@@ -298,10 +298,10 @@ describe('attached exits', () => {
   it('reattaching to a strategy clears the manual exit', () => {
     const target = PAPER.positions[0]
     useUIStore.getState().upsertExit(target.id, exit)
-    useUIStore.getState().reattachToStrategy(target.id, 'strat-1')
+    useUIStore.getState().reattachToStrategy(target.id)
 
     const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
-    expect(after.strategyId).toBe('strat-1')
+    expect(after.strategyId).toBe(target.openedByStrategyId)
     expect(after.managedExit).not.toBeNull()
     expect(after.attachedExit).toBeNull()
   })

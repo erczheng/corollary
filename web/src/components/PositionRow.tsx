@@ -50,11 +50,13 @@ function ExitStatus({ position, strategyName }: { position: Position; strategyNa
 
 function ActionsMenu({
   position,
+  openedByName,
   onSelect,
   onDetach,
   onReattach,
 }: {
   position: Position
+  openedByName: string | null
   onSelect: (mode: TicketMode) => void
   onDetach: () => void
   onReattach: () => void
@@ -103,7 +105,9 @@ function ActionsMenu({
               </button>
             ) : (
               <button type="button" className={item} onClick={() => { onReattach(); setOpen(false) }}>
-                Reattach to strategy
+                {/* Names the destination. "Reattach to strategy" reads as
+                    though it could mean the active one. */}
+                {openedByName ? `Reattach to ${openedByName}` : 'Reattach to strategy'}
               </button>
             )}
           </div>
@@ -134,10 +138,13 @@ export function PositionRow({
 }: PositionRowProps) {
   const detachFromStrategy = useUIStore((s) => s.detachFromStrategy)
   const reattachToStrategy = useUIStore((s) => s.reattachToStrategy)
-  const activeStrategyId = useUIStore((s) => s.activeStrategyId)
 
   const strategy = STRATEGIES.find((s) => s.id === position.strategyId)
   const strategyName = strategy ? formatStrategyName(strategy.name) : null
+  // Names the strategy that *opened* it, which is where reattaching sends
+  // it back to — not whichever strategy is active now.
+  const openedBy = STRATEGIES.find((s) => s.id === position.openedByStrategyId)
+  const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
 
   return (
     <>
@@ -192,9 +199,10 @@ export function PositionRow({
             </button>
             <ActionsMenu
               position={position}
+              openedByName={openedByName}
               onSelect={onSelectMode}
               onDetach={() => detachFromStrategy(position.id)}
-              onReattach={() => reattachToStrategy(position.id, activeStrategyId)}
+              onReattach={() => reattachToStrategy(position.id)}
             />
           </div>
         </td>
