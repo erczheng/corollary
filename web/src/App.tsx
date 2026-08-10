@@ -5,6 +5,7 @@ import { Header } from './components/Header'
 import { CommandPalette } from './components/CommandPalette'
 import { useThemeSync } from './hooks/useThemeSync'
 import { useCommandPaletteShortcut } from './hooks/useCommandPaletteShortcut'
+import { useFocusModality } from './hooks/useFocusModality'
 import { Dashboard } from './pages/Dashboard'
 import { Activity } from './pages/Activity'
 import { News } from './pages/News'
@@ -17,6 +18,7 @@ import { Design } from './pages/Design'
 function AppShell() {
   useThemeSync()
   useCommandPaletteShortcut()
+  useFocusModality()
 
   return (
     <BrowserRouter>

@@ -227,7 +227,7 @@ Borders have three tokens and they are not interchangeable: `outline-warm` for c
 - No `localStorage` or `sessionStorage` in artifacts previewed in chat; in the real app they're fine.
 - Tables are the primary interface. Get density, alignment, and number formatting right before anything decorative.
 - P&L must encode sign textually as well as by color — an explicit `+` or `−` on every value. Color alone fails for colorblind users, screenshots, and grayscale.
-- Every interactive element needs a visible keyboard focus state: 2px ring in `primary`, 2px offset in `surface`, so the ring reads against both the control and the page.
+- Every interactive element needs a visible keyboard focus state: 2px ring in `primary`, 2px offset in `surface`, so the ring reads against both the control and the page. **`:focus-visible` is not sufficient on its own** — per spec a text field matches it whenever it is focused, *including on click*, so inputs and selects ring on mouse click while buttons correctly stay quiet. The ring is gated on `html[data-modality]`, set by `useFocusModality`. Keep the ring on the keyboard path; never delete it outright.
 - Every destructive action (Flatten, Close, Delete strategy) gets a confirm dialog that states the consequence in concrete terms, not "Are you sure?"
 - Loading and empty states are designed, not afterthoughts. An empty Recommended Trades list at 3pm means something different than at 8am; say which.
 - `accent` is capped at two roles per screen, ranked in `DESIGN.md`. It only works while it stays rare.

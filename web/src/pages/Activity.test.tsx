@@ -305,6 +305,17 @@ describe('Expanding a position', () => {
     expect(screen.getByText(/target 50%, stop 200%, 2 DTE/)).toBeInTheDocument()
   })
 
+  it('states the underlying price, which no column shows', () => {
+    gotoActivity()
+    expandRow(single.contract)
+
+    // The Last column is the *contract's* mark — the price you close at.
+    // Without this line the price the payoff curve is drawn against
+    // appears nowhere as a number.
+    expect(screen.getByText(`${single.symbol} underlying`)).toBeInTheDocument()
+    expect(screen.getByText(formatUsd(single.underlying))).toBeInTheDocument()
+  })
+
   it('says where an already-attached exit is held', () => {
     gotoActivity()
     const withExit = PAPER.positions.find((p) => p.attachedExit !== null)!
