@@ -286,6 +286,15 @@ expect.** Every item below produced working-looking code that was wrong:
   it overstates proceeds by the spread on every estimate), and a short's
   `openUnitValue` is *negative* because a credit is a liability (reversing
   it inverts every credit spread's payoff curve).
+- `web/src/lib/markets.ts` — the Markets page's filtering and ranking,
+  as pure functions with no React in them. **Two that are easy to get
+  wrong:** a fund's `marketCap` is `null`, not 0, and the market-cap
+  ranking sorts nulls *last* rather than coercing them — coerced, SPY
+  ranks below the smallest company on the list and a column of dollars
+  states that a fund is worth nothing. And `losers` is its own ascending
+  sort, not `gainers` reversed. Nothing here sorts in place: every view
+  reads the same module-level array, so an in-place `.sort()` would
+  leave the last screen's ordering behind in the fixture itself.
 - `web/src/components/PositionRow.tsx`, `OrderTicket.tsx`,
   `PositionChart.tsx` — the Open Positions row, its expanded ticket, and
   its value/payoff charts. `Activity.tsx` composes them and holds no order
@@ -304,6 +313,19 @@ identically. Only the active account ticks, and `lastTickAt === null` is
 what drives the loading skeletons — loading is a real condition, not a
 timer. Past ~15s without a price the status pill reads `stale`; a badge
 saying "Live" over a frozen timestamp is worse than no badge.
+
+**The Markets chain is priced flat and displayed with a smirk.** The IV
+column in `OPTION_CHAIN` is a *display* surface — prices are struck at the
+underlying's base vol, unskewed. That is deliberate: with time value
+carrying a skew factor, the slope of the put ladder just below the money
+works out to `-a` for skew slope `a`, so any positive skew prints a lower
+strike above the one beside it, which is an arbitrage rather than a
+fixture. Pricing flat bounds the ladder's slope below 1, which is exactly
+what keeps calls cheapening and puts richening all the way up. A contract's
+day change is derived from its underlying's move scaled by delta, and the
+dispersion *scales* that move rather than adding to it — added, it flipped
+the sign wherever delta was small, and far OTM calls rallied on a down day.
+`mockData.test.ts` pins both.
 
 **Dates that are dates, not instants.** `Position.expiry` and `MARKET_TODAY`
 are both `YYYY-MM-DD` and both parse as **UTC** midnight — `daysToExpiry`
