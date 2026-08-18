@@ -4,6 +4,8 @@ import {
   CHAIN_SPEC_BY_SYMBOL,
   CONTRACT_MULTIPLIER,
   MARKET_QUOTES,
+  NEWS_INCOMING,
+  NEWS_ITEMS,
   OPTION_CHAIN,
   chainDte,
   halfSpread,
@@ -16,6 +18,7 @@ import {
   type ActivityItem,
   type AttachedExit,
   type ManagedExit,
+  type NewsItem,
   type OptionContract,
   type Position,
   type PricePoint,
@@ -90,6 +93,29 @@ interface UIState {
    * limits, and one status pill covering both would report the wrong thing
    * on whichever page it was not describing. */
   lastPollAt: string | null
+  /** The published news corpus, newest first.
+   *
+   * A **third** feed, and the bar for adding one is that it stands in for a
+   * different Alpaca mechanism with different limits — this is the news
+   * endpoint, which is neither the 30-symbol websocket nor the snapshot
+   * poll, and it is not account-scoped because a headline is not owned by
+   * whichever keys are loaded. It also fails differently: silence on a
+   * price stream means something broke, while silence here means nothing
+   * happened, and one status pill covering both would report the wrong
+   * thing on whichever page it was not describing. */
+  newsFeed: NewsItem[]
+  /** How much of `NEWS_INCOMING` has been released. Held so a session
+   * replays identically rather than depending on how long the tab was
+   * open. */
+  newsReleased: number
+  /** When the last news poll completed, or null before the first one.
+   * Advances on every poll, including one that returns nothing — see
+   * `pollNews`. */
+  lastNewsAt: string | null
+  /** One news poll. Phase 2 swaps this for the Alpaca news request and
+   * nothing downstream changes, because the store already treats a poll as
+   * "we asked" rather than "a timer fired". */
+  pollNews: () => void
   /** One market snapshot — the whole quoted universe, not just the symbols
    * behind open positions.
    *
@@ -356,6 +382,14 @@ const priceStream = mulberry32(20261101)
  * Markets first, which is exactly the flake seeding exists to prevent. */
 const marketStream = mulberry32(20261102)
 
+/** How far apart released headlines are stamped, on the fixture's clock.
+ *
+ * Four minutes, so a run of arrivals reads as a plausible afternoon rather
+ * than a burst at one timestamp. Unrelated to the poll interval, which is
+ * how often the terminal *asks* — the two would only coincide if news
+ * arrived exactly when you looked for it. */
+const RELEASE_GAP_MS = 4 * 60 * 1_000
+
 /* Volatility is stated **per second**, not per tick, and scaled by how
  * long the tick actually covered.
  *
@@ -444,6 +478,48 @@ export const useUIStore = create<UIState>((set) => ({
   underlyings: MARKET_QUOTES,
   chain: OPTION_CHAIN,
   lastPollAt: null,
+  newsFeed: NEWS_ITEMS,
+  newsReleased: 0,
+  lastNewsAt: null,
+  pollNews: () =>
+    set((s) => {
+      const at = new Date().toISOString()
+
+      // The first poll is the initial fetch: it returns the corpus that is
+      // already loaded and nothing newer. Releasing an arrival here instead
+      // would mean the top of the feed is always a headline that landed
+      // after you opened the page and before you could read it, which is
+      // not how news arrives — and it would make the newest row on a cold
+      // open the one row that was not there a moment ago.
+      if (s.lastNewsAt === null) return { lastNewsAt: at }
+
+      // The reserve is finite, and running dry is not an error. On this
+      // page a poll that returns nothing is a *successful* poll — no news
+      // is the ordinary state of a news feed — so `lastNewsAt` advances
+      // either way and the pill keeps reporting a working connection.
+      // A price stream saying the same thing would mean something broken;
+      // that difference is why this is its own feed and not a branch of
+      // `pollMarkets`.
+      if (s.newsReleased >= NEWS_INCOMING.length) return { lastNewsAt: at }
+
+      const item = NEWS_INCOMING[s.newsReleased]
+      // Stamped against the *fixture's* clock, not the wall clock.
+      //
+      // MARKET_TODAY is 2026-08-07 and the machine's clock is not, so a
+      // released headline stamped `new Date()` would sort months above a
+      // corpus it belongs in the middle of, and the feed's newest row would
+      // sit alone at the top of an empty day. `lastNewsAt` above is real
+      // time because staleness is a real-time question; an article's
+      // timestamp is a claim about when it was published.
+      const previous = s.newsFeed[0]
+      const published = new Date(Date.parse(previous.time) + RELEASE_GAP_MS).toISOString()
+
+      return {
+        newsFeed: [{ ...item, time: published }, ...s.newsFeed],
+        newsReleased: s.newsReleased + 1,
+        lastNewsAt: at,
+      }
+    }),
   toggleTheme: () =>
     set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
   setAccountMode: (accountMode) => set({ accountMode }),

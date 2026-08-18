@@ -900,23 +900,460 @@ const CASH_WORKING_ORDERS: WorkingOrder[] = []
 
 export type Sentiment = 'bullish' | 'bearish' | 'neutral' | 'unclassified'
 
+/** Which of PRD.md §9's three tiers produced a label.
+ *
+ * Carried on the item because the tiers do not have equal standing and the
+ * feed should not pretend they do: tier 1 is a score the vendor shipped,
+ * tier 2 is a deterministic pattern match on a high-signal event, and tier
+ * 3 is the LLM. Settings reports accuracy *per tier*, so a reader comparing
+ * that table against a headline has to know which row the headline belongs
+ * to.
+ *
+ * It is also the only honest account of `unclassified`: tiers 1 and 2
+ * always publish a direction, so an unlabelled item is always tier 3
+ * falling below its confidence threshold. Silence beats a wrong label. */
+export const SENTIMENT_LABEL: Record<Sentiment, string> = {
+  bullish: 'Bullish',
+  bearish: 'Bearish',
+  neutral: 'Neutral',
+  unclassified: 'Unclassified',
+}
+
+/** Four characters, for the feed's Sentiment column.
+ *
+ * A dense ledger has no room for "Unclassified" spelled out on every row,
+ * and these are the abbreviations a tape actually uses. The full word stays
+ * reachable — the cell carries `SENTIMENT_LABEL` as its title, and the
+ * filter dropdown names them in full. */
+export const SENTIMENT_SHORT: Record<Sentiment, string> = {
+  bullish: 'BULL',
+  bearish: 'BEAR',
+  neutral: 'NEUT',
+  unclassified: 'UNCL',
+}
+
+/** Text colour for a sentiment label in a dense row.
+ *
+ * The parallel of `ACTIVITY_STATUS_CLASS`, and deliberately the same shape:
+ * ExecutionsTable already established that a status-like value in a packed
+ * table is small coloured text rather than a pill, because a chip per row
+ * sets the row height for the sake of a two-word label. Chips stay for
+ * places with room to breathe.
+ *
+ * `unclassified` takes `caution`, never `error` — the LLM declining to
+ * commit is the system working as PRD.md §9 specifies, not a failure. And
+ * `neutral` the token is 4.27:1 and below the text floor, so a neutral
+ * label reads in `on-surface-variant` instead. */
+export const SENTIMENT_CLASS: Record<Sentiment, string> = {
+  bullish: 'text-bullish',
+  bearish: 'text-bearish',
+  neutral: 'text-on-surface-variant',
+  unclassified: 'text-caution',
+}
+
+export type SentimentTier = 'provider' | 'rules' | 'llm'
+
+export const SENTIMENT_TIER_LABEL: Record<SentimentTier, string> = {
+  provider: 'Provider',
+  rules: 'Rules',
+  llm: 'LLM',
+}
+
+export const SENTIMENT_TIER_DETAIL: Record<SentimentTier, string> = {
+  provider: 'Tier 1 — a score shipped by Finnhub or Alpaca, published as-is.',
+  rules: 'Tier 2 — a deterministic headline pattern for a high-signal event.',
+  llm: 'Tier 3 — the LLM, batched 20 headlines per call and cached by article ID. Publishes a direction only above its confidence threshold.',
+}
+
 export interface NewsItem {
   id: string
   time: string
-  ticker: string // or "MARKET"
+  /** A ticker, or `MARKET` for a story about no single name. */
+  ticker: string
   headline: string
   sentiment: Sentiment
   publisher: string
   sector: string
+  /** Which tier of PRD.md §9 produced `sentiment`. */
+  tier: SentimentTier
 }
 
-export const NEWS_ITEMS: NewsItem[] = [
-  { id: 'news-1', time: '2026-08-07T13:10:00Z', ticker: 'AAPL', headline: 'Apple beats Q3 estimates on services growth', sentiment: 'bullish', publisher: 'Alpaca News', sector: 'Technology' },
-  { id: 'news-2', time: '2026-08-07T12:40:00Z', ticker: 'MARKET', headline: 'Fed holds rates, signals two cuts possible in 2027', sentiment: 'neutral', publisher: 'Finnhub', sector: 'Macro' },
-  { id: 'news-3', time: '2026-08-07T11:55:00Z', ticker: 'TSLA', headline: 'Tesla recalls 120,000 vehicles over software issue', sentiment: 'bearish', publisher: 'Finnhub', sector: 'Consumer Discretionary' },
-  { id: 'news-4', time: '2026-08-07T10:20:00Z', ticker: 'NVDA', headline: 'Analyst raises NVDA price target ahead of earnings', sentiment: 'bullish', publisher: 'Alpaca News', sector: 'Technology' },
-  { id: 'news-5', time: '2026-08-07T09:05:00Z', ticker: 'XOM', headline: 'Exxon announces secondary offering', sentiment: 'unclassified', publisher: 'Finnhub', sector: 'Energy' },
+/** The sector `MARKET` items are filed under. Macro is a sector in the
+ * feed's sense — "what is this story about" — even though it is not one in
+ * the GICS sense the consensus panel uses. */
+export const MACRO_SECTOR = 'Macro'
+
+/** Names the feed writes about, with the sector each is filed under.
+ *
+ * Deliberately its own table rather than a field bolted onto `STOCK_SEEDS`.
+ * The display names here are what a *headline* calls a company — "Apple",
+ * not "Apple Inc." — so this is not a second copy of the stock universe's
+ * legal names, and broad funds are absent because an index fund does not
+ * report earnings or lose a CFO. */
+const NEWS_UNIVERSE: { ticker: string; company: string; sector: string }[] = [
+  { ticker: 'AAPL', company: 'Apple', sector: 'Technology' },
+  { ticker: 'MSFT', company: 'Microsoft', sector: 'Technology' },
+  { ticker: 'NVDA', company: 'Nvidia', sector: 'Technology' },
+  { ticker: 'AVGO', company: 'Broadcom', sector: 'Technology' },
+  { ticker: 'ARM', company: 'Arm', sector: 'Technology' },
+  { ticker: 'ALAB', company: 'Astera Labs', sector: 'Technology' },
+  { ticker: 'CRWV', company: 'CoreWeave', sector: 'Technology' },
+  { ticker: 'RBRK', company: 'Rubrik', sector: 'Technology' },
+  { ticker: 'GOOGL', company: 'Alphabet', sector: 'Communication Services' },
+  { ticker: 'META', company: 'Meta', sector: 'Communication Services' },
+  { ticker: 'RDDT', company: 'Reddit', sector: 'Communication Services' },
+  { ticker: 'AMZN', company: 'Amazon', sector: 'Consumer Discretionary' },
+  { ticker: 'TSLA', company: 'Tesla', sector: 'Consumer Discretionary' },
+  { ticker: 'HD', company: 'Home Depot', sector: 'Consumer Discretionary' },
+  { ticker: 'WMT', company: 'Walmart', sector: 'Consumer Staples' },
+  { ticker: 'COST', company: 'Costco', sector: 'Consumer Staples' },
+  { ticker: 'LLY', company: 'Eli Lilly', sector: 'Health Care' },
+  { ticker: 'UNH', company: 'UnitedHealth', sector: 'Health Care' },
+  { ticker: 'JPM', company: 'JPMorgan', sector: 'Financials' },
+  { ticker: 'CRCL', company: 'Circle', sector: 'Financials' },
+  { ticker: 'XOM', company: 'Exxon Mobil', sector: 'Energy' },
 ]
+
+/** The outlets that actually reach this terminal. Alpaca's news endpoint is
+ * Benzinga-sourced and Finnhub aggregates the rest. Neither vendor is named
+ * here — a vendor is where an item *arrived from*, which is what `tier`
+ * records, not who wrote it. */
+const PUBLISHERS = ['Benzinga', 'Reuters', 'MarketWatch', 'Bloomberg', 'CNBC', 'Seeking Alpha']
+
+const BANKS = ['Morgan Stanley', 'Goldman Sachs', 'Jefferies', 'Wedbush', 'Piper Sandler', 'BofA']
+
+interface StoryContext {
+  company: string
+  ticker: string
+  sector: string
+  rand: () => number
+}
+
+interface Story {
+  sentiment: Sentiment
+  tier: SentimentTier
+  /** Restricts a story to sectors where it is possible. An FDA hold on a
+   * bank is not a rare event, it is a nonsense one. */
+  sectors?: string[]
+  headline: (ctx: StoryContext) => string
+}
+
+function pick<T>(rand: () => number, xs: T[]): T {
+  return xs[Math.floor(rand() * xs.length)]
+}
+
+function int(rand: () => number, lo: number, hi: number): number {
+  return lo + Math.floor(rand() * (hi - lo + 1))
+}
+
+/** Tier 2 is PRD.md §9's list of high-signal events, verbatim: beat/miss vs
+ * estimates, guidance raised/cut, upgrade/downgrade, M&A, secondary
+ * offering, buyback, executive departure, FDA action. The fixture is built
+ * from that list rather than from invented headlines, so the tier column
+ * means something — every `rules` story below is a pattern the
+ * deterministic classifier genuinely claims to catch. */
+const COMPANY_STORIES: Story[] = [
+  // Tier 2 — deterministic patterns.
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) =>
+      `${c.company} beats Q${int(c.rand, 1, 4)} estimates on ${pick(c.rand, ['services growth', 'data-centre demand', 'margin expansion', 'stronger unit volumes'])}`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) => `${c.company} misses Q${int(c.rand, 1, 4)} revenue estimates`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) => `${c.company} raises full-year guidance`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) =>
+      `${c.company} cuts full-year guidance, citing ${pick(c.rand, ['softer demand', 'FX headwinds', 'a slower ramp', 'tariff exposure'])}`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) => `${pick(c.rand, BANKS)} upgrades ${c.ticker} to Buy from Hold`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) => `${pick(c.rand, BANKS)} downgrades ${c.ticker} to Hold from Buy`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) =>
+      `${c.company} to acquire ${pick(c.rand, ['Halcyon Systems', 'Northbridge Labs', 'Veritas Compute', 'Lumen Analytics'])} in $${int(c.rand, 2, 18)}B deal`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) => `${c.company} announces $${int(c.rand, 1, 6)}B secondary offering`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) => `${c.company} board authorises $${int(c.rand, 5, 60)}B buyback`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) =>
+      `${c.company} ${pick(c.rand, ['CFO', 'COO', 'chief revenue officer'])} departs after ${int(c.rand, 2, 11)} years`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    sectors: ['Health Care'],
+    headline: (c) =>
+      `FDA approves the ${c.company} ${pick(c.rand, ['obesity therapy', 'oncology combination', 'once-weekly formulation'])}`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    sectors: ['Health Care'],
+    headline: (c) => `FDA places a clinical hold on the ${c.company} late-stage trial`,
+  },
+
+  // Tier 1 — the vendor shipped a score with the article.
+  {
+    sentiment: 'bullish',
+    tier: 'provider',
+    headline: (c) => `${c.company} named a top pick at ${pick(c.rand, BANKS)}`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'provider',
+    headline: (c) =>
+      `${c.company} slips as ${pick(c.rand, ['peers guide lower', 'channel checks soften', 'a supplier warns'])}`,
+  },
+  {
+    sentiment: 'neutral',
+    tier: 'provider',
+    headline: (c) => `${c.company} volume tops its ${int(c.rand, 20, 90)}-day average`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'provider',
+    headline: (c) => `${c.company} sets a fresh 52-week high`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'provider',
+    headline: (c) => `${c.company} touches a 52-week low in early trade`,
+  },
+
+  // Tier 3 — the LLM. Some come back under threshold, which is where
+  // `unclassified` comes from and the only place it comes from.
+  {
+    sentiment: 'bullish',
+    tier: 'llm',
+    headline: (c) =>
+      `${c.company} expands its ${pick(c.rand, ['cloud', 'silicon', 'logistics', 'payments'])} partnership with ${pick(c.rand, ['Accenture', 'Siemens', 'Oracle', 'Stripe'])}`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'llm',
+    headline: (c) =>
+      `${c.company} faces ${pick(c.rand, ['an EU', 'an FTC', 'a DOJ', 'a state'])} inquiry over ${pick(c.rand, ['bundling', 'data handling', 'pricing practices'])}`,
+  },
+  {
+    sentiment: 'neutral',
+    tier: 'llm',
+    headline: (c) =>
+      `${c.company} reshuffles its ${pick(c.rand, ['hardware', 'international', 'enterprise'])} leadership`,
+  },
+  {
+    sentiment: 'neutral',
+    tier: 'llm',
+    headline: (c) =>
+      `${c.company} opens ${pick(c.rand, ['a Phoenix', 'an Austin', 'a Dublin', 'a Singapore'])} facility`,
+  },
+  {
+    sentiment: 'unclassified',
+    tier: 'llm',
+    headline: (c) =>
+      `Report: ${c.company} weighing ${pick(c.rand, ['a spin-off of its smaller unit', 'changes to its supplier terms', 'a shift in its capex plan'])}`,
+  },
+  {
+    sentiment: 'unclassified',
+    tier: 'llm',
+    headline: (c) =>
+      `${c.company} executives address ${pick(c.rand, ['margins', 'AI spend', 'capital return'])} at ${pick(c.rand, ['a Barclays', 'a Citi', 'a Deutsche Bank'])} conference`,
+  },
+  {
+    sentiment: 'unclassified',
+    tier: 'llm',
+    headline: (c) => `${c.company} files an 8-K without further detail`,
+  },
+]
+
+const MACRO_STORIES: Story[] = [
+  {
+    sentiment: 'neutral',
+    tier: 'rules',
+    headline: (c) =>
+      `Fed holds rates, signals ${pick(c.rand, ['one cut', 'two cuts', 'no cuts'])} possible in 2027`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'rules',
+    headline: (c) =>
+      `CPI prints ${(2 + c.rand() * 0.4).toFixed(1)}% against a ${(2.6 + c.rand() * 0.3).toFixed(1)}% consensus`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'rules',
+    headline: (c) => `Core PCE runs hotter than expected at ${(2.8 + c.rand() * 0.5).toFixed(1)}%`,
+  },
+  {
+    sentiment: 'bullish',
+    tier: 'provider',
+    headline: (c) => `Nonfarm payrolls add ${int(c.rand, 180, 320)}K, above consensus`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'provider',
+    headline: (c) => `Jobless claims rise to ${int(c.rand, 232, 268)}K`,
+  },
+  {
+    sentiment: 'neutral',
+    tier: 'provider',
+    headline: (c) => `Breadth narrows as ${int(c.rand, 3, 7)} names drive the session`,
+  },
+  {
+    sentiment: 'bearish',
+    tier: 'llm',
+    headline: (c) =>
+      `Treasury yields climb as ${pick(c.rand, ['auction demand softens', 'the term premium widens'])}`,
+  },
+  {
+    sentiment: 'neutral',
+    tier: 'llm',
+    headline: (c) => `Oil holds a ${int(c.rand, 2, 6)}-session range ahead of the OPEC+ meeting`,
+  },
+  {
+    sentiment: 'unclassified',
+    tier: 'llm',
+    headline: (c) =>
+      `Officials offer mixed remarks on the ${pick(c.rand, ['September', 'October', 'December'])} path`,
+  },
+]
+
+/** Sessions the feed reaches back over. Ten is deep enough that the
+ * lookback control changes the answer at every step and that the sector and
+ * publisher filters have something to cut, and shallow enough that the
+ * corpus is still one plausible fortnight rather than an archive. */
+const NEWS_SESSIONS = 10
+
+/** Walks back one session at a time, skipping weekends.
+ *
+ * A real market calendar also skips holidays (CLAUDE.md), which Phase 2
+ * takes from the actual one — the point here is only that the feed has no
+ * Saturday headlines, which would be the first thing anyone noticed. */
+function previousSessions(fromDate: string, count: number): string[] {
+  const out: string[] = []
+  const d = new Date(`${fromDate}T00:00:00Z`)
+  while (out.length < count) {
+    const day = d.getUTCDay()
+    if (day !== 0 && day !== 6) out.push(d.toISOString().slice(0, 10))
+    d.setUTCDate(d.getUTCDate() - 1)
+  }
+  return out
+}
+
+const newsRand = mulberry32(20264001)
+
+/** One story, filed against a session and a time of day. */
+function buildItem(id: string, date: string, rand: () => number): NewsItem {
+  // 10:05 to 20:55 UTC — 6:05am to 4:55pm ET. News runs well before the
+  // open and past the close, so the feed is not clipped to 09:30–16:00.
+  const minutes = int(rand, 605, 1255)
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0')
+  const mm = String(minutes % 60).padStart(2, '0')
+  const time = `${date}T${hh}:${mm}:00Z`
+
+  if (rand() < 0.18) {
+    const story = pick(rand, MACRO_STORIES)
+    return {
+      id,
+      time,
+      ticker: 'MARKET',
+      headline: story.headline({
+        company: 'the market',
+        ticker: 'MARKET',
+        sector: MACRO_SECTOR,
+        rand,
+      }),
+      sentiment: story.sentiment,
+      publisher: pick(rand, PUBLISHERS),
+      sector: MACRO_SECTOR,
+      tier: story.tier,
+    }
+  }
+
+  const name = pick(rand, NEWS_UNIVERSE)
+  const eligible = COMPANY_STORIES.filter(
+    (s) => s.sectors === undefined || s.sectors.includes(name.sector),
+  )
+  const story = pick(rand, eligible)
+  return {
+    id,
+    time,
+    ticker: name.ticker,
+    headline: story.headline({ ...name, rand }),
+    sentiment: story.sentiment,
+    publisher: pick(rand, PUBLISHERS),
+    sector: name.sector,
+    tier: story.tier,
+  }
+}
+
+function buildNewsFeed(): NewsItem[] {
+  const items: NewsItem[] = []
+
+  previousSessions(MARKET_TODAY, NEWS_SESSIONS).forEach((date, sessionIndex) => {
+    // The newest session runs shorter because it is still in progress — the
+    // top of the feed is "so far today", not a finished day.
+    const count = sessionIndex === 0 ? 9 : int(newsRand, 9, 11)
+    for (let i = 0; i < count; i += 1) {
+      items.push(buildItem(`news-${date}-${i}`, date, newsRand))
+    }
+  })
+
+  // Newest first, which is the order the page opens in and the order the
+  // store prepends against.
+  return items.sort((a, b) => b.time.localeCompare(a.time))
+}
+
+export const NEWS_ITEMS: NewsItem[] = buildNewsFeed()
+
+/** Headlines that arrive *while the page is open*.
+ *
+ * Held apart from the published corpus rather than generated on the fly, so
+ * a session still replays identically — the store releases these in order,
+ * and what a reader sees at the third poll is the same on every run.
+ *
+ * When the reserve is exhausted the feed simply stops growing, which is
+ * what a quiet afternoon looks like. No news is the ordinary case on this
+ * page, so a poll that returns nothing is still a *successful* poll and the
+ * status pill has to keep saying so — unlike a price stream, where silence
+ * means something has broken. */
+export const NEWS_INCOMING: NewsItem[] = (() => {
+  const rand = mulberry32(20264002)
+  // `time` is assigned by the store on release, against the fixture's
+  // clock rather than the wall clock — see `pollNews`.
+  return Array.from({ length: 12 }, (_, i) =>
+    buildItem(`news-incoming-${i}`, MARKET_TODAY, rand),
+  )
+})()
 
 // ---------------------------------------------------------------------- //
 // Market sentiment composite (News page)
@@ -925,19 +1362,36 @@ export const NEWS_ITEMS: NewsItem[] = [
 export interface SentimentComponent {
   name: string
   description: string
-  score: number // 0-100, z-scored then rescaled
+  /** 0-100, z-scored on a trailing window and rescaled. */
+  score: number
 }
 
-export const SENTIMENT_COMPOSITE = 58
+/** The seven components of PRD.md §8.3, mirroring CNN's published
+ * methodology. Equally weighted, so the headline number is their mean —
+ * `compositeScore` in `lib/news.ts` derives it rather than storing it. A
+ * stored composite is a number that can drift from the breakdown printed
+ * directly underneath it. */
 export const SENTIMENT_COMPONENTS: SentimentComponent[] = [
-  { name: 'Momentum', description: 'SPX vs 125-day moving average', score: 64 },
-  { name: 'Strength', description: '52-week highs vs lows', score: 55 },
-  { name: 'Breadth', description: 'Advance/decline volume', score: 51 },
-  { name: 'Put/call ratio', description: 'CBOE equity put/call', score: 60 },
-  { name: 'Volatility', description: 'VIX vs 50-day moving average', score: 62 },
-  { name: 'Safe-haven demand', description: '20-day equity minus Treasury return', score: 57 },
-  { name: 'Junk bond demand', description: 'FRED BAMLH0A0HYM2', score: 57 },
+  { name: 'Momentum', description: 'S&P 500 against its 125-day moving average', score: 64 },
+  { name: 'Strength', description: '52-week highs against 52-week lows', score: 55 },
+  { name: 'Breadth', description: 'Advancing against declining volume', score: 51 },
+  { name: 'Put/call ratio', description: 'CBOE equity put/call, 5-day average', score: 60 },
+  { name: 'Volatility', description: 'VIX against its 50-day moving average', score: 62 },
+  { name: 'Safe-haven demand', description: '20-day equity return minus Treasury return', score: 57 },
+  { name: 'Junk bond demand', description: 'High-yield spread, FRED BAMLH0A0HYM2', score: 57 },
 ]
+
+/** When the composite was last computed. Daily, after the close: every
+ * input is a daily series, so a figure restamped every minute would claim a
+ * freshness it does not have. This is why the live pill on this page covers
+ * the *feed* and nothing else. */
+export const SENTIMENT_AS_OF = '2026-08-07T20:15:00Z'
+
+/** The prior session's composite, for the one-day delta. Stored rather than
+ * derived because yesterday's seven components are not carried — the
+ * breakdown on screen is today's, and reconstructing a second one would be
+ * inventing data to fill a column. */
+export const SENTIMENT_PREVIOUS = 51
 
 // ---------------------------------------------------------------------- //
 // Social attention (News page)
@@ -945,19 +1399,36 @@ export const SENTIMENT_COMPONENTS: SentimentComponent[] = [
 
 export interface SocialAttentionItem {
   ticker: string
+  /** Messages in the last session. */
   mentions: number
+  /** The 30-day average this session is measured against. */
   baselineMentions: number
+  /** Messages carrying a user-applied bull/bear label — roughly 30-50% of
+   * them, per PRD.md §8.3. Sentiment is aggregated over these and nothing
+   * else, and the count is displayed so that a direction drawn from eighty
+   * messages is visibly not the same claim as one drawn from two thousand. */
   labeledCount: number
   sampleSize: number
   sentiment: Sentiment
 }
 
 export const SOCIAL_ATTENTION: SocialAttentionItem[] = [
+  { ticker: 'CRWV', mentions: 6180, baselineMentions: 1240, labeledCount: 2410, sampleSize: 6180, sentiment: 'bullish' },
   { ticker: 'NVDA', mentions: 4820, baselineMentions: 2100, labeledCount: 1740, sampleSize: 4820, sentiment: 'bullish' },
   { ticker: 'TSLA', mentions: 3910, baselineMentions: 3400, labeledCount: 1390, sampleSize: 3910, sentiment: 'bearish' },
+  { ticker: 'RDDT', mentions: 2960, baselineMentions: 1180, labeledCount: 905, sampleSize: 2960, sentiment: 'bullish' },
   { ticker: 'AAPL', mentions: 2240, baselineMentions: 2000, labeledCount: 820, sampleSize: 2240, sentiment: 'bullish' },
+  // Below its own baseline. Attention *falling* is a reading too, and a
+  // panel where every row is up is a leaderboard rather than a measurement.
   { ticker: 'SPY', mentions: 1650, baselineMentions: 1700, labeledCount: 540, sampleSize: 1650, sentiment: 'neutral' },
+  { ticker: 'XOM', mentions: 940, baselineMentions: 1450, labeledCount: 310, sampleSize: 940, sentiment: 'bearish' },
+  // Thin label coverage — 88 of 780. A direction is computable and the
+  // sample is too small to publish one, which is what `unclassified` is
+  // for here just as it is in the feed.
+  { ticker: 'ALAB', mentions: 780, baselineMentions: 260, labeledCount: 88, sampleSize: 780, sentiment: 'unclassified' },
 ]
+
+export const SOCIAL_AS_OF = '2026-08-07T20:00:00Z'
 
 // ---------------------------------------------------------------------- //
 // Sector consensus (News page — "Top rated by sector")
@@ -966,19 +1437,32 @@ export const SOCIAL_ATTENTION: SocialAttentionItem[] = [
 export interface SectorConsensus {
   sector: string
   etf: string
+  /** The largest constituent, which the roll-up is weighted toward. */
   leader: string
+  /** Percentages of covering analysts. The three sum to 100. */
   buy: number
   hold: number
   sell: number
   asOf: string
 }
 
+/** All eleven GICS sectors, refreshed monthly from Finnhub (PRD.md §8.3).
+ * Every row carries the same as-of date because they arrive in one job — a
+ * per-row date would imply a staggered refresh that does not happen. */
 export const SECTOR_CONSENSUS: SectorConsensus[] = [
+  { sector: 'Communication Services', etf: 'XLC', leader: 'GOOGL', buy: 71, hold: 24, sell: 5, asOf: '2026-08-01' },
   { sector: 'Technology', etf: 'XLK', leader: 'AAPL', buy: 68, hold: 27, sell: 5, asOf: '2026-08-01' },
-  { sector: 'Health Care', etf: 'XLV', leader: 'LLY', buy: 61, hold: 32, sell: 7, asOf: '2026-08-01' },
-  { sector: 'Financials', etf: 'XLF', leader: 'BRK.B', buy: 55, hold: 38, sell: 7, asOf: '2026-08-01' },
   { sector: 'Consumer Discretionary', etf: 'XLY', leader: 'AMZN', buy: 64, hold: 29, sell: 7, asOf: '2026-08-01' },
+  { sector: 'Health Care', etf: 'XLV', leader: 'LLY', buy: 61, hold: 32, sell: 7, asOf: '2026-08-01' },
+  { sector: 'Industrials', etf: 'XLI', leader: 'CAT', buy: 58, hold: 35, sell: 7, asOf: '2026-08-01' },
+  { sector: 'Financials', etf: 'XLF', leader: 'BRK.B', buy: 55, hold: 38, sell: 7, asOf: '2026-08-01' },
+  { sector: 'Utilities', etf: 'XLU', leader: 'NEE', buy: 52, hold: 40, sell: 8, asOf: '2026-08-01' },
+  { sector: 'Consumer Staples', etf: 'XLP', leader: 'WMT', buy: 49, hold: 43, sell: 8, asOf: '2026-08-01' },
   { sector: 'Energy', etf: 'XLE', leader: 'XOM', buy: 47, hold: 41, sell: 12, asOf: '2026-08-01' },
+  { sector: 'Materials', etf: 'XLB', leader: 'LIN', buy: 44, hold: 45, sell: 11, asOf: '2026-08-01' },
+  // The one sector the street is net-cautious on. A panel where every row
+  // is a majority Buy is a panel nobody needs to read.
+  { sector: 'Real Estate', etf: 'XLRE', leader: 'PLD', buy: 33, hold: 49, sell: 18, asOf: '2026-08-01' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -987,23 +1471,66 @@ export const SECTOR_CONSENSUS: SectorConsensus[] = [
 
 export type CalendarEventType = 'earnings' | 'economic' | 'central-bank' | 'dividend' | 'geopolitical'
 
+export const CALENDAR_TYPE_LABEL: Record<CalendarEventType, string> = {
+  earnings: 'Earnings',
+  economic: 'Economic',
+  'central-bank': 'Central bank',
+  dividend: 'Dividend',
+  geopolitical: 'Geopolitical',
+}
+
 export interface CalendarEvent {
   id: string
-  time: string
+  /** The **Eastern** session the event falls on, as a calendar date.
+   *
+   * Carried separately from `at` rather than derived from it, because
+   * deriving it is the bug: `2026-08-12T00:00:00Z` is midnight UTC, which
+   * is 8pm ET on **August 11**, so an ex-dividend date stored as an instant
+   * groups under the day before the one it is. Grouping runs off this
+   * field, and `news.test.ts` pins that every timed event's ET date matches
+   * it — the same trap `formatExpiry` documents, one screen over. */
+  date: string
+  /** The scheduled instant, or `null` when the event is a date rather than
+   * a time.
+   *
+   * An ex-dividend date and a trade-council session have no 8:30am; they
+   * are properties of a day. Storing a placeholder midnight for them is how
+   * a row ends up reading "7:00 PM" for something that never had a time,
+   * and on the wrong day at that. */
+  at: string | null
   type: CalendarEventType
   title: string
   ticker?: string
 }
 
+/** Forward-looking only, per PRD.md §8.3 — a calendar of what has not
+ * happened yet. `upcomingEvents` in `lib/news.ts` enforces that against the
+ * clock rather than trusting the fixture to stay ahead of it.
+ *
+ * Three weeks out, which reaches past the near expirations in
+ * `CHAIN_EXPIRATIONS`: the point of the panel is seeing the event risk that
+ * sits inside a contract you are already holding. */
 export const CALENDAR_EVENTS: CalendarEvent[] = [
-  { id: 'cal-1', time: '2026-08-08T12:30:00Z', type: 'economic', title: 'Nonfarm payrolls' },
-  { id: 'cal-2', time: '2026-08-08T20:05:00Z', type: 'earnings', title: 'Q3 earnings call', ticker: 'DIS' },
-  { id: 'cal-3', time: '2026-08-11T18:00:00Z', type: 'central-bank', title: 'FOMC rate decision' },
-  { id: 'cal-4', time: '2026-08-12T00:00:00Z', type: 'dividend', title: 'Ex-dividend date', ticker: 'JNJ' },
-  { id: 'cal-5', time: '2026-08-13T00:00:00Z', type: 'geopolitical', title: 'EU trade council session' },
+  { id: 'cal-1', date: '2026-08-10', at: '2026-08-10T14:00:00Z', type: 'economic', title: 'Wholesale inventories' },
+  { id: 'cal-2', date: '2026-08-10', at: '2026-08-10T20:05:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'RBRK' },
+  { id: 'cal-3', date: '2026-08-11', at: '2026-08-11T12:30:00Z', type: 'economic', title: 'CPI, July' },
+  { id: 'cal-4', date: '2026-08-11', at: '2026-08-11T18:00:00Z', type: 'central-bank', title: 'FOMC rate decision' },
+  { id: 'cal-5', date: '2026-08-11', at: '2026-08-11T18:30:00Z', type: 'central-bank', title: 'Fed chair press conference' },
+  // No time at all. An ex-dividend date is a property of the session, and
+  // the row reads "All day" rather than inventing an 8:00 PM.
+  { id: 'cal-6', date: '2026-08-12', at: null, type: 'dividend', title: 'Ex-dividend date', ticker: 'JNJ' },
+  { id: 'cal-7', date: '2026-08-12', at: '2026-08-12T12:30:00Z', type: 'economic', title: 'PPI, July' },
+  { id: 'cal-8', date: '2026-08-13', at: null, type: 'geopolitical', title: 'EU trade council session' },
+  { id: 'cal-9', date: '2026-08-13', at: '2026-08-13T20:05:00Z', type: 'earnings', title: 'Q3 earnings call', ticker: 'AAPL' },
+  { id: 'cal-10', date: '2026-08-14', at: '2026-08-14T12:30:00Z', type: 'economic', title: 'Retail sales, July' },
+  { id: 'cal-11', date: '2026-08-17', at: '2026-08-17T20:05:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'HD' },
+  { id: 'cal-12', date: '2026-08-18', at: null, type: 'dividend', title: 'Ex-dividend date', ticker: 'XOM' },
+  { id: 'cal-13', date: '2026-08-19', at: '2026-08-19T18:00:00Z', type: 'central-bank', title: 'FOMC minutes' },
+  { id: 'cal-14', date: '2026-08-20', at: '2026-08-20T20:20:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'NVDA' },
+  { id: 'cal-15', date: '2026-08-21', at: '2026-08-21T13:00:00Z', type: 'geopolitical', title: 'G20 finance ministers meet' },
+  { id: 'cal-16', date: '2026-08-25', at: '2026-08-25T14:00:00Z', type: 'economic', title: 'Consumer confidence' },
 ]
 
-// ---------------------------------------------------------------------- //
 // ---------------------------------------------------------------------- //
 // Option chains + stocks/ETFs (Markets page)
 // ---------------------------------------------------------------------- //
@@ -1402,9 +1929,14 @@ export const LLM_ORIGINATION = {
   unvalidated: 22,
 }
 
+/** The composite is deliberately **not** a field here. It is the mean of
+ * `SENTIMENT_COMPONENTS`, and `compositeScore` in `lib/news.ts` derives it
+ * — a copy stored on this object is a number that can disagree with the
+ * breakdown the News page prints underneath it, which is the same failure
+ * `activityStats` exists to avoid one page over. Research reads it from
+ * `news.ts` when it is built. */
 export const MARKET_PULSE = {
   vix: 16.8,
-  sentimentComposite: SENTIMENT_COMPOSITE,
   topSector: 'Technology',
 }
 
