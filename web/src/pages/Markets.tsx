@@ -3,6 +3,7 @@ import { Pagination } from '../components/Pagination'
 import { LiveStatus } from '../components/LiveStatus'
 import { SymbolCombobox } from '../components/SymbolCombobox'
 import { ChainOrderTicket } from '../components/ChainOrderTicket'
+import { UnderlyingChart } from '../components/UnderlyingChart'
 import { TableSkeleton } from '../components/Skeleton'
 import { usePagination } from '../hooks/usePagination'
 import { useMarketPoll } from '../hooks/useMarketPoll'
@@ -23,6 +24,7 @@ import {
   filterChain,
   liveStocks,
   relativeVolume,
+  searchStocks,
   sortChain,
   sortStocks,
   stockRankFor,
@@ -59,12 +61,20 @@ const PAGE_SIZE = 15
  * across a page of chains sits well inside that; 400ms would not. */
 const POLL_MS = 2_000
 
+/** The chain section's anchor, so the stock table can send you to it. */
+const CHAIN_SECTION_ID = 'options-chains'
+
 const TH = 'whitespace-nowrap px-3 py-2 text-label-md uppercase text-on-surface-variant'
 const TD = 'px-3 py-2 align-middle'
 const TD_NUM = `${TD} whitespace-nowrap text-right text-data-md text-on-surface`
 
 const SELECT =
   'rounded border border-outline bg-surface px-2 py-2 text-label-md text-on-surface focus:border-primary'
+const SEARCH =
+  // w-56, not w-44: the placeholder is where the field says it covers
+  // company names too, which is the non-obvious half of what it does, and
+  // at w-44 it truncated to 'Search symbol or na'.
+  'w-56 rounded border border-outline bg-surface px-2 py-2 text-label-md text-on-surface placeholder:text-on-surface-variant focus:border-primary'
 
 interface Column<K extends string> {
   key: string
@@ -182,20 +192,28 @@ const STOCK_COLUMNS: Column<StockSortKey>[] = [
   { key: 'volume', label: 'Volume', align: 'right', sortKey: 'volume' },
   { key: 'relVolume', label: 'Rel vol', align: 'right', sortKey: 'relVolume' },
   { key: 'marketCap', label: 'Market cap', align: 'right', sortKey: 'marketCap' },
+  { key: 'chart', label: 'Chart', align: 'right' },
 ]
 
 function contractKeyOf(c: OptionContract): string {
   return `${c.symbol}-${c.expiration}-${c.strike}-${c.type}`
 }
 
-function OptionsChains({ equity, loading }: { equity: number; loading: boolean }) {
+function OptionsChains({
+  underlying,
+  onUnderlyingChange,
+  equity,
+  loading,
+}: {
+  /** Lifted, because the stock table points this at a symbol too. Two
+   * copies of it would let the table say AAPL while the chain showed SPY. */
+  underlying: string | null
+  onUnderlyingChange: (symbol: string | null) => void
+  equity: number
+  loading: boolean
+}) {
   const chain = useUIStore((s) => s.chain)
 
-  // A chain is browsed one underlying at a time — that is the question you
-  // arrive with, so the page opens on one rather than on 180 rows of six
-  // names interleaved. "All underlyings" exists for the screens, where
-  // ranking across the whole board is the point.
-  const [underlying, setUnderlying] = useState<string | null>(CHAIN_UNDERLYINGS[0] ?? null)
   const [minVolume, setMinVolume] = useState(0)
   const [sort, setSort] = useState<ChainSort>(CHAIN_LADDER_SORT)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -210,6 +228,7 @@ function OptionsChains({ equity, loading }: { equity: number; loading: boolean }
 
   return (
     <section
+      id={CHAIN_SECTION_ID}
       aria-labelledby="options-chains-heading"
       className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest"
     >
@@ -228,7 +247,7 @@ function OptionsChains({ equity, loading }: { equity: number; loading: boolean }
             symbols={CHAIN_UNDERLYINGS}
             value={underlying}
             onChange={(next) => {
-              setUnderlying(next)
+              onUnderlyingChange(next)
               // The expanded ticket belongs to a row that may not be in the
               // new result set. Leaving it open would put a ticket for a
               // contract you can no longer see under one you can.
@@ -285,78 +304,83 @@ function OptionsChains({ equity, loading }: { equity: number; loading: boolean }
         </p>
       ) : (
         <>
-          {/* Thirteen columns of quotes do not fit a laptop. Scrolling
-              the table inside its own panel keeps the page layout intact
-              — the alternative, letting it push the page wide, moves every
-              other section sideways too. */}
+          {/* Thirteen columns of quotes do not fit a laptop. Scrolling the
+              table inside its own panel keeps the page layout intact — the
+              alternative, letting it push the page wide, moves every other
+              section sideways too. */}
           <div className="overflow-x-auto">
-          <table className="w-full min-w-[1100px] border-collapse">
-            <SortableHead
-              columns={CHAIN_COLUMNS}
-              sort={sort}
-              onSort={(key) => {
-                setSort(nextSort(sort, key, CHAIN_DEFAULT_DIRECTION))
-                setPage(1)
-              }}
-            />
-            <tbody>
-              {pageItems.map((c) => {
-                const key = contractKeyOf(c)
-                const open = expanded === key
-                return (
-                  <Fragment key={key}>
-                    <tr
-                      className={`border-t border-outline/10 ${
-                        open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
-                      }`}
-                    >
-                      <td className={`${TD} text-body-md text-on-surface`}>{c.symbol}</td>
-                      {/* An expiry is a date, not an instant — formatExpiry
-                          parses it as UTC. Rendered in ET it would show the
-                          day before. */}
-                      <td className={`${TD} whitespace-nowrap text-body-md text-on-surface-variant`}>
-                        {formatExpiry(c.expiration)}
-                      </td>
-                      <td className={`${TD} text-label-md text-on-surface`}>
-                        {c.type === 'call' ? 'Call' : 'Put'}
-                      </td>
-                      <td className={TD_NUM}>{formatUsd(c.strike)}</td>
-                      <td className={TD_NUM}>{formatUsd(c.last)}</td>
-                      <SignedCell value={c.change} />
-                      <SignedCell value={c.changePct} percent />
-                      <td className={TD_NUM}>{formatUsd(c.bid)}</td>
-                      <td className={TD_NUM}>{formatUsd(c.ask)}</td>
-                      <td className={TD_NUM}>{formatInteger(c.volume)}</td>
-                      <td className={TD_NUM}>{formatInteger(c.openInterest)}</td>
-                      <td className={TD_NUM}>{formatIv(c.iv)}</td>
-                      <td className={`${TD} whitespace-nowrap text-right`}>
-                        <button
-                          type="button"
-                          aria-expanded={open}
-                          aria-label={`${open ? 'Close' : 'Trade'} ${c.symbol} $${c.strike} ${c.type}`}
-                          onClick={() => setExpanded(open ? null : key)}
-                          className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
-                        >
-                          {open ? 'Close' : 'Trade'}
-                        </button>
-                      </td>
-                    </tr>
-                    {open && (
-                      <tr>
-                        <td colSpan={CHAIN_COLUMNS.length} className="p-0">
-                          <ChainOrderTicket
-                            contract={c}
-                            equity={equity}
-                            onDone={() => setExpanded(null)}
-                          />
+            <table className="w-full min-w-[1100px] border-collapse">
+              <SortableHead
+                columns={CHAIN_COLUMNS}
+                sort={sort}
+                onSort={(key) => {
+                  setSort(nextSort(sort, key, CHAIN_DEFAULT_DIRECTION))
+                  setPage(1)
+                }}
+              />
+              <tbody>
+                {pageItems.map((c) => {
+                  const key = contractKeyOf(c)
+                  const open = expanded === key
+                  return (
+                    <Fragment key={key}>
+                      <tr
+                        className={`border-t border-outline/10 ${
+                          open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
+                        }`}
+                      >
+                        <td className={`${TD} text-body-md text-on-surface`}>{c.symbol}</td>
+                        {/* An expiry is a date, not an instant — formatExpiry
+                            parses it as UTC. Rendered in ET it would show
+                            the day before. */}
+                        <td className={`${TD} whitespace-nowrap text-body-md text-on-surface-variant`}>
+                          {formatExpiry(c.expiration)}
+                        </td>
+                        <td className={`${TD} text-label-md text-on-surface`}>
+                          {c.type === 'call' ? 'Call' : 'Put'}
+                        </td>
+                        <td className={TD_NUM}>{formatUsd(c.strike)}</td>
+                        <td className={TD_NUM}>{formatUsd(c.last)}</td>
+                        <SignedCell value={c.change} />
+                        <SignedCell value={c.changePct} percent />
+                        <td className={TD_NUM}>{formatUsd(c.bid)}</td>
+                        <td className={TD_NUM}>{formatUsd(c.ask)}</td>
+                        <td className={TD_NUM}>{formatInteger(c.volume)}</td>
+                        <td className={TD_NUM}>{formatInteger(c.openInterest)}</td>
+                        <td className={TD_NUM}>{formatIv(c.iv)}</td>
+                        <td className={`${TD} whitespace-nowrap text-right`}>
+                          <button
+                            type="button"
+                            aria-expanded={open}
+                            /* The expiry is part of the name because a
+                               strike and a right are not unique — the same
+                               $410 call is listed on three expirations, and
+                               without it a screen reader hears the same
+                               button three times. */
+                            aria-label={`${open ? 'Close' : 'Trade'} ${c.symbol} ${c.strike} ${c.type} ${formatExpiry(c.expiration)}`}
+                            onClick={() => setExpanded(open ? null : key)}
+                            className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
+                          >
+                            {open ? 'Close' : 'Trade'}
+                          </button>
                         </td>
                       </tr>
-                    )}
-                  </Fragment>
-                )
-              })}
-            </tbody>
-          </table>
+                      {open && (
+                        <tr>
+                          <td colSpan={CHAIN_COLUMNS.length} className="p-0">
+                            <ChainOrderTicket
+                              contract={c}
+                              equity={equity}
+                              onDone={() => setExpanded(null)}
+                            />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
           <Pagination page={page} pageCount={pageCount} onChange={setPage} />
         </>
@@ -365,13 +389,23 @@ function OptionsChains({ equity, loading }: { equity: number; loading: boolean }
   )
 }
 
-function StocksAndEtfs({ loading }: { loading: boolean }) {
+function StocksAndEtfs({
+  loading,
+  onViewChain,
+}: {
+  loading: boolean
+  onViewChain: (symbol: string) => void
+}) {
   const quotes = useUIStore((s) => s.underlyings)
   const [sort, setSort] = useState<StockSort>(STOCK_RANK_SORT.active)
+  const [search, setSearch] = useState('')
+  const [expanded, setExpanded] = useState<string | null>(null)
 
-  const rows = sortStocks(liveStocks(STOCKS, quotes), sort)
+  const matched = searchStocks(liveStocks(STOCKS, quotes), search)
+  const rows = sortStocks(matched, sort)
   const { page, pageCount, pageItems, setPage } = usePagination(rows, PAGE_SIZE)
   const rank = stockRankFor(sort)
+  const query = search.trim()
 
   return (
     <section
@@ -384,33 +418,49 @@ function StocksAndEtfs({ loading }: { loading: boolean }) {
             Stocks &amp; ETFs
           </h2>
           <p className="mt-1 text-caption text-on-surface-variant">
-            {formatInteger(rows.length)} symbols
+            {query === ''
+              ? `${formatInteger(rows.length)} symbols`
+              : `${formatInteger(rows.length)} of ${formatInteger(STOCKS.length)} symbols`}
           </p>
         </div>
-        <select
-          value={rank ?? 'custom'}
-          onChange={(e) => {
-            setSort(STOCK_RANK_SORT[e.target.value as StockRank])
-            setPage(1)
-          }}
-          aria-label="Rank stocks by"
-          className={SELECT}
-        >
-          {rank === null && <option value="custom">Custom sort</option>}
-          {STOCK_RANKS.map((r) => (
-            <option key={r} value={r}>
-              {STOCK_RANK_LABEL[r]}
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value)
+              setExpanded(null)
+              setPage(1)
+            }}
+            aria-label="Search stocks by symbol or name"
+            placeholder="Search symbol or name…"
+            className={SEARCH}
+          />
+          <select
+            value={rank ?? 'custom'}
+            onChange={(e) => {
+              setSort(STOCK_RANK_SORT[e.target.value as StockRank])
+              setPage(1)
+            }}
+            aria-label="Rank stocks by"
+            className={SELECT}
+          >
+            {rank === null && <option value="custom">Custom sort</option>}
+            {STOCK_RANKS.map((r) => (
+              <option key={r} value={r}>
+                {STOCK_RANK_LABEL[r]}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {loading ? (
         <TableSkeleton rows={8} columns={STOCK_COLUMNS.length} label="Loading stocks and ETFs" />
       ) : rows.length === 0 ? (
         <p className="px-4 py-6 text-body-md text-on-surface-variant">
-          No symbols in the universe yet. Phase 2 fills this from the asset list the scanner runs
-          over.
+          Nothing in the universe matches “{query}”. The search covers ticker and company name, so
+          “reddit” finds RDDT — clear it to see all {formatInteger(STOCKS.length)} symbols.
         </p>
       ) : (
         <>
@@ -426,56 +476,105 @@ function StocksAndEtfs({ loading }: { loading: boolean }) {
             <tbody>
               {pageItems.map((s) => {
                 const rel = relativeVolume(s)
+                const open = expanded === s.symbol
+                const hasChain = CHAIN_UNDERLYINGS.includes(s.symbol)
                 return (
-                  <tr
-                    key={s.symbol}
-                    className="border-t border-outline/10 hover:bg-surface-container-low"
-                  >
-                    <td className={`${TD} text-body-md text-on-surface`}>{s.symbol}</td>
-                    <td className={`${TD} max-w-0 text-body-md text-on-surface-variant`} title={s.name}>
-                      <span className="block truncate">{s.name}</span>
-                    </td>
-                    <td className={TD_NUM}>{formatUsd(s.price)}</td>
-                    <SignedCell value={s.change} />
-                    <SignedCell value={s.changePct} percent />
-                    {/* Compact, unlike the chain's volume: nine digits of
-                        share count would set the column's width for the
-                        sake of precision nobody reads off a screener. */}
-                    <td className={TD_NUM}>{formatCompactNumber(s.volume)}</td>
-                    {/* Today against the name's own average — what
-                        "trending" actually measures. Deliberately not
-                        bullish or bearish: unusual volume carries no
-                        direction, and a green 4.1× beside a stock down 6%
-                        would say the opposite of what happened.
+                  <Fragment key={s.symbol}>
+                    <tr
+                      className={`border-t border-outline/10 ${
+                        open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
+                      }`}
+                    >
+                      <td className={`${TD} text-body-md text-on-surface`}>{s.symbol}</td>
+                      <td
+                        className={`${TD} max-w-0 text-body-md text-on-surface-variant`}
+                        title={s.name}
+                      >
+                        <span className="block truncate">{s.name}</span>
+                      </td>
+                      <td className={TD_NUM}>{formatUsd(s.price)}</td>
+                      <SignedCell value={s.change} />
+                      <SignedCell value={s.changePct} percent />
+                      {/* Compact, unlike the chain's volume: nine digits of
+                          share count would set the column's width for the
+                          sake of precision nobody reads off a screener. */}
+                      <td className={TD_NUM}>{formatCompactNumber(s.volume)}</td>
+                      {/* Today against the name's own average — what
+                          "trending" actually measures. Deliberately not
+                          bullish or bearish: unusual volume carries no
+                          direction, and a green 4.1× beside a stock down 6%
+                          would say the opposite of what happened.
 
-                        `on-accent-container`, not `accent`. Bare accent is
-                        #ce8f82 and measures 2.53:1 on surface — the same
-                        muted-plausible-colour trap CLAUDE.md documents for
-                        `outline` and `neutral`. DESIGN.md only ever uses
-                        accent as a *fill* under `on-accent`; as text it is
-                        half the required floor. The container's on-colour
-                        is 10.7:1 light and 14.3:1 dark. */}
-                    <td
-                      className={`${TD} whitespace-nowrap text-right text-data-md ${
-                        rel >= 2 ? 'font-semibold text-on-accent-container' : 'text-on-surface'
-                      }`}
-                      title={`${formatCompactNumber(s.volume)} today against a ${formatCompactNumber(
-                        s.avgVolume,
-                      )} average`}
-                    >
-                      {rel.toFixed(2)}×
-                    </td>
-                    {/* A fund has no market cap. formatMarketCap renders
-                        the em dash, and sortStocks sorts those rows last
-                        rather than treating them as zero. */}
-                    <td
-                      className={`${TD} whitespace-nowrap text-right text-data-md ${
-                        s.marketCap === null ? 'text-on-surface-variant' : 'text-on-surface'
-                      }`}
-                    >
-                      {formatMarketCap(s.marketCap)}
-                    </td>
-                  </tr>
+                          `on-accent-container`, not `accent`. Bare accent is
+                          #ce8f82 and measures 2.53:1 on surface — the same
+                          muted-plausible-colour trap CLAUDE.md documents for
+                          `outline` and `neutral`. DESIGN.md only ever uses
+                          accent as a *fill* under `on-accent`; as text it is
+                          half the required floor. The container's on-colour
+                          is 10.7:1 light and 14.3:1 dark. */}
+                      <td
+                        className={`${TD} whitespace-nowrap text-right text-data-md ${
+                          rel >= 2 ? 'font-semibold text-on-accent-container' : 'text-on-surface'
+                        }`}
+                        title={`${formatCompactNumber(s.volume)} today against a ${formatCompactNumber(
+                          s.avgVolume,
+                        )} average`}
+                      >
+                        {rel.toFixed(2)}×
+                      </td>
+                      {/* A fund has no market cap. formatMarketCap renders
+                          the em dash, and sortStocks sorts those rows last
+                          rather than treating them as zero. */}
+                      <td
+                        className={`${TD} whitespace-nowrap text-right text-data-md ${
+                          s.marketCap === null ? 'text-on-surface-variant' : 'text-on-surface'
+                        }`}
+                      >
+                        {formatMarketCap(s.marketCap)}
+                      </td>
+                      <td className={`${TD} whitespace-nowrap text-right`}>
+                        <button
+                          type="button"
+                          aria-expanded={open}
+                          aria-label={`${open ? 'Hide' : 'Show'} ${s.symbol} chart`}
+                          onClick={() => setExpanded(open ? null : s.symbol)}
+                          className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
+                        >
+                          {open ? 'Hide' : 'Chart'}
+                        </button>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr>
+                        <td colSpan={STOCK_COLUMNS.length} className="p-0">
+                          <div className="border-t border-outline-warm bg-surface-container-low px-4 py-4">
+                            <UnderlyingChart symbol={s.symbol} />
+                            {/* Only where a chain is actually listed. Twenty
+                                of these twenty-six names have none, and a
+                                button that lands you on an empty chain is
+                                worse than no button — this way the control's
+                                presence is itself the answer to "can I trade
+                                options on this". */}
+                            {hasChain ? (
+                              <button
+                                type="button"
+                                onClick={() => onViewChain(s.symbol)}
+                                className="mt-3 rounded border border-outline px-3 py-2 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
+                              >
+                                View {s.symbol} chain →
+                              </button>
+                            ) : (
+                              <p className="mt-3 text-caption text-on-surface-variant">
+                                No listed chain for {s.symbol} on this provider — it is in the
+                                universe the scanner reads, not one you can write a contract on
+                                here.
+                              </p>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -490,6 +589,10 @@ function StocksAndEtfs({ loading }: { loading: boolean }) {
 export function Markets() {
   const accountMode = useUIStore((s) => s.accountMode)
   const lastPollAt = useUIStore((s) => s.lastPollAt)
+
+  // Held here rather than inside the chain, because the stock table points
+  // it at a symbol too.
+  const [underlying, setUnderlying] = useState<string | null>(CHAIN_UNDERLYINGS[0] ?? null)
 
   useMarketPoll(POLL_MS)
 
@@ -516,8 +619,26 @@ export function Markets() {
         Trading a row opens a position in your {accountMode === 'paper' ? 'Paper' : 'Cash'} account.
       </p>
 
-      <OptionsChains equity={equity} loading={loading} />
-      <StocksAndEtfs loading={loading} />
+      <OptionsChains
+        underlying={underlying}
+        onUnderlyingChange={setUnderlying}
+        equity={equity}
+        loading={loading}
+      />
+      <StocksAndEtfs
+        loading={loading}
+        onViewChain={(symbol) => {
+          setUnderlying(symbol)
+          // Scrolling is the point: the chain is a section above, and
+          // pointing it at a symbol without going there would look like the
+          // button did nothing. Optional-called because jsdom has no
+          // implementation and this is not worth a test double.
+          document.getElementById(CHAIN_SECTION_ID)?.scrollIntoView?.({
+            behavior: 'smooth',
+            block: 'start',
+          })
+        }}
+      />
     </div>
   )
 }

@@ -8,9 +8,11 @@ import {
   STOCK_RANKS,
   STOCK_RANK_SORT,
   chainRankFor,
+  contractMoneyness,
   filterChain,
   liveStocks,
   relativeVolume,
+  searchStocks,
   searchUnderlyings,
   sortChain,
   sortStocks,
@@ -368,5 +370,56 @@ describe('the controls the page offers are backed by the fixture', () => {
     )
 
     expect(emptySomewhere).toBe(true)
+  })
+})
+
+describe('searchStocks', () => {
+  const universe = [
+    stock({ symbol: 'RDDT', name: 'Reddit Inc.' }),
+    stock({ symbol: 'NVDA', name: 'NVIDIA Corp.' }),
+    stock({ symbol: 'ARKK', name: 'ARK Innovation ETF' }),
+  ]
+
+  it('matches a ticker and a company name alike', () => {
+    // Half the reason to search a screener is that you know the company and
+    // not the ticker.
+    expect(searchStocks(universe, 'nvd').map((s) => s.symbol)).toEqual(['NVDA'])
+    expect(searchStocks(universe, 'reddit').map((s) => s.symbol)).toEqual(['RDDT'])
+    expect(searchStocks(universe, 'ETF').map((s) => s.symbol)).toEqual(['ARKK'])
+  })
+
+  it('returns everything for an empty query and nothing for a miss', () => {
+    expect(searchStocks(universe, '  ')).toHaveLength(3)
+    expect(searchStocks(universe, 'zzzz')).toEqual([])
+  })
+
+  it('never reorders or mutates the universe', () => {
+    const before = universe.map((s) => s.symbol)
+    searchStocks(universe, '')
+    expect(universe.map((s) => s.symbol)).toEqual(before)
+  })
+})
+
+describe('contractMoneyness', () => {
+  it('puts a call in the money above its strike and a put below it', () => {
+    // Inverted, a ticket would call a put worthless at exactly the moment
+    // it was worth the most.
+    expect(contractMoneyness(232.4, 230, 'call').itm).toBe(true)
+    expect(contractMoneyness(232.4, 235, 'call').itm).toBe(false)
+    expect(contractMoneyness(232.4, 235, 'put').itm).toBe(true)
+    expect(contractMoneyness(232.4, 230, 'put').itm).toBe(false)
+  })
+
+  it('reports distance unsigned, since which way it points is what itm says', () => {
+    expect(contractMoneyness(232.4, 230, 'call').distance).toBeCloseTo(2.4, 2)
+    expect(contractMoneyness(232.4, 235, 'call').distance).toBeCloseTo(2.6, 2)
+  })
+
+  it('treats exactly at the strike as out of the money', () => {
+    // At the money is not in the money: intrinsic value is zero, and a
+    // ticket claiming otherwise overstates what the contract is worth.
+    expect(contractMoneyness(230, 230, 'call').itm).toBe(false)
+    expect(contractMoneyness(230, 230, 'put').itm).toBe(false)
+    expect(contractMoneyness(230, 230, 'call').distance).toBe(0)
   })
 })

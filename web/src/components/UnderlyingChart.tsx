@@ -18,27 +18,19 @@ const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
 const AXIS_TICK = { fill: 'var(--on-surface-variant)', fontSize: 12 }
 
-/** The underlying behind the contract you are about to trade.
- *
- * An option ticket without the stock is a ticket asking you to price a
- * derivative with the derivative hidden. The strike is drawn on it, because
- * the one question this chart answers is where the underlying sits relative
- * to the number that decides whether the trade works.
+/** A stock's price over a window you choose.
  *
  * Reads the quote from the store rather than the fixture: the poll moves
  * it, and a chart on the frozen module constant would sit still under a row
  * that is changing.
+ *
+ * It carries no strike and no contract. It sat in the option ticket first
+ * and that was the wrong home — a chart is a thing you *browse*, and the
+ * place you browse stocks is the stock table. What the ticket actually
+ * needed from it was one sentence about where spot sits against the strike,
+ * which is now stated there directly.
  */
-export function UnderlyingChart({
-  symbol,
-  strike,
-  right,
-}: {
-  symbol: string
-  /** The contract's strike, marked on the series. */
-  strike: number
-  right: 'call' | 'put'
-}) {
+export function UnderlyingChart({ symbol }: { symbol: string }) {
   const [range, setRange] = useState<ChartRange>('3M')
   const quote = useUIStore((s) => s.underlyings[symbol]) ?? null
 
@@ -58,14 +50,10 @@ export function UnderlyingChart({
   if (!quote) {
     return (
       <p className="text-caption text-on-surface-variant">
-        No quote for {symbol}. Phase 2 subscribes to the underlying alongside the chain.
+        No quote for {symbol}. Phase 2 subscribes to the whole listed universe.
       </p>
     )
   }
-
-  // In the money is a fact about where the stock is, and it is the fact
-  // that decides what this contract is worth at expiry.
-  const itm = right === 'call' ? quote.price > strike : quote.price < strike
 
   return (
     <div>
@@ -124,13 +112,10 @@ export function UnderlyingChart({
               tickLine={false}
               axisLine={false}
               width={72}
-              // The strike has to stay on screen at every range, or the
-              // line marking it silently leaves the plot and the chart
-              // stops answering its one question.
-              domain={[
-                (min: number) => Math.min(min, strike) * 0.99,
-                (max: number) => Math.max(max, strike) * 1.01,
-              ]}
+              // Padded rather than 'auto', which pins the series to the
+              // very top and bottom of the plot and leaves the line
+              // touching the axis.
+              domain={[(min: number) => min * 0.99, (max: number) => max * 1.01]}
               tickFormatter={(v: number) => formatUsd(v)}
             />
             <Tooltip
@@ -156,33 +141,11 @@ export function UnderlyingChart({
                 fontSize: 12,
               }}
             />
-            {/* The strike. A stroke, not text — the accessibility floor
-                that rules `accent` out as a text colour does not apply to
-                a line, and the label beside it takes on-surface-variant. */}
-            <ReferenceLine
-              y={strike}
-              stroke="var(--accent)"
-              strokeDasharray="2 4"
-              label={{
-                value: `Strike ${formatUsd(strike)}`,
-                position: 'insideBottomRight',
-                fill: 'var(--on-surface-variant)',
-                fontSize: 12,
-              }}
-            />
             <Line type="monotone" dataKey="value" stroke="var(--primary)" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
 
-      {/* Stated in words as well as drawn, because which side of the strike
-          the stock sits on is the single fact this chart exists for, and
-          reading it off a dashed line is work. */}
-      <p className="mt-2 text-caption text-on-surface-variant">
-        {symbol} at {formatUsd(quote.price)} is{' '}
-        {itm ? 'in the money' : 'out of the money'} against the {formatUsd(strike)} {right}, by{' '}
-        {formatUsd(Math.abs(quote.price - strike))}.
-      </p>
     </div>
   )
 }

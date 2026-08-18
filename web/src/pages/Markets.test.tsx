@@ -4,7 +4,7 @@ import App from '../App'
 import { useUIStore } from '../lib/store'
 import { STOCKS, sliceRange } from '../lib/mockData'
 import { CHAIN_UNDERLYINGS, MIN_VOLUME_STEPS, filterChain, relativeVolume } from '../lib/markets'
-import { formatInteger } from '../lib/format'
+import { formatExpiry, formatInteger } from '../lib/format'
 
 const initialState = useUIStore.getState()
 
@@ -443,34 +443,99 @@ describe('pagination', () => {
   })
 })
 
-describe('the underlying chart in the ticket', () => {
+/** The sentence is broken across spans — the price takes tabular figures —
+ * so it needs a matcher that reads the paragraph rather than a text node. */
+function moneynessLine(): HTMLElement {
+  return screen.getByText(
+    (_, el) => el?.tagName === 'P' && /is (in|out of) the money against/.test(el.textContent ?? ''),
+  )
+}
+
+describe('the ticket states where spot sits against the strike', () => {
   function openTicket(): void {
     fireEvent.click(within(chainTable()).getAllByRole('button', { name: /^Trade/ })[0])
   }
 
-  it('shows the stock behind the contract, with its strike named', () => {
+  it('says it in words, and shows no chart', () => {
     render(<App />)
     openTicket()
 
-    // An option ticket without the underlying asks you to price a
-    // derivative with the derivative hidden.
+    // The chart moved to the stock table; the ticket keeps the one fact it
+    // could not do without, because otherwise the underlying's price is not
+    // on screen anywhere near the order you are about to place.
+    expect(moneynessLine()).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Chart range' })).not.toBeInTheDocument()
+  })
+
+  it('gets the direction right on a call and on a put', () => {
+    render(<App />)
+
+    const chain = useUIStore.getState().chain
+    const spot = useUIStore.getState().underlyings[CHAIN_UNDERLYINGS[0]].price
+
+    // A call is in the money above its strike and a put below it. Inverted,
+    // the ticket would call a put worthless at exactly the moment it was
+    // worth the most.
+    for (const right of ['call', 'put'] as const) {
+      const target = chain.find(
+        (c) => c.symbol === CHAIN_UNDERLYINGS[0] && c.type === right && c.strike < spot,
+      )!
+      // Named in full, expiry included: the same $410 call is listed on
+      // three expirations, so a strike and a right do not identify a row.
+      const label = `Trade ${target.symbol} ${target.strike} ${right} ${formatExpiry(
+        target.expiration,
+      )}`
+      fireEvent.click(within(chainTable()).getByRole('button', { name: label }))
+
+      expect(moneynessLine().textContent).toMatch(
+        right === 'call' ? /is in the money/ : /is out of the money/,
+      )
+    }
+  })
+
+  it('follows the poll rather than quoting a frozen price', () => {
+    render(<App />)
+    openTicket()
+
+    const before = moneynessLine().textContent
+    act(() => {
+      useUIStore.getState().pollMarkets(2_000)
+    })
+    expect(moneynessLine().textContent).not.toBe(before)
+  })
+})
+
+describe('the chart in the stock table', () => {
+  function openChart(row = 0): void {
+    fireEvent.click(within(stockTable()).getAllByRole('button', { name: /chart$/i })[row])
+  }
+
+  it('expands a row into its chart', () => {
+    render(<App />)
+
+    expect(screen.queryByRole('group', { name: 'Chart range' })).not.toBeInTheDocument()
+    openChart()
     expect(screen.getByRole('group', { name: 'Chart range' })).toBeInTheDocument()
-    expect(screen.getByText(/is (in|out of) the money against the/)).toBeInTheDocument()
   })
 
   it('offers every range, and they are not all the same chart', () => {
     render(<App />)
-    openTicket()
+    openChart()
 
     const group = screen.getByRole('group', { name: 'Chart range' })
-    const ranges = within(group)
-      .getAllByRole('button')
-      .map((b) => b.textContent)
-    expect(ranges).toEqual(['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'])
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      '1D',
+      '1W',
+      '1M',
+      '3M',
+      'YTD',
+      '1Y',
+      'All',
+    ])
 
-    // The quote carries a year of closes precisely so these differ. At a
-    // quarter, 3M / YTD / 1Y / All redrew an identical chart — four
-    // buttons pretending to be a control.
+    // The quote carries thirteen months of closes precisely so these
+    // differ. At a quarter, 3M / YTD / 1Y / All redrew an identical chart —
+    // four buttons pretending to be a control.
     const quote = useUIStore.getState().underlyings[CHAIN_UNDERLYINGS[0]]
     const lengths = new Set(
       (['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'] as const).map(
@@ -482,7 +547,7 @@ describe('the underlying chart in the ticket', () => {
 
   it('reports the move over the window on screen, not over the day', () => {
     render(<App />)
-    openTicket()
+    openChart()
 
     const group = screen.getByRole('group', { name: 'Chart range' })
     expect(screen.getByText(/over 3M/)).toBeInTheDocument()
@@ -497,7 +562,7 @@ describe('the underlying chart in the ticket', () => {
 
   it('marks the range that is showing, for a screen reader too', () => {
     render(<App />)
-    openTicket()
+    openChart()
 
     const group = screen.getByRole('group', { name: 'Chart range' })
     expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'true')
@@ -507,16 +572,87 @@ describe('the underlying chart in the ticket', () => {
     expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('follows the poll rather than sitting still under a moving row', () => {
+  it('opens one row at a time', () => {
     render(<App />)
-    openTicket()
+    openChart(0)
+    openChart(1)
 
-    const price = () => screen.getByText(/is (in|out of) the money against the/).textContent
+    // An accordion keeps the page short and makes the target of the chart
+    // unambiguous — two charts open is two answers to one question.
+    expect(screen.getAllByRole('group', { name: 'Chart range' })).toHaveLength(1)
+  })
+})
 
-    const before = price()
-    act(() => {
-      useUIStore.getState().pollMarkets(2_000)
+describe('the view-chain cross-link', () => {
+  function openChartFor(symbol: string): void {
+    fireEvent.change(screen.getByLabelText('Search stocks by symbol or name'), {
+      target: { value: symbol },
     })
-    expect(price()).not.toBe(before)
+    fireEvent.click(within(stockTable()).getAllByRole('button', { name: /chart$/i })[0])
+  }
+
+  it('points the chain at the symbol it names', () => {
+    render(<App />)
+    openChartFor('MSFT')
+
+    fireEvent.click(screen.getByRole('button', { name: 'View MSFT chain →' }))
+
+    for (const symbol of column(chainTable(), 0)) expect(symbol).toBe('MSFT')
+  })
+
+  it('is absent where no chain is listed, and says why', () => {
+    render(<App />)
+
+    // Twenty of the twenty-six names have no chain. A button that lands you
+    // on an empty one is worse than no button — its absence is itself the
+    // answer to "can I trade options on this".
+    const noChain = STOCKS.find((s) => !CHAIN_UNDERLYINGS.includes(s.symbol))!
+    openChartFor(noChain.symbol)
+
+    expect(screen.queryByRole('button', { name: /View .* chain/ })).not.toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`No listed chain for ${noChain.symbol}`))).toBeInTheDocument()
+  })
+})
+
+describe('the stock search', () => {
+  function searchStocksBox(): HTMLElement {
+    return screen.getByLabelText('Search stocks by symbol or name')
+  }
+
+  it('matches a ticker', () => {
+    render(<App />)
+
+    fireEvent.change(searchStocksBox(), { target: { value: 'nvd' } })
+    expect(column(stockTable(), 0)).toEqual(['NVDA'])
+  })
+
+  it('matches a company name too', () => {
+    render(<App />)
+
+    // Half the reason to search a screener is that you know the company and
+    // not the ticker.
+    fireEvent.change(searchStocksBox(), { target: { value: 'reddit' } })
+    expect(column(stockTable(), 0)).toEqual(['RDDT'])
+  })
+
+  it('reaches a designed empty state, which says what the search covers', () => {
+    render(<App />)
+
+    fireEvent.change(searchStocksBox(), { target: { value: 'zzzz' } })
+
+    const region = section('Stocks & ETFs')
+    expect(within(region).queryAllByRole('table')).toHaveLength(0)
+    expect(within(region).getByText(/Nothing in the universe matches/)).toBeInTheDocument()
+  })
+
+  it('returns to page one when the search narrows the table', () => {
+    render(<App />)
+
+    const region = section('Stocks & ETFs')
+    fireEvent.click(within(region).getByRole('button', { name: 'Next' }))
+    expect(within(region).getByText(/Page 2 of/)).toBeInTheDocument()
+
+    fireEvent.change(searchStocksBox(), { target: { value: 'a' } })
+    expect(within(region).queryByText(/Page 2 of/)).not.toBeInTheDocument()
   })
 })
