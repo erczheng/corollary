@@ -686,6 +686,39 @@ const PAPER_POSITIONS: Position[] = [
     attachedExit: { takeProfit: 9.6, stopPrice: 4.5, stopLimitPrice: 4.4, timeInForce: 'gtc', heldBy: 'broker' },
     valueHistory: buildValueHistory(20260904, 640.0, 640.0, 15),
   },
+  /* The last two exist so the DTE column's other render paths are
+   * reachable. Without them `Expired` and `Today` are branches nobody can
+   * ever see, which is the same trap `pending` fell into before the
+   * Activity page existed.
+   *
+   * An expired contract sitting in the book is not a contrivance: it stays
+   * there until settlement clears it, and those are exactly the hours when
+   * you most want the row shouting about it. Both are near-worthless
+   * out-of-the-money longs, which is how most options end. */
+  {
+    id: 'pos-5', symbol: 'AAPL', contract: '$240 Call Aug 7',
+    last: 0.05, underlying: 232.4, costBasis: 120.0, value: 5.0, quantity: 1,
+    pnl: -115.0, pnlPct: -95.83, bid: 0.03, ask: 0.07, direction: 'long',
+    legs: [{ symbol: 'AAPL260807C00240000', strike: 240, right: 'call', side: 'long', ratio: 1 }],
+    expiry: '2026-08-07',
+    strategyId: 'strat-1',
+    openedByStrategyId: 'strat-1',
+    managedExit: { profitTargetPct: 50, stopLossPct: 200, timeStopDte: 2 },
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260907, 120.0, 5.0, 9),
+  },
+  {
+    id: 'pos-6', symbol: 'SPY', contract: '$420 Put Aug 5',
+    last: 0.02, underlying: 429.88, costBasis: 90.0, value: 2.0, quantity: 1,
+    pnl: -88.0, pnlPct: -97.78, bid: 0.01, ask: 0.03, direction: 'long',
+    legs: [{ symbol: 'SPY260805P00420000', strike: 420, right: 'put', side: 'long', ratio: 1 }],
+    expiry: '2026-08-05',
+    strategyId: null,
+    openedByStrategyId: 'strat-1',
+    managedExit: null,
+    attachedExit: null,
+    valueHistory: buildValueHistory(20260908, 90.0, 2.0, 11),
+  },
 ]
 
 const CASH_POSITIONS: Position[] = [

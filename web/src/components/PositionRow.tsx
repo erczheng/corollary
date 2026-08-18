@@ -64,6 +64,7 @@ function ActionsMenu({
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -74,12 +75,22 @@ function ActionsMenu({
     return () => window.removeEventListener('keydown', onKey)
   }, [open])
 
+  // Focus moves into the menu on open and back to the button on close.
+  // Without the second half, dismissing the menu drops focus onto <body>
+  // and the next Tab restarts from the top of the document — which on a
+  // page of four expandable rows means finding your place again.
+  useEffect(() => {
+    if (open) ref.current?.querySelector('button')?.focus()
+    else triggerRef.current?.focus()
+  }, [open])
+
   const item =
     'block w-full px-3 py-2 text-left text-label-md text-on-surface hover:bg-surface-container-low'
 
   return (
     <div className="relative inline-block" ref={ref}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={`More actions for ${position.symbol} ${position.contract}`}
         aria-expanded={open}
@@ -93,7 +104,7 @@ function ActionsMenu({
           {/* Click-anywhere-else closes. A menu you can only dismiss by
               picking something from it is a trap. */}
           <div className="fixed inset-0 z-10" role="presentation" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-20 mt-1 w-56 overflow-hidden rounded-lg border border-outline-warm bg-surface-container-lowest py-1 text-left">
+          <div role="menu" className="absolute right-0 z-20 mt-1 w-56 overflow-hidden rounded-lg border border-outline-warm bg-surface-container-lowest py-1 text-left">
             <button type="button" className={item} onClick={() => { onSelect('add'); setOpen(false) }}>
               Add to position
             </button>
@@ -137,6 +148,19 @@ export function PositionRow({
   equity,
   columnCount,
 }: PositionRowProps) {
+  // Escape collapses the panel. Expanding a row is a mode you can end up
+  // in by accident, and every other dismissible surface here — the
+  // confirm dialog, the command palette, the ⋯ menu — already answers to
+  // Escape.
+  useEffect(() => {
+    if (!expanded) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onToggle()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [expanded, onToggle])
+
   const detachFromStrategy = useUIStore((s) => s.detachFromStrategy)
   const reattachToStrategy = useUIStore((s) => s.reattachToStrategy)
 

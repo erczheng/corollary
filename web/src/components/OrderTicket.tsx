@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
 import { useUIStore } from '../lib/store'
 import {
+  MARKET_TODAY,
   ORDER_TYPE_LABEL,
   RISK_LIMITS,
   TIME_IN_FORCE_LABEL,
@@ -13,6 +14,7 @@ import {
   MULTI_LEG_NOTE,
   ORDER_SIDE_LABEL,
   addedRiskPct,
+  daysToExpiry,
   availableOrderTypes,
   estimate,
   exitIsSell,
@@ -24,7 +26,7 @@ import {
   type OrderDraft,
   type TicketMode,
 } from '../lib/orders'
-import { formatPct, formatUsd } from '../lib/format'
+import { formatExpiry, formatPct, formatUsd } from '../lib/format'
 
 const MODES: { key: TicketMode; label: string }[] = [
   { key: 'close', label: 'Close' },
@@ -131,6 +133,13 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
   )
   const riskCeiling = RISK_LIMITS.find((l) => l.key === 'max_risk_per_trade_pct')?.value ?? 0
 
+  const dte = daysToExpiry(position.expiry, MARKET_TODAY)
+  /* A GTC order cannot outlive the contract it is written on — the
+     contract expires and takes the order with it. "Good til canceled" is
+     the one phrase on this ticket that reads like a promise, and on a
+     position seven days from expiry it is a promise about seven days. */
+  const gtcOutlivesContract = (mode === 'exit' ? exitTif : timeInForce) === 'gtc'
+
   const needsLimit = orderType === 'limit' || orderType === 'stop_limit'
   const needsStop = orderType === 'stop' || orderType === 'stop_limit'
 
@@ -153,7 +162,16 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
   }
 
   return (
-    <div>
+    <form
+      // A real form, so Enter in any field opens the confirm — the same
+      // gesture every other order ticket in the world uses. It opens the
+      // dialog rather than submitting outright; Enter should not be able
+      // to place an order in one keystroke.
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (errors.length === 0) setConfirming(true)
+      }}
+    >
       <div
         role="group"
         aria-label="Ticket mode"
@@ -232,6 +250,16 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
           <p className="text-caption text-on-surface-variant">
             Leaving stop limit empty places a plain stop, which fills at market once it trips.
           </p>
+          {gtcOutlivesContract && (
+            /* `caution`, not `error`: this is a fact about the contract,
+               not a mistake in the order. */
+            <p className="text-caption text-caution">
+              Good-til-canceled, but {position.symbol} {position.contract} expires{' '}
+              {formatExpiry(position.expiry)}
+              {dte > 0 ? ` — ${dte} day${dte === 1 ? '' : 's'} away` : dte === 0 ? ' — today' : ' — already expired'}.
+              The order dies with the contract; it cannot outlive it.
+            </p>
+          )}
         </div>
       ) : (
         <div className="mt-4 space-y-3">
@@ -301,6 +329,17 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
 
           {isMultiLeg(position) && <p className="text-caption text-on-surface-variant">{MULTI_LEG_NOTE}</p>}
 
+          {gtcOutlivesContract && (
+            /* `caution`, not `error`: this is a fact about the contract,
+               not a mistake in the order. */
+            <p className="text-caption text-caution">
+              Good-til-canceled, but {position.symbol} {position.contract} expires{' '}
+              {formatExpiry(position.expiry)}
+              {dte > 0 ? ` — ${dte} day${dte === 1 ? '' : 's'} away` : dte === 0 ? ' — today' : ' — already expired'}.
+              The order dies with the contract; it cannot outlive it.
+            </p>
+          )}
+
           <dl className="grid grid-cols-2 gap-x-4 gap-y-1 border-t border-outline/10 pt-3 text-label-md">
             <dt className="text-on-surface-variant">Side</dt>
             <dd className="text-right text-on-surface">{ORDER_SIDE_LABEL[side]}</dd>
@@ -340,9 +379,8 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
 
       <div className="mt-4 flex items-center gap-2">
         <button
-          type="button"
+          type="submit"
           disabled={errors.length > 0}
-          onClick={() => setConfirming(true)}
           className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:bg-surface-container-high disabled:text-on-surface-variant"
         >
           {mode === 'exit' ? (existing ? 'Update exit' : 'Attach exit') : `Review ${MODES.find((m) => m.key === mode)!.label.toLowerCase()}`}
@@ -384,7 +422,8 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
               {ORDER_TYPE_LABEL[orderType].toLowerCase()} order
               {needsLimit && <> at {formatUsd(draft.limitPrice ?? 0)}</>}
               {needsStop && <>, stop {formatUsd(draft.stopPrice ?? 0)}</>}, good{' '}
-              {TIME_IN_FORCE_LABEL[timeInForce].toLowerCase()}. Estimated{' '}
+              {TIME_IN_FORCE_LABEL[timeInForce].toLowerCase()} on a contract expiring{' '}
+              {formatExpiry(position.expiry)}. Estimated{' '}
               {preview.kind === 'proceeds' ? 'proceeds' : 'cost'} {formatUsd(preview.amount)} at{' '}
               {formatUsd(preview.pricePerContract)} per contract.{' '}
               {mode === 'close'
@@ -398,6 +437,6 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
         onConfirm={submit}
         onCancel={() => setConfirming(false)}
       />
-    </div>
+    </form>
   )
 }
