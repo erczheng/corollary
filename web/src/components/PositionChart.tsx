@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { type Position } from '../lib/mockData'
+import { sliceRange, type Position } from '../lib/mockData'
 import { useUIStore } from '../lib/store'
 import { breakevens, maxLoss, maxProfit, payoffCurve } from '../lib/orders'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
@@ -111,7 +111,11 @@ export function PositionChart({ position }: { position: Position }) {
             </LineChart>
           ) : mode === 'underlying' ? (
             <LineChart
-              data={underlying?.history ?? []}
+              /* A quarter, not the whole year the quote now carries. This
+                 view sits under a position with weeks left on it; the
+                 Markets ticket is where the longer window is offered, with
+                 a control to pick it. */
+              data={underlying ? sliceRange(underlying.history, '3M') : []}
               margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
             >
               <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />

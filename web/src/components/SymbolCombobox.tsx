@@ -119,7 +119,14 @@ export function SymbolCombobox({
           id={`${id}-listbox`}
           role="listbox"
           aria-label={label}
-          className="absolute right-0 z-20 mt-1 max-h-64 w-40 overflow-auto rounded border border-outline-warm bg-surface-container-lowest py-1"
+          /* max-h-96, not max-h-64: seven options measure 260px and the
+             tighter cap clipped them at 254, so the list scrolled by six
+             pixels and showed a bar implying more below. The cap is still
+             here — Phase 2's asset list is hundreds of symbols — it just
+             sits above the list that actually exists. overflow-y rather
+             than overflow, so a 40px-wide list can never grow a horizontal
+             bar too. */
+          className="absolute right-0 z-20 mt-1 max-h-96 w-40 overflow-y-auto rounded border border-outline-warm bg-surface-container-lowest py-1"
         >
           {options.length === 0 ? (
             <li className="px-3 py-2 text-caption text-on-surface-variant">

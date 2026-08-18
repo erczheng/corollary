@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent, act } from '@testing-library/react'
 import App from '../App'
 import { useUIStore } from '../lib/store'
-import { STOCKS } from '../lib/mockData'
+import { STOCKS, sliceRange } from '../lib/mockData'
 import { CHAIN_UNDERLYINGS, MIN_VOLUME_STEPS, filterChain, relativeVolume } from '../lib/markets'
 import { formatInteger } from '../lib/format'
 
@@ -440,5 +440,83 @@ describe('pagination', () => {
     })
 
     expect(within(region).getByText(/Page 1 of/)).toBeInTheDocument()
+  })
+})
+
+describe('the underlying chart in the ticket', () => {
+  function openTicket(): void {
+    fireEvent.click(within(chainTable()).getAllByRole('button', { name: /^Trade/ })[0])
+  }
+
+  it('shows the stock behind the contract, with its strike named', () => {
+    render(<App />)
+    openTicket()
+
+    // An option ticket without the underlying asks you to price a
+    // derivative with the derivative hidden.
+    expect(screen.getByRole('group', { name: 'Chart range' })).toBeInTheDocument()
+    expect(screen.getByText(/is (in|out of) the money against the/)).toBeInTheDocument()
+  })
+
+  it('offers every range, and they are not all the same chart', () => {
+    render(<App />)
+    openTicket()
+
+    const group = screen.getByRole('group', { name: 'Chart range' })
+    const ranges = within(group)
+      .getAllByRole('button')
+      .map((b) => b.textContent)
+    expect(ranges).toEqual(['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'])
+
+    // The quote carries a year of closes precisely so these differ. At a
+    // quarter, 3M / YTD / 1Y / All redrew an identical chart — four
+    // buttons pretending to be a control.
+    const quote = useUIStore.getState().underlyings[CHAIN_UNDERLYINGS[0]]
+    const lengths = new Set(
+      (['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'] as const).map(
+        (r) => sliceRange(quote.history, r).length,
+      ),
+    )
+    expect(lengths.size).toBe(7)
+  })
+
+  it('reports the move over the window on screen, not over the day', () => {
+    render(<App />)
+    openTicket()
+
+    const group = screen.getByRole('group', { name: 'Chart range' })
+    expect(screen.getByText(/over 3M/)).toBeInTheDocument()
+
+    fireEvent.click(within(group).getByRole('button', { name: '1W' }))
+
+    // A range control that redraws the axis but leaves a daily figure
+    // beside it is reporting on a chart nobody is looking at.
+    expect(screen.getByText(/over 1W/)).toBeInTheDocument()
+    expect(screen.queryByText(/over 3M/)).not.toBeInTheDocument()
+  })
+
+  it('marks the range that is showing, for a screen reader too', () => {
+    render(<App />)
+    openTicket()
+
+    const group = screen.getByRole('group', { name: 'Chart range' })
+    expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(within(group).getByRole('button', { name: '1M' }))
+    expect(within(group).getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true')
+    expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('follows the poll rather than sitting still under a moving row', () => {
+    render(<App />)
+    openTicket()
+
+    const price = () => screen.getByText(/is (in|out of) the money against the/).textContent
+
+    const before = price()
+    act(() => {
+      useUIStore.getState().pollMarkets(2_000)
+    })
+    expect(price()).not.toBe(before)
   })
 })
