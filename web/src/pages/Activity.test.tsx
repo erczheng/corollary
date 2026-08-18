@@ -23,7 +23,7 @@ beforeEach(() => {
   // rendering content rather than skeletons. It has to be now rather than
   // a fixed date, because the pill goes stale on elapsed time and a
   // hardcoded timestamp is permanently stale. Nothing has actually ticked
-  // — the interval is 2s and these tests take milliseconds — so every
+  // — the tick interval is far longer than these tests take — so every
   // fixture value is still the one the assertions expect.
   useUIStore.setState({ ...initialState, lastTickAt: new Date().toISOString() }, true)
 })
@@ -615,10 +615,30 @@ describe('Expiry', () => {
 
     for (const p of PAPER.positions) {
       const dte = daysToExpiry(p.expiry, MARKET_TODAY)
-      expect(within(rowFor(p.contract)).getByTitle(`Expires ${formatExpiry(p.expiry)}`)).toHaveTextContent(
-        `${dte}d`,
-      )
+      const cell = within(rowFor(p.contract)).getByTitle(`Expires ${formatExpiry(p.expiry)}`)
+      expect(cell).toHaveTextContent(dte < 0 ? 'Expired' : dte === 0 ? 'Today' : `${dte}d`)
     }
+  })
+
+  /* All three render paths need a fixture behind them or two of them are
+   * branches nobody can ever see — the trap `pending` fell into before the
+   * Activity page existed. */
+  it('reaches the expiring-today and already-expired states', () => {
+    gotoActivity()
+
+    const today = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'today')!
+    const expired = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'expired')!
+
+    expect(within(rowFor(today.contract)).getByText('Today')).toBeInTheDocument()
+    expect(within(rowFor(expired.contract)).getByText('Expired')).toBeInTheDocument()
+  })
+
+  it('flags an expired position in caution, the same as one nearly there', () => {
+    gotoActivity()
+
+    const expired = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'expired')!
+    const cell = within(rowFor(expired.contract)).getByText('Expired').parentElement!
+    expect(cell.className).toMatch(/text-caution/)
   })
 
   it('flags a position near expiry in caution, never in error', () => {
@@ -640,6 +660,80 @@ describe('Expiry', () => {
     const cell = within(rowFor(far.contract)).getByTitle(`Expires ${formatExpiry(far.expiry)}`).parentElement!
 
     expect(cell.className).not.toMatch(/text-caution/)
+  })
+})
+
+describe('The ticket knows the contract expires', () => {
+  it('warns that a GTC order cannot outlive the contract', () => {
+    gotoActivity()
+    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
+
+    fireEvent.click(within(rowFor(near.contract)).getByRole('button', { name: 'Close' }))
+    fireEvent.change(screen.getByLabelText('Time in force'), { target: { value: 'gtc' } })
+
+    // "Good til canceled" is the one phrase on the ticket that reads like
+    // a promise, and on a contract days from expiry it is a short one.
+    expect(screen.getByText(/cannot outlive it/)).toBeInTheDocument()
+  })
+
+  it('says nothing of the sort for a day order', () => {
+    gotoActivity()
+    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
+
+    fireEvent.click(within(rowFor(near.contract)).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByText(/cannot outlive it/)).not.toBeInTheDocument()
+  })
+
+  it('names the expiry in the confirm, the last place you look', () => {
+    gotoActivity()
+    const target = PAPER.positions[0]
+
+    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: 'Close' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Review close' }))
+
+    expect(
+      within(screen.getByRole('alertdialog')).getByText(
+        new RegExp(`expiring ${formatExpiry(target.expiry)}`),
+      ),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('Keyboard', () => {
+  it('opens the confirm on Enter rather than placing the order outright', () => {
+    gotoActivity()
+    const target = PAPER.positions[0]
+    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: 'Close' }))
+
+    fireEvent.submit(screen.getByLabelText('Quantity').closest('form')!)
+
+    // Enter reaches the dialog, not the broker. One keystroke should not
+    // be able to close a position.
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(useUIStore.getState().openPositions.paper).toHaveLength(PAPER.positions.length)
+  })
+
+  it('collapses the expanded row on Escape', () => {
+    gotoActivity()
+    fireEvent.click(within(rowFor(PAPER.positions[0].contract)).getByRole('button', { name: /^Details for/ }))
+    expect(screen.getByRole('group', { name: 'Ticket mode' })).toBeInTheDocument()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('group', { name: 'Ticket mode' })).not.toBeInTheDocument()
+  })
+
+  it('hands focus back to the menu button when the menu closes', () => {
+    gotoActivity()
+    const trigger = within(rowFor(PAPER.positions[0].contract)).getByRole('button', {
+      name: /^More actions for/,
+    })
+
+    fireEvent.click(trigger)
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    // Otherwise focus lands on <body> and the next Tab restarts from the
+    // top of the document.
+    expect(document.activeElement).toBe(trigger)
   })
 })
 
