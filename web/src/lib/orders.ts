@@ -74,8 +74,8 @@ export function crossingPrice(position: Position, mode: 'close' | 'add'): number
   return isSelling(resolvedSide(position, mode)) ? position.bid : position.ask
 }
 
-export function midPrice(position: Position): number {
-  return round2((position.bid + position.ask) / 2)
+export function midPrice(quote: { bid: number; ask: number }): number {
+  return round2((quote.bid + quote.ask) / 2)
 }
 
 export interface OrderDraft {
@@ -384,4 +384,121 @@ export function addedRiskPct(position: Position, quantity: number, equity: numbe
   if (equity <= 0) return 0
   const perUnit = Math.abs(openUnitValue(position))
   return round2(((perUnit * quantity * CONTRACT_MULTIPLIER) / equity) * 100)
+}
+
+// -------------------------------------------------------------------- //
+// Opening a position from a chain row (Markets)
+// -------------------------------------------------------------------- //
+
+/** The two numbers any order estimate needs. A `Position` satisfies it, and
+ * so does an `OptionContract` — the bid/ask rules are the same whether you
+ * are closing something you hold or opening something you don't, and
+ * writing them twice is how the two drift apart. */
+export interface Quote {
+  bid: number
+  ask: number
+}
+
+/** Opening is a choice of side, not a consequence of one. A position you
+ * hold has a direction that decides how it closes; a contract on the chain
+ * has none until you pick it. */
+export type OpenSide = Extract<OrderSide, 'BTO' | 'STO'>
+
+export const OPEN_SIDES: OpenSide[] = ['BTO', 'STO']
+
+/** Buying to open lifts the ask, selling to open hits the bid. Reversing
+ * this understates the cost of every buy by the width of the spread —
+ * the same trap `crossingPrice` documents for closing. */
+export function openCrossingPrice(quote: Quote, side: OpenSide): number {
+  return side === 'BTO' ? quote.ask : quote.bid
+}
+
+export interface OpenDraft {
+  side: OpenSide
+  quantity: number
+  orderType: OrderType
+  limitPrice: number | null
+  stopPrice: number | null
+  timeInForce: TimeInForce
+}
+
+export function estimateOpen(quote: Quote, draft: OpenDraft): Estimate {
+  const usesLimit = draft.orderType === 'limit' || draft.orderType === 'stop_limit'
+  const pricePerContract =
+    usesLimit && draft.limitPrice !== null && draft.limitPrice > 0
+      ? draft.limitPrice
+      : openCrossingPrice(quote, draft.side)
+
+  return {
+    kind: isSelling(draft.side) ? 'proceeds' : 'cost',
+    amount: round2(pricePerContract * draft.quantity * CONTRACT_MULTIPLIER),
+    pricePerContract,
+    side: draft.side,
+  }
+}
+
+export function validateOpenOrder(draft: OpenDraft): string[] {
+  const errors: string[] = []
+
+  if (!Number.isInteger(draft.quantity) || draft.quantity < 1) {
+    errors.push('Quantity must be a whole number of contracts, at least 1.')
+  }
+
+  const needsLimit = draft.orderType === 'limit' || draft.orderType === 'stop_limit'
+  const needsStop = draft.orderType === 'stop' || draft.orderType === 'stop_limit'
+
+  if (needsLimit && !(draft.limitPrice !== null && draft.limitPrice > 0)) {
+    errors.push('Limit price is required.')
+  }
+  if (needsStop && !(draft.stopPrice !== null && draft.stopPrice > 0)) {
+    errors.push('Stop price is required.')
+  }
+
+  return errors
+}
+
+/** What this order puts at risk, in the terms CLAUDE.md rule 4 defines.
+ *
+ * A long option risks the premium paid, and nothing else — that is a number
+ * the UI can state exactly. A naked short is **undefined risk**, and the
+ * limit is checked against a stress loss at ±2σ of the underlying's 20-day
+ * realized volatility. That is an engine computation over data this page
+ * does not have, so the ticket says so rather than inventing a figure: a
+ * confident wrong number under a "risk" label is worse than an honest
+ * absence, and either way the engine is what enforces the ceiling
+ * (CLAUDE.md rule 4 — the UI displays limits, it never decides them). */
+export type OpenRisk =
+  | { kind: 'defined'; amount: number; pct: number }
+  | { kind: 'undefined' }
+
+export function openRisk(quote: Quote, draft: OpenDraft, equity: number): OpenRisk {
+  if (draft.side === 'STO') return { kind: 'undefined' }
+
+  const { pricePerContract } = estimateOpen(quote, draft)
+  const amount = round2(pricePerContract * draft.quantity * CONTRACT_MULTIPLIER)
+  return {
+    kind: 'defined',
+    amount,
+    pct: equity <= 0 ? 0 : round2((amount / equity) * 100),
+  }
+}
+
+/** OCC symbol: underlying, then YYMMDD, then C or P, then the strike times
+ * a thousand padded to eight digits. `AAPL241220C00150000` is the AAPL $150
+ * call expiring 20 Dec 2024.
+ *
+ * The ×1000 and the pad are both load-bearing — a $150 strike written as
+ * `00150` or `150000000` is a different contract or no contract at all.
+ * Adjusted contracts carry a numeric root suffix (`AAPL1`) and a deliverable
+ * that is no longer 100 shares; this does not build those, and the scanner
+ * filters them out rather than sizing them wrong. */
+export function occSymbol(
+  underlying: string,
+  expiration: string,
+  right: 'call' | 'put',
+  strike: number,
+): string {
+  const [year, month, day] = expiration.split('-')
+  const strikeThousandths = String(Math.round(strike * 1000)).padStart(8, '0')
+  return `${underlying}${year.slice(2)}${month}${day}${right === 'call' ? 'C' : 'P'}${strikeThousandths}`
 }

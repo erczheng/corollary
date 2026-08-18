@@ -286,21 +286,56 @@ expect.** Every item below produced working-looking code that was wrong:
   it overstates proceeds by the spread on every estimate), and a short's
   `openUnitValue` is *negative* because a credit is a liability (reversing
   it inverts every credit spread's payoff curve).
-- `web/src/lib/markets.ts` — the Markets page's filtering and ranking,
-  as pure functions with no React in them. **Two that are easy to get
-  wrong:** a fund's `marketCap` is `null`, not 0, and the market-cap
-  ranking sorts nulls *last* rather than coercing them — coerced, SPY
-  ranks below the smallest company on the list and a column of dollars
-  states that a fund is worth nothing. And `losers` is its own ascending
-  sort, not `gainers` reversed. Nothing here sorts in place: every view
-  reads the same module-level array, so an in-place `.sort()` would
-  leave the last screen's ordering behind in the fixture itself.
+- `web/src/lib/markets.ts` — the Markets page's filtering, ranking and
+  sorting, as pure functions with no React in them. The named screens
+  (`CHAIN_RANK_SORT`, `STOCK_RANK_SORT`) and the clickable column headers
+  drive **one** sort between them, so the dropdown can never claim a
+  ranking the table is not in; `chainRankFor`/`stockRankFor` map back and
+  return null for "Custom". **Three that are easy to get wrong:** a fund's
+  `marketCap` is `null`, not 0, and it sorts *last in both directions*
+  rather than being coerced — coerced to zero it would sort SPY to the
+  *top* of an ascending list and state, in a column of dollars, that a
+  fund is worth nothing. `losers` is its own ascending sort, not
+  `gainers` reversed. And "trending" is relative volume
+  (`volume / avgVolume`), a different question from "most active" — raw
+  volume finds the same mega caps every session because NVDA trades 200M
+  shares on a quiet day. Nothing here sorts in place: every view reads the
+  same array, so an in-place `.sort()` would leave the last screen's
+  ordering behind in the data itself.
+- `web/src/components/ChainOrderTicket.tsx` — opening a position from a
+  chain row. Deliberately *not* `OrderTicket`, which acts on something you
+  already hold and derives its side from the position's direction; here
+  the side is the user's choice, so `orders.ts` grows a parallel
+  `OpenDraft`/`estimateOpen`/`openRisk` set over a bare `Quote` rather
+  than a `Position`. Buying to open lifts the ask, selling hits the bid.
+  **A short reports `{ kind: 'undefined' }` risk and the ticket says so
+  in words** — a naked short has no maximum loss to quote, the engine
+  sizes it against a ±2σ stress loss (rule 4), and a confident wrong
+  number under the word "risk" is worse than an honest absence.
 - `web/src/components/PositionRow.tsx`, `OrderTicket.tsx`,
   `PositionChart.tsx` — the Open Positions row, its expanded ticket, and
   its value/payoff charts. `Activity.tsx` composes them and holds no order
   logic of its own.
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
+
+**Two feeds, not one: `store.tick()` streams and `store.pollMarkets()`
+polls.** Activity streams at 400ms, scoped to the symbols behind open
+positions — that is the 30-symbol websocket cap on the Basic plan. Markets
+polls every 2s across *every* quoted symbol, which is what snapshot
+requests allow under a 200/min budget. They write to the same
+`underlyings` map, because one symbol has one price and a second map is how
+the Markets table and an Activity row end up disagreeing about AAPL.
+`MARKET_QUOTES` is that map — a superset of `UNDERLYINGS`, covering every
+name on the Markets page. Two things the poll gets right that are easy to
+get wrong: **volatility scales with √t, not t** (scaling linearly made a 2s
+poll five times hotter per unit time than a 400ms tick, and swung a deep ITM
+call from +15% to −0.7% between prints), and the poll carries its own,
+calmer per-second figure than the stream — the stream's 0.3%/s is a
+legibility choice for a handful of position rows, and on a 180-row screener
+it is just noise. **The chain is re-priced from its underlying, never walked
+contract by contract**: independent random steps invert the ladder within
+seconds, printing a 225 call above the 220 beside it.
 
 **The Activity page is live, and `store.tick()` is the mock broker.** It
 stands in for the Alpaca WebSocket: it re-marks positions, fills working

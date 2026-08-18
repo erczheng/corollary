@@ -1,17 +1,43 @@
 import { describe, it, expect } from 'vitest'
 import {
+  CHAIN_LADDER_SORT,
+  CHAIN_RANKS,
+  CHAIN_RANK_SORT,
   CHAIN_UNDERLYINGS,
   MIN_VOLUME_STEPS,
+  STOCK_RANKS,
+  STOCK_RANK_SORT,
+  chainRankFor,
   filterChain,
-  rankChain,
-  rankStocks,
-  type ChainRank,
-  type StockRank,
+  liveStocks,
+  relativeVolume,
+  searchUnderlyings,
+  sortChain,
+  sortStocks,
+  stockRankFor,
+  type ChainSortKey,
+  type StockSortKey,
 } from './markets'
-import { OPTION_CHAIN, STOCKS, type OptionContract, type StockQuote } from './mockData'
+import {
+  OPTION_CHAIN,
+  STOCKS,
+  type OptionContract,
+  type StockQuote,
+  type UnderlyingQuote,
+} from './mockData'
 
-const CHAIN_RANK_LIST: ChainRank[] = ['strike', 'volume', 'gainers', 'losers', 'iv', 'openInterest']
-const STOCK_RANK_LIST: StockRank[] = ['active', 'gainers', 'losers', 'new', 'marketCap']
+const CHAIN_KEYS: ChainSortKey[] = [
+  'ladder',
+  'last',
+  'change',
+  'changePct',
+  'bid',
+  'ask',
+  'volume',
+  'openInterest',
+  'iv',
+]
+const STOCK_KEYS: StockSortKey[] = ['price', 'change', 'changePct', 'volume', 'relVolume', 'marketCap']
 
 /** Minimal rows, so an ordering test fails for the reason it names rather
  * than because a fixture moved. */
@@ -22,6 +48,7 @@ function contract(over: Partial<OptionContract>): OptionContract {
     expiration: '2026-08-21',
     type: 'call',
     last: 5,
+    previousClose: 4.9,
     change: 0.1,
     changePct: 2,
     bid: 4.95,
@@ -41,8 +68,8 @@ function stock(over: Partial<StockQuote>): StockQuote {
     change: 1,
     changePct: 1,
     volume: 1_000_000,
+    avgVolume: 1_000_000,
     marketCap: 100,
-    listedOn: '2000-01-01',
     ...over,
   }
 }
@@ -68,9 +95,31 @@ describe('filterChain', () => {
   })
 })
 
-describe('rankChain', () => {
-  it('reads the strike ladder by symbol, expiration, strike, then calls before puts', () => {
-    const rows = rankChain(
+describe('searchUnderlyings', () => {
+  it('matches anywhere in the symbol, case insensitively', () => {
+    const symbols = ['SPY', 'AAPL', 'QQQ', 'MSFT']
+
+    expect(searchUnderlyings(symbols, 'qq')).toEqual(['QQQ'])
+    expect(searchUnderlyings(symbols, 'S')).toEqual(['SPY', 'MSFT'])
+    // Unanchored on purpose: nobody should have to know whether the list is
+    // alphabetical to find a symbol in it.
+    expect(searchUnderlyings(symbols, 'ft')).toEqual(['MSFT'])
+  })
+
+  it('returns everything for an empty query and nothing for a miss', () => {
+    const symbols = ['SPY', 'AAPL']
+
+    expect(searchUnderlyings(symbols, '   ')).toEqual(symbols)
+    // "APPL" is the classic typo. Finding nothing is the correct answer —
+    // silently matching AAPL would filter a chain to a symbol nobody asked
+    // for.
+    expect(searchUnderlyings(symbols, 'APPL')).toEqual([])
+  })
+})
+
+describe('sortChain', () => {
+  it('reads the ladder by symbol, expiration, strike, then calls before puts', () => {
+    const rows = sortChain(
       [
         contract({ symbol: 'TSLA', expiration: '2026-08-21', strike: 230, type: 'call' }),
         contract({ symbol: 'AAPL', expiration: '2026-09-18', strike: 225, type: 'call' }),
@@ -78,7 +127,7 @@ describe('rankChain', () => {
         contract({ symbol: 'AAPL', expiration: '2026-08-21', strike: 230, type: 'call' }),
         contract({ symbol: 'AAPL', expiration: '2026-08-21', strike: 225, type: 'call' }),
       ],
-      'strike',
+      CHAIN_LADDER_SORT,
     )
 
     expect(rows.map((c) => `${c.symbol} ${c.expiration} ${c.strike}${c.type[0]}`)).toEqual([
@@ -90,84 +139,139 @@ describe('rankChain', () => {
     ])
   })
 
-  it('ranks volume, open interest and IV highest first', () => {
+  it('sorts every quote column in both directions', () => {
     const rows = [
-      contract({ strike: 1, volume: 10, openInterest: 30, iv: 0.1 }),
-      contract({ strike: 2, volume: 30, openInterest: 10, iv: 0.3 }),
-      contract({ strike: 3, volume: 20, openInterest: 20, iv: 0.2 }),
+      contract({ strike: 1, volume: 10, openInterest: 30, iv: 0.1, last: 3, changePct: 4, bid: 1, ask: 9 }),
+      contract({ strike: 2, volume: 30, openInterest: 10, iv: 0.3, last: 1, changePct: -9, bid: 3, ask: 7 }),
+      contract({ strike: 3, volume: 20, openInterest: 20, iv: 0.2, last: 2, changePct: 0, bid: 2, ask: 8 }),
     ]
 
-    expect(rankChain(rows, 'volume').map((c) => c.volume)).toEqual([30, 20, 10])
-    expect(rankChain(rows, 'openInterest').map((c) => c.openInterest)).toEqual([30, 20, 10])
-    expect(rankChain(rows, 'iv').map((c) => c.iv)).toEqual([0.3, 0.2, 0.1])
+    for (const key of CHAIN_KEYS) {
+      if (key === 'ladder') continue
+      const down = sortChain(rows, { key, direction: 'descending' }).map((c) => c[key])
+      const up = sortChain(rows, { key, direction: 'ascending' }).map((c) => c[key])
+
+      expect(down).toEqual([...down].sort((a, b) => b - a))
+      expect(up).toEqual([...up].sort((a, b) => a - b))
+    }
   })
 
-  it('puts the biggest gain on top of gainers and the biggest loss on top of losers', () => {
+  it('breaks ties on the ladder rather than on array order', () => {
+    // Two contracts on the same volume must not swap places between
+    // renders — a table that reshuffles under a stable sort looks like it
+    // is still loading.
     const rows = [
-      contract({ strike: 1, changePct: 4 }),
-      contract({ strike: 2, changePct: -9 }),
-      contract({ strike: 3, changePct: 0 }),
+      contract({ strike: 240, volume: 500 }),
+      contract({ strike: 220, volume: 500 }),
+      contract({ strike: 230, volume: 500 }),
     ]
 
-    // Losers is the same list read from the other end, not the reverse of
-    // the gainers *page* — reversing a paginated gainers list would put
-    // the flattest contracts on top of the losers screen.
-    expect(rankChain(rows, 'gainers').map((c) => c.changePct)).toEqual([4, 0, -9])
-    expect(rankChain(rows, 'losers').map((c) => c.changePct)).toEqual([-9, 0, 4])
+    expect(sortChain(rows, { key: 'volume', direction: 'descending' }).map((c) => c.strike)).toEqual([
+      220, 230, 240,
+    ])
   })
 
   it('never reorders the chain in place', () => {
-    // Every view reads the same module-level array. An in-place sort would
-    // leave the previous view's ordering behind in the fixture, so the
-    // strike ladder would come back shuffled by whatever screen ran last.
+    // Every view reads the same array. An in-place sort would leave the
+    // previous view's ordering behind in the data, so the ladder would come
+    // back shuffled by whatever screen ran last.
     const before = OPTION_CHAIN.map((c) => `${c.symbol}${c.strike}${c.type}${c.expiration}`)
 
-    for (const rank of CHAIN_RANK_LIST) rankChain(OPTION_CHAIN, rank)
+    for (const key of CHAIN_KEYS) {
+      for (const direction of ['ascending', 'descending'] as const) {
+        expect(sortChain(OPTION_CHAIN, { key, direction })).toHaveLength(OPTION_CHAIN.length)
+      }
+    }
 
     expect(OPTION_CHAIN.map((c) => `${c.symbol}${c.strike}${c.type}${c.expiration}`)).toEqual(before)
   })
+})
 
-  it('returns every contract it was given, whichever ranking is asked for', () => {
-    for (const rank of CHAIN_RANK_LIST) {
-      expect(rankChain(OPTION_CHAIN, rank)).toHaveLength(OPTION_CHAIN.length)
+describe('the named screens and the column headers share one sort', () => {
+  it('round-trips every chain preset', () => {
+    for (const rank of CHAIN_RANKS) {
+      expect(chainRankFor(CHAIN_RANK_SORT[rank])).toBe(rank)
     }
+  })
+
+  it('round-trips every stock preset', () => {
+    for (const rank of STOCK_RANKS) {
+      expect(stockRankFor(STOCK_RANK_SORT[rank])).toBe(rank)
+    }
+  })
+
+  it('reports no preset once a header has taken the table somewhere custom', () => {
+    // The dropdown shows "Custom" rather than keeping a stale label
+    // claiming the table is still ranked by IV.
+    expect(chainRankFor({ key: 'bid', direction: 'ascending' })).toBeNull()
+    expect(stockRankFor({ key: 'price', direction: 'ascending' })).toBeNull()
+  })
+
+  it('keeps losers as its own ascending sort, not the gainers list reversed', () => {
+    expect(CHAIN_RANK_SORT.losers).toEqual({ key: 'changePct', direction: 'ascending' })
+    expect(CHAIN_RANK_SORT.gainers).toEqual({ key: 'changePct', direction: 'descending' })
+    expect(STOCK_RANK_SORT.losers).toEqual({ key: 'changePct', direction: 'ascending' })
+  })
+
+  it('points trending at relative volume and most active at raw volume', () => {
+    // Two different questions. Raw volume finds the same mega caps every
+    // session; relative volume finds the name having an unusual day.
+    expect(STOCK_RANK_SORT.trending).toEqual({ key: 'relVolume', direction: 'descending' })
+    expect(STOCK_RANK_SORT.active).toEqual({ key: 'volume', direction: 'descending' })
   })
 })
 
-describe('rankStocks', () => {
-  it('ranks volume and percent change the way each view claims', () => {
+describe('sortStocks', () => {
+  it('sorts every column in both directions', () => {
     const rows = [
-      stock({ symbol: 'A', volume: 10, changePct: 1 }),
-      stock({ symbol: 'B', volume: 30, changePct: -4 }),
-      stock({ symbol: 'C', volume: 20, changePct: 7 }),
+      stock({ symbol: 'A', price: 10, change: 1, changePct: 1, volume: 30, avgVolume: 10, marketCap: 5 }),
+      stock({ symbol: 'B', price: 30, change: -3, changePct: -3, volume: 10, avgVolume: 20, marketCap: 50 }),
+      stock({ symbol: 'C', price: 20, change: 2, changePct: 7, volume: 20, avgVolume: 40, marketCap: 15 }),
     ]
 
-    expect(rankStocks(rows, 'active').map((s) => s.symbol)).toEqual(['B', 'C', 'A'])
-    expect(rankStocks(rows, 'gainers').map((s) => s.symbol)).toEqual(['C', 'A', 'B'])
-    expect(rankStocks(rows, 'losers').map((s) => s.symbol)).toEqual(['B', 'A', 'C'])
+    for (const key of STOCK_KEYS) {
+      const read = (s: StockQuote) => (key === 'relVolume' ? relativeVolume(s) : (s[key] as number))
+      expect(sortStocks(rows, { key, direction: 'descending' }).map(read)).toEqual(
+        rows.map(read).sort((a, b) => b - a),
+      )
+      expect(sortStocks(rows, { key, direction: 'ascending' }).map(read)).toEqual(
+        rows.map(read).sort((a, b) => a - b),
+      )
+    }
   })
 
-  it('puts the most recent listing first', () => {
+  it('ranks trending by relative volume, not by size', () => {
     const rows = [
-      stock({ symbol: 'OLD', listedOn: '1980-12-12' }),
-      stock({ symbol: 'NEW', listedOn: '2025-06-05' }),
-      stock({ symbol: 'MID', listedOn: '2014-10-31' }),
+      // Enormous in absolute terms, ordinary for itself.
+      stock({ symbol: 'NVDA', volume: 200_000_000, avgVolume: 210_000_000 }),
+      // Small, and having a day.
+      stock({ symbol: 'RBRK', volume: 12_000_000, avgVolume: 3_100_000 }),
     ]
 
-    expect(rankStocks(rows, 'new').map((s) => s.symbol)).toEqual(['NEW', 'MID', 'OLD'])
+    expect(sortStocks(rows, STOCK_RANK_SORT.trending).map((s) => s.symbol)).toEqual(['RBRK', 'NVDA'])
+    expect(sortStocks(rows, STOCK_RANK_SORT.active).map((s) => s.symbol)).toEqual(['NVDA', 'RBRK'])
   })
 
-  it('sorts a fund last rather than treating its null market cap as zero', () => {
+  it('sorts a fund last in BOTH directions rather than treating null as zero', () => {
     const rows = [
       stock({ symbol: 'SPY', marketCap: null }),
       stock({ symbol: 'SMALL', marketCap: 12 }),
       stock({ symbol: 'BIG', marketCap: 3_540 }),
     ]
 
-    // The bug this pins: coercing null to 0 ranks SPY below the smallest
-    // company on the list and asserts, in a column of dollars, that an ETF
-    // is worth nothing.
-    expect(rankStocks(rows, 'marketCap').map((s) => s.symbol)).toEqual(['BIG', 'SMALL', 'SPY'])
+    // Coerced to zero, SPY ranks below the smallest company on the list and
+    // a column of dollars states that a fund is worth nothing. Ascending is
+    // the case that catches the coercion: a zero would sort *first* there.
+    expect(sortStocks(rows, { key: 'marketCap', direction: 'descending' }).map((s) => s.symbol)).toEqual([
+      'BIG',
+      'SMALL',
+      'SPY',
+    ])
+    expect(sortStocks(rows, { key: 'marketCap', direction: 'ascending' }).map((s) => s.symbol)).toEqual([
+      'SMALL',
+      'BIG',
+      'SPY',
+    ])
   })
 
   it('orders funds against each other deterministically', () => {
@@ -177,17 +281,58 @@ describe('rankStocks', () => {
       stock({ symbol: 'SPY', marketCap: null }),
     ]
 
-    expect(rankStocks(rows, 'marketCap').map((s) => s.symbol)).toEqual(['ARKK', 'QQQ', 'SPY'])
+    expect(sortStocks(rows, { key: 'marketCap', direction: 'descending' }).map((s) => s.symbol)).toEqual([
+      'ARKK',
+      'QQQ',
+      'SPY',
+    ])
   })
 
   it('never reorders the universe in place, and never drops a symbol', () => {
     const before = STOCKS.map((s) => s.symbol)
 
-    for (const rank of STOCK_RANK_LIST) {
-      expect(rankStocks(STOCKS, rank)).toHaveLength(STOCKS.length)
+    for (const key of STOCK_KEYS) {
+      expect(sortStocks(STOCKS, { key, direction: 'descending' })).toHaveLength(STOCKS.length)
     }
 
     expect(STOCKS.map((s) => s.symbol)).toEqual(before)
+  })
+})
+
+describe('liveStocks', () => {
+  function quote(price: number): UnderlyingQuote {
+    return {
+      symbol: 'AAPL',
+      price,
+      previousClose: price - 1,
+      change: 1,
+      changePct: 0.5,
+      history: [{ date: '2026-08-07', value: price }],
+    }
+  }
+
+  it('re-quotes a row from the live price map', () => {
+    const [row] = liveStocks([stock({ symbol: 'AAPL', price: 100 })], { AAPL: quote(240) })
+
+    // Price belongs to the symbol, not to the row. A stock carrying its own
+    // copy is how the Markets table and an Activity row end up disagreeing
+    // about what AAPL costs.
+    expect(row.price).toBe(240)
+    expect(row.change).toBe(1)
+    expect(row.changePct).toBe(0.5)
+  })
+
+  it('leaves a row alone when the map has no quote for it', () => {
+    const [row] = liveStocks([stock({ symbol: 'XYZ', price: 42 })], { AAPL: quote(240) })
+    expect(row.price).toBe(42)
+  })
+
+  it('keeps everything that is not a quote', () => {
+    const [row] = liveStocks([stock({ symbol: 'AAPL', marketCap: 3540, avgVolume: 52_000_000 })], {
+      AAPL: quote(240),
+    })
+    expect(row.marketCap).toBe(3540)
+    expect(row.avgVolume).toBe(52_000_000)
   })
 })
 

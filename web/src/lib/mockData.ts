@@ -832,7 +832,15 @@ export const UNDERLYINGS: Record<string, UnderlyingQuote> = {
  * disagree. */
 export interface WorkingOrder {
   id: string
-  positionId: string
+  /** The position this order acts on, or null for an order that opens a
+   * new one — at that point there is no position yet, which is the whole
+   * difference between the two. Exactly one of this and `contractKey` is
+   * set. */
+  positionId: string | null
+  /** The contract an *opening* order rests against, null once it belongs
+   * to a position. A closing order fills from its position mark; an
+   * opening one has no position to mark, so it fills from the chain. */
+  contractKey: string | null
   /** Denormalised for display, so the list renders without resolving the
    * position — which may have been closed out from under it. */
   contract: string
@@ -856,6 +864,7 @@ const PAPER_WORKING_ORDERS: WorkingOrder[] = [
   {
     id: 'wo-1',
     positionId: 'pos-2',
+    contractKey: null,
     contract: 'TSLA $240 Put Nov 15',
     side: 'STC',
     orderType: 'limit',
@@ -980,6 +989,7 @@ export const CALENDAR_EVENTS: CalendarEvent[] = [
 ]
 
 // ---------------------------------------------------------------------- //
+// ---------------------------------------------------------------------- //
 // Option chains + stocks/ETFs (Markets page)
 // ---------------------------------------------------------------------- //
 
@@ -992,6 +1002,11 @@ export interface OptionContract {
   expiration: string
   type: 'call' | 'put'
   last: number
+  /** Yesterday's settle. Carried rather than derived so that `change` stays
+   * anchored while `last` moves: a poll that re-marks the contract updates
+   * the price and the change follows from this, instead of the two drifting
+   * apart into a percentage measured against nothing. */
+  previousClose: number
   change: number
   changePct: number
   bid: number
@@ -1007,14 +1022,23 @@ export interface OptionContract {
  * the curve are all on screen and time value visibly decays across them. */
 export const CHAIN_EXPIRATIONS = ['2026-08-21', '2026-09-18', '2026-10-16']
 
+export interface ChainSpec {
+  symbol: string
+  baseIv: number
+  /** Scales volume and open interest. SPY trades orders of magnitude more
+   * contracts than MSFT, and a chain where every name is equally busy
+   * makes "most volume" meaningless. */
+  liquidity: number
+  seed: number
+}
+
 /** Underlyings with a listed chain.
  *
- * Spot is deliberately *not* repeated here — it is read from UNDERLYINGS,
- * so the Markets chain and the Activity position rows cannot disagree
- * about what AAPL costs. `liquidity` scales volume and open interest: SPY
- * trades orders of magnitude more contracts than MSFT, and a chain where
- * every name is equally busy makes "most volume" meaningless. */
-const CHAIN_UNDERLYINGS: { symbol: string; baseIv: number; liquidity: number; seed: number }[] = [
+ * Spot is deliberately *not* repeated here — it is read from the quote map,
+ * so the Markets chain and the Activity position rows cannot disagree about
+ * what AAPL costs. Exported because the poll re-prices the chain from the
+ * same constants the fixture was built with. */
+export const CHAIN_SPECS: ChainSpec[] = [
   { symbol: 'SPY', baseIv: 0.16, liquidity: 3.2, seed: 20262001 },
   { symbol: 'AAPL', baseIv: 0.28, liquidity: 1.4, seed: 20262002 },
   { symbol: 'NVDA', baseIv: 0.44, liquidity: 1.6, seed: 20262003 },
@@ -1022,6 +1046,10 @@ const CHAIN_UNDERLYINGS: { symbol: string; baseIv: number; liquidity: number; se
   { symbol: 'QQQ', baseIv: 0.19, liquidity: 0.9, seed: 20262005 },
   { symbol: 'MSFT', baseIv: 0.24, liquidity: 0.35, seed: 20262006 },
 ]
+
+export const CHAIN_SPEC_BY_SYMBOL: Record<string, ChainSpec> = Object.fromEntries(
+  CHAIN_SPECS.map((s) => [s.symbol, s]),
+)
 
 /** Strike increments follow the listed ladder rather than a fixed step — a
  * $5 ladder on a $138 stock and a $10 ladder on a $430 index is what OPRA
@@ -1037,18 +1065,81 @@ function strikeIncrement(spot: number): number {
 /** Approximate call delta from standardised moneyness. Not Black-Scholes —
  * this is fixture data, and a logistic in sigma-units is close enough to
  * give the chain a coherent shape: deep ITM near 1, ATM near 0.5, far OTM
- * near 0. It exists so a day's change can be derived from the underlying's
- * move rather than drawn independently, which is what makes "top gainers"
- * a coherent list instead of noise. */
-function callDelta(moneyness: number): number {
+ * near 0. */
+export function callDelta(moneyness: number): number {
   return 1 / (1 + Math.exp(moneyness * 1.55))
+}
+
+export function chainDte(expiration: string): number {
+  return Math.round(
+    (Date.parse(`${expiration}T00:00:00Z`) - Date.parse(`${MARKET_TODAY}T00:00:00Z`)) / 86_400_000,
+  )
+}
+
+/** Standardised moneyness — the strike's distance from spot in units of a
+ * one-standard-deviation move over the contract's life. The same number
+ * means the same thing on a 14-day SPY call and a 70-day TSLA put. */
+export function moneyness(spot: number, strike: number, dte: number, baseIv: number): number {
+  const sd = spot * baseIv * Math.sqrt(dte / 365)
+  return sd === 0 ? 0 : (strike - spot) / sd
+}
+
+/** What one contract is worth at a given spot.
+ *
+ * Struck at the underlying's **base** vol, flat across the ladder, and that
+ * is deliberate rather than a shortcut. With a skew factor g(m) in time
+ * value, the slope of the put ladder just below the money works out to -a
+ * for skew slope a — so any positive skew prints a lower strike above the
+ * one beside it, which is an arbitrage rather than a fixture. Pricing flat
+ * bounds the slope at 0.4·|m|·e^(-m²/2) < 1, which is exactly the condition
+ * that keeps calls cheapening and puts richening all the way up.
+ *
+ * Exported because the market poll re-prices the whole chain through this
+ * one function. Re-marking each contract with an independent random walk
+ * would invert the ladder within seconds — a chain moves because its
+ * underlying moved, not because each strike wandered off on its own. */
+export function priceContract(
+  spot: number,
+  strike: number,
+  dte: number,
+  baseIv: number,
+  type: 'call' | 'put',
+): number {
+  const m = moneyness(spot, strike, dte, baseIv)
+  const sd = spot * baseIv * Math.sqrt(dte / 365)
+  const intrinsic = type === 'call' ? Math.max(spot - strike, 0) : Math.max(strike - spot, 0)
+  const timeValue = sd * 0.4 * Math.exp(-(m * m) / 2)
+  return Math.max(0.01, round2(intrinsic + timeValue))
+}
+
+/** Half the quoted spread. Widens away from the money and on the thinner
+ * names — the wing contracts are where a modelled fill price is least
+ * trustworthy, and the table should show that rather than hide it behind a
+ * uniform penny spread. */
+export function halfSpread(last: number, m: number, liquidity: number): number {
+  const activity = Math.exp(-(m * m) / 2)
+  return Math.max(0.01, round2(last * 0.012 + 0.01 + ((1 - activity) * 0.06) / liquidity))
+}
+
+/** The reported vol surface: a smirk, not a flat line. OTM puts bid up,
+ * both wings above the money. Without it "highest IV" would rank the six
+ * underlyings in order and say nothing about the chain itself.
+ *
+ * Relative to baseIv rather than absolute, so a 0.16 index and a 0.52
+ * single name are skewed by the same proportion instead of the same number
+ * of vol points. Smooth in strike with no draw in it: a real surface is
+ * smooth, and independent per-strike noise inverted the far-dated ladders.
+ *
+ * Three decimals, not two — at two the smirk collapses into ties and
+ * "highest IV" ranks equal contracts arbitrarily. */
+export function surfaceIv(baseIv: number, m: number): number {
+  return Math.max(0.06, Math.round(baseIv * (1 + 0.07 * -m + 0.04 * m * m) * 1000) / 1000)
 }
 
 function buildChain(): OptionContract[] {
   const contracts: OptionContract[] = []
-  const today = new Date(`${MARKET_TODAY}T00:00:00Z`).getTime()
 
-  for (const u of CHAIN_UNDERLYINGS) {
+  for (const u of CHAIN_SPECS) {
     const next = mulberry32(u.seed)
     const spot = UNDERLYINGS[u.symbol].price
     const underlyingChange = UNDERLYINGS[u.symbol].change
@@ -1056,83 +1147,36 @@ function buildChain(): OptionContract[] {
     const atm = Math.round(spot / inc) * inc
 
     for (const expiration of CHAIN_EXPIRATIONS) {
-      const dte = Math.round((new Date(`${expiration}T00:00:00Z`).getTime() - today) / 86_400_000)
-      const t = dte / 365
-      // Near-dated contracts carry most of the volume. Weighted by
-      // position in the ladder rather than by date.
+      const dte = chainDte(expiration)
+      // Near-dated contracts carry most of the volume. Weighted by position
+      // in the ladder rather than by date.
       const expiryWeight = [1, 0.55, 0.3][CHAIN_EXPIRATIONS.indexOf(expiration)]
 
       for (let i = -2; i <= 2; i++) {
         const strike = round2(atm + i * inc)
-        // Moneyness in units of a one-standard-deviation move over the
-        // contract's life, so the same number means the same thing on a
-        // 14-day SPY call and a 70-day TSLA put.
-        const sd0 = spot * u.baseIv * Math.sqrt(t)
-        const m = (strike - spot) / sd0
-
-        // The reported surface: a smirk, not a flat line. OTM puts bid
-        // up, both wings above the money. Without it "highest IV" would
-        // rank the six underlyings in order and say nothing about the
-        // chain itself. Relative to baseIv rather than absolute, so a
-        // 0.16 index and a 0.52 single name are skewed by the same
-        // proportion instead of the same number of vol points.
-        //
-        // This is a *display* surface — the prices below are struck at
-        // baseIv, flat across the ladder. That is deliberate and it is
-        // not a shortcut: pricing off the smirk cannot keep the chain
-        // monotone. Time value carries a factor g(m) = 1 + a(-m) + bm²,
-        // and the slope of the put ladder just below the money works out
-        // to -a, negative for any positive skew — so the 420 put prints
-        // above the 430 beside it, which is an arbitrage rather than a
-        // fixture. Pricing flat bounds the slope at 0.4·|m|·e^(-m²/2) <
-        // 1, which is exactly the condition that keeps calls cheapening
-        // and puts richening all the way up the ladder.
-        //
-        // Three decimals, not two: at two the smirk collapses into ties
-        // and "highest IV" ranks equal contracts arbitrarily.
-        const iv = Math.max(0.06, Math.round(u.baseIv * (1 + 0.07 * -m + 0.04 * m * m) * 1000) / 1000)
+        const m = moneyness(spot, strike, dte, u.baseIv)
+        const iv = surfaceIv(u.baseIv, m)
 
         for (const type of ['call', 'put'] as const) {
-          // sd0, not the smirked iv — see the note above the surface.
-          const sd = sd0
-          const intrinsic = type === 'call' ? Math.max(spot - strike, 0) : Math.max(strike - spot, 0)
-          // Time value peaks at the money and decays into both wings. The
-          // 0.4 coefficient keeps its slope well under 1, which is what
-          // holds the chain monotone — calls cheapening as strikes rise and
-          // puts richening, the way a real chain reads. A chain that fails
-          // that is one no trader would believe.
-          const timeValue = sd * 0.4 * Math.exp(-(m * m) / 2)
-          const last = Math.max(0.01, round2(intrinsic + timeValue))
+          const last = priceContract(spot, strike, dte, u.baseIv, type)
 
           // The day's move comes from the underlying's, scaled by delta. A
           // call on a name that fell should be down; drawing the change
           // independently produced chains where both sides rallied at once.
+          // The dispersion *scales* that move rather than adding to it —
+          // added, it flipped the sign wherever delta was small.
           const delta = type === 'call' ? callDelta(m) : callDelta(m) - 1
-          // Dispersion *scales* the delta-driven move rather than adding to
-          // it. Added, it flipped the sign wherever delta * change was
-          // small — far OTM calls rallying on a down day, which made "top
-          // gainers" a list of rounding errors.
           const drift = delta * underlyingChange * (0.78 + next() * 0.5)
           // Yesterday's close has to stay above zero, or the percentage is
           // a division by a negative price.
           const change = round2(Math.max(Math.min(drift, last - 0.01), -last * 4))
           const previousClose = round2(last - change)
-          const changePct = previousClose <= 0 ? 0 : round2((change / previousClose) * 100)
 
           const activity = Math.exp(-(m * m) / 2)
           const volume = Math.round(120 + 26_000 * activity * expiryWeight * u.liquidity * (0.45 + next()))
           const openInterest = Math.round(volume * (1.6 + next() * 4.4) + 250)
 
-          // Spreads widen away from the money and on the thinner names.
-          // The wing contracts are where a modelled fill price is least
-          // trustworthy and the table should show that, rather than hide it
-          // behind a uniform penny spread.
-          const halfSpread = Math.max(
-            0.01,
-            round2(last * 0.012 + 0.01 + ((1 - activity) * 0.06) / u.liquidity),
-          )
-          const bid = Math.min(last, Math.max(0.01, round2(last - halfSpread)))
-          const ask = round2(last + halfSpread)
+          const half = halfSpread(last, m, u.liquidity)
 
           contracts.push({
             symbol: u.symbol,
@@ -1140,10 +1184,11 @@ function buildChain(): OptionContract[] {
             expiration,
             type,
             last,
+            previousClose,
             change,
-            changePct,
-            bid,
-            ask,
+            changePct: round2((change / previousClose) * 100),
+            bid: Math.min(last, Math.max(0.01, round2(last - half))),
+            ask: round2(last + half),
             volume,
             openInterest,
             iv,
@@ -1159,7 +1204,10 @@ function buildChain(): OptionContract[] {
 /** 180 contracts: six underlyings, three expirations, five strikes, both
  * rights. Deep enough that pagination does real work and that the ranking
  * views disagree with each other — a five-row chain ranked six ways returns
- * the same five rows and proves nothing. */
+ * the same five rows and proves nothing.
+ *
+ * This is the *opening* snapshot. The live chain lives in the store, which
+ * re-prices it from the underlying on every poll. */
 export const OPTION_CHAIN: OptionContract[] = buildChain()
 
 export interface StockQuote {
@@ -1169,89 +1217,108 @@ export interface StockQuote {
   change: number
   changePct: number
   volume: number
+  /** Average daily share volume. Carried per name rather than drawn from
+   * one range, because a uniform draw made COST as busy as NVDA and turned
+   * "most active" into a reshuffle of the same list.
+   *
+   * It is also the denominator of relative volume, which is what "trending
+   * now" actually means: 4x its usual volume is a stock something is
+   * happening to, where raw volume only ever finds the same mega caps. */
+  avgVolume: number
   /** Billions of dollars, or **null for a fund**. An ETF has no market
    * capitalisation. Rendering that as 0 would sort SPY below every real
    * company and read as a fund worth nothing, so the column shows an em
    * dash and the ranking sorts nulls last rather than treating them as
    * zero. */
   marketCap: number | null
-  /** First day of trading, YYYY-MM-DD — a date, not an instant. Dates are
-   * approximate; they exist to give the "new listings" view something real
-   * to sort on. */
-  listedOn: string
 }
 
-/** Price is only carried here for names with no entry in UNDERLYINGS —
- * where a quote exists it wins, so the Markets table, the Activity rows and
- * the position charts all agree about the same stock. */
+/** Metadata, and the price each name is seeded at. Nothing here is a live
+ * value — the quote map below owns those, for every symbol on the page. */
 const STOCK_SEEDS: {
   symbol: string
   name: string
   price: number
-  marketCap: number | null
-  /** Average daily share volume. Carried per name rather than drawn from
-   * one range, because a uniform draw made COST as busy as NVDA and turned
-   * "most active" into a reshuffle of the same list. */
   avgVolume: number
-  listedOn: string
+  marketCap: number | null
+  seed: number
 }[] = [
-  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, marketCap: 3540, avgVolume: 52_000_000, listedOn: '1980-12-12' },
-  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, marketCap: 3110, avgVolume: 22_000_000, listedOn: '1986-03-13' },
-  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, marketCap: 3390, avgVolume: 210_000_000, listedOn: '1999-01-22' },
-  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, marketCap: 2120, avgVolume: 41_000_000, listedOn: '1997-05-15' },
-  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, marketCap: 2160, avgVolume: 28_000_000, listedOn: '2004-08-19' },
-  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, marketCap: 1420, avgVolume: 15_000_000, listedOn: '2012-05-18' },
-  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, marketCap: 830, avgVolume: 24_000_000, listedOn: '2009-08-06' },
-  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, marketCap: 760, avgVolume: 92_000_000, listedOn: '2010-06-29' },
-  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, marketCap: 754, avgVolume: 3_400_000, listedOn: '1970-01-02' },
-  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, marketCap: 638, avgVolume: 18_000_000, listedOn: '1972-08-25' },
-  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, marketCap: 623, avgVolume: 9_200_000, listedOn: '1969-03-05' },
-  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, marketCap: 528, avgVolume: 4_100_000, listedOn: '1984-10-17' },
-  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, marketCap: 516, avgVolume: 16_000_000, listedOn: '1972-01-03' },
-  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, marketCap: 392, avgVolume: 2_100_000, listedOn: '1985-12-05' },
-  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, marketCap: 366, avgVolume: 3_600_000, listedOn: '1981-09-22' },
+  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, avgVolume: 52_000_000, marketCap: 3540, seed: 20263001 },
+  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, avgVolume: 22_000_000, marketCap: 3110, seed: 20263002 },
+  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, avgVolume: 210_000_000, marketCap: 3390, seed: 20263003 },
+  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, avgVolume: 41_000_000, marketCap: 2120, seed: 20263004 },
+  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, avgVolume: 28_000_000, marketCap: 2160, seed: 20263005 },
+  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, avgVolume: 15_000_000, marketCap: 1420, seed: 20263006 },
+  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, avgVolume: 24_000_000, marketCap: 830, seed: 20263007 },
+  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, avgVolume: 92_000_000, marketCap: 760, seed: 20263008 },
+  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, avgVolume: 3_400_000, marketCap: 754, seed: 20263009 },
+  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, avgVolume: 18_000_000, marketCap: 638, seed: 20263010 },
+  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, avgVolume: 9_200_000, marketCap: 623, seed: 20263011 },
+  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, avgVolume: 4_100_000, marketCap: 528, seed: 20263012 },
+  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, avgVolume: 16_000_000, marketCap: 516, seed: 20263013 },
+  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, avgVolume: 2_100_000, marketCap: 392, seed: 20263014 },
+  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, avgVolume: 3_600_000, marketCap: 366, seed: 20263015 },
   // Funds. Every one carries a null market cap on purpose — the column has
   // an em-dash branch and a fixture has to reach it.
-  { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust', price: 429.88, marketCap: null, avgVolume: 61_000_000, listedOn: '1993-01-22' },
-  { symbol: 'QQQ', name: 'Invesco QQQ Trust', price: 372.4, marketCap: null, avgVolume: 34_000_000, listedOn: '1999-03-10' },
-  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 218.63, marketCap: null, avgVolume: 28_000_000, listedOn: '2000-05-22' },
-  { symbol: 'XLE', name: 'Energy Select Sector SPDR Fund', price: 91.24, marketCap: null, avgVolume: 17_000_000, listedOn: '1998-12-16' },
-  { symbol: 'ARKK', name: 'ARK Innovation ETF', price: 54.77, marketCap: null, avgVolume: 12_000_000, listedOn: '2014-10-31' },
-  // The recent end of the listing ladder, so "new listings" has something
-  // to sort to the top and the view is not just the same table again.
-  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, marketCap: 149, avgVolume: 8_400_000, listedOn: '2023-09-14' },
-  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, marketCap: 14, avgVolume: 6_200_000, listedOn: '2024-03-20' },
-  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, marketCap: 21, avgVolume: 9_800_000, listedOn: '2024-03-21' },
-  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, marketCap: 12, avgVolume: 3_100_000, listedOn: '2024-04-25' },
-  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, marketCap: 47, avgVolume: 14_000_000, listedOn: '2025-03-28' },
-  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, marketCap: 33, avgVolume: 11_000_000, listedOn: '2025-06-05' },
+  { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust', price: 429.88, avgVolume: 61_000_000, marketCap: null, seed: 20263016 },
+  { symbol: 'QQQ', name: 'Invesco QQQ Trust', price: 372.4, avgVolume: 34_000_000, marketCap: null, seed: 20263017 },
+  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 218.63, avgVolume: 28_000_000, marketCap: null, seed: 20263018 },
+  { symbol: 'XLE', name: 'Energy Select Sector SPDR Fund', price: 91.24, avgVolume: 17_000_000, marketCap: null, seed: 20263019 },
+  { symbol: 'ARKK', name: 'ARK Innovation ETF', price: 54.77, avgVolume: 12_000_000, marketCap: null, seed: 20263020 },
+  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, avgVolume: 8_400_000, marketCap: 149, seed: 20263021 },
+  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, avgVolume: 6_200_000, marketCap: 14, seed: 20263022 },
+  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, avgVolume: 9_800_000, marketCap: 21, seed: 20263023 },
+  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, avgVolume: 3_100_000, marketCap: 12, seed: 20263024 },
+  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, avgVolume: 14_000_000, marketCap: 47, seed: 20263025 },
+  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, avgVolume: 11_000_000, marketCap: 33, seed: 20263026 },
 ]
+
+/** **One price per symbol, for the whole terminal.**
+ *
+ * UNDERLYINGS covers the six names a position can be written on. This
+ * extends it to every symbol the Markets page lists, and it is a superset
+ * rather than a second map on purpose: two maps would let the Markets table
+ * and an Activity row show different prices for the same stock, which is
+ * the exact failure `Position.underlying` being keyed by symbol exists to
+ * prevent. The store seeds its live quotes from here and both pages read
+ * that one map.
+ *
+ * The stream and the poll are still different things — the stream is capped
+ * at 30 symbols and scoped to open positions, while polled snapshots are
+ * bounded by a request budget instead. They write to the same prices. */
+export const MARKET_QUOTES: Record<string, UnderlyingQuote> = {
+  ...UNDERLYINGS,
+  ...Object.fromEntries(
+    STOCK_SEEDS.filter((s) => !(s.symbol in UNDERLYINGS)).map((s) => [
+      s.symbol,
+      buildUnderlying(s.symbol, s.price, s.seed, 62),
+    ]),
+  ),
+}
 
 const stockRand = mulberry32(20262100)
 
-/** 26 rows — two pages at 15, with enough spread in volume and market cap
- * that the five ranking views return visibly different tables. */
+/** 26 rows — two pages at 15, with enough spread in volume, market cap and
+ * relative volume that the five ranking views return visibly different
+ * tables.
+ *
+ * Price, change and percent are read from the quote map rather than stored
+ * here, so there is nothing to keep in sync. */
 export const STOCKS: StockQuote[] = STOCK_SEEDS.map((s) => {
-  // Both draws happen unconditionally. Drawing inside the branch below
-  // would make the stream's order depend on which symbols have a quote, so
-  // adding one underlying would silently shift every row after it.
-  const drawPct = round2((stockRand() - 0.5) * 7)
-  const volume = Math.round(s.avgVolume * (0.78 + stockRand() * 0.5))
-
-  const quote = UNDERLYINGS[s.symbol]
-  const price = quote ? quote.price : s.price
-  const changePct = quote ? quote.changePct : drawPct
-  const change = quote ? quote.change : round2(price - price / (1 + changePct / 100))
+  const quote = MARKET_QUOTES[s.symbol]
+  // Today's volume against the average. Most names trade near their usual
+  // size; a few are having a day, which is what the trending screen is for.
+  const relative = stockRand() < 0.22 ? 1.9 + stockRand() * 2.6 : 0.55 + stockRand() * 0.85
 
   return {
     symbol: s.symbol,
     name: s.name,
-    price,
-    change,
-    changePct,
-    volume,
+    price: quote.price,
+    change: quote.change,
+    changePct: quote.changePct,
+    volume: Math.round(s.avgVolume * relative),
+    avgVolume: s.avgVolume,
     marketCap: s.marketCap,
-    listedOn: s.listedOn,
   }
 })
 

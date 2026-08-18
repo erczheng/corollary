@@ -24,6 +24,11 @@ import {
   validateExit,
   validateOrder,
   addedRiskPct,
+  estimateOpen,
+  occSymbol,
+  openCrossingPrice,
+  openRisk,
+  validateOpenOrder,
 } from './orders'
 
 const PAPER = ACCOUNT_SNAPSHOTS.paper.positions
@@ -443,5 +448,97 @@ describe('fixtures are internally consistent', () => {
     expect(all.some((p) => p.attachedExit?.heldBy === 'corollary')).toBe(true)
     expect(all.some((p) => p.strategyId !== null)).toBe(true)
     expect(all.some((p) => p.strategyId === null)).toBe(true)
+  })
+})
+
+describe('opening a position from the chain', () => {
+  const quote = { bid: 4.9, ask: 5.1 }
+  const draft = {
+    side: 'BTO' as const,
+    quantity: 2,
+    orderType: 'market' as const,
+    limitPrice: null,
+    stopPrice: null,
+    timeInForce: 'day' as const,
+  }
+
+  it('lifts the ask to buy and hits the bid to sell', () => {
+    // The same trap `crossingPrice` documents for closing. Reversed, every
+    // buy estimate is understated by the width of the spread.
+    expect(openCrossingPrice(quote, 'BTO')).toBe(5.1)
+    expect(openCrossingPrice(quote, 'STO')).toBe(4.9)
+  })
+
+  it('calls a buy a cost and a sell a credit, never both "proceeds"', () => {
+    expect(estimateOpen(quote, draft)).toMatchObject({ kind: 'cost', amount: 1_020 })
+    expect(estimateOpen(quote, { ...draft, side: 'STO' })).toMatchObject({
+      kind: 'proceeds',
+      amount: 980,
+    })
+  })
+
+  it('fills a limit order at its own price rather than crossing', () => {
+    const est = estimateOpen(quote, { ...draft, orderType: 'limit', limitPrice: 4.5 })
+    expect(est.pricePerContract).toBe(4.5)
+    expect(est.amount).toBe(900)
+  })
+
+  it('ignores a blank or zero limit and falls back to the crossing price', () => {
+    // A limit of 0 is "not stated yet", not a free order.
+    expect(estimateOpen(quote, { ...draft, orderType: 'limit', limitPrice: null }).pricePerContract).toBe(
+      5.1,
+    )
+    expect(estimateOpen(quote, { ...draft, orderType: 'limit', limitPrice: 0 }).pricePerContract).toBe(5.1)
+  })
+
+  it('rejects a fractional or missing quantity and a limit order with no limit', () => {
+    expect(validateOpenOrder({ ...draft, quantity: 1.5 })).toHaveLength(1)
+    expect(validateOpenOrder({ ...draft, quantity: 0 })).toHaveLength(1)
+    expect(validateOpenOrder({ ...draft, orderType: 'limit', limitPrice: null })).toHaveLength(1)
+    expect(validateOpenOrder(draft)).toEqual([])
+  })
+})
+
+describe('openRisk', () => {
+  const quote = { bid: 4.9, ask: 5.1 }
+  const draft = {
+    side: 'BTO' as const,
+    quantity: 2,
+    orderType: 'market' as const,
+    limitPrice: null,
+    stopPrice: null,
+    timeInForce: 'day' as const,
+  }
+
+  it('risks the premium paid on a long, and states it as a percent of equity', () => {
+    // CLAUDE.md rule 4: for a long option, risk *is* the premium.
+    expect(openRisk(quote, draft, 34_000)).toEqual({ kind: 'defined', amount: 1_020, pct: 3 })
+  })
+
+  it('refuses to quote a maximum loss on a short', () => {
+    // A naked short is undefined risk, sized against a ±2σ stress loss the
+    // engine computes. A confident wrong number under the word "risk" is
+    // worse than an honest absence.
+    expect(openRisk(quote, { ...draft, side: 'STO' }, 34_000)).toEqual({ kind: 'undefined' })
+  })
+
+  it('reports zero percent rather than dividing by an empty account', () => {
+    expect(openRisk(quote, draft, 0)).toEqual({ kind: 'defined', amount: 1_020, pct: 0 })
+  })
+})
+
+describe('occSymbol', () => {
+  it('builds the OCC format the docs specify', () => {
+    // From CLAUDE.md: AAPL241220C00150000 is the AAPL $150 call expiring
+    // 20 Dec 2024.
+    expect(occSymbol('AAPL', '2024-12-20', 'call', 150)).toBe('AAPL241220C00150000')
+  })
+
+  it('multiplies the strike by a thousand and pads to eight digits', () => {
+    // The ×1000 and the pad are both load-bearing — $7.50 written as
+    // 00000750 is a 75-cent strike.
+    expect(occSymbol('SPY', '2026-08-21', 'put', 7.5)).toBe('SPY260821P00007500')
+    expect(occSymbol('SPY', '2026-08-21', 'put', 430)).toBe('SPY260821P00430000')
+    expect(occSymbol('COST', '2026-10-16', 'call', 884.19)).toBe('COST261016C00884190')
   })
 })
