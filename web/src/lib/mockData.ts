@@ -806,13 +806,28 @@ function buildUnderlying(symbol: string, price: number, seed: number, sessions: 
 
 /** Prices here must match every `Position.underlying` that names the same
  * symbol; `orders.test.ts` asserts it. */
+/** A year of daily closes.
+ *
+ * Calendar days, not sessions — the walk skips weekends, so 400 of these
+ * is about 286 closes reaching back to mid-2025.
+ *
+ * Long enough that every range on the Markets chart differs. At a quarter,
+ * 3M / YTD / 1Y / All all returned the same points, which is four buttons
+ * redrawing one chart; at a year, 1Y and All still did. Thirteen months
+ * separates the last pair.
+ *
+ * Changing this does not move any quoted number: buildUnderlying walks
+ * backwards from today's price, so previousClose comes from the first draw
+ * and change and changePct follow it, whatever the count. */
+const QUOTE_SESSIONS = 400
+
 export const UNDERLYINGS: Record<string, UnderlyingQuote> = {
-  AAPL: buildUnderlying('AAPL', 232.4, 20261001, 62),
-  TSLA: buildUnderlying('TSLA', 238.1, 20261002, 62),
-  SPY: buildUnderlying('SPY', 429.88, 20261003, 62),
-  QQQ: buildUnderlying('QQQ', 372.4, 20261004, 62),
-  MSFT: buildUnderlying('MSFT', 418.35, 20261005, 62),
-  NVDA: buildUnderlying('NVDA', 138.2, 20261006, 62),
+  AAPL: buildUnderlying('AAPL', 232.4, 20261001, QUOTE_SESSIONS),
+  TSLA: buildUnderlying('TSLA', 238.1, 20261002, QUOTE_SESSIONS),
+  SPY: buildUnderlying('SPY', 429.88, 20261003, QUOTE_SESSIONS),
+  QQQ: buildUnderlying('QQQ', 372.4, 20261004, QUOTE_SESSIONS),
+  MSFT: buildUnderlying('MSFT', 418.35, 20261005, QUOTE_SESSIONS),
+  NVDA: buildUnderlying('NVDA', 138.2, 20261006, QUOTE_SESSIONS),
 }
 
 // ---------------------------------------------------------------------- //
@@ -1291,7 +1306,7 @@ export const MARKET_QUOTES: Record<string, UnderlyingQuote> = {
   ...Object.fromEntries(
     STOCK_SEEDS.filter((s) => !(s.symbol in UNDERLYINGS)).map((s) => [
       s.symbol,
-      buildUnderlying(s.symbol, s.price, s.seed, 62),
+      buildUnderlying(s.symbol, s.price, s.seed, QUOTE_SESSIONS),
     ]),
   ),
 }

@@ -316,6 +316,18 @@ expect.** Every item below produced working-looking code that was wrong:
   `PositionChart.tsx` — the Open Positions row, its expanded ticket, and
   its value/payoff charts. `Activity.tsx` composes them and holds no order
   logic of its own.
+- `web/src/components/UnderlyingChart.tsx` — the stock behind a chain
+  contract, inside the Markets ticket, with a range control. Marks the
+  strike and yesterday's close, and states which side of the strike the
+  stock is on in words as well as drawing it. The readout reports the move
+  **over the window on screen**, not over the day — a range control that
+  redraws the axis and leaves a daily figure beside it is reporting on a
+  chart nobody is looking at. `UNDERLYINGS` carries 400 calendar days for
+  this reason: at a quarter, 3M / YTD / 1Y / All all returned the same
+  points, which is four buttons redrawing one chart. Changing
+  `QUOTE_SESSIONS` moves no quoted number — `buildUnderlying` walks
+  backwards from today's price, so `previousClose` comes from the first
+  draw whatever the count.
 - `web/src/pages/Design.tsx` — the `/design` route, which proves the token
   system. New tokens get exercised here.
 

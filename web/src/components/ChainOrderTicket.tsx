@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
+import { UnderlyingChart } from './UnderlyingChart'
 import { useUIStore } from '../lib/store'
 import { contractLabel } from '../lib/store'
 import {
@@ -133,6 +134,14 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
         <p className="text-caption text-on-surface-variant">
           Bid {formatUsd(contract.bid)} · Ask {formatUsd(contract.ask)} · IV {formatIv(contract.iv)}
         </p>
+      </div>
+
+      {/* The stock, before the order. An option ticket without the
+          underlying asks you to price a derivative with the derivative
+          hidden — and where the stock sits relative to the strike is the
+          fact that decides what this contract is worth at expiry. */}
+      <div className="mt-4">
+        <UnderlyingChart symbol={contract.symbol} strike={contract.strike} right={contract.type} />
       </div>
 
       {/* Side first, because it changes what every field below means — the
