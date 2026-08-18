@@ -1,24 +1,102 @@
 /**
- * Filtering and ranking for the Markets page (PRD.md §8.4). Pure functions
- * with no React in them, so the ordering rules can be tested without
- * rendering a table — the same split `orders.ts` uses.
+ * Filtering, ranking and sorting for the Markets page (PRD.md §8.4). Pure
+ * functions with no React in them, so the ordering rules can be tested
+ * without rendering a table — the same split `orders.ts` uses.
  *
- * None of these mutate their input. `OPTION_CHAIN` and `STOCKS` are module
- * singletons and every view reads the same array; an in-place `.sort()`
- * would leave the previous view's ordering behind in the fixture itself.
+ * None of these mutate their input. The chain and the stock universe are
+ * single arrays that every view reads; an in-place `.sort()` would leave
+ * the previous view's ordering behind in the data itself.
  */
 
-import { OPTION_CHAIN, type OptionContract, type StockQuote } from './mockData'
+import {
+  OPTION_CHAIN,
+  type OptionContract,
+  type StockQuote,
+  type UnderlyingQuote,
+} from './mockData'
+
+export type SortDirection = 'ascending' | 'descending'
+
+/** Nulls sort last in **both** directions, rather than being coerced to a
+ * number. An absent market capitalisation is not a small one: coerced to
+ * zero, SPY ranks below the smallest company on the list and a column of
+ * dollars states that a fund is worth nothing. Descending or ascending, a
+ * row with no value belongs at the bottom either way. */
+function compareNullable(a: number | null, b: number | null, direction: SortDirection): number | null {
+  if (a === null && b === null) return 0
+  if (a === null) return 1
+  if (b === null) return -1
+  return direction === 'ascending' ? a - b : b - a
+}
+
+function compare(a: number, b: number, direction: SortDirection): number {
+  return direction === 'ascending' ? a - b : b - a
+}
 
 // ---------------------------------------------------------------------- //
 // Options chains
 // ---------------------------------------------------------------------- //
 
-/** The rankings PRD.md §8.4 asks for, plus the chain's own order.
- *
- * `strike` is the default because that is how a chain is actually read —
- * down a ladder, comparing the strike above to the one below. The other
- * five are screens, and answer a different question. */
+/** `ladder` is the chain's own order — symbol, expiration, strike, calls
+ * before puts — and it is not a column you can click. The rest are, and
+ * they are exactly the quote columns: sorting by Type would group two
+ * halves of the same ladder into blocks that no longer read as a chain,
+ * and sorting by Strike across three expirations interleaves ladders that
+ * do not exist. */
+export type ChainSortKey =
+  | 'ladder'
+  | 'last'
+  | 'change'
+  | 'changePct'
+  | 'bid'
+  | 'ask'
+  | 'volume'
+  | 'openInterest'
+  | 'iv'
+
+export interface ChainSort {
+  key: ChainSortKey
+  direction: SortDirection
+}
+
+/** Which way a column wants to be read the first time you click it. Money
+ * and size open descending — the question is "what is biggest" — and there
+ * is no column here where smallest-first is the obvious first ask. */
+export const CHAIN_DEFAULT_DIRECTION: SortDirection = 'descending'
+
+export const CHAIN_LADDER_SORT: ChainSort = { key: 'ladder', direction: 'ascending' }
+
+/** Calls before puts at the same strike, which is how a chain is printed. */
+const RIGHT_ORDER: Record<OptionContract['type'], number> = { call: 0, put: 1 }
+
+export function sortChain(contracts: OptionContract[], sort: ChainSort): OptionContract[] {
+  const rows = [...contracts]
+
+  if (sort.key === 'ladder') {
+    // Symbol, then expiration, then strike, then right. Sorting by strike
+    // alone interleaves three expirations of the same underlying into one
+    // ladder that does not exist.
+    return rows.sort(
+      (a, b) =>
+        a.symbol.localeCompare(b.symbol) ||
+        a.expiration.localeCompare(b.expiration) ||
+        a.strike - b.strike ||
+        RIGHT_ORDER[a.type] - RIGHT_ORDER[b.type],
+    )
+  }
+
+  const key = sort.key
+  // Ties keep the ladder's order rather than whatever the array happened to
+  // hold, so two contracts on the same volume don't swap places between
+  // renders.
+  const ladder = sortChain(rows, CHAIN_LADDER_SORT)
+  return ladder.sort((a, b) => compare(a[key], b[key], sort.direction))
+}
+
+/** The named screens PRD.md §8.4 asks for, expressed as sorts. The
+ * dropdown and the column headers drive one piece of state between them —
+ * two independent sorts would let the header say one thing while the
+ * dropdown claimed another. */
 export type ChainRank = 'strike' | 'volume' | 'gainers' | 'losers' | 'iv' | 'openInterest'
 
 export const CHAIN_RANKS: ChainRank[] = ['strike', 'volume', 'gainers', 'losers', 'iv', 'openInterest']
@@ -32,28 +110,25 @@ export const CHAIN_RANK_LABEL: Record<ChainRank, string> = {
   openInterest: 'Highest open interest',
 }
 
-/** Which column a ranking sorts on, so the header can say so. A table
- * sorted by a rule the header does not name looks shuffled. */
-export const CHAIN_RANK_COLUMN: Record<ChainRank, string> = {
-  strike: 'strike',
-  volume: 'volume',
-  gainers: 'changePct',
-  losers: 'changePct',
-  iv: 'iv',
-  openInterest: 'openInterest',
+export const CHAIN_RANK_SORT: Record<ChainRank, ChainSort> = {
+  strike: CHAIN_LADDER_SORT,
+  volume: { key: 'volume', direction: 'descending' },
+  gainers: { key: 'changePct', direction: 'descending' },
+  // Most negative first — the losers screen sorts up, not down, and is not
+  // the gainers list reversed.
+  losers: { key: 'changePct', direction: 'ascending' },
+  iv: { key: 'iv', direction: 'descending' },
+  openInterest: { key: 'openInterest', direction: 'descending' },
 }
 
-/** Which way each ranking runs. Not decorative: the header announces it
- * through `aria-sort`, and hardcoding "descending" would tell a screen
- * reader the strike ladder counts down while it visibly counts up. */
-export const CHAIN_RANK_DIRECTION: Record<ChainRank, 'ascending' | 'descending'> = {
-  strike: 'ascending',
-  volume: 'descending',
-  gainers: 'descending',
-  // Most negative first — the losers screen sorts up, not down.
-  losers: 'ascending',
-  iv: 'descending',
-  openInterest: 'descending',
+/** The screen a sort corresponds to, or null if clicking a header has taken
+ * the table somewhere no preset describes. The dropdown shows that as
+ * "Custom" rather than keeping a stale label from the last preset. */
+export function chainRankFor(sort: ChainSort): ChainRank | null {
+  const match = CHAIN_RANKS.find(
+    (r) => CHAIN_RANK_SORT[r].key === sort.key && CHAIN_RANK_SORT[r].direction === sort.direction,
+  )
+  return match ?? null
 }
 
 /** Every underlying with a listed chain, in the order the fixture defines
@@ -61,10 +136,10 @@ export const CHAIN_RANK_DIRECTION: Record<ChainRank, 'ascending' | 'descending'>
 export const CHAIN_UNDERLYINGS: string[] = [...new Set(OPTION_CHAIN.map((c) => c.symbol))]
 
 /** Minimum contract volume. PRD.md §8.4 lists volume as a *filter*
- * alongside the rankings, and it is the one control here that can empty
- * the table — the thin end of a quiet name genuinely has nothing above
- * 20,000, and saying so is more useful than showing five illiquid strikes
- * as though they were tradeable. */
+ * alongside the rankings, and it is the one control here that can empty the
+ * table — the thin end of a quiet name genuinely has nothing above 20,000,
+ * and saying so is more useful than showing five illiquid strikes as though
+ * they were tradeable. */
 export const MIN_VOLUME_STEPS = [0, 5_000, 20_000, 50_000]
 
 export interface ChainFilter {
@@ -80,105 +155,99 @@ export function filterChain(contracts: OptionContract[], filter: ChainFilter): O
   )
 }
 
-/** Calls before puts at the same strike, which is how a chain is printed. */
-const RIGHT_ORDER: Record<OptionContract['type'], number> = { call: 0, put: 1 }
+/** Substring match on the symbol, for the underlying search. Case
+ * insensitive and unanchored: someone typing "qq" is looking for QQQ, and
+ * someone typing "sp" should not have to know whether the list is
+ * alphabetical. */
+export function searchUnderlyings(symbols: string[], query: string): string[] {
+  const q = query.trim().toLowerCase()
+  if (q === '') return symbols
+  return symbols.filter((s) => s.toLowerCase().includes(q))
+}
 
-export function rankChain(contracts: OptionContract[], rank: ChainRank): OptionContract[] {
-  const rows = [...contracts]
-
-  switch (rank) {
-    case 'strike':
-      // Symbol, then expiration, then strike, then right. Sorting by
-      // strike alone interleaves three expirations of the same underlying
-      // into one ladder that does not exist.
-      return rows.sort(
-        (a, b) =>
-          a.symbol.localeCompare(b.symbol) ||
-          a.expiration.localeCompare(b.expiration) ||
-          a.strike - b.strike ||
-          RIGHT_ORDER[a.type] - RIGHT_ORDER[b.type],
-      )
-
-    case 'volume':
-      return rows.sort((a, b) => b.volume - a.volume)
-
-    case 'openInterest':
-      return rows.sort((a, b) => b.openInterest - a.openInterest)
-
-    case 'iv':
-      return rows.sort((a, b) => b.iv - a.iv)
-
-    case 'gainers':
-      // Biggest gain first. Losers is not the reverse of this list — it is
-      // the same list read from the other end, and reversing `gainers`
-      // would put the flattest contracts on top of the losers screen.
-      return rows.sort((a, b) => b.changePct - a.changePct)
-
-    case 'losers':
-      return rows.sort((a, b) => a.changePct - b.changePct)
-  }
+/** A contract's display name, in the same shape the rest of the app writes
+ * contracts in — `AAPL $230 Call Aug 21`. One format everywhere, so a
+ * contract bought from the chain reads identically in the ledger. */
+export function contractName(c: OptionContract, expiryLabel: string): string {
+  return `${c.symbol} $${c.strike} ${c.type === 'call' ? 'Call' : 'Put'} ${expiryLabel}`
 }
 
 // ---------------------------------------------------------------------- //
 // Stocks & ETFs
 // ---------------------------------------------------------------------- //
 
-export type StockRank = 'active' | 'gainers' | 'losers' | 'new' | 'marketCap'
+export type StockSortKey = 'price' | 'change' | 'changePct' | 'volume' | 'relVolume' | 'marketCap'
 
-export const STOCK_RANKS: StockRank[] = ['active', 'gainers', 'losers', 'new', 'marketCap']
+export interface StockSort {
+  key: StockSortKey
+  direction: SortDirection
+}
+
+/** Today's volume against the name's average.
+ *
+ * This is what "trending now" means on a screener, and it is a different
+ * question from "most active": raw volume finds the same mega caps every
+ * session, because NVDA trades 200M shares on a quiet day. Relative volume
+ * finds the name that is doing something unusual *for itself*, which is
+ * the one worth looking at. */
+export function relativeVolume(s: StockQuote): number {
+  return s.avgVolume === 0 ? 0 : s.volume / s.avgVolume
+}
+
+export function sortStocks(stocks: StockQuote[], sort: StockSort): StockQuote[] {
+  const rows = [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol))
+
+  if (sort.key === 'marketCap') {
+    return rows.sort((a, b) => compareNullable(a.marketCap, b.marketCap, sort.direction) ?? 0)
+  }
+  if (sort.key === 'relVolume') {
+    return rows.sort((a, b) => compare(relativeVolume(a), relativeVolume(b), sort.direction))
+  }
+
+  const key = sort.key
+  return rows.sort((a, b) => compare(a[key], b[key], sort.direction))
+}
+
+export type StockRank = 'active' | 'trending' | 'gainers' | 'losers' | 'marketCap'
+
+export const STOCK_RANKS: StockRank[] = ['active', 'trending', 'gainers', 'losers', 'marketCap']
 
 export const STOCK_RANK_LABEL: Record<StockRank, string> = {
   active: 'Most active',
+  trending: 'Trending now',
   gainers: 'Top gainers',
   losers: 'Top losers',
-  new: 'New listings',
   marketCap: 'Market cap',
 }
 
-export const STOCK_RANK_COLUMN: Record<StockRank, string> = {
-  active: 'volume',
-  gainers: 'changePct',
-  losers: 'changePct',
-  new: 'listedOn',
-  marketCap: 'marketCap',
+export const STOCK_RANK_SORT: Record<StockRank, StockSort> = {
+  active: { key: 'volume', direction: 'descending' },
+  trending: { key: 'relVolume', direction: 'descending' },
+  gainers: { key: 'changePct', direction: 'descending' },
+  losers: { key: 'changePct', direction: 'ascending' },
+  marketCap: { key: 'marketCap', direction: 'descending' },
 }
 
-export const STOCK_RANK_DIRECTION: Record<StockRank, 'ascending' | 'descending'> = {
-  active: 'descending',
-  gainers: 'descending',
-  losers: 'ascending',
-  // Most recently listed first, so the newest date is at the top.
-  new: 'descending',
-  marketCap: 'descending',
+export function stockRankFor(sort: StockSort): StockRank | null {
+  const match = STOCK_RANKS.find(
+    (r) => STOCK_RANK_SORT[r].key === sort.key && STOCK_RANK_SORT[r].direction === sort.direction,
+  )
+  return match ?? null
 }
 
-export function rankStocks(stocks: StockQuote[], rank: StockRank): StockQuote[] {
-  const rows = [...stocks]
-
-  switch (rank) {
-    case 'active':
-      return rows.sort((a, b) => b.volume - a.volume)
-
-    case 'gainers':
-      return rows.sort((a, b) => b.changePct - a.changePct)
-
-    case 'losers':
-      return rows.sort((a, b) => a.changePct - b.changePct)
-
-    case 'new':
-      // Most recently listed first.
-      return rows.sort((a, b) => b.listedOn.localeCompare(a.listedOn))
-
-    case 'marketCap':
-      // A fund has no market capitalisation, so it sorts to the bottom
-      // rather than being coerced to zero. Coercing would rank SPY below
-      // the smallest company on the list and state, in a column of
-      // dollars, that it is worth nothing.
-      return rows.sort((a, b) => {
-        if (a.marketCap === null && b.marketCap === null) return a.symbol.localeCompare(b.symbol)
-        if (a.marketCap === null) return 1
-        if (b.marketCap === null) return -1
-        return b.marketCap - a.marketCap
-      })
-  }
+/** Re-quotes the universe from the live price map.
+ *
+ * Price, change and percent are not stored on the row — they belong to the
+ * symbol, and the symbol has exactly one quote. A stock carrying its own
+ * copy is how the Markets table and an Activity row end up disagreeing
+ * about what AAPL costs. */
+export function liveStocks(
+  base: StockQuote[],
+  quotes: Record<string, UnderlyingQuote>,
+): StockQuote[] {
+  return base.map((s) => {
+    const q = quotes[s.symbol]
+    if (!q) return s
+    return { ...s, price: q.price, change: q.change, changePct: q.changePct }
+  })
 }

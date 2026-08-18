@@ -339,9 +339,20 @@ describe('the stock universe covers what the Markets table renders', () => {
     }
   })
 
-  it('spans enough listing dates that "new listings" is a different table', () => {
-    const listed = STOCKS.map((s) => s.listedOn).sort()
-    expect(listed[listed.length - 1] > '2024-01-01').toBe(true)
-    expect(listed[0] < '1990-01-01').toBe(true)
+  it('spreads relative volume enough that trending is a different table', () => {
+    // "Most active" finds the same mega caps every session — NVDA trades
+    // 200M shares on a quiet day. Trending is volume against the name's
+    // own average, so the fixture has to hold names having an unusual day
+    // and names having an ordinary one, or the two views agree and one of
+    // them is decoration.
+    const relative = STOCKS.map((s) => s.volume / s.avgVolume)
+    expect(Math.max(...relative)).toBeGreaterThan(1.8)
+    expect(Math.min(...relative)).toBeLessThan(0.9)
+
+    const byVolume = [...STOCKS].sort((a, b) => b.volume - a.volume)[0]
+    const byRelative = [...STOCKS].sort(
+      (a, b) => b.volume / b.avgVolume - a.volume / a.avgVolume,
+    )[0]
+    expect(byRelative.symbol).not.toBe(byVolume.symbol)
   })
 })

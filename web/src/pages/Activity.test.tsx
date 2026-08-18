@@ -489,6 +489,7 @@ describe('Working Orders', () => {
           {
             id: 'wo-sl',
             positionId: 'pos-1',
+            contractKey: null,
             contract: 'AAPL $230 Call Oct 17',
             side: 'STC',
             orderType: 'stop_limit',

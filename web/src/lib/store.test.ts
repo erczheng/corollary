@@ -378,6 +378,7 @@ describe('the price tick', () => {
           {
             id: 'wo-fill',
             positionId: target.id,
+            contractKey: null,
             contract: `${target.symbol} ${target.contract}`,
             side: 'STC',
             orderType: 'limit',
@@ -431,6 +432,7 @@ describe('the price tick', () => {
           {
             id: 'wo-far',
             positionId: target.id,
+            contractKey: null,
             contract: `${target.symbol} ${target.contract}`,
             side: 'STC',
             orderType: 'limit',
@@ -535,5 +537,193 @@ describe('attached exits', () => {
     expect(after.strategyId).toBeNull()
     expect(after.managedExit).toBeNull()
     expect(after.attachedExit).toBeNull()
+  })
+})
+
+/** The Markets poll. Distinct from `tick` on purpose — it stands in for a
+ * snapshot request across the quoted universe, where the tick stands in
+ * for a 30-symbol websocket scoped to open positions. */
+describe('pollMarkets', () => {
+  it('moves every quoted symbol, not just the ones behind a position', () => {
+    const before = { ...useUIStore.getState().underlyings }
+    useUIStore.getState().pollMarkets(2_000)
+    const after = useUIStore.getState().underlyings
+
+    // A screener that only moves the six stocks you happen to hold is not
+    // a screener.
+    const moved = Object.keys(after).filter((s) => after[s].price !== before[s].price)
+    expect(moved.length).toBeGreaterThan(6)
+    expect(Object.keys(after).length).toBe(Object.keys(before).length)
+  })
+
+  it('keeps the day change anchored to yesterday, not to the last poll', () => {
+    useUIStore.getState().pollMarkets(2_000)
+    for (const q of Object.values(useUIStore.getState().underlyings)) {
+      expect(q.change).toBeCloseTo(q.price - q.previousClose, 2)
+    }
+  })
+
+  it('re-prices the chain from its underlying, keeping the ladder in order', () => {
+    // The invariant that breaks if contracts are walked independently: a
+    // 225 call printing above the 220 beside it is an arbitrage, and the
+    // chain stops reading like a chain within seconds.
+    for (let i = 0; i < 20; i++) useUIStore.getState().pollMarkets(2_000)
+    const chain = useUIStore.getState().chain
+
+    for (const symbol of new Set(chain.map((c) => c.symbol))) {
+      for (const expiration of new Set(chain.map((c) => c.expiration))) {
+        for (const type of ['call', 'put'] as const) {
+          const ladder = chain
+            .filter((c) => c.symbol === symbol && c.expiration === expiration && c.type === type)
+            .sort((a, b) => a.strike - b.strike)
+
+          for (let i = 1; i < ladder.length; i++) {
+            if (type === 'call') expect(ladder[i].last).toBeLessThan(ladder[i - 1].last)
+            else expect(ladder[i].last).toBeGreaterThan(ladder[i - 1].last)
+          }
+        }
+      }
+    }
+  })
+
+  it('keeps every quote inside its own spread, poll after poll', () => {
+    for (let i = 0; i < 20; i++) useUIStore.getState().pollMarkets(2_000)
+    for (const c of useUIStore.getState().chain) {
+      expect(c.bid).toBeGreaterThan(0)
+      expect(c.ask).toBeGreaterThan(c.bid)
+      expect(c.last).toBeGreaterThanOrEqual(c.bid)
+      expect(c.last).toBeLessThanOrEqual(c.ask)
+    }
+  })
+
+  it('only ever accumulates volume', () => {
+    // A screener sorted on a figure that can fall would reorder backwards
+    // mid-session.
+    const before = new Map(
+      useUIStore.getState().chain.map((c) => [`${c.symbol}${c.strike}${c.type}${c.expiration}`, c.volume]),
+    )
+    for (let i = 0; i < 5; i++) useUIStore.getState().pollMarkets(2_000)
+    for (const c of useUIStore.getState().chain) {
+      expect(c.volume).toBeGreaterThanOrEqual(
+        before.get(`${c.symbol}${c.strike}${c.type}${c.expiration}`)!,
+      )
+    }
+  })
+
+  it('leaves the opening fixture untouched, so a reload replays the same session', () => {
+    const opening = useUIStore.getState().chain[0]
+    const snapshot = { ...opening }
+    for (let i = 0; i < 5; i++) useUIStore.getState().pollMarkets(2_000)
+    expect(opening).toEqual(snapshot)
+  })
+})
+
+describe('submitOpenOrder', () => {
+  const contract = {
+    symbol: 'AAPL',
+    strike: 230,
+    expiration: '2026-08-21',
+    type: 'call' as const,
+    last: 7.41,
+    previousClose: 7.97,
+    change: -0.56,
+    changePct: -7.03,
+    bid: 7.31,
+    ask: 7.51,
+    volume: 26_056,
+    openInterest: 87_887,
+    iv: 0.284,
+  }
+
+  const draft = {
+    side: 'BTO' as const,
+    quantity: 2,
+    orderType: 'market' as const,
+    limitPrice: null,
+    stopPrice: null,
+    timeInForce: 'day' as const,
+  }
+
+  it('opens a long that is flat at the fill, not already in profit', () => {
+    useUIStore.getState().submitOpenOrder(contract, draft)
+    const position = useUIStore.getState().openPositions.paper[0]
+
+    // Bought at the ask and marked at the ask: a position that opens
+    // showing a gain has been marked against the wrong side of the spread.
+    expect(position.direction).toBe('long')
+    expect(position.quantity).toBe(2)
+    expect(position.costBasis).toBe(1_502)
+    expect(position.symbol).toBe('AAPL')
+    expect(position.expiry).toBe('2026-08-21')
+    expect(position.legs[0].symbol).toBe('AAPL260821C00230000')
+  })
+
+  it('opens a short whose cost basis is the credit taken in', () => {
+    useUIStore.getState().submitOpenOrder(contract, { ...draft, side: 'STO' })
+    const position = useUIStore.getState().openPositions.paper[0]
+
+    expect(position.direction).toBe('short')
+    // Sold at the bid.
+    expect(position.costBasis).toBe(1_462)
+    expect(position.legs[0].side).toBe('short')
+  })
+
+  it('writes a filled opening row that reports no P&L', () => {
+    useUIStore.getState().submitOpenOrder(contract, draft)
+    const [row] = useUIStore.getState().activity.paper
+
+    expect(row.status).toBe('filled')
+    expect(row.action).toBe('BTO')
+    // An opening fill has realized nothing; only a close reports P&L.
+    expect(row.pnl).toBeNull()
+    expect(row.pnlPct).toBeNull()
+  })
+
+  it('opens the position under no strategy, so nothing else manages it', () => {
+    useUIStore.getState().submitOpenOrder(contract, draft)
+    const position = useUIStore.getState().openPositions.paper[0]
+
+    // Bought by hand from the chain. Two exit regimes on one position
+    // double-close when a cancel races a fill.
+    expect(position.strategyId).toBeNull()
+    expect(position.managedExit).toBeNull()
+    expect(position.attachedExit).toBeNull()
+  })
+
+  it('rests a limit order instead of filling it, and fills it from the poll', () => {
+    // A limit far above the mark fills on the first poll; the point is that
+    // it goes through the working-orders list rather than straight to a
+    // position.
+    useUIStore.getState().submitOpenOrder(contract, {
+      ...draft,
+      orderType: 'limit',
+      limitPrice: 99,
+    })
+
+    expect(useUIStore.getState().openPositions.paper).toHaveLength(
+      ACCOUNT_SNAPSHOTS.paper.positions.length,
+    )
+    const order = useUIStore.getState().workingOrders.paper[0]
+    expect(order.positionId).toBeNull()
+    expect(order.contractKey).toBe('AAPL-2026-08-21-230-call')
+    expect(useUIStore.getState().activity.paper[0].status).toBe('pending')
+
+    useUIStore.getState().pollMarkets(2_000)
+
+    expect(useUIStore.getState().workingOrders.paper.some((o) => o.id === order.id)).toBe(false)
+    expect(useUIStore.getState().openPositions.paper.length).toBe(
+      ACCOUNT_SNAPSHOTS.paper.positions.length + 1,
+    )
+    expect(useUIStore.getState().activity.paper.find((a) => a.id === order.activityId)?.status).toBe(
+      'filled',
+    )
+  })
+
+  it('opens into the account whose keys are loaded, and only that one', () => {
+    useUIStore.setState({ accountMode: 'cash' })
+    useUIStore.getState().submitOpenOrder(contract, draft)
+
+    expect(useUIStore.getState().openPositions.cash.length).toBe(CASH.positions.length + 1)
+    expect(useUIStore.getState().openPositions.paper.length).toBe(PAPER.positions.length)
   })
 })

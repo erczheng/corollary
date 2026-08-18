@@ -1,25 +1,37 @@
 import { create } from 'zustand'
 import {
   ACCOUNT_SNAPSHOTS,
+  CHAIN_SPEC_BY_SYMBOL,
   CONTRACT_MULTIPLIER,
+  MARKET_QUOTES,
+  OPTION_CHAIN,
+  chainDte,
+  halfSpread,
+  moneyness,
   mulberry32,
-  UNDERLYINGS,
+  priceContract,
+  surfaceIv,
   type UnderlyingQuote,
   type AccountMode,
   type ActivityItem,
   type AttachedExit,
   type ManagedExit,
+  type OptionContract,
   type Position,
   type PricePoint,
   type WorkingOrder,
 } from './mockData'
 import {
   estimate,
+  estimateOpen,
   exitTrigger,
   isWorkingOrderType,
+  occSymbol,
   orderWouldFill,
+  type OpenDraft,
   type OrderDraft,
 } from './orders'
+import { formatExpiry } from './format'
 
 export type Theme = 'light' | 'dark'
 export type ExecutionMode = 'manual' | 'auto'
@@ -63,6 +75,38 @@ interface UIState {
    * "now" marker would never move. Keyed by symbol because two positions
    * can share an underlying and must never disagree about its price. */
   underlyings: Record<string, UnderlyingQuote>
+  /** The live option chain behind the Markets page.
+   *
+   * Held here rather than read straight from the fixture for the same
+   * reason `underlyings` is: the poll moves it. A chain frozen under a
+   * moving stock is a screen that looks live and is not.
+   *
+   * Re-priced from the underlying rather than walked contract by contract —
+   * see `pollMarkets`. */
+  chain: OptionContract[]
+  /** When the last market snapshot arrived, or null before the first one.
+   * Separate from `lastTickAt` on purpose: the position stream and the
+   * market poll are different feeds with different cadences and different
+   * limits, and one status pill covering both would report the wrong thing
+   * on whichever page it was not describing. */
+  lastPollAt: string | null
+  /** One market snapshot — the whole quoted universe, not just the symbols
+   * behind open positions.
+   *
+   * This is the *poll*, not the stream, and the distinction is a real one
+   * from CLAUDE.md: the websocket is capped at 30 symbols on the Basic
+   * plan, so it is spent on open positions, while snapshot requests are
+   * bounded by a 200/min budget instead and can cover a whole page of
+   * chains. Phase 2 swaps this for those requests and nothing downstream
+   * changes. */
+  pollMarkets: (elapsedMs?: number) => void
+  /** Opens a position from a chain row — the Markets ticket.
+   *
+   * Distinct from `submitPositionOrder`, which acts on something you
+   * already hold. Nothing here decides whether the order is *allowed*: in
+   * Phase 2 that is `RiskManager.approve()` and nowhere else (CLAUDE.md
+   * rule 1), and this becomes the call that happens after it returns. */
+  submitOpenOrder: (contract: OptionContract, draft: OpenDraft) => void
   toggleTheme: () => void
   setAccountMode: (mode: AccountMode) => void
   setExecutionMode: (mode: ExecutionMode) => void
@@ -218,10 +262,99 @@ function addQuantity(position: Position, quantity: number, price: number, at: st
   }
 }
 
+/** Identifies a contract across a re-priced chain. The array is rebuilt
+ * every poll, so a resting order cannot hold a reference to the object it
+ * was placed against — it holds this instead. */
+export function contractKey(c: {
+  symbol: string
+  expiration: string
+  strike: number
+  type: 'call' | 'put'
+}): string {
+  return `${c.symbol}-${c.expiration}-${c.strike}-${c.type}`
+}
+
+/** `$230 Call Aug 21` — the shape every contract is written in elsewhere,
+ * so one bought from the chain reads identically in the ledger. The symbol
+ * is not included: `Position` carries it separately and the activity feed
+ * joins the two. */
+export function contractLabel(c: {
+  strike: number
+  type: 'call' | 'put'
+  expiration: string
+}): string {
+  return `$${c.strike} ${c.type === 'call' ? 'Call' : 'Put'} ${formatExpiry(c.expiration)}`
+}
+
+/** Builds the position an opening fill creates.
+ *
+ * A short's cost basis is the credit taken in, and its P&L runs the other
+ * way — it gains as the contract cheapens. Both are zero at the instant of
+ * the fill, which is the point: a position that opens showing a profit has
+ * been marked against the wrong side of the spread. */
+function openedPosition(
+  contract: OptionContract,
+  opts: {
+    side: 'BTO' | 'STO'
+    quantity: number
+    price: number
+    at: string
+    strategyId: string
+    underlying: number
+  },
+): Position {
+  const { side, quantity, price, at, underlying } = opts
+  const direction = side === 'BTO' ? 'long' : 'short'
+  const costBasis = round2(price * quantity * CONTRACT_MULTIPLIER)
+  const value = round2(contract.last * quantity * CONTRACT_MULTIPLIER)
+  const pnl = round2(direction === 'long' ? value - costBasis : costBasis - value)
+
+  return {
+    id: `pos-open-${contractKey(contract)}-${at}`,
+    symbol: contract.symbol,
+    contract: contractLabel(contract),
+    last: contract.last,
+    underlying,
+    costBasis,
+    value,
+    quantity,
+    pnl,
+    pnlPct: costBasis === 0 ? 0 : round2((pnl / costBasis) * 100),
+    bid: contract.bid,
+    ask: contract.ask,
+    direction,
+    legs: [
+      {
+        symbol: occSymbol(contract.symbol, contract.expiration, contract.type, contract.strike),
+        strike: contract.strike,
+        right: contract.type,
+        side: direction,
+        ratio: 1,
+      },
+    ],
+    expiry: contract.expiration,
+    // Opened by hand from the chain, so no strategy manages it and there is
+    // no managed exit to inherit. Attaching one is a deliberate act on the
+    // Activity row, the same as it is for any detached position.
+    strategyId: null,
+    openedByStrategyId: opts.strategyId,
+    managedExit: null,
+    attachedExit: null,
+    // One point: the position starts where it opened. The chart fills in
+    // from there as the mark moves.
+    valueHistory: [{ date: at.slice(0, 10), value: costBasis }],
+  }
+}
+
 /** The tick's price stream. Seeded, so a session replays identically and a
  * screenshot taken twice looks the same — the rule the fixtures already
  * follow, extended to the thing that moves them. */
 const priceStream = mulberry32(20261101)
+
+/** The poll draws from its own stream. Sharing one with the position tick
+ * would make the Activity page's replay depend on whether you had visited
+ * Markets first, which is exactly the flake seeding exists to prevent. */
+const marketStream = mulberry32(20261102)
 
 /* Volatility is stated **per second**, not per tick, and scaled by how
  * long the tick actually covered.
@@ -234,6 +367,21 @@ const priceStream = mulberry32(20261101)
  * minute. Change TICK_MS freely; these stay put. */
 const CONTRACT_VOLATILITY_PER_SECOND = 0.018
 const UNDERLYING_VOLATILITY_PER_SECOND = 0.003
+
+/** The poll's own figure, and much calmer than the stream's.
+ *
+ * The stream's 0.3%/s is a legibility choice: Activity shows a handful of
+ * positions and needs visible movement so a resting exit is reachable
+ * without waiting all afternoon. A screener is the opposite problem —
+ * scanned across 180 rows for what is unusual, and at 0.3%/s a two-second
+ * snapshot moves SPY 0.85%, which put a deep ITM call at +15% on the day
+ * and −0.7% two seconds later. Nothing is learnable from a table that
+ * jumps like that, and worse, nothing in it is *true*: real quotes do not
+ * do this.
+ *
+ * At 0.06%/s a snapshot moves SPY about a third of a point and an ATM
+ * contract a couple of cents — visible, and believable. */
+const POLL_UNDERLYING_VOLATILITY_PER_SECOND = 0.0006
 
 /** A tick with no argument is assumed to cover a second — the shape tests
  * use, where the interval is not in play. */
@@ -293,7 +441,9 @@ export const useUIStore = create<UIState>((set) => ({
     paper: ACCOUNT_SNAPSHOTS.paper.workingOrders,
     cash: ACCOUNT_SNAPSHOTS.cash.workingOrders,
   },
-  underlyings: UNDERLYINGS,
+  underlyings: MARKET_QUOTES,
+  chain: OPTION_CHAIN,
+  lastPollAt: null,
   toggleTheme: () =>
     set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
   setAccountMode: (accountMode) => set({ accountMode }),
@@ -358,6 +508,7 @@ export const useUIStore = create<UIState>((set) => ({
         const order: WorkingOrder = {
           id: `wo-${position.id}-${at}`,
           positionId: position.id,
+          contractKey: null,
           contract,
           side,
           orderType: draft.orderType,
@@ -483,6 +634,10 @@ export const useUIStore = create<UIState>((set) => ({
       // no longer fill, so it is dropped rather than matched.
       const byId = new Map(positions.map((p) => [p.id, p]))
       const remainingOrders = s.workingOrders[mode].filter((order) => {
+        // An opening order names a contract, not a position, and fills
+        // from the market poll instead — the feed that is actually
+        // printing it. The stream carries position marks only.
+        if (order.positionId === null) return true
         const position = byId.get(order.positionId)
         if (!position || closedIds.has(position.id)) return false
         if (!orderWouldFill(order, position.last)) return true
@@ -505,7 +660,7 @@ export const useUIStore = create<UIState>((set) => ({
       const activity = s.activity[mode].map((a) => {
         const order = s.workingOrders[mode].find((o) => o.activityId === a.id && consumedOrderIds.has(o.id))
         if (!order) return a
-        const position = byId.get(order.positionId)
+        const position = order.positionId === null ? undefined : byId.get(order.positionId)
         const closing = order.side === 'STC' || order.side === 'BTC'
         return {
           ...a,
@@ -525,6 +680,211 @@ export const useUIStore = create<UIState>((set) => ({
         activity: { ...s.activity, [mode]: [...filled, ...activity] },
         underlyings,
         lastTickAt: at,
+      }
+    }),
+  pollMarkets: (elapsedMs = DEFAULT_TICK_MS) =>
+    set((s) => {
+      const at = new Date().toISOString()
+      // **Square root of elapsed time, not elapsed time.** A random walk
+      // travels with sqrt(t), so scaling a draw linearly makes a 2s poll
+      // five times more volatile per unit time than a 400ms tick rather
+      // than the same. Unfixed, one snapshot swung a deep ITM call from
+      // +15% to -0.7% on the day, which reads as a broken feed rather
+      // than a moving market.
+      const seconds = Math.sqrt(elapsedMs / 1_000)
+
+      // Every quoted symbol, not just the ones behind positions. A
+      // screener that only moves the six stocks you happen to hold is not
+      // a screener.
+      const underlyings: Record<string, UnderlyingQuote> = {}
+      for (const [symbol, quote] of Object.entries(s.underlyings)) {
+        const move = (marketStream() - 0.5) * 2 * POLL_UNDERLYING_VOLATILITY_PER_SECOND * seconds
+        const price = round2(quote.price * (1 + move))
+        const change = round2(price - quote.previousClose)
+        underlyings[symbol] = {
+          ...quote,
+          price,
+          change,
+          changePct: round2((change / quote.previousClose) * 100),
+          // Today's point *is* today's price so far, so it moves rather
+          // than a new daily close being appended every two seconds.
+          history: [
+            ...quote.history.slice(0, -1),
+            { date: quote.history[quote.history.length - 1].date, value: price },
+          ],
+        }
+      }
+
+      // The chain is re-derived from its underlying, never walked
+      // independently. Giving each contract its own random step inverts the
+      // ladder within seconds — a 225 call printing above the 220 beside
+      // it — because nothing would hold the strikes in order. A chain moves
+      // because the stock moved.
+      const chain = s.chain.map((c) => {
+        const spec = CHAIN_SPEC_BY_SYMBOL[c.symbol]
+        const spot = underlyings[c.symbol]?.price
+        if (!spec || spot === undefined) return c
+
+        const dte = chainDte(c.expiration)
+        const last = priceContract(spot, c.strike, dte, spec.baseIv, c.type)
+        const m = moneyness(spot, c.strike, dte, spec.baseIv)
+        const half = halfSpread(last, m, spec.liquidity)
+        // Yesterday's settle does not move during the session, so the day's
+        // change follows the price rather than being drawn again.
+        const change = round2(last - c.previousClose)
+
+        return {
+          ...c,
+          last,
+          change,
+          changePct: round2((change / c.previousClose) * 100),
+          bid: Math.min(last, Math.max(0.01, round2(last - half))),
+          ask: round2(last + half),
+          iv: surfaceIv(spec.baseIv, m),
+          // Volume only ever accumulates through a session. A screener
+          // sorted on a figure that can fall would reorder backwards.
+          volume: c.volume + Math.round(marketStream() * 25 * spec.liquidity * seconds),
+        }
+      })
+
+      // A resting open order fills against the contract it names, from the
+      // feed that is actually printing it. Position-keyed orders fill in
+      // `tick` instead, against their own position's mark.
+      const mode = s.accountMode
+      const byKey = new Map(chain.map((c) => [contractKey(c), c]))
+      const filledIds = new Set<string>()
+      const opened: Position[] = []
+      const fills: ActivityItem[] = []
+
+      const remaining = s.workingOrders[mode].filter((order) => {
+        if (order.contractKey === null) return true
+        const contract = byKey.get(order.contractKey)
+        if (!contract) return true
+        if (!orderWouldFill(order, contract.last)) return true
+
+        filledIds.add(order.id)
+        const price = order.limitPrice ?? order.stopPrice ?? contract.last
+        opened.push(
+          openedPosition(contract, {
+            side: order.side === 'BTO' ? 'BTO' : 'STO',
+            quantity: order.quantity,
+            price,
+            at,
+            strategyId: s.activeStrategyId,
+            underlying: underlyings[contract.symbol]?.price ?? contract.last,
+          }),
+        )
+        return false
+      })
+
+      if (filledIds.size === 0) {
+        return { underlyings, chain, lastPollAt: at }
+      }
+
+      const activity = s.activity[mode].map((a) => {
+        const order = s.workingOrders[mode].find((o) => o.activityId === a.id && filledIds.has(o.id))
+        if (!order) return a
+        // An opening fill has realized nothing, so P&L stays null.
+        return { ...a, status: 'filled' as const, price: order.limitPrice ?? order.stopPrice }
+      })
+
+      return {
+        underlyings,
+        chain,
+        lastPollAt: at,
+        openPositions: { ...s.openPositions, [mode]: [...opened, ...s.openPositions[mode]] },
+        workingOrders: { ...s.workingOrders, [mode]: remaining },
+        activity: { ...s.activity, [mode]: [...fills, ...activity] },
+      }
+    }),
+  submitOpenOrder: (contract, draft) =>
+    set((s) => {
+      const mode = s.accountMode
+      const at = new Date().toISOString()
+      const { pricePerContract } = estimateOpen(contract, draft)
+      const name = `${contract.symbol} ${contractLabel(contract)}`
+
+      // A market order fills. Anything else rests until the contract
+      // reaches it, which is what the working orders list is for.
+      if (isWorkingOrderType(draft.orderType)) {
+        const activityId = `act-open-${contractKey(contract)}-${at}`
+        return {
+          workingOrders: {
+            ...s.workingOrders,
+            [mode]: [
+              {
+                id: `wo-open-${contractKey(contract)}-${at}`,
+                positionId: null,
+                contractKey: contractKey(contract),
+                contract: name,
+                side: draft.side,
+                orderType: draft.orderType,
+                quantity: draft.quantity,
+                limitPrice: draft.limitPrice,
+                stopPrice: draft.stopPrice,
+                timeInForce: draft.timeInForce,
+                placedAt: at,
+                activityId,
+              },
+              ...s.workingOrders[mode],
+            ],
+          },
+          activity: {
+            ...s.activity,
+            [mode]: [
+              {
+                id: activityId,
+                time: at,
+                contract: name,
+                action: draft.side,
+                price: draft.limitPrice ?? draft.stopPrice,
+                quantity: draft.quantity,
+                pnl: null,
+                pnlPct: null,
+                amount: null,
+                status: 'pending' as const,
+              },
+              ...s.activity[mode],
+            ],
+          },
+        }
+      }
+
+      return {
+        openPositions: {
+          ...s.openPositions,
+          [mode]: [
+            openedPosition(contract, {
+              side: draft.side,
+              quantity: draft.quantity,
+              price: pricePerContract,
+              at,
+              strategyId: s.activeStrategyId,
+              underlying: s.underlyings[contract.symbol]?.price ?? contract.last,
+            }),
+            ...s.openPositions[mode],
+          ],
+        },
+        activity: {
+          ...s.activity,
+          [mode]: [
+            {
+              id: `act-open-${contractKey(contract)}-${at}`,
+              time: at,
+              contract: name,
+              action: draft.side,
+              price: pricePerContract,
+              quantity: draft.quantity,
+              // An opening fill has realized nothing; only a close reports
+              // P&L.
+              pnl: null,
+              pnlPct: null,
+              amount: null,
+              status: 'filled' as const,
+            },
+            ...s.activity[mode],
+          ],
+        },
       }
     }),
   cancelWorkingOrder: (id) =>

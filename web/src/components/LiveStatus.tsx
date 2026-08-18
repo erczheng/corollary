@@ -35,8 +35,21 @@ export function streamState(lastTickAt: string | null, now: number): StreamState
  *
  * A pill, not a control: it reports and does nothing, the same reason the
  * account badge in the header is a pill. */
-export function LiveStatus() {
-  const lastTickAt = useUIStore((s) => s.lastTickAt)
+/** Which feed the pill is reporting on.
+ *
+ * Both say "Live", because both mean the same thing to whoever is reading:
+ * prices are arriving. What differs is the mechanism, and that only shows
+ * up in the tooltip — the stream is a 30-symbol websocket scoped to open
+ * positions, the poll is a snapshot request across the quoted universe.
+ * Labelling one of them "Polled" would suggest the numbers are less current
+ * than they are. */
+export type FeedKind = 'stream' | 'poll'
+
+export function LiveStatus({ at: feedAt, kind = 'stream' }: { at?: string | null; kind?: FeedKind } = {}) {
+  const streamedAt = useUIStore((s) => s.lastTickAt)
+  // The prop wins when given. Undefined means "the position stream", which
+  // is what every caller predating the Markets poll meant.
+  const lastTickAt = feedAt === undefined ? streamedAt : feedAt
   const [now, setNow] = useState(() => Date.now())
 
   // Staleness is a function of elapsed time, so it needs its own clock —
@@ -59,10 +72,14 @@ export function LiveStatus() {
 
   const title =
     state === 'connecting'
-      ? 'Waiting for the first price.'
+      ? kind === 'poll'
+        ? 'Waiting for the first snapshot.'
+        : 'Waiting for the first price.'
       : state === 'stale'
         ? 'No price has arrived recently. The numbers on this page are not current.'
-        : 'Streaming prices for the open positions in this account.'
+        : kind === 'poll'
+          ? 'Polled snapshots across every quoted symbol. Chains are not streamed — the websocket is capped at 30 symbols and those are spent on open positions.'
+          : 'Streaming prices for the open positions in this account.'
 
   return (
     <span
