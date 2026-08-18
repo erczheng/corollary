@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
-import { UnderlyingChart } from './UnderlyingChart'
 import { useUIStore } from '../lib/store'
 import { contractLabel } from '../lib/store'
 import {
@@ -22,6 +21,7 @@ import {
   type OpenDraft,
   type OpenSide,
 } from '../lib/orders'
+import { contractMoneyness } from '../lib/markets'
 import { formatIv, formatPct, formatUsd } from '../lib/format'
 
 /** Opening orders accept market and limit only.
@@ -78,6 +78,10 @@ interface ChainOrderTicketProps {
 export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketProps) {
   const submitOpenOrder = useUIStore((s) => s.submitOpenOrder)
   const isHalted = useUIStore((s) => s.isHalted)
+  // From the store, not the fixture: the poll moves it, and a frozen spot
+  // beside a moving chain would put the sentence and the row in
+  // disagreement about the same stock.
+  const spot = useUIStore((s) => s.underlyings[contract.symbol])?.price ?? null
 
   const [side, setSide] = useState<OpenSide>('BTO')
   const [quantity, setQuantity] = useState('1')
@@ -121,6 +125,7 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
   const crossing = openCrossingPrice(contract, side)
 
   const overLimit = risk.kind === 'defined' && risk.pct > MAX_RISK_PCT
+  const money = contractMoneyness(spot ?? contract.strike, contract.strike, contract.type)
 
   function submit() {
     submitOpenOrder(contract, draft)
@@ -136,13 +141,22 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
         </p>
       </div>
 
-      {/* The stock, before the order. An option ticket without the
-          underlying asks you to price a derivative with the derivative
-          hidden — and where the stock sits relative to the strike is the
-          fact that decides what this contract is worth at expiry. */}
-      <div className="mt-4">
-        <UnderlyingChart symbol={contract.symbol} strike={contract.strike} right={contract.type} />
-      </div>
+      {/* One sentence, not a chart. Where the stock sits against the
+          strike is the fact that decides what this contract is worth at
+          expiry, and the ticket otherwise shows only bid, ask and IV — so
+          the underlying would not be on screen anywhere near the order you
+          are about to place. The chart itself lives in the stock table,
+          which is where you browse rather than transact. */}
+      {spot !== null && (
+        <p className="mt-3 text-caption text-on-surface-variant">
+          {contract.symbol} at{' '}
+          <span className="text-data-md text-on-surface">{formatUsd(spot)}</span> is{' '}
+          <span className={money.itm ? 'text-on-surface' : undefined}>
+            {money.itm ? 'in the money' : 'out of the money'}
+          </span>{' '}
+          against the {formatUsd(contract.strike)} {contract.type}, by {formatUsd(money.distance)}.
+        </p>
+      )}
 
       {/* Side first, because it changes what every field below means — the
           estimate flips from a cost to a credit and the risk stops being a

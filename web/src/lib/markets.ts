@@ -251,3 +251,40 @@ export function liveStocks(
     return { ...s, price: q.price, change: q.change, changePct: q.changePct }
   })
 }
+
+/** Substring match over symbol and name, for the stock search. Both,
+ * because half the reason to search a screener is that you know the company
+ * and not the ticker — "reddit" should find RDDT. */
+export function searchStocks(stocks: StockQuote[], query: string): StockQuote[] {
+  const q = query.trim().toLowerCase()
+  if (q === '') return stocks
+  return stocks.filter(
+    (s) => s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q),
+  )
+}
+
+export interface Moneyness {
+  /** In the money — the contract has intrinsic value at this spot. */
+  itm: boolean
+  /** Absolute distance from spot to strike, in dollars. Unsigned: which
+   * way it points is what `itm` already says, and a signed figure would
+   * mean opposite things on a call and a put. */
+  distance: number
+}
+
+/** Where the stock sits relative to the strike.
+ *
+ * The one fact an option ticket cannot omit: it decides what the contract
+ * is worth at expiry. **A call is in the money above its strike and a put
+ * is in the money below it** — inverted, a ticket would tell you a put was
+ * worthless at exactly the moment it was worth the most. */
+export function contractMoneyness(
+  spot: number,
+  strike: number,
+  right: 'call' | 'put',
+): Moneyness {
+  return {
+    itm: right === 'call' ? spot > strike : spot < strike,
+    distance: Math.abs(spot - strike),
+  }
+}
