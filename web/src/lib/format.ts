@@ -133,3 +133,29 @@ const DATE_ONLY = new Intl.DateTimeFormat('en-US', {
 export function formatDateOnly(isoDate: string): string {
   return DATE_ONLY.format(new Date(`${isoDate}T00:00:00Z`))
 }
+
+/** Grouped integer — share counts, contract volume, open interest. Not
+ * compact: a chain is scanned for exact size, and "37.5K" loses the digit
+ * that distinguishes a busy strike from a very busy one. */
+export function formatInteger(value: number): string {
+  return value.toLocaleString('en-US')
+}
+
+/** Market capitalisation, carried in billions.
+ *
+ * `null` is an ETF, which has no market capitalisation at all — it renders
+ * an em dash rather than $0.00B, which would read as a fund worth nothing
+ * and would sort below every real company. The unit is part of the value
+ * here, so it is not left to the column header. */
+export function formatMarketCap(billions: number | null): string {
+  if (billions === null) return '—'
+  if (billions >= 1000) return `$${(billions / 1000).toFixed(2)}T`
+  return `$${billions.toLocaleString('en-US')}B`
+}
+
+/** Implied volatility, stored as a decimal and read as a percentage. One
+ * decimal place: the chain's smirk moves in tenths, and rounding to whole
+ * points flattens adjacent strikes into a tie. */
+export function formatIv(iv: number): string {
+  return `${(iv * 100).toFixed(1)}%`
+}

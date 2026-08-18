@@ -3,7 +3,12 @@ import {
   ACCOUNT_SNAPSHOTS,
   ACTIVITY_STATUS_LABEL,
   BENCHMARK_HISTORY,
+  CHAIN_EXPIRATIONS,
+  MARKET_TODAY,
+  OPTION_CHAIN,
+  STOCKS,
   STRATEGIES,
+  UNDERLYINGS,
   activityStats,
   type ActivityStatus,
 } from './mockData'
@@ -206,5 +211,137 @@ describe('activityStats', () => {
     expect(stats.avgLoss).toBeNull()
     expect(stats.avgLossPct).toBeNull()
     expect(stats.losses).toBe(0)
+  })
+})
+
+/** The Markets chain is generated, so "seeded" only holds if something
+ * notices when the draw changes — the same guardrail the price series and
+ * the activity feed carry above. */
+describe('the option chain is pinned and internally consistent', () => {
+  it('holds the chain to its known shape', () => {
+    expect(OPTION_CHAIN).toHaveLength(180)
+
+    const atm = OPTION_CHAIN.find(
+      (c) => c.symbol === 'AAPL' && c.expiration === '2026-08-21' && c.strike === 230 && c.type === 'call',
+    )!
+    expect(atm.last).toBe(7.41)
+    expect(atm.bid).toBe(7.31)
+    expect(atm.ask).toBe(7.51)
+    expect(atm.volume).toBe(26_056)
+    expect(atm.iv).toBe(0.284)
+
+    // Put-call parity at the same strike, which the flat pricing vol makes
+    // exact: C - P is the forward less the strike. A chain that fails it
+    // is one where the calls and the puts were generated independently.
+    const put = OPTION_CHAIN.find(
+      (c) => c.symbol === 'AAPL' && c.expiration === '2026-08-21' && c.strike === 230 && c.type === 'put',
+    )!
+    expect(atm.last - put.last).toBeCloseTo(UNDERLYINGS.AAPL.price - 230, 2)
+  })
+
+  it('is deep enough that the chain paginates', () => {
+    // 15 rows per page, and the page opens scoped to one underlying — so
+    // it is the per-symbol depth that has to clear the bar, not the total.
+    for (const symbol of new Set(OPTION_CHAIN.map((c) => c.symbol))) {
+      expect(OPTION_CHAIN.filter((c) => c.symbol === symbol).length).toBeGreaterThan(15)
+    }
+  })
+
+  it('never quotes a last outside its own spread', () => {
+    for (const c of OPTION_CHAIN) {
+      expect(c.bid).toBeGreaterThan(0)
+      expect(c.ask).toBeGreaterThan(c.bid)
+      expect(c.last).toBeGreaterThanOrEqual(c.bid)
+      expect(c.last).toBeLessThanOrEqual(c.ask)
+    }
+  })
+
+  it('agrees with itself about the day: change, percent and yesterday close', () => {
+    for (const c of OPTION_CHAIN) {
+      const previousClose = c.last - c.change
+      // A percentage measured against a non-positive close is not a
+      // percentage. Every contract has to have been worth something
+      // yesterday.
+      expect(previousClose).toBeGreaterThan(0)
+      expect(c.changePct).toBeCloseTo((c.change / previousClose) * 100, 1)
+    }
+  })
+
+  it('reads like a chain — calls cheapen as strikes rise, puts richen', () => {
+    // A chain that fails this is one no trader would believe, and it would
+    // make the strike ladder look shuffled even when it is sorted right.
+    for (const symbol of new Set(OPTION_CHAIN.map((c) => c.symbol))) {
+      for (const expiration of new Set(OPTION_CHAIN.map((c) => c.expiration))) {
+        for (const type of ['call', 'put'] as const) {
+          const ladder = OPTION_CHAIN.filter(
+            (c) => c.symbol === symbol && c.expiration === expiration && c.type === type,
+          ).sort((a, b) => a.strike - b.strike)
+
+          expect(ladder.length).toBeGreaterThan(1)
+          for (let i = 1; i < ladder.length; i++) {
+            if (type === 'call') expect(ladder[i].last).toBeLessThan(ladder[i - 1].last)
+            else expect(ladder[i].last).toBeGreaterThan(ladder[i - 1].last)
+          }
+        }
+      }
+    }
+  })
+
+  it('moves the calls and the puts in opposite directions on the day', () => {
+    // The change is derived from the underlying's move, not drawn on its
+    // own. Drawn independently, both sides of a name rallied at once and
+    // "top gainers" was noise rather than a read on the session.
+    for (const symbol of new Set(OPTION_CHAIN.map((c) => c.symbol))) {
+      const rows = OPTION_CHAIN.filter((c) => c.symbol === symbol && c.expiration === '2026-08-21')
+      const calls = rows.filter((c) => c.type === 'call')
+      const puts = rows.filter((c) => c.type === 'put')
+      const up = UNDERLYINGS[symbol].change > 0
+
+      expect(calls.every((c) => (up ? c.change > 0 : c.change < 0))).toBe(true)
+      expect(puts.every((c) => (up ? c.change < 0 : c.change > 0))).toBe(true)
+    }
+  })
+
+  it('expires on a weekday, in the future', () => {
+    for (const expiration of CHAIN_EXPIRATIONS) {
+      const day = new Date(`${expiration}T00:00:00Z`).getUTCDay()
+      expect(day).not.toBe(0)
+      expect(day).not.toBe(6)
+      expect(expiration > MARKET_TODAY).toBe(true)
+    }
+  })
+})
+
+describe('the stock universe covers what the Markets table renders', () => {
+  it('is deep enough to paginate and holds no duplicate symbol', () => {
+    expect(STOCKS.length).toBeGreaterThan(15)
+    expect(new Set(STOCKS.map((s) => s.symbol)).size).toBe(STOCKS.length)
+  })
+
+  it('carries a fund with no market cap and a company with one', () => {
+    // The em-dash branch and the null-sorts-last rule both need a fixture
+    // that reaches them.
+    expect(STOCKS.some((s) => s.marketCap === null)).toBe(true)
+    expect(STOCKS.some((s) => s.marketCap !== null && s.marketCap > 0)).toBe(true)
+    expect(STOCKS.some((s) => s.changePct > 0)).toBe(true)
+    expect(STOCKS.some((s) => s.changePct < 0)).toBe(true)
+  })
+
+  it('never prices a stock differently from the quote the rest of the app reads', () => {
+    // Markets, the Activity rows and the payoff charts all name the same
+    // stock. One number, one source — UNDERLYINGS.
+    for (const s of STOCKS) {
+      const quote = UNDERLYINGS[s.symbol]
+      if (!quote) continue
+      expect(s.price).toBe(quote.price)
+      expect(s.change).toBe(quote.change)
+      expect(s.changePct).toBe(quote.changePct)
+    }
+  })
+
+  it('spans enough listing dates that "new listings" is a different table', () => {
+    const listed = STOCKS.map((s) => s.listedOn).sort()
+    expect(listed[listed.length - 1] > '2024-01-01').toBe(true)
+    expect(listed[0] < '1990-01-01').toBe(true)
   })
 })
