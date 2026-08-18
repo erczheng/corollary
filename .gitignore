@@ -9,3 +9,6 @@ __pycache__/
 *.egg-info/
 node_modules/
 dist/
+
+# Playwright MCP scratch output (snapshots, console logs, screenshots)
+.playwright-mcp/
