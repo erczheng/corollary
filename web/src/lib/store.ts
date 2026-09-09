@@ -56,6 +56,7 @@ import {
   type NotificationChannel,
 } from './settings'
 import { buildNotification, routedTo } from './notifications'
+import { loadTheme, saveTheme, type Theme } from './theme'
 import {
   archiveChat,
   canTransition,
@@ -75,7 +76,9 @@ import {
 } from './orders'
 import { formatExpiry, formatUsd } from './format'
 
-export type Theme = 'light' | 'dark'
+// Defined in `theme.ts`, which owns reading and writing it. Re-exported so
+// the store stays the single import site for UI state types.
+export type { Theme } from './theme'
 export type ExecutionMode = 'manual' | 'auto'
 export type { AccountMode }
 
@@ -684,7 +687,9 @@ function updatePosition(s: UIState, id: string, fn: (p: Position) => Position): 
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  theme: 'light',
+  // The stored preference, not a constant — this is the one piece of state
+  // that survives a reload. See `theme.ts` for why it is the only one.
+  theme: loadTheme(),
   accountMode: 'paper',
   executionMode: 'manual',
   paletteOpen: false,
@@ -748,7 +753,11 @@ export const useUIStore = create<UIState>((set) => ({
       }
     }),
   toggleTheme: () =>
-    set((s) => ({ theme: s.theme === 'light' ? 'dark' : 'light' })),
+    set((s) => {
+      const theme = s.theme === 'light' ? 'dark' : 'light'
+      saveTheme(theme)
+      return { theme }
+    }),
   setAccountMode: (accountMode) => set({ accountMode }),
   setExecutionMode: (executionMode) => set({ executionMode }),
   setActiveStrategyId: (activeStrategyId) => set({ activeStrategyId }),
