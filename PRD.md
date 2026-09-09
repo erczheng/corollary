@@ -51,7 +51,7 @@ Two things resolve it, and they do different jobs:
 - **A read-only account badge in the header**, on every page — a pill reading Paper or Cash, not a switch. Cash takes `caution`, since real money in play is a reason to read carefully rather than a failure; Paper recedes into `neutral`. This answers "whose money am I looking at" in the same place everywhere.
 - **The Paper/Cash switch itself appears on any page whose entire contents are account-scoped.** That is the Dashboard, Activity, and Account. On all three, the toggle sits on the page title line, because it governs everything below it — sending someone to another page to change the scope of the page they're reading is a detour, not a safeguard.
 
-The safeguard was never the switch's location. Cash is entered through the confirm dialog above no matter where the toggle is rendered, it never survives a restart, and every cold start comes up in Paper. Pages that only *display* account context and don't scope their whole contents to it (News, Markets, Research, Settings) get the badge and no switch.
+The safeguard was never the switch's location. Cash is entered through the confirm dialog above no matter where the toggle is rendered, it never survives a restart, and every cold start comes up in Paper. That confirm names **buying power first, then cash** — on a cash account the two differ by whatever is unsettled, and quoting cash alone in the dialog that precedes real trading would overstate what can actually be deployed. The difference is stated rather than left to be noticed. Pages that only *display* account context and don't scope their whole contents to it (News, Markets, Research, Settings) get the badge and no switch.
 
 The rule is what decides this, not the list. Account was added to the first group when the page was built: every figure on it — cash, buying power, settled and unsettled, its transfer ledger — belongs to exactly one account, which makes it the most completely account-scoped page in the app. Settings stays in the second group: it displays the badge and scopes nothing to it, apart from the equity figure a risk-limit confirm quotes.
 
@@ -379,7 +379,7 @@ Replaces the user menu. No authentication while bound to `127.0.0.1`.
 - Risk limits (§4), editable, with the three definitions of "risk" stated on the page — a percentage ceiling is uninterpretable without them. Raising a limit confirms and quotes the consequence in dollars against current equity; lowering one does not. The engine still enforces; this edits what is stored.
 - Notification routing (§10) — every cell editable, with the critical-event confirm described there.
 - Data source status, and **feed selection**: the three `ALPACA_*_FEED` variables, with values the current plan cannot serve shown as requiring an upgrade rather than silently failing. Historical bars on IEX draws a warning, because every `min_avg_volume` threshold in a strategy is measured against whatever feed produced them.
-- Theme (light / dark).
+- Theme (light / dark). The **one** preference that persists across a restart, deliberately — every other piece of session state, the account mode above all, is required to come up fresh.
 - **Sentiment accuracy readout** (§9), with the demotion banner when a source falls below the 52% floor in either window.
 - **Configuration audit log** — risk limits, feeds and routing in one log, newest first, each row carrying the value it replaced. One log rather than three: on a bad day the question is simply whether anything changed first.
 

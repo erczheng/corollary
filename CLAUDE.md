@@ -348,6 +348,15 @@ expect.** Every item below produced working-looking code that was wrong:
   archived, **never both**: `store.openChat` files what is on screen on
   the way out, so switching never discards a transcript and the two copies
   never have to agree on every keystroke.
+- `web/src/lib/theme.ts` — the **only** state that survives a reload, and
+  the boundary is the point: rule 5 requires every cold start to come up in
+  Paper, so a general "persist the store" helper is exactly the change that
+  would restore Cash without a confirm. One key, one value, so it cannot
+  grow into that by accident. Reads are guarded — `localStorage` *throws*
+  in Safari private mode and under some policies, and an unreadable theme
+  must never stop the terminal booting. `main.tsx` applies it before React
+  mounts; an effect runs after the first paint, and that paint would be
+  light.
 - `web/src/lib/routes.ts` — `DESTINATIONS`, the one list of everywhere in
   the app. The command palette and the not-found page both answer "where
   could you have meant to go", and two copies drift the first time a page
