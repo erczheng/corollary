@@ -4,6 +4,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { useUIStore } from '../lib/store'
 import { RECOMMENDATIONS, recommendationTitle } from '../lib/mockData'
 import { dispositionOf, visibleRecommendations } from '../lib/research'
+import { DESTINATIONS } from '../lib/routes'
 
 export interface Command {
   id: string
@@ -28,16 +29,6 @@ export function filterCommands(commands: Command[], query: string): Command[] {
   )
 }
 
-const PAGES: { to: string; label: string }[] = [
-  { to: '/', label: 'Dashboard' },
-  { to: '/activity', label: 'Activity' },
-  { to: '/news', label: 'News' },
-  { to: '/markets', label: 'Markets' },
-  { to: '/research', label: 'Research' },
-  { to: '/account', label: 'Account' },
-  { to: '/settings', label: 'Settings' },
-]
-
 /** Ctrl+K palette — PRD.md §11 names it in the Phase 1 bar.
  *
  * Three groups, which is what the placeholder here promised: jump to a page,
@@ -61,6 +52,7 @@ export function CommandPalette() {
   const flatten = useUIStore((s) => s.flatten)
   const dispositions = useUIStore((s) => s.dispositions)
   const executeRecommendation = useUIStore((s) => s.executeRecommendation)
+  const queueRecommendation = useUIStore((s) => s.queueRecommendation)
   const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
 
   const [query, setQuery] = useState('')
@@ -69,7 +61,7 @@ export function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const commands = useMemo<Command[]>(() => {
-    const list: Command[] = PAGES.map((page) => ({
+    const list: Command[] = DESTINATIONS.map((page) => ({
       id: `page-${page.to}`,
       label: `Go to ${page.label}`,
       group: 'Pages',
@@ -81,15 +73,41 @@ export function CommandPalette() {
     for (const r of visibleRecommendations(RECOMMENDATIONS, dispositions)) {
       const title = recommendationTitle(r)
       const acted = dispositionOf(r.id, dispositions) !== 'open'
-      if (!acted) {
-        list.push({
-          id: `exec-${r.id}`,
-          label: `Execute ${title}`,
-          group: 'Recommendations',
-          hint: 'Submits to the risk manager',
-          run: () => executeRecommendation(r.id),
-        })
+      // Execute *and* Queue, gated together on the halt.
+      //
+      // Both, because PRD.md §8.5 treats them as peers and the distinction
+      // between them is load-bearing: executed means an order went to the
+      // risk manager, queued means the engine will place one on its next
+      // run and nothing has been sent yet. Offering only Execute here made
+      // the palette's one order action the irreversible one, while the
+      // safer half of the pair was reachable only from Research.
+      //
+      // Gated, because §8.5 disables both while the engine is halted and
+      // the palette was not honouring that — halting stops new entries
+      // (CLAUDE.md rule 7), and a surface that still offers to open one is
+      // the surface that will be used to do it by accident. Omitted rather
+      // than shown-disabled: there is no disabled state in a command list,
+      // and a command that silently does nothing is worse than an absent
+      // one.
+      if (!acted && !isHalted) {
+        list.push(
+          {
+            id: `exec-${r.id}`,
+            label: `Execute ${title}`,
+            group: 'Recommendations',
+            hint: 'Submits to the risk manager',
+            run: () => executeRecommendation(r.id),
+          },
+          {
+            id: `queue-${r.id}`,
+            label: `Queue ${title}`,
+            group: 'Recommendations',
+            hint: 'Staged for the engine’s next run — nothing sent yet',
+            run: () => queueRecommendation(r.id),
+          },
+        )
       }
+      // Never gated on the halt: waving off a candidate opens nothing.
       list.push({
         id: `dismiss-${r.id}`,
         label: `Dismiss ${title}`,
@@ -128,6 +146,7 @@ export function CommandPalette() {
     navigate,
     dispositions,
     executeRecommendation,
+    queueRecommendation,
     dismissRecommendation,
     isHalted,
     halt,

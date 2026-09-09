@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useUIStore } from './store'
-import { ACCOUNT_SNAPSHOTS, NOTIFICATIONS, RISK_LIMITS } from './mockData'
+import { ACCOUNT_SNAPSHOTS, CHAT_HISTORY, NOTIFICATIONS, RISK_LIMITS } from './mockData'
 import type { OrderDraft } from './orders'
 import { unreadCount, visibleNotifications } from './notifications'
 import { notificationAuditField } from './settings'
@@ -1053,5 +1053,81 @@ describe('notifications emitted by the tick', () => {
     expect(
       visibleNotifications(useUIStore.getState().notifications, 'paper').map((n) => n.id),
     ).not.toContain(emitted.id)
+  })
+})
+
+
+describe('chat history', () => {
+  beforeEach(() => {
+    useUIStore.setState({ ...initialState }, true)
+  })
+
+  it('opens with an empty transcript and a seeded history beside it', () => {
+    const s = useUIStore.getState()
+    expect(s.chat).toEqual([])
+    expect(s.chatHistory).toEqual(CHAT_HISTORY)
+  })
+
+  /** Nothing to file, and you are already in a new chat. */
+  it('newChat is a no-op on an untouched transcript', () => {
+    useUIStore.getState().newChat()
+
+    expect(useUIStore.getState().chat).toEqual([])
+    expect(useUIStore.getState().chatHistory).toHaveLength(CHAT_HISTORY.length)
+  })
+
+  it('newChat files the transcript newest-first and clears the chat', () => {
+    useUIStore.getState().sendChatMessage('How is my risk configured?')
+    expect(useUIStore.getState().chat.length).toBeGreaterThan(0)
+
+    useUIStore.getState().newChat()
+
+    const s = useUIStore.getState()
+    expect(s.chat).toEqual([])
+    expect(s.chatHistory).toHaveLength(CHAT_HISTORY.length + 1)
+    expect(s.chatHistory[0].title).toBe('How is my risk configured?')
+  })
+
+  it('openChat loads an archived conversation and takes it out of the history', () => {
+    const target = CHAT_HISTORY[0]
+
+    useUIStore.getState().openChat(target.id)
+
+    const s = useUIStore.getState()
+    expect(s.chat).toEqual(target.messages)
+    expect(s.chatHistory.map((c) => c.id)).not.toContain(target.id)
+    expect(s.chatHistory).toHaveLength(CHAT_HISTORY.length - 1)
+  })
+
+  /** Switching away must never discard what is on screen. */
+  it('openChat files the current transcript on the way out', () => {
+    useUIStore.getState().sendChatMessage('What are today’s recommendations?')
+    useUIStore.getState().openChat(CHAT_HISTORY[1].id)
+
+    const s = useUIStore.getState()
+    expect(s.chat).toEqual(CHAT_HISTORY[1].messages)
+    expect(s.chatHistory[0].title).toBe('What are today’s recommendations?')
+    // One left, one arrived.
+    expect(s.chatHistory).toHaveLength(CHAT_HISTORY.length)
+  })
+
+  it('ignores an unknown conversation id rather than clearing the chat', () => {
+    useUIStore.getState().sendChatMessage('How is my risk configured?')
+    const before = useUIStore.getState().chat
+
+    useUIStore.getState().openChat('chat-does-not-exist')
+
+    expect(useUIStore.getState().chat).toEqual(before)
+    expect(useUIStore.getState().chatHistory).toHaveLength(CHAT_HISTORY.length)
+  })
+
+  /** A conversation is either current or archived, never both — otherwise
+   * the two copies have to agree on every keystroke. */
+  it('never holds the live transcript in the history as well', () => {
+    useUIStore.getState().openChat(CHAT_HISTORY[0].id)
+
+    const s = useUIStore.getState()
+    const archivedIds = new Set(s.chatHistory.flatMap((c) => c.messages.map((m) => m.id)))
+    for (const m of s.chat) expect(archivedIds.has(m.id)).toBe(false)
   })
 })

@@ -339,6 +339,21 @@ expect.** Every item below produced working-looking code that was wrong:
   `chatReply` **must never improvise** — an unmatched question gets a
   reply admitting it is a shell, since a fluent non-answer is the one
   thing on this page that could actually mislead.
+  It also owns the chat history: `conversationTitle` names a conversation
+  by its **first user message** (the reply is the shell's words, not
+  yours), and `archiveChat` returns **null for an empty transcript** —
+  opening the app and never typing is not a conversation, and blank rows
+  are how a history stops being read. A conversation is either current or
+  archived, **never both**: `store.openChat` files what is on screen on
+  the way out, so switching never discards a transcript and the two copies
+  never have to agree on every keystroke.
+- `web/src/lib/routes.ts` — `DESTINATIONS`, the one list of everywhere in
+  the app. The command palette and the not-found page both answer "where
+  could you have meant to go", and two copies drift the first time a page
+  is added. The header's nav is deliberately *not* built from it — five
+  worded links with Account and Settings in the icon cluster is a
+  different set for a stated reason, not a stale copy. `/design` is
+  absent: it proves the token system, it is not a destination.
 - `web/src/components/RecommendationBits.tsx` — the confidence slot,
   disposition badge, and Execute/Queue/Dismiss actions, shared by the
   Dashboard panel and Research's table. Deliberately **atoms, not one
@@ -355,6 +370,13 @@ expect.** Every item below produced working-looking code that was wrong:
   not** — an early `if (!open) return null` above it unmounted the dialog
   in the same tick Flatten asked for it, so the most destructive command
   had no guard at all. `CommandPalette.test.tsx` pins it.
+  It offers **all three** recommendation actions, and gates them the way
+  §8.5 does: Execute and Queue disappear while the engine is halted,
+  Dismiss never does, because waving off a candidate opens nothing. They
+  are *omitted* rather than shown disabled — a command list has no
+  disabled state, and a command that silently does nothing is worse than
+  an absent one. Queue was missing at first, which left the palette
+  offering only the irreversible half of the pair.
 - `web/src/components/ChainOrderTicket.tsx` — opening a position from a
   chain row. Deliberately *not* `OrderTicket`, which acts on something you
   already hold and derives its side from the position's direction; here

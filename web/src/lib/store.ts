@@ -4,6 +4,7 @@ import {
   API_KEYS,
   AUDIT_LOG,
   CHAIN_SPEC_BY_SYMBOL,
+  CHAT_HISTORY,
   CONTRACT_MULTIPLIER,
   CURRENT_PLAN,
   DATA_FEEDS,
@@ -25,6 +26,7 @@ import {
   type AccountMode,
   type ActivityItem,
   type ApiKeyPresence,
+  type ArchivedChat,
   type ChatMessage,
   type AttachedExit,
   type AuditLogEntry,
@@ -54,7 +56,13 @@ import {
   type NotificationChannel,
 } from './settings'
 import { buildNotification, routedTo } from './notifications'
-import { canTransition, chatReply, proposalToStrategy, type Dispositions } from './research'
+import {
+  archiveChat,
+  canTransition,
+  chatReply,
+  proposalToStrategy,
+  type Dispositions,
+} from './research'
 import {
   estimate,
   estimateOpen,
@@ -313,6 +321,29 @@ interface UIState {
   /** The Research chat transcript. Empty on a cold start, which is the
    * designed empty state rather than an accident. */
   chat: ChatMessage[]
+  /** Conversations you have finished with, newest first.
+   *
+   * The live transcript is deliberately *not* in here. A history lists the
+   * conversations you could go back to, and the one already on screen is not
+   * one of them — keeping it in both places would need the two copies to
+   * agree on every keystroke.
+   *
+   * Seeded from `CHAT_HISTORY` so the menu has contents on a cold start
+   * without disturbing the empty transcript that opens beside it. */
+  chatHistory: ArchivedChat[]
+  /** Files the current transcript away and clears the chat.
+   *
+   * A no-op on an untouched transcript — `archiveChat` returns null for an
+   * empty one, and filing blank rows is how a history stops being worth
+   * opening. */
+  newChat: () => void
+  /** Switches to an archived conversation.
+   *
+   * Symmetrical with `newChat`: whatever is on screen is filed first, so
+   * switching away never discards a transcript. The one being opened leaves
+   * the history and becomes the live chat, which keeps the invariant above —
+   * a conversation is either current or archived, never both. */
+  openChat: (id: string) => void
   /** What has been done with each recommendation, keyed by id.
    *
    * Here rather than in Dashboard's local state, which is where dismissal
@@ -1329,6 +1360,25 @@ export const useUIStore = create<UIState>((set) => ({
 
   strategies: STRATEGIES,
   chat: [],
+  chatHistory: CHAT_HISTORY,
+  newChat: () =>
+    set((s) => {
+      const filed = archiveChat(s.chat, new Date().toISOString())
+      if (filed === null) return s
+      return { chat: [], chatHistory: [filed, ...s.chatHistory] }
+    }),
+  openChat: (id) =>
+    set((s) => {
+      const target = s.chatHistory.find((c) => c.id === id)
+      if (target === undefined) return s
+
+      const rest = s.chatHistory.filter((c) => c.id !== id)
+      const filed = archiveChat(s.chat, new Date().toISOString())
+      return {
+        chat: target.messages,
+        chatHistory: filed === null ? rest : [filed, ...rest],
+      }
+    }),
   dispositions: {},
   executeRecommendation: (id) =>
     set((s) => ({ dispositions: { ...s.dispositions, [id]: 'executed' } })),

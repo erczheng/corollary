@@ -14,6 +14,7 @@ import { Research } from './pages/Research'
 import { Account } from './pages/Account'
 import { Settings } from './pages/Settings'
 import { Design } from './pages/Design'
+import { NotFound } from './pages/NotFound'
 
 function AppShell() {
   useThemeSync()
@@ -34,6 +35,10 @@ function AppShell() {
             <Route path="/account" element={<Account />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/design" element={<Design />} />
+            {/* Catch-all. Without it an unknown URL renders the header over
+                an empty main, which reads as a crash rather than a wrong
+                address. */}
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </main>
         <CommandPalette />

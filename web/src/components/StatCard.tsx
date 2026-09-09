@@ -58,7 +58,7 @@ export function StatCard({
           <span className={positive ? 'text-bullish' : 'text-bearish'}>
             {positive ? <ArrowUpIcon /> : <ArrowDownIcon />}
           </span>
-          <span className={positive ? 'text-bullish' : 'text-bearish'}>
+          <span className={positive ? 'whitespace-nowrap text-bullish' : 'whitespace-nowrap text-bearish'}>
             {positive ? '+' : '−'}
             {Math.abs(changePct).toFixed(1)}
             {changeUnit === '%' ? '%' : ' pts'}

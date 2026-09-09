@@ -265,7 +265,7 @@ export function Dashboard() {
           changeUnit="pts"
           comparedTo={
             live
-              ? `vs backtest · ${live.trades} validated · ${LLM_ORIGINATION.unvalidated} untested excluded`
+              ? `vs backtest · ${live.trades} validated · ${LLM_ORIGINATION.unvalidated} excluded`
               : undefined
           }
           note={`Not traded live yet — backtested ${activeStrategy.backtest.winRate}% over ${activeStrategy.backtest.trades} trades`}

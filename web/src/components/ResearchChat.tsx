@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Chip } from './Chip'
+import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { CHAT_SUGGESTIONS, type StrategyProposal } from '../lib/mockData'
-import { formatTimeET } from '../lib/format'
+import { formatDateTimeET, formatTimeET } from '../lib/format'
 
 /** The Research chat (PRD.md §8.5).
  *
@@ -45,14 +46,17 @@ export function ResearchChat() {
         <h2 id="chat-heading" className="text-title-lg text-on-surface">
           Chat
         </h2>
-        {/* `caution`, not `error`: a shell standing in for a model is a stage
-            of the build, not a fault. */}
-        <Chip
-          variant="caution"
-          title="Replies come from a fixed table, not a language model. The live model arrives with the LLM layer in Phase 4."
-        >
-          Scripted — Phase 1
-        </Chip>
+        <div className="flex items-center gap-2">
+          <ChatHistoryMenu />
+          {/* `caution`, not `error`: a shell standing in for a model is a stage
+              of the build, not a fault. */}
+          <Chip
+            variant="caution"
+            title="Replies come from a fixed table, not a language model. The live model arrives with the LLM layer in Phase 4."
+          >
+            Scripted — Phase 1
+          </Chip>
+        </div>
       </div>
 
       <div
@@ -133,6 +137,130 @@ export function ResearchChat() {
         </button>
       </form>
     </section>
+  )
+}
+
+
+/** Past conversations, anchored to the chat header.
+ *
+ * A menu rather than a sidebar: the chat is one column of a three-column page
+ * and a permanent list would cost more width than a feature you reach for
+ * between conversations is worth.
+ *
+ * **New chat is the only way a transcript is filed**, and it is disabled while
+ * the transcript is empty — there is nothing to file, and you are already in a
+ * new chat. Opening an archived conversation files the current one on the way
+ * out, so switching never silently discards what is on screen.
+ *
+ * The list is a record, not a preference: nothing here edits or deletes a
+ * conversation. Phase 4 replaces what generates the replies and none of this
+ * changes shape.
+ */
+function ChatHistoryMenu() {
+  const chat = useUIStore((s) => s.chat)
+  const history = useUIStore((s) => s.chatHistory)
+  const newChat = useUIStore((s) => s.newChat)
+  const openChat = useUIStore((s) => s.openChat)
+
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  // Same dismissal contract as the notification bell: Escape and a click
+  // outside, both torn down when the menu closes.
+  useEffect(() => {
+    if (!open) return
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    function onPointerDown(e: MouseEvent) {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('mousedown', onPointerDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('mousedown', onPointerDown)
+    }
+  }, [open])
+
+  const empty = chat.length === 0
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        aria-label={`Chat history — ${history.length} saved`}
+        className="flex items-center gap-1.5 rounded border border-outline px-2.5 py-1 text-label-md text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low"
+      >
+        History
+        <span className="text-on-surface-variant">{history.length}</span>
+        <ChevronDownIcon className="h-3 w-3 text-on-surface-variant" />
+      </button>
+
+      {open ? (
+        <div
+          role="menu"
+          aria-label="Chat history"
+          className="absolute right-0 z-20 mt-2 w-80 rounded-lg border border-outline-warm bg-surface-container-lowest"
+        >
+          <div className="flex items-center justify-between border-b border-outline-warm px-3 py-2">
+            <span className="text-caption uppercase tracking-wide text-on-surface-variant">
+              Conversations
+            </span>
+            <button
+              type="button"
+              disabled={empty}
+              onClick={() => {
+                newChat()
+                setOpen(false)
+              }}
+              title={
+                empty
+                  ? 'This conversation is empty — nothing to save'
+                  : 'Save this conversation and start a new one'
+              }
+              className="rounded border border-outline px-2 py-1 text-caption text-on-surface transition-colors duration-base ease-standard hover:bg-surface-container-low disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50"
+            >
+              New chat
+            </button>
+          </div>
+
+          {history.length === 0 ? (
+            // Says what would be here and how it gets here, rather than
+            // leaving a blank box that could equally mean "broken".
+            <p className="px-3 py-4 text-caption text-on-surface-variant">
+              No saved conversations yet. Starting a new chat files the one on screen here.
+            </p>
+          ) : (
+            <ul className="max-h-72 overflow-y-auto py-1">
+              {history.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      openChat(c.id)
+                      setOpen(false)
+                    }}
+                    className="flex w-full flex-col gap-0.5 px-3 py-2 text-left transition-colors duration-base ease-standard hover:bg-surface-container-low"
+                  >
+                    <span className="truncate text-body-md text-on-surface">{c.title}</span>
+                    <span className="text-caption text-on-surface-variant">
+                      {formatDateTimeET(c.at)} · {c.messages.length} messages
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
