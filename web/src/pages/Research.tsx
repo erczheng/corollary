@@ -25,8 +25,8 @@ import { dispositionOf, recommendationCsvRows, visibleRecommendations } from '..
 import { downloadCsv } from '../lib/csv'
 import { formatExpiry, formatSignedNumber, formatUsd, signClass } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-2 text-caption uppercase tracking-wide text-on-surface-variant'
-const TD = 'px-3 py-2 align-middle'
+const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
 
 /** PRD.md §8.5. The page for deciding what to trade and which strategy should
  * be running, as opposed to the Dashboard's "what is my state right now".
@@ -90,11 +90,16 @@ export function Research() {
           trendTone="neutral"
           comparedTo={`${formatSignedNumber(vixChange)} pts vs previous close`}
         />
+        {/* The note is kept to one line at every three-column width. That
+            slot is ~294px wide here and only ~266px at the `lg` breakpoint,
+            where the cards are narrowest; the full sentence wanted 394px, so
+            it wrapped and made this the one card in the row two lines taller
+            than the other two. */}
         <StatCard
           label="Sentiment composite"
           value={`${composite}`}
           icon={<TargetIcon />}
-          note="0–100, mean of seven components — breakdown on News"
+          note="0–100 · seven components · News"
         />
         <StatCard
           label="Top sector"

@@ -70,8 +70,8 @@ const POLL_MS = 15_000
  * reading down a column of headlines — where Activity's is a reconciliation
  * surface you read one row of at a time. ExecutionsTable already set the
  * precedent for small text in a packed table. */
-const TH = 'whitespace-nowrap px-3 py-2 text-caption uppercase tracking-wide text-on-surface-variant'
-const TD = 'px-3 py-1.5 align-middle'
+const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
 
 const SELECT =
   'rounded border border-outline bg-surface px-2 py-1 text-caption text-on-surface focus:border-primary'

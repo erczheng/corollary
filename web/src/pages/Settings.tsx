@@ -26,8 +26,8 @@ import {
 } from '../lib/settings'
 import { formatDateTimeET, formatInteger, formatUsd } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-2 text-caption uppercase tracking-wide text-on-surface-variant'
-const TD = 'px-3 py-2 align-middle'
+const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
 
 const SELECT =
   'rounded border border-outline bg-surface px-2 py-1 text-caption text-on-surface focus:border-primary'

@@ -8,7 +8,7 @@ import { MARKET_TODAY, TIME_IN_FORCE_LABEL, type Position } from '../lib/mockDat
 import { daysToExpiry, expiryUrgency, isMultiLeg, type TicketMode } from '../lib/orders'
 import { formatExpiry } from '../lib/format'
 
-const CELL = 'px-3 py-2 text-right text-data-md text-on-surface'
+const CELL = 'px-3 py-1 text-right text-data-md text-on-surface'
 
 /** Who is responsible for closing this position, in one line.
  *
@@ -182,7 +182,7 @@ export function PositionRow({
   return (
     <>
       <tr className="border-t border-outline/10 hover:bg-surface-container-low">
-        <td className="max-w-0 px-3 py-2 text-body-md text-on-surface">
+        <td className="max-w-0 px-3 py-1 text-body-md text-on-surface">
           <button
             type="button"
             onClick={onToggle}
@@ -222,11 +222,11 @@ export function PositionRow({
         <td className={CELL}>{formatUsd(position.costBasis)}</td>
         <td className={CELL}>{formatUsd(position.value)}</td>
         <td className={CELL}>{position.quantity}</td>
-        <td className={`whitespace-nowrap px-3 py-2 text-right text-data-md ${signClass(position.pnl)}`}>
+        <td className={`whitespace-nowrap px-3 py-1 text-right text-data-md ${signClass(position.pnl)}`}>
           {formatUsd(position.pnl, { signed: true })}
           <span className="ml-2 text-caption">{formatPct(position.pnlPct, { signed: true })}</span>
         </td>
-        <td className="whitespace-nowrap px-3 py-2 text-right">
+        <td className="whitespace-nowrap px-3 py-1 text-right">
           <div className="flex items-center justify-end gap-2">
             {/* Close is the order button: it opens the ticket rather than
                 submitting. One word, one behaviour — the old fast-and-

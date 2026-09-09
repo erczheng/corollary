@@ -64,8 +64,8 @@ const POLL_MS = 2_000
 /** The chain section's anchor, so the stock table can send you to it. */
 const CHAIN_SECTION_ID = 'options-chains'
 
-const TH = 'whitespace-nowrap px-3 py-2 text-label-md uppercase text-on-surface-variant'
-const TD = 'px-3 py-2 align-middle'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
 const TD_NUM = `${TD} whitespace-nowrap text-right text-data-md text-on-surface`
 
 const SELECT =
