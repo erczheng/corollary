@@ -21,6 +21,15 @@ interface StatCardProps {
   /** Percentage points, not percent, when the value is itself a percentage:
    * 71% against a 68% baseline is +3 pts, not +3%. */
   changeUnit?: '%' | 'pts'
+  /** Whether up is good.
+   *
+   * `directional` (the default) colours a rise `bullish` and a fall
+   * `bearish`, which is right for a balance or a win rate. `neutral` keeps
+   * the arrow — direction is still a fact — but drops the colour, for a
+   * figure where up is not better: **the VIX is the case this exists for.**
+   * A spiking VIX painted green would report risk-off as a gain, the same
+   * class of error as colouring a losing position `error`. */
+  trendTone?: 'directional' | 'neutral'
   /** Shown in place of the trend line when `changePct` is omitted. */
   note?: string
 }
@@ -38,9 +47,12 @@ export function StatCard({
   changePct,
   comparedTo,
   changeUnit = '%',
+  trendTone = 'directional',
   note,
 }: StatCardProps) {
   const positive = changePct !== undefined && changePct >= 0
+  const toneClass =
+    trendTone === 'neutral' ? 'text-on-surface-variant' : positive ? 'text-bullish' : 'text-bearish'
 
   return (
     <div
@@ -55,10 +67,10 @@ export function StatCard({
       <p className={`mt-1 text-data-xl ${valueClassName ?? 'text-on-surface'}`}>{value}</p>
       {changePct !== undefined ? (
         <div className="mt-1 flex items-center gap-2 text-label-md">
-          <span className={positive ? 'text-bullish' : 'text-bearish'}>
+          <span className={toneClass}>
             {positive ? <ArrowUpIcon /> : <ArrowDownIcon />}
           </span>
-          <span className={positive ? 'whitespace-nowrap text-bullish' : 'whitespace-nowrap text-bearish'}>
+          <span className={`whitespace-nowrap ${toneClass}`}>
             {positive ? '+' : '−'}
             {Math.abs(changePct).toFixed(1)}
             {changeUnit === '%' ? '%' : ' pts'}

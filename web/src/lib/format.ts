@@ -14,6 +14,17 @@ export function formatPct(value: number, opts: { signed?: boolean } = {}): strin
   return `${sign}${abs.toFixed(2)}%`
 }
 
+/** A signed plain number — no currency, no percent.
+ *
+ * For quantities measured in their own units, where a `$` would be wrong and
+ * a `%` would be a different number: the VIX moves in points. Uses the same
+ * U+2212 minus as the money and percent formatters, so a column of signed
+ * values lines up whatever produced it. */
+export function formatSignedNumber(value: number, fractionDigits = 2): string {
+  const sign = value > 0 ? '+' : value < 0 ? '−' : ''
+  return `${sign}${Math.abs(value).toFixed(fractionDigits)}`
+}
+
 export function formatCompactNumber(value: number): string {
   return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }

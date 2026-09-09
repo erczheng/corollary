@@ -23,7 +23,7 @@ import {
 import { compositeScore } from '../lib/news'
 import { dispositionOf, recommendationCsvRows, visibleRecommendations } from '../lib/research'
 import { downloadCsv } from '../lib/csv'
-import { formatExpiry, formatUsd, signClass } from '../lib/format'
+import { formatExpiry, formatSignedNumber, formatUsd, signClass } from '../lib/format'
 
 const TH = 'whitespace-nowrap px-3 py-2 text-caption uppercase tracking-wide text-on-surface-variant'
 const TD = 'px-3 py-2 align-middle'
@@ -53,6 +53,11 @@ export function Research() {
   // with the breakdown the News page prints underneath the same number.
   const composite = compositeScore(SENTIMENT_COMPONENTS)
 
+  // Day's change on the VIX, derived from the previous close so the level
+  // and the move come from one number rather than two that could drift.
+  const vixChange = MARKET_PULSE.vix - MARKET_PULSE.vixPreviousClose
+  const vixChangePct = (vixChange / MARKET_PULSE.vixPreviousClose) * 100
+
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
       <h1 className="text-display-lg text-on-surface">Research</h1>
@@ -61,15 +66,29 @@ export function Research() {
         place. The chat is scoped to this account and its data.
       </p>
 
-      {/* Market Pulse (§8.5) — three facts, no trend lines. None of them has a
-          baseline on this page to compare against, and StatCard's own note
-          says inventing one is worse than showing none. */}
+      {/* Market Pulse (§8.5). VIX carries the day's change; the other two do
+          not, because neither has a baseline on this page to compare against
+          and StatCard's own note says inventing one is worse than showing
+          none. */}
       <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Derived from the previous close rather than read from a stored
+            change, so the level and the move cannot disagree.
+
+            `neutral` tone: a rising VIX is not a gain. Colouring it green
+            would report risk-off as good news, and the fixture closes
+            *down* precisely so that branch is the one on screen.
+
+            The change displaces the "implied 30-day volatility" note —
+            StatCard shows one line or the other, and a second would make
+            this card taller than the two beside it. Today's move is the
+            more useful of the two on a page you read each morning. */}
         <StatCard
           label="VIX"
           value={MARKET_PULSE.vix.toFixed(2)}
           icon={<TrendingUpIcon />}
-          note="Implied 30-day volatility on the S&P 500"
+          changePct={vixChangePct}
+          trendTone="neutral"
+          comparedTo={`${formatSignedNumber(vixChange)} pts vs previous close`}
         />
         <StatCard
           label="Sentiment composite"

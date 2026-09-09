@@ -12,7 +12,7 @@ import {
 } from '../lib/mockData'
 import { compositeScore } from '../lib/news'
 import { GATE_THRESHOLDS } from '../lib/research'
-import { formatStrategyName } from '../lib/format'
+import { formatSignedNumber, formatStrategyName } from '../lib/format'
 
 const initialState = useUIStore.getState()
 
@@ -54,6 +54,32 @@ describe('Market Pulse', () => {
     expect(
       within(screen.getByRole('group', { name: 'Top sector' })).getByText(MARKET_PULSE.topSector),
     ).toBeInTheDocument()
+  })
+
+  /** The day's move, derived from the previous close so the level and the
+   * change cannot disagree. */
+  it('shows the VIX change against the previous close, in points and percent', () => {
+    render(<App />)
+    const card = within(screen.getByRole('group', { name: 'VIX' }))
+
+    const change = MARKET_PULSE.vix - MARKET_PULSE.vixPreviousClose
+    const pct = (change / MARKET_PULSE.vixPreviousClose) * 100
+
+    expect(card.getByText(`${Math.abs(pct).toFixed(1)}%`, { exact: false })).toBeInTheDocument()
+    expect(card.getByText(/vs previous close/)).toBeInTheDocument()
+    expect(card.getByText(new RegExp(`${formatSignedNumber(change)} pts`))).toBeInTheDocument()
+  })
+
+  /** A rising VIX is not a gain. Colouring it `bullish` would report
+   * risk-off as good news — the same class of error as colouring a losing
+   * position `error`. The fixture closes *down*, so the branch a naive
+   * trend line would paint green is the one on screen. */
+  it('does not colour the VIX move bullish or bearish', () => {
+    render(<App />)
+    const card = screen.getByRole('group', { name: 'VIX' })
+
+    expect(card.querySelector('.text-bullish')).toBeNull()
+    expect(card.querySelector('.text-bearish')).toBeNull()
   })
 
   /** Derived from the components rather than stored, so it can never disagree

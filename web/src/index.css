@@ -287,13 +287,13 @@
 @utility text-display-lg {
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: 48px;
-  line-height: 56px;
+  font-size: 36px;
+  line-height: 44px;
   letter-spacing: -0.02em;
 
   @media (width <= 767px) {
-    font-size: 32px;
-    line-height: 40px;
+    font-size: 28px;
+    line-height: 36px;
     letter-spacing: -0.01em;
   }
 }
@@ -301,20 +301,20 @@
 @utility text-headline-md {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 32px;
-  line-height: 40px;
+  font-size: 26px;
+  line-height: 32px;
 
   @media (width <= 767px) {
-    font-size: 24px;
-    line-height: 32px;
+    font-size: 22px;
+    line-height: 28px;
   }
 }
 
 @utility text-title-lg {
   font-family: var(--font-display);
   font-weight: 500;
-  font-size: 22px;
-  line-height: 28px;
+  font-size: 18px;
+  line-height: 24px;
 }
 
 @utility text-body-lg {
@@ -357,16 +357,16 @@
 @utility text-data-lg {
   font-family: var(--font-data);
   font-weight: 600;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: 18px;
+  line-height: 24px;
   font-variant-numeric: tabular-nums;
 }
 
 @utility text-data-xl {
   font-family: var(--font-data);
   font-weight: 600;
-  font-size: 32px;
-  line-height: 40px;
+  font-size: 24px;
+  line-height: 32px;
   font-variant-numeric: tabular-nums;
 }
 
