@@ -24,8 +24,8 @@ const ALPACA_URL = 'https://app.alpaca.markets/'
  * here needs a faster clock than the positions screen. */
 const TICK_MS = 400
 
-const TH = 'whitespace-nowrap px-3 py-2 text-caption uppercase tracking-wide text-on-surface-variant'
-const TD = 'px-3 py-2 align-middle'
+const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
 
 /** A panel on this page. `region` so the tests and a screen reader can tell
  * the three apart, the same way the Markets and News sections are built. */

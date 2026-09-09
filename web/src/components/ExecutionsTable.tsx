@@ -98,8 +98,8 @@ const COLUMNS: Record<ColumnKey, { label: string; align: 'left' | 'right'; grow?
   status: { label: 'Status', align: 'right' },
 }
 
-const TH = 'whitespace-nowrap px-3 py-2 text-label-md uppercase text-on-surface-variant'
-const TD = 'px-3 py-2 align-top'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
+const TD = 'px-3 py-1 align-top'
 const TD_NUM = `${TD} text-right text-data-md text-on-surface`
 
 /** P&L if the trade produced one, the cash moved if it was a deposit or a

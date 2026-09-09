@@ -10,8 +10,8 @@ import {
 import { ORDER_SIDE_LABEL } from '../lib/orders'
 import { formatDateTimeET, formatUsd } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-2 text-label-md uppercase text-on-surface-variant'
-const TD = 'px-3 py-2 align-top'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
+const TD = 'px-3 py-1 align-top'
 
 /** The price the order is actually working at. A stop-limit has both a
  * trigger and a limit and they are not interchangeable, so both are shown

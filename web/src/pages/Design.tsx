@@ -386,27 +386,27 @@ export function Design() {
           <table className="w-full border-collapse">
             <thead>
               <tr className="bg-surface-container">
-                <th className="px-4 py-3 text-left text-label-md uppercase text-on-surface-variant">Symbol</th>
-                <th className="px-4 py-3 text-left text-label-md uppercase text-on-surface-variant">Contract</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">Last</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">Cost basis</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">Value</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">P&amp;L ($)</th>
-                <th className="px-4 py-3 text-right text-label-md uppercase text-on-surface-variant">P&amp;L (%)</th>
+                <th className="px-3 py-1 text-left text-label-md uppercase text-on-surface-variant">Symbol</th>
+                <th className="px-3 py-1 text-left text-label-md uppercase text-on-surface-variant">Contract</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Last</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Cost basis</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Value</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">P&amp;L ($)</th>
+                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">P&amp;L (%)</th>
               </tr>
             </thead>
             <tbody>
               {POSITIONS.map((p) => (
                 <tr key={p.symbol} className="border-t border-outline/10 hover:bg-surface-container-low">
-                  <td className="px-4 py-3 text-body-md text-on-surface">{p.symbol}</td>
-                  <td className="px-4 py-3 text-body-md text-on-surface-variant">{p.contract}</td>
-                  <td className="px-4 py-3 text-right text-data-md text-on-surface">{p.qty}</td>
-                  <td className="px-4 py-3 text-right text-data-md text-on-surface">${p.last.toFixed(2)}</td>
-                  <td className="px-4 py-3 text-right text-data-md text-on-surface">${p.costBasis.toFixed(2)}</td>
-                  <td className="px-4 py-3 text-right text-data-md text-on-surface">${p.value.toFixed(2)}</td>
-                  <td className={`px-4 py-3 text-right text-data-md ${pnlClass(p.pnlUsd)}`}>{formatUsd(p.pnlUsd)}</td>
-                  <td className={`px-4 py-3 text-right text-data-md ${pnlClass(p.pnlPct)}`}>{formatPct(p.pnlPct)}</td>
+                  <td className="px-3 py-1 text-body-md text-on-surface">{p.symbol}</td>
+                  <td className="px-3 py-1 text-body-md text-on-surface-variant">{p.contract}</td>
+                  <td className="px-3 py-1 text-right text-data-md text-on-surface">{p.qty}</td>
+                  <td className="px-3 py-1 text-right text-data-md text-on-surface">${p.last.toFixed(2)}</td>
+                  <td className="px-3 py-1 text-right text-data-md text-on-surface">${p.costBasis.toFixed(2)}</td>
+                  <td className="px-3 py-1 text-right text-data-md text-on-surface">${p.value.toFixed(2)}</td>
+                  <td className={`px-3 py-1 text-right text-data-md ${pnlClass(p.pnlUsd)}`}>{formatUsd(p.pnlUsd)}</td>
+                  <td className={`px-3 py-1 text-right text-data-md ${pnlClass(p.pnlPct)}`}>{formatPct(p.pnlPct)}</td>
                 </tr>
               ))}
             </tbody>
