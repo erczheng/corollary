@@ -291,39 +291,35 @@ describe('engine commands', () => {
 })
 
 
-/** PRD.md §8.5 gives a recommendation three actions and the palette now
- * offers all three. Execute and Queue are peers there, and the difference
- * between them is load-bearing: executed means an order reached the risk
- * manager, queued means the engine will place one later and nothing has
- * been sent. */
+/** Two actions, not three. `Queue` was removed, so accepting a candidate
+ * means submitting it and nothing else. */
 describe('recommendation actions', () => {
   const first = RECOMMENDATIONS[0]
   const title = recommendationTitle(first)
 
-  it('offers Execute, Queue and Dismiss for an open candidate', () => {
+  it('offers Execute and Dismiss, and no Queue', () => {
     const dialog = openPalette()
 
     expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
-    expect(within(dialog).getByText(`Queue ${title}`)).toBeInTheDocument()
     expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
+    expect(within(dialog).queryByText(`Queue ${title}`)).not.toBeInTheDocument()
   })
 
-  it('Queue stages the candidate without claiming an order was sent', () => {
+  it('Execute records the submission', () => {
     const dialog = openPalette()
-    fireEvent.click(within(dialog).getByText(`Queue ${title}`))
+    fireEvent.click(within(dialog).getByText(`Execute ${title}`))
 
-    expect(useUIStore.getState().dispositions[first.id]).toBe('queued')
+    expect(useUIStore.getState().dispositions[first.id]).toBe('executed')
   })
 
   /** Halting stops new entries (CLAUDE.md rule 7). A surface that still
    * offers to open one is the surface it happens on by accident. */
   describe('while the engine is halted', () => {
-    it('withdraws both order actions', () => {
+    it('withdraws Execute', () => {
       act(() => useUIStore.getState().halt())
       const dialog = openPalette()
 
       expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
-      expect(within(dialog).queryByText(`Queue ${title}`)).not.toBeInTheDocument()
     })
 
     /** Waving off a candidate opens nothing, so it is never gated. */
@@ -334,13 +330,12 @@ describe('recommendation actions', () => {
       expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
     })
 
-    it('brings both back on resume', () => {
+    it('brings Execute back on resume', () => {
       act(() => useUIStore.getState().halt())
       act(() => useUIStore.getState().resume())
       const dialog = openPalette()
 
       expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
-      expect(within(dialog).getByText(`Queue ${title}`)).toBeInTheDocument()
     })
   })
 })

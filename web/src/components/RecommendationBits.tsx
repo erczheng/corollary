@@ -77,13 +77,11 @@ export function ConfidenceBadge({ recommendation }: { recommendation: Recommenda
 
 const DISPOSITION_LABEL: Record<Exclude<Disposition, 'open'>, string> = {
   executed: 'Executed',
-  queued: 'Queued',
   dismissed: 'Dismissed',
 }
 
 const DISPOSITION_TITLE: Record<Exclude<Disposition, 'open'>, string> = {
   executed: 'Submitted to the risk manager. Manual execution from this list lands in Phase 6.',
-  queued: 'Staged for the engine to place on its next run. Nothing has been sent to the broker.',
   dismissed: 'Waved off. A refresh restores it — the scanner rebuilds its candidate set.',
 }
 
@@ -101,28 +99,28 @@ export function DispositionBadge({ disposition }: { disposition: Disposition }) 
   )
 }
 
-/** Execute / Queue / Dismiss.
+/** Execute / Dismiss.
+ *
+ * Two actions, not three. `Queue` sat between them — staged for the engine's
+ * next run, nothing sent to a broker — and was removed deliberately, so
+ * accepting a candidate now means submitting it and nothing else.
  *
  * `onExecute` opens the caller's confirm rather than placing anything itself —
  * neither view submits an order from a click, and in Phase 6 that path runs
  * through `RiskManager.approve()`.
  *
- * Execute and Queue are both disabled while the engine is halted, and the
- * title says which it is: halting stops new entries, so staging one for the
- * engine to place is exactly as unavailable as placing it now. Dismiss stays
- * enabled — waving off a candidate is not opening a position, and there is no
- * reason a halt should stop you tidying the list.
+ * Execute is disabled while the engine is halted: halting stops new entries.
+ * Dismiss stays enabled — waving off a candidate is not opening a position,
+ * and there is no reason a halt should stop you tidying the list.
  *
- * `compact` drops Queue and the labels, for the Dashboard's half-width panel
- * where §8.1 asks only for a Trade action. Research is where §8.5 puts the
- * full set. */
+ * `compact` shortens Execute to "Trade" for the Dashboard's half-width panel,
+ * which is the wording §8.1 uses. */
 export function RecommendationActions({
   recommendation,
   disposition,
   halted,
   compact = false,
   onExecute,
-  onQueue,
   onDismiss,
 }: {
   recommendation: Recommendation
@@ -130,12 +128,11 @@ export function RecommendationActions({
   halted: boolean
   compact?: boolean
   onExecute: () => void
-  onQueue?: () => void
   onDismiss: () => void
 }) {
   const title = recommendationTitle(recommendation)
   const haltedTitle = 'Trading is halted — resume to open new positions'
-  const acted = disposition === 'executed' || disposition === 'queued'
+  const acted = disposition === 'executed'
 
   const button =
     'rounded border px-3 py-1 text-label-md transition-colors duration-base ease-standard disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50'
@@ -151,24 +148,6 @@ export function RecommendationActions({
       >
         {compact ? 'Trade' : 'Execute'}
       </button>
-
-      {!compact && onQueue ? (
-        <button
-          type="button"
-          onClick={onQueue}
-          disabled={halted || acted}
-          title={
-            halted
-              ? haltedTitle
-              : acted
-                ? 'Already acted on'
-                : `Stage ${title} for the engine to place on its next run`
-          }
-          className={`${button} border-outline text-on-surface hover:bg-surface-container-low`}
-        >
-          Queue
-        </button>
-      ) : null}
 
       <button
         type="button"

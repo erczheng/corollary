@@ -352,31 +352,31 @@ describe('Recommended Trades (full)', () => {
     expect(screen.getByRole('alertdialog').textContent).toMatch(/third of normal size/)
   })
 
-  /** Queued is not executed. Nothing has been sent to a broker. */
-  it('queues without a confirm and says the engine will place it', () => {
+  /** Two actions, not three: Queue was removed, so there is no state in
+   * which a candidate has been accepted but nothing sent. */
+  it('offers only Execute and Dismiss', () => {
     render(<App />)
     const target = RECOMMENDATIONS[0]
 
     const row = within(table())
       .getAllByRole('row')
       .find((r) => r.textContent?.includes(recommendationTitle(target)))!
-    fireEvent.click(within(row).getByRole('button', { name: 'Queue' }))
 
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
-    expect(useUIStore.getState().dispositions[target.id]).toBe('queued')
-    expect(within(table()).getByText('Queued')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: 'Execute' })).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: /^Dismiss/ })).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: 'Queue' })).not.toBeInTheDocument()
   })
 
-  it('stops offering Execute and Queue once a row has been acted on', () => {
+  it('stops offering Execute once a row has been acted on', () => {
     render(<App />)
     const target = RECOMMENDATIONS[0]
-    act(() => useUIStore.getState().queueRecommendation(target.id))
+    act(() => useUIStore.getState().executeRecommendation(target.id))
 
     const row = within(table())
       .getAllByRole('row')
       .find((r) => r.textContent?.includes(recommendationTitle(target)))!
     expect(within(row).getByRole('button', { name: 'Execute' })).toBeDisabled()
-    expect(within(row).getByRole('button', { name: 'Queue' })).toBeDisabled()
+    expect(within(table()).getByText('Executed')).toBeInTheDocument()
   })
 
   it('removes a dismissed row and restores it on refresh', () => {
@@ -395,16 +395,16 @@ describe('Recommended Trades (full)', () => {
   })
 
   /** A refresh restores dismissals but must not discard what you decided. */
-  it('leaves queued rows alone on refresh', () => {
+  it('leaves executed rows alone on refresh', () => {
     render(<App />)
     const target = RECOMMENDATIONS[0]
-    act(() => useUIStore.getState().queueRecommendation(target.id))
+    act(() => useUIStore.getState().executeRecommendation(target.id))
 
     fireEvent.click(within(section('Recommended Trades')).getByRole('button', { name: /Refresh/ }))
-    expect(useUIStore.getState().dispositions[target.id]).toBe('queued')
+    expect(useUIStore.getState().dispositions[target.id]).toBe('executed')
   })
 
-  it('disables Execute and Queue while the engine is halted, but not Dismiss', () => {
+  it('disables Execute while the engine is halted, but not Dismiss', () => {
     render(<App />)
     act(() => {
       useUIStore.getState().setExecutionMode('auto')
@@ -413,7 +413,6 @@ describe('Recommended Trades (full)', () => {
 
     const row = within(table()).getAllByRole('row')[1]
     expect(within(row).getByRole('button', { name: 'Execute' })).toBeDisabled()
-    expect(within(row).getByRole('button', { name: 'Queue' })).toBeDisabled()
     expect(within(row).getByRole('button', { name: /^Dismiss/ })).toBeEnabled()
   })
 

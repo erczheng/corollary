@@ -52,7 +52,6 @@ export function CommandPalette() {
   const flatten = useUIStore((s) => s.flatten)
   const dispositions = useUIStore((s) => s.dispositions)
   const executeRecommendation = useUIStore((s) => s.executeRecommendation)
-  const queueRecommendation = useUIStore((s) => s.queueRecommendation)
   const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
 
   const [query, setQuery] = useState('')
@@ -73,39 +72,20 @@ export function CommandPalette() {
     for (const r of visibleRecommendations(RECOMMENDATIONS, dispositions)) {
       const title = recommendationTitle(r)
       const acted = dispositionOf(r.id, dispositions) !== 'open'
-      // Execute *and* Queue, gated together on the halt.
-      //
-      // Both, because PRD.md §8.5 treats them as peers and the distinction
-      // between them is load-bearing: executed means an order went to the
-      // risk manager, queued means the engine will place one on its next
-      // run and nothing has been sent yet. Offering only Execute here made
-      // the palette's one order action the irreversible one, while the
-      // safer half of the pair was reachable only from Research.
-      //
-      // Gated, because §8.5 disables both while the engine is halted and
-      // the palette was not honouring that — halting stops new entries
-      // (CLAUDE.md rule 7), and a surface that still offers to open one is
-      // the surface that will be used to do it by accident. Omitted rather
-      // than shown-disabled: there is no disabled state in a command list,
-      // and a command that silently does nothing is worse than an absent
-      // one.
+      // Gated on the halt, which the palette was not honouring: halting
+      // stops new entries (CLAUDE.md rule 7), and a surface that still
+      // offers to open one is the surface it happens on by accident.
+      // Omitted rather than shown-disabled — there is no disabled state in
+      // a command list, and a command that silently does nothing is worse
+      // than an absent one.
       if (!acted && !isHalted) {
-        list.push(
-          {
-            id: `exec-${r.id}`,
-            label: `Execute ${title}`,
-            group: 'Recommendations',
-            hint: 'Submits to the risk manager',
-            run: () => executeRecommendation(r.id),
-          },
-          {
-            id: `queue-${r.id}`,
-            label: `Queue ${title}`,
-            group: 'Recommendations',
-            hint: 'Staged for the engine’s next run — nothing sent yet',
-            run: () => queueRecommendation(r.id),
-          },
-        )
+        list.push({
+          id: `exec-${r.id}`,
+          label: `Execute ${title}`,
+          group: 'Recommendations',
+          hint: 'Submits to the risk manager',
+          run: () => executeRecommendation(r.id),
+        })
       }
       // Never gated on the halt: waving off a candidate opens nothing.
       list.push({
@@ -146,7 +126,6 @@ export function CommandPalette() {
     navigate,
     dispositions,
     executeRecommendation,
-    queueRecommendation,
     dismissRecommendation,
     isHalted,
     halt,

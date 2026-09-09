@@ -358,19 +358,12 @@ interface UIState {
    * from Recommended Trades in **Phase 6**, behind the risk manager. Creating
    * an order here would be claiming something reached a broker. */
   executeRecommendation: (id: string) => void
-  /** Stages a recommendation for the engine to place on its next run.
-   *
-   * Distinct from executing, and the distinction is the whole reason both
-   * buttons exist: executed means an order was placed, queued means one will
-   * be. Collapsing them would have the page assert an order exists that
-   * nothing has sent. */
-  queueRecommendation: (id: string) => void
   dismissRecommendation: (id: string) => void
   /** Restores dismissed rows — the scanner rebuilds its candidate set and
    * does not remember what you waved off (§6.5).
    *
-   * Leaves executed and queued rows alone. Those are not dismissals; you
-   * acted on them, and a refresh that reset them would discard intent. */
+   * Leaves executed rows alone. Those are not dismissals; you acted on them,
+   * and a refresh that reset them would discard intent. */
   refreshRecommendations: () => void
   /** Appends the message and its scripted reply.
    *
@@ -1382,15 +1375,13 @@ export const useUIStore = create<UIState>((set) => ({
   dispositions: {},
   executeRecommendation: (id) =>
     set((s) => ({ dispositions: { ...s.dispositions, [id]: 'executed' } })),
-  queueRecommendation: (id) =>
-    set((s) => ({ dispositions: { ...s.dispositions, [id]: 'queued' } })),
   dismissRecommendation: (id) =>
     set((s) => ({ dispositions: { ...s.dispositions, [id]: 'dismissed' } })),
   refreshRecommendations: () =>
     set((s) => {
       // Drops dismissals and keeps everything else. Rebuilding the whole map
-      // would also erase what you executed and queued, which are decisions
-      // rather than things you waved off.
+      // would also erase what you executed, which is a decision rather than
+      // something you waved off.
       const kept: Dispositions = {}
       for (const [id, disposition] of Object.entries(s.dispositions)) {
         if (disposition !== 'dismissed') kept[id] = disposition
