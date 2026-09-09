@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { useUIStore } from './store'
-import { ACCOUNT_SNAPSHOTS } from './mockData'
+import { ACCOUNT_SNAPSHOTS, NOTIFICATIONS, RISK_LIMITS } from './mockData'
 import type { OrderDraft } from './orders'
+import { unreadCount, visibleNotifications } from './notifications'
+import { notificationAuditField } from './settings'
 
 const initialState = useUIStore.getState()
 
@@ -725,5 +727,331 @@ describe('submitOpenOrder', () => {
 
     expect(useUIStore.getState().openPositions.cash.length).toBe(CASH.positions.length + 1)
     expect(useUIStore.getState().openPositions.paper.length).toBe(PAPER.positions.length)
+  })
+})
+
+// ---------------------------------------------------------------------- //
+// Settings (PRD.md §8.7)
+// ---------------------------------------------------------------------- //
+
+/** PRD.md §4: every change to a limit writes an audit row with a timestamp
+ * and the previous value. The point of the log is the sentence "when a bad
+ * month happens, you need to know whether a limit moved first", which only
+ * works if the row records what it moved *from*. */
+describe('setRiskLimit', () => {
+  it('changes the ceiling and logs the previous value', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setRiskLimit('max_risk_per_trade_pct', 10)
+
+    const s = useUIStore.getState()
+    expect(s.riskLimits.find((l) => l.key === 'max_risk_per_trade_pct')!.value).toBe(10)
+
+    expect(s.auditLog).toHaveLength(before + 1)
+    expect(s.auditLog[0]).toMatchObject({
+      category: 'risk',
+      field: 'max_risk_per_trade_pct',
+      previousValue: '7',
+      newValue: '10',
+    })
+  })
+
+  it('writes exactly one row per change', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setRiskLimit('max_daily_loss_pct', 15)
+    expect(useUIStore.getState().auditLog).toHaveLength(before + 1)
+  })
+
+  it('logs nothing when the value did not actually change', () => {
+    const before = useUIStore.getState().auditLog.length
+    const current = RISK_LIMITS.find((l) => l.key === 'max_daily_loss_pct')!.value
+    useUIStore.getState().setRiskLimit('max_daily_loss_pct', current)
+
+    expect(useUIStore.getState().auditLog).toHaveLength(before)
+  })
+
+  it('refuses a value outside the range and logs nothing', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setRiskLimit('max_risk_per_trade_pct', 500)
+
+    const s = useUIStore.getState()
+    expect(s.riskLimits.find((l) => l.key === 'max_risk_per_trade_pct')!.value).toBe(7)
+    expect(s.auditLog).toHaveLength(before)
+  })
+
+  it('refuses a fractional position count', () => {
+    useUIStore.getState().setRiskLimit('max_concurrent_positions', 8.5)
+    expect(
+      useUIStore.getState().riskLimits.find((l) => l.key === 'max_concurrent_positions')!.value,
+    ).toBe(8)
+  })
+
+  it('leaves the other four limits alone', () => {
+    useUIStore.getState().setRiskLimit('max_risk_per_trade_pct', 10)
+
+    for (const limit of RISK_LIMITS.filter((l) => l.key !== 'max_risk_per_trade_pct')) {
+      expect(useUIStore.getState().riskLimits.find((l) => l.key === limit.key)!.value).toBe(
+        limit.value,
+      )
+    }
+  })
+})
+
+describe('setNotificationRoute', () => {
+  it('toggles one channel of one event and logs it', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setNotificationRoute('order_filled', 'bell', false)
+
+    const s = useUIStore.getState()
+    const route = s.notificationRoutes.find((r) => r.event === 'order_filled')!
+    expect(route.bell).toBe(false)
+    // The other channel of the same event is untouched.
+    expect(route.discord).toBe(true)
+
+    expect(s.auditLog).toHaveLength(before + 1)
+    expect(s.auditLog[0]).toMatchObject({
+      category: 'notification',
+      field: notificationAuditField('order_filled', 'bell'),
+      previousValue: 'on',
+      newValue: 'off',
+    })
+  })
+
+  it('logs nothing when the cell is already in the requested state', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setNotificationRoute('order_filled', 'bell', true)
+    expect(useUIStore.getState().auditLog).toHaveLength(before)
+  })
+
+  /** Every cell is editable, bell included — PRD.md §10's table is the
+   * shipped default rather than an invariant. The confirm that guards
+   * silencing a critical event is a UI concern; the store does not veto it. */
+  it('allows a critical event to be silenced, since the confirm lives in the UI', () => {
+    useUIStore.getState().setNotificationRoute('engine_error', 'bell', false)
+    useUIStore.getState().setNotificationRoute('engine_error', 'discord', false)
+
+    const route = useUIStore.getState().notificationRoutes.find((r) => r.event === 'engine_error')!
+    expect(route.bell).toBe(false)
+    expect(route.discord).toBe(false)
+  })
+})
+
+describe('setDataFeed', () => {
+  it('changes a feed and logs the previous value', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setDataFeed('stockHistorical', 'iex')
+
+    const s = useUIStore.getState()
+    expect(s.dataFeeds.find((f) => f.key === 'stockHistorical')!.value).toBe('iex')
+    expect(s.auditLog).toHaveLength(before + 1)
+    expect(s.auditLog[0]).toMatchObject({
+      category: 'feed',
+      field: 'stockHistorical',
+      previousValue: 'sip',
+      newValue: 'iex',
+    })
+  })
+
+  /** Requesting OPRA on Basic returns an auth error, not empty data. Storing
+   * it would break every subsequent options request for nothing. */
+  it('refuses a feed the current plan cannot serve', () => {
+    const before = useUIStore.getState().auditLog.length
+    useUIStore.getState().setDataFeed('options', 'opra')
+
+    const s = useUIStore.getState()
+    expect(s.dataFeeds.find((f) => f.key === 'options')!.value).toBe('indicative')
+    expect(s.auditLog).toHaveLength(before)
+  })
+
+  it('refuses a value that is not an option for that feed at all', () => {
+    useUIStore.getState().setDataFeed('options', 'nonsense')
+    expect(useUIStore.getState().dataFeeds.find((f) => f.key === 'options')!.value).toBe(
+      'indicative',
+    )
+  })
+})
+
+describe('markNotificationsRead', () => {
+  it('clears the unread count for the book on screen', () => {
+    expect(unreadCount(useUIStore.getState().notifications, 'paper')).toBeGreaterThan(0)
+    useUIStore.getState().markNotificationsRead()
+    expect(unreadCount(useUIStore.getState().notifications, 'paper')).toBe(0)
+  })
+
+  /** Opening the bell in Paper must not mark a Cash notification read. You
+   * have never seen it — it is not in the panel you just opened. */
+  it('leaves the other account notifications unread', () => {
+    const cashUnread = NOTIFICATIONS.filter((n) => n.account === 'cash' && !n.read)
+    expect(cashUnread.length).toBeGreaterThan(0)
+
+    useUIStore.getState().markNotificationsRead()
+
+    const after = useUIStore.getState().notifications
+    for (const n of cashUnread) {
+      expect(after.find((x) => x.id === n.id)!.read).toBe(false)
+    }
+  })
+
+  it('marks account-less events read, since those were on screen', () => {
+    useUIStore.setState({
+      notifications: NOTIFICATIONS.map((n) => (n.account === null ? { ...n, read: false } : n)),
+    })
+    useUIStore.getState().markNotificationsRead()
+
+    for (const n of useUIStore.getState().notifications.filter((x) => x.account === null)) {
+      expect(n.read).toBe(true)
+    }
+  })
+})
+
+describe('dismissNotification', () => {
+  it('removes one notification and leaves the rest', () => {
+    const target = NOTIFICATIONS[0]
+    useUIStore.getState().dismissNotification(target.id)
+
+    const after = useUIStore.getState().notifications
+    expect(after.some((n) => n.id === target.id)).toBe(false)
+    expect(after).toHaveLength(NOTIFICATIONS.length - 1)
+  })
+})
+
+/** The bell reports what the mock broker did on its own. These tests are
+ * about the *gate*: routing decides what is delivered, and it decides it at
+ * emission — never by hiding history after the fact. */
+describe('notifications emitted by the tick', () => {
+  const restingSell = (positionId: string, contract: string, quantity: number) => ({
+    id: 'wo-notify',
+    positionId,
+    contractKey: null,
+    contract,
+    side: 'STC' as const,
+    orderType: 'limit' as const,
+    quantity,
+    limitPrice: 0.01,
+    stopPrice: null,
+    timeInForce: 'gtc' as const,
+    placedAt: '2026-08-07T15:00:00Z',
+    activityId: 'act-1',
+  })
+
+  it('announces a working order that filled', () => {
+    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
+    useUIStore.setState({
+      workingOrders: {
+        paper: [restingSell(target.id, `${target.symbol} ${target.contract}`, target.quantity)],
+        cash: [],
+      },
+    })
+
+    const before = useUIStore.getState().notifications.length
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.notifications.length).toBe(before + 1)
+    expect(s.notifications[0].event).toBe('order_filled')
+    expect(s.notifications[0].account).toBe('paper')
+    expect(s.notifications[0].read).toBe(false)
+  })
+
+  /** The important one. Unchecking the bell suppresses the *notification*
+   * and nothing else — the order still fills and the ledger still records
+   * it. A routing preference that quietly stopped orders from filling would
+   * be catastrophic and completely invisible. */
+  it('suppresses the bell entry when the route is off, but still fills the order', () => {
+    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
+    useUIStore.getState().setNotificationRoute('order_filled', 'bell', false)
+    useUIStore.setState({
+      workingOrders: {
+        paper: [restingSell(target.id, `${target.symbol} ${target.contract}`, target.quantity)],
+        cash: [],
+      },
+    })
+
+    const before = useUIStore.getState().notifications.length
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.notifications.length).toBe(before)
+    // The fill itself happened regardless.
+    expect(s.workingOrders.paper.some((o) => o.id === 'wo-notify')).toBe(false)
+    expect(s.openPositions.paper.some((p) => p.id === target.id)).toBe(false)
+  })
+
+  it('does not erase notifications already received when a route is turned off', () => {
+    const before = useUIStore.getState().notifications.length
+    useUIStore.getState().setNotificationRoute('order_filled', 'bell', false)
+    expect(useUIStore.getState().notifications).toHaveLength(before)
+  })
+
+  /** A take-profit is a fill and a stop is a stop. They route separately and
+   * they read differently — a stop is a `warning`, a rejection is an
+   * `error`, and neither is the other. */
+  it('reports a triggered stop as stop_loss_hit, not as a fill', () => {
+    const target = PAPER.positions.find((p) => p.direction === 'long')!
+    useUIStore.getState().upsertExit(target.id, {
+      // Take-profit unreachably high and the stop just under it, so the mark
+      // is below both and only the stop can trigger.
+      takeProfit: 9_999,
+      stopPrice: 9_998,
+      stopLimitPrice: null,
+      timeInForce: 'gtc',
+      heldBy: 'broker',
+    })
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.notifications[0].event).toBe('stop_loss_hit')
+    expect(s.notifications[0].detail).toContain('stop loss')
+  })
+
+  it('reports a triggered take-profit as a fill', () => {
+    const target = PAPER.positions.find((p) => p.direction === 'long')!
+    useUIStore.getState().upsertExit(target.id, {
+      takeProfit: 0.01,
+      stopPrice: 0.001,
+      stopLimitPrice: null,
+      timeInForce: 'gtc',
+      heldBy: 'broker',
+    })
+    useUIStore.getState().tick()
+
+    const s = useUIStore.getState()
+    expect(s.notifications[0].event).toBe('order_filled')
+    expect(s.notifications[0].detail).toContain('take profit')
+  })
+
+  it('emits nothing on a quiet tick', () => {
+    const before = useUIStore.getState().notifications.length
+    useUIStore.getState().tick()
+    expect(useUIStore.getState().notifications).toHaveLength(before)
+  })
+
+  /** You were on screen when you clicked these. Activity records them; a
+   * notification about your own click is what teaches you to ignore the
+   * bell. */
+  it('emits nothing for a manual halt or flatten', () => {
+    const before = useUIStore.getState().notifications.length
+    useUIStore.getState().halt()
+    useUIStore.getState().flatten()
+    expect(useUIStore.getState().notifications).toHaveLength(before)
+  })
+
+  it('scopes an emitted notification to the account that produced it', () => {
+    useUIStore.setState({ accountMode: 'cash' })
+    const target = CASH.positions.find((p) => p.direction === 'long')!
+    useUIStore.getState().upsertExit(target.id, {
+      takeProfit: 0.01,
+      stopPrice: 0.001,
+      stopLimitPrice: null,
+      timeInForce: 'gtc',
+      heldBy: 'broker',
+    })
+    useUIStore.getState().tick()
+
+    const emitted = useUIStore.getState().notifications[0]
+    expect(emitted.account).toBe('cash')
+    // And it does not appear in the paper book.
+    expect(
+      visibleNotifications(useUIStore.getState().notifications, 'paper').map((n) => n.id),
+    ).not.toContain(emitted.id)
   })
 })

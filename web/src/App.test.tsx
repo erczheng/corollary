@@ -1,10 +1,17 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import App from './App'
+import { useUIStore } from './lib/store'
+import { unreadCount } from './lib/notifications'
+
+const initialState = useUIStore.getState()
 
 beforeEach(() => {
   // BrowserRouter reads window.location, and the wordmark test navigates.
   window.history.pushState({}, '', '/')
+  // The bell tests mark notifications read, which is store state that would
+  // otherwise leak into every test that runs after them.
+  useUIStore.setState({ ...initialState }, true)
 })
 
 describe('App shell', () => {
@@ -62,7 +69,8 @@ describe('App shell', () => {
       render(<App />)
 
       const account = screen.getByRole('link', { name: 'Account' })
-      const bell = screen.getByRole('button', { name: 'Notifications' })
+      // The name now carries the unread count, so match the prefix.
+      const bell = screen.getByRole('button', { name: /^Notifications/ })
       const settings = screen.getByRole('link', { name: 'Settings' })
 
       // Node.compareDocumentPosition: 4 === "argument follows this node".
@@ -70,12 +78,27 @@ describe('App shell', () => {
       expect(bell.compareDocumentPosition(settings)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
     })
 
-    it('carries no unread badge on a bell with no feed behind it', () => {
+    /** This is the test the placeholder bell asked to have changed: there is
+     * a feed behind it now, so a badge is a number the panel can account for
+     * rather than a decoration that lies. The count is also in the accessible
+     * name — a red dot says nothing to a screen reader. */
+    it('carries an unread badge that matches the feed behind it', () => {
       render(<App />)
 
-      // An unread count nothing can produce would be a decoration that
-      // lies. When notifications land, this is the test to change.
-      expect(screen.getByRole('button', { name: 'Notifications' }).textContent).toBe('')
+      const bell = screen.getByRole('button', { name: /^Notifications/ })
+      const unread = unreadCount(useUIStore.getState().notifications, 'paper')
+
+      expect(unread).toBeGreaterThan(0)
+      expect(bell.textContent).toBe(String(unread))
+      expect(bell).toHaveAttribute('aria-label', `Notifications — ${unread} unread`)
+    })
+
+    it('drops the badge once everything visible has been read', () => {
+      render(<App />)
+      act(() => useUIStore.getState().markNotificationsRead())
+
+      const bell = screen.getByRole('button', { name: 'Notifications' })
+      expect(bell.textContent).toBe('')
     })
   })
 

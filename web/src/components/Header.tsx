@@ -1,6 +1,7 @@
 import { Link, NavLink } from 'react-router-dom'
 import { ThemeToggle } from './ThemeToggle'
-import { BellIcon, GearIcon, UserIcon } from './icons'
+import { NotificationBell } from './NotificationBell'
+import { GearIcon, UserIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { ACCOUNT_LABEL } from '../lib/mockData'
 
@@ -145,18 +146,11 @@ export function Header() {
             <UserIcon className="h-4 w-4" />
           </IconNavLink>
 
-          {/* Notifications has no feed behind it yet — the events are routed
-              in Settings, and the bell that receives them lands with them.
-              Deliberately badge-free until then: an unread count that
-              nothing can produce is a decoration that lies. */}
-          <button
-            type="button"
-            aria-label="Notifications"
-            title="Notifications — no unread"
-            className={`${ICON_BUTTON} ${ICON_IDLE}`}
-          >
-            <BellIcon className="h-4 w-4" />
-          </button>
+          {/* The feed landed with the routing matrix that feeds it, as the
+              placeholder here anticipated. The badge is real now: the count
+              comes from unread notifications in the book on screen, so it is
+              a number the panel underneath can always account for. */}
+          <NotificationBell />
 
           <IconNavLink to="/settings" label="Settings">
             <GearIcon className="h-4 w-4" />

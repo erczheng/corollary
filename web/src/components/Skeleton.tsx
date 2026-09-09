@@ -19,6 +19,23 @@ function Bar({ className = '' }: { className?: string }) {
   )
 }
 
+/** A single figure that hasn't arrived yet, for standing in place of one
+ * number rather than a whole panel.
+ *
+ * The Account page's equity reconciliation needs this: cash is a static
+ * balance from the broker and arrives immediately, while position value is
+ * marked from the price stream and does not. Showing cost basis in the
+ * meantime would state an equity figure that is wrong by the whole
+ * unrealized P&L, and showing a zero would read as a flat book. */
+export function ValueSkeleton({ label, className = 'w-24' }: { label: string; className?: string }) {
+  return (
+    <span role="status" aria-live="polite" aria-busy="true" className="inline-block align-middle">
+      <span className="sr-only">{label}</span>
+      <Bar className={`h-4 ${className}`} />
+    </span>
+  )
+}
+
 export function TableSkeleton({ rows, columns, label }: { rows: number; columns: number; label: string }) {
   return (
     <div role="status" aria-live="polite" aria-busy="true">

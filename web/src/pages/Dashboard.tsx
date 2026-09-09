@@ -3,7 +3,11 @@ import { Link } from 'react-router-dom'
 import { StatCard } from '../components/StatCard'
 import { PerformanceChart } from '../components/PerformanceChart'
 import { RefreshButton } from '../components/RefreshButton'
-import { Chip } from '../components/Chip'
+import {
+  ConfidenceBadge,
+  DispositionBadge,
+  RecommendationActions,
+} from '../components/RecommendationBits'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { ExecutionModeToggle } from '../components/ExecutionModeToggle'
@@ -13,20 +17,22 @@ import {
   activityCsvRows,
   type ActivityFilter,
 } from '../components/ExecutionsTable'
-import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon, XIcon } from '../components/icons'
+import { BankIcon, ChevronDownIcon, TargetIcon, TrendingUpIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
+import {
+  dispositionOf,
+  visibleRecommendations as visibleRecommendations_,
+} from '../lib/research'
 import {
   ACCOUNT_SNAPSHOTS,
   isOrderAction,
+  LLM_ORIGINATION,
   RECOMMENDATIONS,
   recommendationTitle,
-  STRATEGIES,
   type Recommendation,
 } from '../lib/mockData'
 import { downloadCsv } from '../lib/csv'
 import {
-  CONFIDENCE_TIER_CLASS,
-  confidenceTier,
   formatExpiry,
   formatStrategyName,
   formatUsd,
@@ -64,12 +70,24 @@ export function Dashboard() {
   const activity = useUIStore((s) => s.activity[s.accountMode])
   const [confirmingFlatten, setConfirmingFlatten] = useState(false)
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all')
-  const [dismissedIds, setDismissedIds] = useState<string[]>([])
   const [tradeTarget, setTradeTarget] = useState<Recommendation | null>(null)
 
-  const visibleRecommendations = RECOMMENDATIONS.filter((r) => !dismissedIds.includes(r.id))
+  /* Recommendation state lives in the store, not here. Research's full table
+     acts on the same candidate set, and two components each holding their own
+     idea of what was dismissed would disagree the moment you dismissed on one
+     and looked at the other. */
+  const dispositions = useUIStore((s) => s.dispositions)
+  const executeRecommendation = useUIStore((s) => s.executeRecommendation)
+  const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
+  const refreshRecommendations = useUIStore((s) => s.refreshRecommendations)
 
-  const activeStrategy = STRATEGIES.find((s) => s.id === activeStrategyId) ?? STRATEGIES[0]
+  const visibleRecommendations = visibleRecommendations_(RECOMMENDATIONS, dispositions)
+
+  /* From the store: Research renames, promotes, retires and deletes these, and
+     a dropdown reading the fixture would keep offering a strategy that no
+     longer exists under a name that has changed. */
+  const strategies = useUIStore((s) => s.strategies)
+  const activeStrategy = strategies.find((s) => s.id === activeStrategyId) ?? strategies[0]
 
   // Paper and Cash are different accounts holding different money, so the
   // balance, the volume, and the chart all follow the toggle.
@@ -149,7 +167,7 @@ export function Dashboard() {
             aria-label="Active strategy"
             className="appearance-none whitespace-nowrap rounded-full border border-outline bg-surface-container-low py-2 pl-4 pr-8 text-label-md text-on-surface focus:border-primary"
           >
-            {STRATEGIES.map((s) => (
+            {strategies.map((s) => (
               <option key={s.id} value={s.id}>
                 Strategy: {formatStrategyName(s.name)}
               </option>
@@ -232,13 +250,24 @@ export function Dashboard() {
           changePct={account.volumeTrend.changePct}
           comparedTo={account.volumeTrend.comparedTo}
         />
+        {/* PRD.md §8.1 scopes this to *validated* trades, excluding
+            LLM-originated `unvalidated` ones. The figure was already validated
+            — a strategy trades its own setups, and a setup match is what makes
+            a trade validated (§6.2), so an unvalidated origination has no
+            strategy to be counted against in the first place. What was missing
+            was saying so. The excluded count comes from the account-wide
+            origination bucket, which is the only place those trades exist. */}
         <StatCard
           label="Live win rate"
           value={live ? `${live.winRate}%` : '—'}
           icon={<TargetIcon />}
           changePct={winRateDelta}
           changeUnit="pts"
-          comparedTo={live ? `vs backtest, ${live.trades} live trades` : undefined}
+          comparedTo={
+            live
+              ? `vs backtest · ${live.trades} validated · ${LLM_ORIGINATION.unvalidated} untested excluded`
+              : undefined
+          }
           note={`Not traded live yet — backtested ${activeStrategy.backtest.winRate}% over ${activeStrategy.backtest.trades} trades`}
         />
       </div>
@@ -269,7 +298,7 @@ export function Dashboard() {
               {/* A refresh restores anything dismissed — the scanner
                   rebuilds its candidate set, it doesn't remember what you
                   waved off. */}
-              <RefreshButton onRefresh={() => setDismissedIds([])} />
+              <RefreshButton onRefresh={refreshRecommendations} />
               <Link
                 to="/research"
                 className="text-label-md text-primary transition-colors duration-base ease-standard hover:text-on-surface"
@@ -308,62 +337,23 @@ export function Dashboard() {
                     </div>
                   </div>
 
+                  {/* Confidence and the actions are shared with Research's
+                      full table — see RecommendationBits. The confidence slot
+                      in particular has three states that are easy to get
+                      subtly wrong, and it had no business existing twice.
+                      `compact` drops Queue: §8.1 gives this panel a Trade
+                      action, and §8.5 is where the full set belongs. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    {r.confidence !== null ? (
-                      <span
-                        className={`rounded-full px-3 py-1 text-data-md ${
-                          CONFIDENCE_TIER_CLASS[confidenceTier(r.confidence)]
-                        }`}
-                        title={`${confidenceTier(r.confidence)} confidence — backtested hit rate for this setup class`}
-                      >
-                        {r.confidence}%
-                      </span>
-                    ) : r.unvalidated ? (
-                      /* An unvalidated origination has no base rate by
-                         construction (PRD.md §6.2 — no setup match), so the
-                         tag goes in the slot the number would have taken
-                         rather than competing with the reason text. It says
-                         the same thing the em dash would, with the reason
-                         why. */
-                      <Chip
-                        variant="accent"
-                        title="Unvalidated — no setup match, so no backtested base rate. Capped at ⅓ normal size."
-                      >
-                        Untested
-                      </Chip>
-                    ) : (
-                      /* PRD.md §6.3: where no base rate exists, confidence
-                         shows an em dash rather than a number. */
-                      <span
-                        className="px-3 py-1 text-data-md text-on-surface-variant"
-                        title="No backtested base rate for this setup yet"
-                      >
-                        —
-                      </span>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => setTradeTarget(r)}
-                      disabled={engineHalted}
-                      title={
-                        engineHalted
-                          ? 'Trading is halted — resume to open new positions'
-                          : `Trade ${recommendationTitle(r)}`
-                      }
-                      className="rounded border border-primary px-3 py-1 text-label-md text-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50"
-                    >
-                      Trade
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDismissedIds((ids) => [...ids, r.id])}
-                      aria-label={`Dismiss ${recommendationTitle(r)}`}
-                      title="Dismiss"
-                      className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
-                    >
-                      <XIcon className="h-3.5 w-3.5" />
-                    </button>
+                    <ConfidenceBadge recommendation={r} />
+                    <DispositionBadge disposition={dispositionOf(r.id, dispositions)} />
+                    <RecommendationActions
+                      recommendation={r}
+                      disposition={dispositionOf(r.id, dispositions)}
+                      halted={engineHalted}
+                      compact
+                      onExecute={() => setTradeTarget(r)}
+                      onDismiss={() => dismissRecommendation(r.id)}
+                    />
                   </div>
                 </div>
               ))}
@@ -453,7 +443,7 @@ export function Dashboard() {
              wired up in Phase 6, it goes through RiskManager.approve()
              and nowhere else (CLAUDE.md rule 1). Do not call the broker
              from this handler. */
-          if (tradeTarget) setDismissedIds((ids) => [...ids, tradeTarget.id])
+          if (tradeTarget) executeRecommendation(tradeTarget.id)
           setTradeTarget(null)
         }}
         onCancel={() => setTradeTarget(null)}

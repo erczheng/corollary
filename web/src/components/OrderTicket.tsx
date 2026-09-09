@@ -4,12 +4,12 @@ import { useUIStore } from '../lib/store'
 import {
   MARKET_TODAY,
   ORDER_TYPE_LABEL,
-  RISK_LIMITS,
   TIME_IN_FORCE_LABEL,
   type OrderType,
   type Position,
   type TimeInForce,
 } from '../lib/mockData'
+import { riskLimitFor } from '../lib/settings'
 import {
   MULTI_LEG_NOTE,
   ORDER_SIDE_LABEL,
@@ -68,6 +68,7 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
   const submitPositionOrder = useUIStore((s) => s.submitPositionOrder)
   const upsertExit = useUIStore((s) => s.upsertExit)
   const cancelExit = useUIStore((s) => s.cancelExit)
+  const riskLimits = useUIStore((s) => s.riskLimits)
 
   const types = availableOrderTypes(position)
 
@@ -131,7 +132,12 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
     () => addedRiskPct(position, draft.quantity, equity),
     [position, draft.quantity, equity],
   )
-  const riskCeiling = RISK_LIMITS.find((l) => l.key === 'max_risk_per_trade_pct')?.value ?? 0
+  /* From the store, not the fixture: the ceiling is editable in Settings and
+     a ticket quoting a stale one is telling you about a limit that is no
+     longer in force. Null means none is configured — said in words below
+     rather than substituted with a number, which is what the old `?? 0`
+     did and it reported every trade as over-limit. */
+  const riskCeiling = riskLimitFor(riskLimits, 'max_risk_per_trade_pct')
 
   const dte = daysToExpiry(position.expiry, MARKET_TODAY)
   /* A GTC order cannot outlive the contract it is written on — the
@@ -360,8 +366,11 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
                one — the ticket still submits and lets the risk manager
                decide. */
             <p className="text-caption text-on-surface-variant">
-              Adds an estimated {formatPct(riskPct)} of equity against a {riskCeiling}% per-trade ceiling.
-              The risk manager decides; this is an estimate.
+              Adds an estimated {formatPct(riskPct)} of equity
+              {riskCeiling === null
+                ? '. No per-trade ceiling is configured'
+                : ` against a ${riskCeiling}% per-trade ceiling`}
+              . The risk manager decides; this is an estimate.
             </p>
           )}
         </div>

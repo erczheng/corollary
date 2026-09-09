@@ -49,9 +49,11 @@ These sat in the persistent app header through early Phase 1 and were moved to t
 Two things resolve it, and they do different jobs:
 
 - **A read-only account badge in the header**, on every page — a pill reading Paper or Cash, not a switch. Cash takes `caution`, since real money in play is a reason to read carefully rather than a failure; Paper recedes into `neutral`. This answers "whose money am I looking at" in the same place everywhere.
-- **The Paper/Cash switch itself appears on any page whose entire contents are account-scoped.** That is the Dashboard and Activity. On both, the toggle sits on the page title line, because it governs everything below it — sending someone to another page to change the scope of the page they're reading is a detour, not a safeguard.
+- **The Paper/Cash switch itself appears on any page whose entire contents are account-scoped.** That is the Dashboard, Activity, and Account. On all three, the toggle sits on the page title line, because it governs everything below it — sending someone to another page to change the scope of the page they're reading is a detour, not a safeguard.
 
 The safeguard was never the switch's location. Cash is entered through the confirm dialog above no matter where the toggle is rendered, it never survives a restart, and every cold start comes up in Paper. Pages that only *display* account context and don't scope their whole contents to it (News, Markets, Research, Settings) get the badge and no switch.
+
+The rule is what decides this, not the list. Account was added to the first group when the page was built: every figure on it — cash, buying power, settled and unsettled, its transfer ledger — belongs to exactly one account, which makes it the most completely account-scoped page in the app. Settings stays in the second group: it displays the badge and scopes nothing to it, apart from the equity figure a risk-limit confirm quotes.
 
 **Controls.** Two distinct actions, never merged:
 
@@ -343,28 +345,41 @@ Scoped to the account whose keys are in use. Paper and Cash are separate books, 
 ### 8.5 Research
 
 - **Chat:** Claude, scoped to this account and its data. Can propose strategies, request additional recommendations, and retrieve market context. Strategy proposals enter as `draft` and must clear §5.3.
-- **Strategies:** scrollable list with an `ACTIVE` badge. Edit and delete inline. Hover reveals backtest and live statistics, separately labeled.
+  - **Through Phase 3 this is a scripted shell, and it says so on screen.** Replies come from a keyword table; anything unmatched gets a reply admitting there is no answer rather than improvising one. Every other Phase 1 surface is self-evidently a fixture — a table of invented numbers reads as invented — but a fluent sentence reads as a considered answer, which makes an unlabelled scripted chat the one place here that could genuinely mislead. The live model arrives with the LLM layer in Phase 4.
+  - A proposal carries its intent as prose, **not** a YAML body. The declarative schema and the indicator whitelist are Phase 4, and printing rules no validator has checked would invite trusting them. Accepting one lands a `draft` and nothing further along — the LLM may propose, it may not promote.
+- **Strategies:** scrollable list with an `ACTIVE` badge. Rename, promote along §5.2, retire, and delete inline, each behind the guard it warrants.
+  - Statistics appear on **expand, not hover.** §8.5 originally said hover, and hover was wrong for the same reason §8.2 puts rejection reasons on screen as text: a hover-only panel does not exist on a touch device, to a keyboard, or in a screenshot.
+  - Backtest and live are **labelled separately and never combined.** A 68% backtest and a 71% live record are claims about different evidence, and a blended figure would be the most misleading number on the page. A strategy that has never traded live says so rather than showing its backtest in the live slot.
+  - Each row reports its **§5.3 promotion gate** status and names every threshold it misses. It reports rather than blocks: the PRD is explicit that anything missing the gate can still be promoted manually, so greying out the control would enforce a rule the spec left to a person.
+  - Deleting the **active** strategy is refused — retire it first. Deleting the running strategy would leave the positions it opened with nothing managing them.
 - **LLM origination panel:** sits with the strategy list. Shows LLM-originated trades as their own bucket — count, win rate, profit factor, standalone P&L, and the validated/unvalidated split. This is the number that answers "is the LLM layer earning its place," and it is deliberately kept off the Dashboard so the headline win rate stays clean.
-- **Market Pulse:** VIX, the in-house sentiment composite, top sector for the session.
-- **Recommended Trades (full):** symbol, contract, confidence, action. Actions: Execute, Queue, Dismiss. Export CSV.
+  - This is also where the Dashboard's excluded trades live. §8.1 scopes that win rate to validated trades, and the unvalidated bucket is account-wide rather than per-strategy — an unvalidated origination has no setup match, which is exactly why it cannot be attributed to a strategy.
+- **Market Pulse:** VIX, the in-house sentiment composite, top sector for the session. The composite is **derived** from its seven components, never a stored copy, so it cannot disagree with the breakdown News prints beneath the same number.
+- **Recommended Trades (full):** contract, expiry, setup class, reason, origin, confidence, action. Actions: Execute, Queue, Dismiss. Export CSV.
+  - **Queue is not Execute.** Executed means an order went to the risk manager; queued means the engine will place it on its next run and nothing has been sent. Collapsing them would have the page assert an order exists at the broker that does not. Both are disabled while the engine is halted; Dismiss is not, since waving off a candidate opens nothing.
+  - Dismissal is shared with the Dashboard's panel rather than local to either. Two views act on one candidate set, and each holding its own copy would disagree the moment you dismissed on one and looked at the other. A refresh restores dismissals and leaves executed and queued rows alone — those are decisions, not things you waved off.
+  - The CSV exports the **whole** candidate set, dismissed rows included: it is a record of what the scanner produced this session, not a copy of what happens to be on screen. A null confidence exports empty rather than as the em dash it renders as, because "—" in a numeric column is a parse error.
 
 ### 8.6 Account
 
 Replaces "Wallet." Alpaca is the source of truth; Corollary keeps no ledger.
 
-- Cash, buying power, options buying power, settled vs unsettled.
-- Deposits and withdrawals link out to Alpaca.
+- Cash, buying power, options buying power, settled vs unsettled. Buying power differs by account and the page says why: Paper is a margin account at 2× cash, while a Cash account can only spend what has *settled*. Options buying power is never the margin figure — options are not marginable, and sizing against equity buying power overstates capacity by 2×.
+- **Total equity, reconciled on screen:** cash + the market value of open positions. Derived, not a maintained balance. Position value is marked from the price stream, so it carries the live pill and shows a loading state until the first price arrives rather than briefly presenting cost basis as equity.
+- **Cash transfers**, filtered out of the account's activity ledger — deposits and withdrawals are not orders. Signed, netted, with a designed empty state.
+- Deposits and withdrawals link out to Alpaca. Corollary initiates neither.
 
 ### 8.7 Settings
 
 Replaces the user menu. No authentication while bound to `127.0.0.1`.
 
-- API keys (stored in env, never in the repo; UI shows masked presence only).
-- Risk limits (§4), with audit log.
-- Notification routing (§10).
-- Data source selection and provider status.
+- API keys (stored in env, never in the repo). **Presence only** — no value, no mask, no last-four. There is no field on the page that could contain key material.
+- Risk limits (§4), editable, with the three definitions of "risk" stated on the page — a percentage ceiling is uninterpretable without them. Raising a limit confirms and quotes the consequence in dollars against current equity; lowering one does not. The engine still enforces; this edits what is stored.
+- Notification routing (§10) — every cell editable, with the critical-event confirm described there.
+- Data source status, and **feed selection**: the three `ALPACA_*_FEED` variables, with values the current plan cannot serve shown as requiring an upgrade rather than silently failing. Historical bars on IEX draws a warning, because every `min_avg_volume` threshold in a strategy is measured against whatever feed produced them.
 - Theme (light / dark).
-- **Sentiment accuracy readout** (§9).
+- **Sentiment accuracy readout** (§9), with the demotion banner when a source falls below the 52% floor in either window.
+- **Configuration audit log** — risk limits, feeds and routing in one log, newest first, each row carrying the value it replaced. One log rather than three: on a bad day the question is simply whether anything changed first.
 
 ---
 
@@ -386,7 +401,9 @@ No article is ever manually reviewed. The system grades itself and reports when 
 
 ## 10. Notifications
 
-**Channels:** in-app bell (all events) and Discord webhook (routed by severity).
+**Channels:** in-app bell and Discord webhook (routed by severity).
+
+**The table below is the shipped default, not an invariant.** Settings (§8.7) can change any cell, including a bell one — the bell receives all events *by default*, and the routing matrix is what decides thereafter. Three events are marked **critical** (`Order rejected`, `Daily loss halt`, `Engine error / dead-man's switch`): silencing one of those on *every* channel is still permitted, but it passes through a confirm that names what stops arriving, because a rule-9 alert routed nowhere is how the engine ends up halted and silent. Routing changes are audit-logged alongside risk limits.
 
 | Event | Bell | Discord |
 |---|---|---|
@@ -399,6 +416,10 @@ No article is ever manually reviewed. The system grades itself and reports when 
 | New recommendations ready | ✓ | — |
 | Strategy promotion eligible | ✓ | — |
 
+**The bell is a panel anchored to the header icon, not a page.** A notification you have to navigate to is one you miss while watching a position, and there is no `/notifications` route among the app's screens. It carries an unread badge scoped to the account on screen, and opening it marks nothing read — clearing is an explicit action, because glancing at a badge is not reading the feed. Each notification belongs to the book it happened in; an engine fault belongs to neither and appears in both.
+
+Severity is a property of the event, and it observes the same split the rest of the interface does: a rejected order, a loss halt and a dead connection are `error`; a **stop loss firing is `caution`, never `error`**, because a stop doing exactly what it was told to do is not a system failure.
+
 Discord messages use rich embeds — a fill renders as a formatted block with contract, price, quantity, and P&L.
 
 Implemented behind a `Notifier` interface with pluggable channels, so adding SMS or push later is configuration rather than code.
@@ -407,7 +428,7 @@ Implemented behind a `Notifier` interface with pluggable channels, so adding SMS
 
 ## 11. Build order
 
-**Phase 1 — Shell.** Every page renders, navigation works, design system applied, Ctrl+K command palette, light/dark. Mock data. *Done when: you can click through the whole app and it feels real.*
+**Phase 1 — Shell.** Every page renders, navigation works, design system applied, Ctrl+K command palette, light/dark. Mock data. *Done when: you can click through the whole app and it feels real.* **Complete.** All seven pages are built, the palette runs page/recommendation/engine commands, and the notification bell has a feed behind it. Flatten keeps its confirm even when reached by typing three letters into the palette.
 
 **Phase 2 — Read-only, real data.** Alpaca paper connected. Dashboard, Activity, Markets, Account show live values. No execution. *Done when: you'd open it in the morning and learn something true.*
 
