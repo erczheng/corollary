@@ -302,6 +302,59 @@ expect.** Every item below produced working-looking code that was wrong:
   shares on a quiet day. Nothing here sorts in place: every view reads the
   same array, so an in-place `.sort()` would leave the last screen's
   ordering behind in the data itself.
+- `web/src/lib/settings.ts` — every rule behind the Settings page, pure:
+  limit validation and its per-limit range, whether a change is a *raise*
+  (only raises confirm — nagging on the safe direction trains people to
+  dismiss the dialog that matters), the dollar consequence quoted in that
+  confirm, audit-entry construction and field-label resolution, which feed
+  values a plan may take, and the sentiment floor. **`riskLimitFor` returns
+  `number | null`, and null means "no ceiling configured" — say so, never
+  substitute a number.** That is not hypothetical: the two order tickets
+  used to do this lookup themselves with *different* fallbacks, `?? 7` in
+  one and `?? 0` in the other, so one invented a ceiling nobody had set and
+  the other reported every trade as over-limit.
+- `web/src/lib/account.ts` — the Account page's arithmetic: `cashTransfers`
+  (deposits and withdrawals are not orders — filter through `isOrderAction`),
+  `netTransfers`, `positionsValue`, `totalEquity`. `positionsValue` sums
+  `Position.value`, the **contract's** market value; summing `underlying`
+  would be wrong by roughly the multiplier with nothing to show it.
+- `web/src/lib/notifications.ts` — severity, account scoping, unread
+  counting, and notification construction. Two things to keep straight:
+  `stop_loss_hit` is a **warning, not an error** (a stop firing is a loss
+  behaving correctly — same reason `bearish` and `error` stay apart), and
+  `account: null` means an event that belongs to no book and shows in
+  **both**, which is what stops an engine fault being hidden by whichever
+  account happens to be selected.
+- **The routing gate is applied when an event is emitted, in `store.tick()`
+  — never when the panel renders.** Filtering at read time would let
+  unchecking a route retroactively erase notifications you already
+  received. Those happened; the record of them is not a preference.
+- `web/src/lib/research.ts` — recommendation dispositions, the scripted
+  chat router, §5.2's lifecycle transitions, and §5.3's promotion gate.
+  Three to keep straight: **`queued` is not `executed`** (one means an
+  order went to the risk manager, the other that the engine will place it
+  later — collapsing them asserts an order exists that nothing sent);
+  `promotionGate` **reports rather than vetoes**, because the PRD says
+  anything missing the gate can still be promoted by hand; and
+  `chatReply` **must never improvise** — an unmatched question gets a
+  reply admitting it is a shell, since a fluent non-answer is the one
+  thing on this page that could actually mislead.
+- `web/src/components/RecommendationBits.tsx` — the confidence slot,
+  disposition badge, and Execute/Queue/Dismiss actions, shared by the
+  Dashboard panel and Research's table. Deliberately **atoms, not one
+  table with two layouts** the way `ExecutionsTable` is: those two views
+  are both tables differing only in columns, whereas these two are
+  different shapes (a compact card list vs a wide table), and a prop per
+  structural difference would be worse than sharing the pieces that can
+  drift. The confidence slot is the piece that can drift — three branches,
+  and `primary`/`caution`/`neutral` for tiers, never `bullish`/`bearish`.
+- `web/src/components/CommandPalette.tsx` — Ctrl+K. Matching is
+  **substring, not fuzzy**: on a list this small fuzzy mostly means a typo
+  highlights a different command, and one of them closes every position.
+  The palette body is conditionally rendered but the **flatten confirm is
+  not** — an early `if (!open) return null` above it unmounted the dialog
+  in the same tick Flatten asked for it, so the most destructive command
+  had no guard at all. `CommandPalette.test.tsx` pins it.
 - `web/src/components/ChainOrderTicket.tsx` — opening a position from a
   chain row. Deliberately *not* `OrderTicket`, which acts on something you
   already hold and derives its side from the position's direction; here

@@ -4,7 +4,7 @@ import { OrderTicket } from './OrderTicket'
 import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { formatStrategyName, formatPct, formatUsd, signClass } from '../lib/format'
-import { MARKET_TODAY, STRATEGIES, TIME_IN_FORCE_LABEL, type Position } from '../lib/mockData'
+import { MARKET_TODAY, TIME_IN_FORCE_LABEL, type Position } from '../lib/mockData'
 import { daysToExpiry, expiryUrgency, isMultiLeg, type TicketMode } from '../lib/orders'
 import { formatExpiry } from '../lib/format'
 
@@ -164,11 +164,16 @@ export function PositionRow({
   const detachFromStrategy = useUIStore((s) => s.detachFromStrategy)
   const reattachToStrategy = useUIStore((s) => s.reattachToStrategy)
 
-  const strategy = STRATEGIES.find((s) => s.id === position.strategyId)
+  /* From the store, not the fixture: Research can rename a strategy, and a
+     row reading the fixture would keep showing the old name while Research
+     showed the new one — two names for one strategy on one app. */
+  const strategies = useUIStore((s) => s.strategies)
+
+  const strategy = strategies.find((s) => s.id === position.strategyId)
   const strategyName = strategy ? formatStrategyName(strategy.name) : null
   // Names the strategy that *opened* it, which is where reattaching sends
   // it back to — not whichever strategy is active now.
-  const openedBy = STRATEGIES.find((s) => s.id === position.openedByStrategyId)
+  const openedBy = strategies.find((s) => s.id === position.openedByStrategyId)
   const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
   const underlying = useUIStore((s) => s.underlyings[position.symbol]) ?? null
   const dte = daysToExpiry(position.expiry, MARKET_TODAY)

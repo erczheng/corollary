@@ -1876,12 +1876,19 @@ export interface Strategy {
   version: number
   status: StrategyStatus
   backtest: { winRate: number; profitFactor: number; maxDrawdown: number; trades: number }
-  /** An undifferentiated aggregate for now. PRD.md §8.1 scopes the
-   * Dashboard's win rate to validated trades only, excluding LLM-originated
-   * `unvalidated` ones (§6.2) — but that split belongs with the Research
-   * origination panel (§8.5), which owns the validated/unvalidated
-   * breakdown, and it lands when that page is built. Deferred deliberately;
-   * don't nest the split in here from the Dashboard side. */
+  /** Closed live trades **this strategy** placed — all of them validated, by
+   * construction. A strategy trades its own setups, and a setup match is what
+   * *makes* a trade validated (§6.2).
+   *
+   * This field carried a note asking for a validated/unvalidated split to be
+   * added here. It should not be: the unvalidated bucket is LLM-originated
+   * trades with **no setup match**, which is precisely why they cannot be
+   * attributed to a strategy. They live account-wide in `LLM_ORIGINATION`
+   * and nowhere else, exactly as §6.4's "their own P&L bucket" describes.
+   *
+   * So the Dashboard's figure was already validated-only. What it was missing
+   * was *saying so* — §8.1 wants the exclusion named, and the count comes
+   * from `LLM_ORIGINATION.unvalidated`, not from here. */
   live: { winRate: number; profitFactor: number; maxDrawdown: number; trades: number } | null
 }
 
@@ -1941,19 +1948,115 @@ export const MARKET_PULSE = {
 }
 
 // ---------------------------------------------------------------------- //
-// Account (Account page)
+// Research chat (Research page, PRD.md §8.5)
 // ---------------------------------------------------------------------- //
 
-export const ACCOUNT_SUMMARY = {
-  cash: 12_480.32,
-  buyingPower: 24_960.64,
-  optionsBuyingPower: 12_480.32,
-  settled: 11_200.0,
-  unsettled: 1_280.32,
+export type ChatRole = 'user' | 'assistant'
+
+/** A strategy the assistant offered.
+ *
+ * Carries no YAML body: the declarative document, its JSON Schema and the
+ * indicator whitelist are Phase 4, and a proposal that printed rules the
+ * validator has never seen would be inviting someone to trust them. `rules`
+ * is prose describing intent, which is all a proposal can honestly be before
+ * the schema exists to check it against.
+ *
+ * Accepting one lands a `draft` — never anything further along. PRD.md §5.3's
+ * promotion gate is what moves a strategy past that, and the whole point of
+ * the gate is that nothing skips it. */
+export interface StrategyProposal {
+  name: string
+  summary: string
+  rules: string[]
 }
 
+export interface ChatMessage {
+  id: string
+  role: ChatRole
+  text: string
+  at: string
+  proposal: StrategyProposal | null
+}
+
+/** One scripted reply.
+ *
+ * **This is a shell, not a model.** Phase 1 is mock data and the LLM layer is
+ * Phase 4, so replies are matched from a fixed table and the panel says so on
+ * screen. A chat that answered plausibly while being scripted would be the
+ * most misleading thing in the app — everything else here is visibly a
+ * fixture, but a convincing sentence reads as a considered answer.
+ *
+ * Keyword-routed rather than sequential so a question gets a relevant reply,
+ * and deterministic either way: same input, same output, no PRNG. */
+export interface ChatScript {
+  /** Tested against the user's message, lowercased. */
+  match: RegExp
+  reply: string
+  proposal: StrategyProposal | null
+}
+
+export const CHAT_SCRIPT: ChatScript[] = [
+  {
+    match: /strateg|propose|idea for a|build me/,
+    reply:
+      'Based on this account’s fills, mean-reversion entries on oversold index ETFs have carried the strongest live win rate, and the losing tail is concentrated in trades held through an earnings print. Here is a proposal that keeps the entry and adds a time stop before earnings.',
+    proposal: {
+      name: 'index_mean_reversion_v2',
+      summary:
+        'Mean reversion on index ETFs, exiting before any earnings event in the underlying basket.',
+      rules: [
+        'Enter when RSI(14) < 30 and price is below the 20-day SMA',
+        'Put credit spread, 30–45 DTE, short strike at 0.30 delta',
+        'Profit target 50% of credit, stop at 200% of credit',
+        'Time stop 2 DTE, and exit any position before an earnings date',
+      ],
+    },
+  },
+  {
+    match: /recommend|candidate|what should i|trade idea|scanner/,
+    reply:
+      'Seven candidates cleared the scanner for this session. The highest base rate is the SPY put credit spread at 71% — that figure is the backtested hit rate for its setup class, not a model’s confidence. One candidate is an LLM origination with no setup match, so it is capped at a third of normal size and labelled Untested.',
+    proposal: null,
+  },
+  {
+    match: /vix|volatilit|market|macro|sentiment/,
+    reply:
+      'VIX is 16.8, which is unremarkable. The in-house sentiment composite is derived from its seven components rather than stored, so the number beside it on the News page is always the mean of what is printed underneath. Technology leads the session.',
+    proposal: null,
+  },
+  {
+    match: /risk|limit|size|position siz|exposure/,
+    reply:
+      'Per-trade risk is capped at 7% of equity, and what "risk" means depends on the structure: maximum loss at expiry for a defined-risk spread, premium paid for a long option, and a ±2σ stress loss for anything undefined. The engine enforces all five ceilings server-side — the numbers on Settings are what is stored, not what is allowed.',
+    proposal: null,
+  },
+  {
+    match: /backtest|history|historical/,
+    reply:
+      'Alpaca’s options history starts February 2024, and in practice it is bars only — there is no historical quotes endpoint, and trades reach back just seven days. So every backtest fill price is an estimate from the spread model rather than a measurement, and results say so alongside the assumption used.',
+    proposal: null,
+  },
+]
+
+/** Shown when nothing matches. Says it is a shell rather than improvising —
+ * an evasive-but-fluent non-answer is exactly the failure mode this panel
+ * should not have. */
+export const CHAT_FALLBACK =
+  'This is a scripted shell, so I have no reply for that yet. The live model arrives with the LLM layer in Phase 4. Try asking about strategies, recommendations, market context, risk limits, or backtests.'
+
+/** Starting prompts, so the routing is discoverable rather than guesswork.
+ * The chat opens empty on purpose — that makes the designed empty state the
+ * default view and the populated transcript one click away, so both are
+ * reachable without contriving a sequence. */
+export const CHAT_SUGGESTIONS: string[] = [
+  'Propose a strategy from this account’s history',
+  'What are today’s recommendations?',
+  'How is my risk configured?',
+]
+
 // ---------------------------------------------------------------------- //
-// Dashboard header stats, per account (PRD.md §8.1)
+// Dashboard header stats + Account page balances, per account
+// (PRD.md §8.1, §8.6)
 // ---------------------------------------------------------------------- //
 
 export interface Trend {
@@ -1974,7 +2077,12 @@ export interface Trend {
  * cleared both books — fine while nothing rendered a per-account position
  * list, wrong the moment Activity did. Note the tradeoff PRD.md §3 calls
  * out: Activity has no Paper/Cash switch on it, so the header carries a
- * read-only account badge to say which book is on screen. */
+ * read-only account badge to say which book is on screen.
+ *
+ * The balance fields landed here with the Account page rather than becoming
+ * a second account-keyed map beside this one. They are account-scoped for
+ * exactly the reason everything else here is, and a parallel
+ * `ACCOUNT_SUMMARY[mode]` would be a second place to forget to update. */
 export interface AccountSnapshot {
   portfolioHistory: PricePoint[]
   volume24h: number
@@ -1983,6 +2091,29 @@ export interface AccountSnapshot {
   positions: Position[]
   activity: ActivityItem[]
   workingOrders: WorkingOrder[]
+  /** Total cash in the account — **settled plus unsettled**. The invariant
+   * `settled + unsettled === cash` holds in both books and is pinned by a
+   * test, because the Account page reconciles against it and a balance that
+   * doesn't add up is worse than one that isn't shown. */
+  cash: number
+  /** What the broker will let you spend. Paper is a margin account, so this
+   * is 2× cash; the Cash account has no margin, so it is the *settled*
+   * balance and nothing more. That difference is the whole reason the
+   * settled/unsettled split is on the page. */
+  buyingPower: number
+  /** Always ≤ `buyingPower`: **options are not marginable**, so on the
+   * margin account this is cash rather than twice it. Sizing an option
+   * order against equity buying power overstates capacity by 2× — which is
+   * why the two are separate fields instead of one number the caller
+   * halves. */
+  optionsBuyingPower: number
+  /** Cash that has cleared. On the Cash account this is the only money you
+   * can actually trade with — reusing unsettled proceeds is a good-faith
+   * violation, which the Account page says in words. */
+  settled: number
+  /** Proceeds not yet cleared. T+1 since May 2024, so this is normally
+   * yesterday's sales. */
+  unsettled: number
 }
 
 export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
@@ -1994,6 +2125,13 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     positions: PAPER_POSITIONS,
     activity: PAPER_ACTIVITY,
     workingOrders: PAPER_WORKING_ORDERS,
+    // Margin account: buying power is 2× cash, but options buying power is
+    // not, because options can't be bought on margin.
+    cash: 12_480.32,
+    buyingPower: 24_960.64,
+    optionsBuyingPower: 12_480.32,
+    settled: 11_200.0,
+    unsettled: 1_280.32,
   },
   cash: {
     portfolioHistory: CASH_HISTORY,
@@ -2003,6 +2141,14 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     positions: CASH_POSITIONS,
     activity: CASH_ACTIVITY,
     workingOrders: CASH_WORKING_ORDERS,
+    // No margin here, so buying power is the *settled* balance — not total
+    // cash. The $240 of unsettled proceeds is money you can see and cannot
+    // spend, which is the distinction the Account page exists to make.
+    cash: 3_180.45,
+    buyingPower: 2_940.45,
+    optionsBuyingPower: 2_940.45,
+    settled: 2_940.45,
+    unsettled: 240.0,
   },
 }
 
@@ -2015,53 +2161,219 @@ export const ACCOUNT_LABEL: Record<AccountMode, string> = {
 // Risk limits + audit log (Settings page)
 // ---------------------------------------------------------------------- //
 
+/** One of the five ceilings in CLAUDE.md rule 4 / PRD.md §4.
+ *
+ * `min` and `max` are the editable range, not the enforced one — the engine
+ * enforces (rule 4) and this range only stops the *field* from accepting a
+ * value no ceiling could sensibly take. They are per-limit rather than one
+ * shared 0–100 because `max_concurrent_positions` is a count and the rest
+ * are percentages, and a count of 100 concurrent option positions on this
+ * account is not a limit, it is the absence of one. */
+/** The five keys, as a union rather than a bare string.
+ *
+ * Both order tickets look a ceiling up by key. A typo in that lookup returns
+ * "no limit configured", which is indistinguishable from a real absence at
+ * runtime — so it is worth making it a compile error instead. */
+export type RiskLimitKey =
+  | 'max_risk_per_trade_pct'
+  | 'max_daily_loss_pct'
+  | 'max_concurrent_positions'
+  | 'max_exposure_per_underlying'
+  | 'max_net_directional_pct'
+
 export interface RiskLimit {
-  key: string
+  key: RiskLimitKey
   label: string
   value: number
   unit: '%' | 'count'
+  min: number
+  max: number
+  /** What this ceiling actually constrains, in one line. The Settings page
+   * renders it beside the field: "25%" tells you nothing about whether it
+   * is measured against equity or against the position. */
+  help: string
 }
 
 export const RISK_LIMITS: RiskLimit[] = [
-  { key: 'max_risk_per_trade_pct', label: 'Max risk per trade', value: 7, unit: '%' },
-  { key: 'max_daily_loss_pct', label: 'Max daily loss', value: 20, unit: '%' },
-  { key: 'max_concurrent_positions', label: 'Max concurrent positions', value: 8, unit: 'count' },
-  { key: 'max_exposure_per_underlying', label: 'Max exposure per underlying', value: 25, unit: '%' },
-  { key: 'max_net_directional_pct', label: 'Max net directional exposure', value: 40, unit: '%' },
+  {
+    key: 'max_risk_per_trade_pct',
+    label: 'Max risk per trade',
+    value: 7,
+    unit: '%',
+    min: 1,
+    max: 25,
+    help: 'Ceiling on what one position may lose, as a share of account equity.',
+  },
+  {
+    key: 'max_daily_loss_pct',
+    label: 'Max daily loss',
+    value: 20,
+    unit: '%',
+    min: 1,
+    max: 50,
+    help: 'Realized + unrealized loss in one session that triggers an automatic halt.',
+  },
+  {
+    key: 'max_concurrent_positions',
+    label: 'Max concurrent positions',
+    value: 8,
+    unit: 'count',
+    min: 1,
+    max: 20,
+    help: 'How many positions may be open at once, across every strategy.',
+  },
+  {
+    key: 'max_exposure_per_underlying',
+    label: 'Max exposure per underlying',
+    value: 25,
+    unit: '%',
+    min: 5,
+    max: 100,
+    help: 'Ceiling on combined risk across every position sharing one underlying.',
+  },
+  {
+    key: 'max_net_directional_pct',
+    label: 'Max net directional exposure',
+    value: 40,
+    unit: '%',
+    min: 5,
+    max: 100,
+    help: 'Ceiling on net long-minus-short delta exposure, as a share of equity.',
+  },
 ]
+
+/** Which kind of setting an audit row describes.
+ *
+ * PRD.md §4 asks for an audit log on the five risk limits. Feed and
+ * notification changes are in the same log rather than in logs of their
+ * own, because all three answer the same question at 3pm on a bad day —
+ * "did someone change something first?" — and three separate logs is three
+ * places to look.
+ *
+ * Feed changes belong here specifically: switching historical equity bars
+ * from SIP to IEX silently reinterprets every `min_avg_volume` in every
+ * strategy YAML, since IEX is ~2.5% of US volume (CLAUDE.md). Nothing about
+ * that is visible in the strategy document afterwards. */
+export type AuditCategory = 'risk' | 'feed' | 'notification'
 
 export interface AuditLogEntry {
   id: string
   time: string
+  category: AuditCategory
+  /** The stored field key — `max_risk_per_trade_pct`, not "Max risk per
+   * trade". Resolved to a label for display by `auditFieldLabel` in
+   * settings.ts, so the log stays a record of what changed rather than of
+   * how it was worded on the day. */
   field: string
   previousValue: string
   newValue: string
 }
 
 export const AUDIT_LOG: AuditLogEntry[] = [
-  { id: 'audit-1', time: '2026-07-15T14:00:00Z', field: 'max_risk_per_trade_pct', previousValue: '5', newValue: '7' },
-  { id: 'audit-2', time: '2026-06-02T09:30:00Z', field: 'max_concurrent_positions', previousValue: '6', newValue: '8' },
+  { id: 'audit-1', time: '2026-07-15T14:00:00Z', category: 'risk', field: 'max_risk_per_trade_pct', previousValue: '5', newValue: '7' },
+  { id: 'audit-2', time: '2026-06-02T09:30:00Z', category: 'risk', field: 'max_concurrent_positions', previousValue: '6', newValue: '8' },
+  { id: 'audit-3', time: '2026-05-18T11:05:00Z', category: 'feed', field: 'stockHistorical', previousValue: 'iex', newValue: 'sip' },
 ]
 
 // ---------------------------------------------------------------------- //
 // Notifications + data sources + sentiment accuracy (Settings page)
 // ---------------------------------------------------------------------- //
 
+/** The eight routable events of PRD.md §10.
+ *
+ * A key, not the display string. The routing matrix, the severity map and
+ * the emitted notifications all have to agree about which event this is,
+ * and agreeing on `'engine_error'` survives someone rewording the label —
+ * which the table in PRD.md §10 has already done once, curly apostrophe
+ * included. */
+export type NotificationEvent =
+  | 'order_filled'
+  | 'order_rejected'
+  | 'stop_loss_hit'
+  | 'daily_loss_halt'
+  | 'engine_error'
+  | 'price_alert'
+  | 'recommendations_ready'
+  | 'strategy_promotion'
+
+export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
+  order_filled: 'Order filled',
+  order_rejected: 'Order rejected',
+  stop_loss_hit: 'Stop loss hit',
+  daily_loss_halt: 'Daily loss halt',
+  engine_error: 'Engine error / dead-man’s switch',
+  price_alert: 'Price alert on a recommended trade',
+  recommendations_ready: 'New recommendations ready',
+  strategy_promotion: 'Strategy promotion eligible',
+}
+
+/** Routing per channel.
+ *
+ * These are **defaults**, not invariants. PRD.md §10's table describes the
+ * shipped state; Settings may change any cell, including a bell one. That
+ * is a deliberate decision — see the critical-event confirm in
+ * `isCriticalEvent` (settings.ts), which is what stops a rule-9 dead-man's
+ * switch alert from being routed silently to nowhere. */
 export interface NotificationRoute {
-  event: string
+  event: NotificationEvent
   bell: boolean
   discord: boolean
 }
 
 export const NOTIFICATION_ROUTES: NotificationRoute[] = [
-  { event: 'Order filled', bell: true, discord: true },
-  { event: 'Order rejected', bell: true, discord: true },
-  { event: 'Stop loss hit', bell: true, discord: true },
-  { event: 'Daily loss halt', bell: true, discord: true },
-  { event: 'Engine error / dead-man’s switch', bell: true, discord: true },
-  { event: 'Price alert on a recommended trade', bell: true, discord: true },
-  { event: 'New recommendations ready', bell: true, discord: false },
-  { event: 'Strategy promotion eligible', bell: true, discord: false },
+  { event: 'order_filled', bell: true, discord: true },
+  { event: 'order_rejected', bell: true, discord: true },
+  { event: 'stop_loss_hit', bell: true, discord: true },
+  { event: 'daily_loss_halt', bell: true, discord: true },
+  { event: 'engine_error', bell: true, discord: true },
+  { event: 'price_alert', bell: true, discord: true },
+  { event: 'recommendations_ready', bell: true, discord: false },
+  { event: 'strategy_promotion', bell: true, discord: false },
+]
+
+/** One delivered bell notification.
+ *
+ * `event` carries the type and the title comes off
+ * `NOTIFICATION_EVENT_LABEL`, so a notification never stores its own
+ * heading — two copies of "Order filled" is two things to reword and one to
+ * forget.
+ *
+ * `account` is the book the event happened in, or **null** for an event
+ * that belongs to no book: an engine error is not paper's or cash's, and
+ * hiding it because the other account is selected would hide the one class
+ * of event you most need to see. Everything else is account-scoped for the
+ * same reason positions are — a paper fill announcing itself while Cash is
+ * live misreports which money moved. */
+export interface Notification {
+  id: string
+  time: string
+  event: NotificationEvent
+  /** The specifics: which contract, what price, which rule rejected it.
+   * The event label says what kind of thing happened; this says what
+   * happened. */
+  detail: string
+  read: boolean
+  account: AccountMode | null
+}
+
+/** Seeded bell feed — one of every event type in PRD.md §10, so every
+ * severity and both read states are reachable on screen. `store.tick()`
+ * appends to this live as fills and stops actually occur, so the panel is
+ * not merely a fixture being displayed.
+ *
+ * Newest first, matching the news feed and the activity ledger. */
+export const NOTIFICATIONS: Notification[] = [
+  { id: 'notif-1', time: '2026-08-07T14:42:00Z', event: 'order_rejected', detail: 'NVDA 220C ×4 rejected — max risk per trade (7%) would be exceeded at 9.2%.', read: false, account: 'paper' },
+  { id: 'notif-2', time: '2026-08-07T14:31:00Z', event: 'stop_loss_hit', detail: 'NVDA260821C00220000 ×2 closed at $6.10 — stop loss. −$412.00.', read: false, account: 'paper' },
+  { id: 'notif-3', time: '2026-08-07T14:04:00Z', event: 'order_filled', detail: 'AAPL260821C00195000 ×2 bought to open at $4.10.', read: false, account: 'paper' },
+  { id: 'notif-4', time: '2026-08-07T13:58:00Z', event: 'engine_error', detail: 'Alpaca stream disconnected for 94s — engine halted itself and will not auto-resume.', read: true, account: null },
+  { id: 'notif-5', time: '2026-08-07T13:30:00Z', event: 'price_alert', detail: 'MSFT is within 1% of the entry on a recommended debit spread.', read: true, account: 'paper' },
+  { id: 'notif-6', time: '2026-08-07T12:15:00Z', event: 'recommendations_ready', detail: '6 candidates cleared the scanner for today’s session.', read: true, account: null },
+  { id: 'notif-7', time: '2026-08-06T20:05:00Z', event: 'strategy_promotion', detail: 'Momentum Call Debit Spread has 40 paper trades at a 68% win rate — eligible for promotion.', read: true, account: null },
+  // Unread, and in the *cash* book on purpose: without it the badge is
+  // unreachable in one of the two accounts, and "the bell shows a count"
+  // would be a state only ever seen in Paper.
+  { id: 'notif-8', time: '2026-08-06T18:40:00Z', event: 'daily_loss_halt', detail: 'Session loss reached 20% of equity — new entries halted. Managed exits still running.', read: false, account: 'cash' },
 ]
 
 export interface DataSourceStatus {
@@ -2077,6 +2389,73 @@ export const DATA_SOURCES: DataSourceStatus[] = [
   { name: 'StockTwits (social)', status: 'degraded', detail: 'Rate limited — retrying' },
 ]
 
+// ---------------------------------------------------------------------- //
+// Feed selection + plan (Settings page, CLAUDE.md "Alpaca specifics")
+// ---------------------------------------------------------------------- //
+
+/** Which Alpaca data plan the account is on.
+ *
+ * This is a *fact* about the account, not a preference — you cannot select
+ * your way onto OPRA. It is here because it gates which feed values are
+ * legal, and because the two numbers it determines (streamed symbols,
+ * requests per minute) are the reason this app has a 400ms stream scoped to
+ * open positions *and* a separate 2s poll across everything else. */
+export type DataPlan = 'basic' | 'algo_trader_plus'
+
+export interface DataPlanCaps {
+  label: string
+  monthlyUsd: number
+  /** Websocket symbol cap, or null for unlimited. Thirty goes fast when
+   * every option contract is its own symbol (CLAUDE.md). */
+  streamSymbols: number | null
+  reqPerMin: number
+}
+
+export const DATA_PLANS: Record<DataPlan, DataPlanCaps> = {
+  basic: { label: 'Basic (free)', monthlyUsd: 0, streamSymbols: 30, reqPerMin: 200 },
+  algo_trader_plus: { label: 'Algo Trader Plus', monthlyUsd: 99, streamSymbols: null, reqPerMin: 10_000 },
+}
+
+export const CURRENT_PLAN: DataPlan = 'basic'
+
+export type FeedKey = 'options' | 'stockHistorical' | 'stockRealtime'
+
+/** A feed setting, mirroring one env var read only inside
+ * `data/providers/alpaca.py`. Feed names are configuration and never
+ * literals (CLAUDE.md), which is exactly why they are selectable here:
+ * upgrading the plan sets all three and changes nothing else in the code. */
+export interface DataFeed {
+  key: FeedKey
+  envVar: string
+  label: string
+  value: string
+  help: string
+}
+
+export const DATA_FEEDS: DataFeed[] = [
+  {
+    key: 'options',
+    envVar: 'ALPACA_OPTIONS_FEED',
+    label: 'Options quotes',
+    value: 'indicative',
+    help: 'Indicative is a 15-minute-delayed derivative of OPRA, not OPRA itself.',
+  },
+  {
+    key: 'stockHistorical',
+    envVar: 'ALPACA_STOCK_FEED_HISTORICAL',
+    label: 'Equity bars (historical)',
+    value: 'sip',
+    help: 'SIP is 100% of US volume and is free for anything older than 15 minutes.',
+  },
+  {
+    key: 'stockRealtime',
+    envVar: 'ALPACA_STOCK_FEED_REALTIME',
+    label: 'Equity quotes (real-time)',
+    value: 'iex',
+    help: 'Real-time SIP requires the paid plan; IEX is ~2.5% of US volume.',
+  },
+]
+
 export interface SentimentAccuracy {
   source: string
   tier: string
@@ -2084,9 +2463,52 @@ export interface SentimentAccuracy {
   accuracy1d: number
 }
 
+/** Per-source accuracy against realized forward return (PRD.md §9).
+ *
+ * StockTwits sits below the 52% floor at 1h and above it at 1d, on purpose:
+ * it makes the demotion state reachable on screen, and it pins which
+ * reading of "accuracy falls below 52%" this app takes — *either* window
+ * failing demotes the source, because a signal that is coin-flip at one
+ * hour is not one to hand the scanner on the strength of its one-day
+ * number. It is also already `degraded` in DATA_SOURCES, so the two panels
+ * tell the same story about the same provider. */
 export const SENTIMENT_ACCURACY: SentimentAccuracy[] = [
   { source: 'Finnhub', tier: 'Provider-supplied', accuracy1h: 57, accuracy1d: 61 },
   { source: 'Alpaca', tier: 'Provider-supplied', accuracy1h: 55, accuracy1d: 58 },
   { source: 'Rules', tier: 'Deterministic patterns', accuracy1h: 63, accuracy1d: 66 },
   { source: 'LLM', tier: 'Tier 3', accuracy1h: 60, accuracy1d: 64 },
+  { source: 'StockTwits', tier: 'Provider-supplied', accuracy1h: 49, accuracy1d: 53 },
+]
+
+// ---------------------------------------------------------------------- //
+// API key presence (Settings page, CLAUDE.md rule 6)
+// ---------------------------------------------------------------------- //
+
+/** Presence of one credential, and nothing else about it.
+ *
+ * There is no `value`, no `masked`, and no last-four, deliberately: rule 6
+ * says the UI never renders a key, and `PK••••4F2A` renders four characters
+ * of one. Presence is the entire answer the page is allowed to give, and it
+ * happens to be the only one worth having — you cannot fix a wrong key by
+ * squinting at its suffix.
+ *
+ * `optional` is what keeps the page from crying wolf: the live keys are
+ * *meant* to be absent until Phase 7, so their absence renders as a plain
+ * fact rather than a warning. */
+export interface ApiKeyPresence {
+  envVar: string
+  purpose: string
+  present: boolean
+  optional: boolean
+}
+
+export const API_KEYS: ApiKeyPresence[] = [
+  { envVar: 'ALPACA_PAPER_API_KEY', purpose: 'Paper execution + market data', present: true, optional: false },
+  { envVar: 'ALPACA_PAPER_SECRET_KEY', purpose: 'Paper execution + market data', present: true, optional: false },
+  { envVar: 'ALPACA_LIVE_API_KEY', purpose: 'Cash execution — blank until Phase 7', present: false, optional: true },
+  { envVar: 'ALPACA_LIVE_SECRET_KEY', purpose: 'Cash execution — blank until Phase 7', present: false, optional: true },
+  { envVar: 'ANTHROPIC_API_KEY', purpose: 'LLM enrichment + Research chat', present: true, optional: false },
+  { envVar: 'FINNHUB_API_KEY', purpose: 'News, sentiment, earnings calendar', present: true, optional: false },
+  { envVar: 'FRED_API_KEY', purpose: 'Macro series', present: true, optional: false },
+  { envVar: 'DISCORD_WEBHOOK_URL', purpose: 'Discord notification channel', present: true, optional: true },
 ]

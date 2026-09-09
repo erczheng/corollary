@@ -1,12 +1,20 @@
 import { create } from 'zustand'
 import {
   ACCOUNT_SNAPSHOTS,
+  API_KEYS,
+  AUDIT_LOG,
   CHAIN_SPEC_BY_SYMBOL,
   CONTRACT_MULTIPLIER,
+  CURRENT_PLAN,
+  DATA_FEEDS,
   MARKET_QUOTES,
   NEWS_INCOMING,
   NEWS_ITEMS,
+  NOTIFICATIONS,
+  NOTIFICATION_ROUTES,
   OPTION_CHAIN,
+  RISK_LIMITS,
+  STRATEGIES,
   chainDte,
   halfSpread,
   moneyness,
@@ -16,14 +24,37 @@ import {
   type UnderlyingQuote,
   type AccountMode,
   type ActivityItem,
+  type ApiKeyPresence,
+  type ChatMessage,
   type AttachedExit,
+  type AuditLogEntry,
+  type DataFeed,
+  type DataPlan,
+  type FeedKey,
   type ManagedExit,
   type NewsItem,
+  type Notification,
+  type NotificationEvent,
+  type NotificationRoute,
   type OptionContract,
   type Position,
   type PricePoint,
+  type RiskLimit,
+  type RiskLimitKey,
+  type Strategy,
+  type StrategyProposal,
+  type StrategyStatus,
   type WorkingOrder,
 } from './mockData'
+import {
+  auditEntry,
+  feedOptionsFor,
+  notificationAuditField,
+  validateRiskLimit,
+  type NotificationChannel,
+} from './settings'
+import { buildNotification, routedTo } from './notifications'
+import { canTransition, chatReply, proposalToStrategy, type Dispositions } from './research'
 import {
   estimate,
   estimateOpen,
@@ -34,7 +65,7 @@ import {
   type OpenDraft,
   type OrderDraft,
 } from './orders'
-import { formatExpiry } from './format'
+import { formatExpiry, formatUsd } from './format'
 
 export type Theme = 'light' | 'dark'
 export type ExecutionMode = 'manual' | 'auto'
@@ -199,6 +230,146 @@ interface UIState {
    * `elapsedMs` is how much time the tick covers, which scales how far
    * prices move. Frequency and volatility stay independent that way. */
   tick: (elapsedMs?: number) => void
+
+  // -------------------------------------------------------------------- //
+  // Settings (PRD.md §8.7)
+  // -------------------------------------------------------------------- //
+
+  /** The five ceilings of CLAUDE.md rule 4, editable from Settings.
+   *
+   * Here rather than read from the fixture because **both order tickets
+   * quote this number**, and a ceiling that Settings can move has to be a
+   * single value they both read. `ChainOrderTicket` previously captured it
+   * in a module-level const, which meant an edited limit would never reach
+   * it for the life of the tab.
+   *
+   * This is still display state. The engine enforces (rule 4) and never
+   * trusts a limit that arrived from the client — Phase 2 makes editing
+   * these a server call, and this becomes the cache of what it returned. */
+  riskLimits: RiskLimit[]
+  /** Every configuration change, newest first, with its previous value.
+   *
+   * PRD.md §4 requires this for the risk limits. Feed and routing changes
+   * are in the same log because they answer the same question on a bad day:
+   * did something change before this started happening? */
+  auditLog: AuditLogEntry[]
+  notificationRoutes: NotificationRoute[]
+  dataFeeds: DataFeed[]
+  /** Which credentials the environment supplied — presence only, never a
+   * value (CLAUDE.md rule 6).
+   *
+   * In the store rather than read from the fixture because presence has
+   * consequences elsewhere on the page: routing events to Discord with no
+   * webhook configured delivers nothing, and Settings says so. Held here so
+   * that warning is reachable and testable rather than a branch that cannot
+   * render until Phase 2 supplies a real answer. */
+  apiKeys: ApiKeyPresence[]
+  /** Which Alpaca plan is in force. A fact about the account rather than a
+   * preference — it gates which feed values are legal. */
+  dataPlan: DataPlan
+  /** The bell feed. Not account-keyed like `activity` is: each notification
+   * carries its own `account`, because an engine fault belongs to no book
+   * and has to appear in both. */
+  notifications: Notification[]
+  /** Edits one ceiling and records it.
+   *
+   * Refuses a value that fails `validateRiskLimit`, and refuses a no-op —
+   * an audit log full of `7 → 7` is a log nobody will read on the day it
+   * matters. */
+  setRiskLimit: (key: RiskLimitKey, value: number) => void
+  /** Toggles one cell of the routing matrix. Every cell is editable,
+   * including a bell one: PRD.md §10's table is the shipped default, not an
+   * invariant. The confirm that guards silencing a critical event lives in
+   * the Settings UI, since it is a question for a person. */
+  setNotificationRoute: (
+    event: NotificationEvent,
+    channel: NotificationChannel,
+    enabled: boolean,
+  ) => void
+  /** Changes one feed. Refuses a value the current plan cannot serve —
+   * requesting `opra` on Basic returns an auth error rather than data, so
+   * storing it would break the data layer to no purpose. */
+  setDataFeed: (key: FeedKey, value: string) => void
+  /** Marks the notifications **visible in the current book** as read.
+   *
+   * Scoped on purpose: opening the bell in Paper must not clear an unread
+   * Cash notification you have never seen. Account-less events are cleared,
+   * since those were on screen. */
+  markNotificationsRead: () => void
+  dismissNotification: (id: string) => void
+
+  // -------------------------------------------------------------------- //
+  // Research (PRD.md §8.5)
+  // -------------------------------------------------------------------- //
+
+  /** The strategy list, mutable from Research.
+   *
+   * In the store rather than read from the fixture because Research renames,
+   * promotes, retires and deletes them — and because **three other places
+   * read a strategy** (the Dashboard's dropdown and win-rate card, and each
+   * position row's "managed by" line). A rename that reached Research and not
+   * the position rows would leave two names for one strategy on screen. */
+  strategies: Strategy[]
+  /** The Research chat transcript. Empty on a cold start, which is the
+   * designed empty state rather than an accident. */
+  chat: ChatMessage[]
+  /** What has been done with each recommendation, keyed by id.
+   *
+   * Here rather than in Dashboard's local state, which is where dismissal
+   * used to live. Both the Dashboard panel and Research's full table act on
+   * the same candidate set, and two components each holding their own idea of
+   * what was dismissed would disagree the moment you dismissed on one and
+   * looked at the other. */
+  dispositions: Dispositions
+  /** Marks a recommendation executed.
+   *
+   * Phase 1 records the intent and nothing else — §11 puts manual execution
+   * from Recommended Trades in **Phase 6**, behind the risk manager. Creating
+   * an order here would be claiming something reached a broker. */
+  executeRecommendation: (id: string) => void
+  /** Stages a recommendation for the engine to place on its next run.
+   *
+   * Distinct from executing, and the distinction is the whole reason both
+   * buttons exist: executed means an order was placed, queued means one will
+   * be. Collapsing them would have the page assert an order exists that
+   * nothing has sent. */
+  queueRecommendation: (id: string) => void
+  dismissRecommendation: (id: string) => void
+  /** Restores dismissed rows — the scanner rebuilds its candidate set and
+   * does not remember what you waved off (§6.5).
+   *
+   * Leaves executed and queued rows alone. Those are not dismissals; you
+   * acted on them, and a refresh that reset them would discard intent. */
+  refreshRecommendations: () => void
+  /** Appends the message and its scripted reply.
+   *
+   * The reply comes from `chatReply`, which is a lookup table, not a model.
+   * Phase 4 replaces this call and the transcript shape does not change. */
+  sendChatMessage: (text: string) => void
+  /** Accepts a proposed strategy as a **draft**.
+   *
+   * Never anything further along: §5.3's promotion gate is what moves a
+   * strategy past draft, and the LLM proposing one buys no exemption from it. */
+  acceptProposal: (proposal: StrategyProposal) => void
+  renameStrategy: (id: string, name: string) => void
+  /** Moves a strategy along §5.2's lifecycle.
+   *
+   * Refuses a transition `canTransition` disallows, so nothing skips a stage —
+   * the stages are the evidence, and a draft promoted straight to active has
+   * no record for the gate to measure.
+   *
+   * Promoting one to `active` demotes the incumbent to `paper`, because §5.2
+   * allows exactly one active strategy in v1. That demotion is deliberately
+   * *not* an offered transition — it is a consequence the store applies, and
+   * `paper` is where the incumbent can resume from without losing its record. */
+  setStrategyStatus: (id: string, status: StrategyStatus) => void
+  /** Deletes a strategy.
+   *
+   * Refuses to delete the **active** one: retire it first. Deleting the
+   * running strategy would leave the engine with nothing managing the
+   * positions it opened, and the Dashboard reading a strategy that no longer
+   * exists. */
+  deleteStrategy: (id: string) => void
 }
 
 /** A long is sold to close, a short is bought to close — and each crosses
@@ -225,6 +396,38 @@ function closeExecution(position: Position, at: string, idPrefix: string): Activ
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** One bell entry, or null when the routing matrix says this event does not
+ * go to the bell.
+ *
+ * **The gate is applied here, at emission, and nowhere else.** Unchecking
+ * "Order filled" in Settings stops future fills from arriving; it does not
+ * retroactively erase the fills already in the panel. Those happened, and the
+ * record of what happened is not a preference — filtering at read time would
+ * let a settings change rewrite history. */
+function bellEntry(
+  routes: NotificationRoute[],
+  event: NotificationEvent,
+  key: string,
+  detail: string,
+  account: AccountMode,
+  at: string,
+): Notification | null {
+  return routedTo(routes, event, 'bell')
+    ? buildNotification(event, key, detail, account, at)
+    : null
+}
+
+/** What a closed position reads as in the bell.
+ *
+ * P&L runs through `formatUsd` with `signed`, so a loss carries an explicit
+ * minus rather than relying on a colour the panel does not apply to this
+ * string. DESIGN.md requires the sign textually on every P&L value — a
+ * notification read in a screenshot or in grayscale has to still say which
+ * way the trade went. */
+function exitDetail(position: Position, price: number, reason: string): string {
+  return `${position.symbol} ${position.contract} ×${position.quantity} closed at ${formatUsd(price)} — ${reason}. ${formatUsd(position.pnl, { signed: true })}.`
+}
 
 /** The exits from PRD.md §5.1's example strategy. Phase 2 reads these off
  * the strategy document itself; Phase 1 has one shape for all of them. */
@@ -647,6 +850,16 @@ export const useUIStore = create<UIState>((set) => ({
       const filled: ActivityItem[] = []
       const closedIds = new Set<string>()
       const consumedOrderIds = new Set<string>()
+      /** Bell entries this tick produced.
+       *
+       * The bell reports what happened **while you were not looking** — the
+       * mock broker acting on its own. Deliberately nothing is emitted for
+       * halt, flatten, or a market order you just submitted: you were on
+       * screen for those, Activity records them, and a notification telling
+       * you about your own click is the kind of noise that gets a bell
+       * ignored. `daily_loss_halt` and `engine_error` come from the engine in
+       * Phase 2 and exist here only as seeds. */
+      const notified: Notification[] = []
 
       // The stocks behind the positions this account holds — one symbol
       // per position, which is what keeps the subscription inside the
@@ -699,6 +912,21 @@ export const useUIStore = create<UIState>((set) => ({
             status: 'filled',
           })
           closedIds.add(marked.id)
+
+          // A take-profit is a fill; a stop is a stop. They are separate
+          // events in PRD.md §10 and separately routable, so the same exit
+          // firing for two different reasons must not collapse into one
+          // notification type — and a stop is a `warning`, never an `error`.
+          const takeProfit = trigger === 'take_profit'
+          const entry = bellEntry(
+            s.notificationRoutes,
+            takeProfit ? 'order_filled' : 'stop_loss_hit',
+            marked.id,
+            exitDetail(marked, price, takeProfit ? 'take profit' : 'stop loss'),
+            mode,
+            at,
+          )
+          if (entry) notified.push(entry)
           return marked
         }
 
@@ -720,6 +948,17 @@ export const useUIStore = create<UIState>((set) => ({
 
         consumedOrderIds.add(order.id)
         if (order.side === 'STC' || order.side === 'BTC') closedIds.add(position.id)
+
+        const fillPrice = order.limitPrice ?? order.stopPrice ?? position.last
+        const entry = bellEntry(
+          s.notificationRoutes,
+          'order_filled',
+          order.id,
+          `${order.contract} ×${order.quantity} ${order.side} filled at ${formatUsd(fillPrice)}.`,
+          mode,
+          at,
+        )
+        if (entry) notified.push(entry)
         return false
       })
 
@@ -756,6 +995,11 @@ export const useUIStore = create<UIState>((set) => ({
         activity: { ...s.activity, [mode]: [...filled, ...activity] },
         underlyings,
         lastTickAt: at,
+        // Newest first, matching the feed's stored order. Left untouched when
+        // the routing matrix suppressed everything this tick, so an
+        // all-unchecked bell does not churn the array on every tick.
+        notifications:
+          notified.length > 0 ? [...notified, ...s.notifications] : s.notifications,
       }
     }),
   pollMarkets: (elapsedMs = DEFAULT_TICK_MS) =>
@@ -1000,4 +1244,168 @@ export const useUIStore = create<UIState>((set) => ({
       // The strategy's rules and a manual exit cannot both run.
       attachedExit: null,
     }))),
+
+  // -------------------------------------------------------------------- //
+  // Settings (PRD.md §8.7)
+  // -------------------------------------------------------------------- //
+
+  riskLimits: RISK_LIMITS,
+  auditLog: AUDIT_LOG,
+  notificationRoutes: NOTIFICATION_ROUTES,
+  dataFeeds: DATA_FEEDS,
+  dataPlan: CURRENT_PLAN,
+  apiKeys: API_KEYS,
+  notifications: NOTIFICATIONS,
+  setRiskLimit: (key, value) =>
+    set((s) => {
+      const limit = s.riskLimits.find((l) => l.key === key)
+      if (!limit) return s
+      // A no-op writes no audit row. The log exists to be read on the day
+      // something went wrong, and padding it with unchanged values is how it
+      // becomes unreadable.
+      if (limit.value === value) return s
+      // Checked here as well as in the field. Rule 4 gives enforcement to
+      // the engine, but there is no reason for the client to hold a value it
+      // already knows is nonsense.
+      if (validateRiskLimit(limit, value) !== null) return s
+
+      return {
+        riskLimits: s.riskLimits.map((l) => (l.key === key ? { ...l, value } : l)),
+        auditLog: [
+          auditEntry('risk', key, String(limit.value), String(value)),
+          ...s.auditLog,
+        ],
+      }
+    }),
+  setNotificationRoute: (event, channel, enabled) =>
+    set((s) => {
+      const route = s.notificationRoutes.find((r) => r.event === event)
+      if (!route || route[channel] === enabled) return s
+
+      return {
+        notificationRoutes: s.notificationRoutes.map((r) =>
+          r.event === event ? { ...r, [channel]: enabled } : r,
+        ),
+        auditLog: [
+          auditEntry(
+            'notification',
+            notificationAuditField(event, channel),
+            route[channel] ? 'on' : 'off',
+            enabled ? 'on' : 'off',
+          ),
+          ...s.auditLog,
+        ],
+      }
+    }),
+  setDataFeed: (key, value) =>
+    set((s) => {
+      const feed = s.dataFeeds.find((f) => f.key === key)
+      if (!feed || feed.value === value) return s
+
+      // Refuses what the plan cannot serve. This is not politeness: CLAUDE.md
+      // notes that requesting `opra` or real-time `sip` on Basic returns an
+      // auth error rather than empty data, so storing it would break every
+      // subsequent request for no gain.
+      const option = feedOptionsFor(key, s.dataPlan).find((o) => o.value === value)
+      if (!option || option.requiresUpgrade) return s
+
+      return {
+        dataFeeds: s.dataFeeds.map((f) => (f.key === key ? { ...f, value } : f)),
+        auditLog: [auditEntry('feed', key, feed.value, value), ...s.auditLog],
+      }
+    }),
+  markNotificationsRead: () =>
+    set((s) => ({
+      notifications: s.notifications.map((n) =>
+        n.account === s.accountMode || n.account === null ? { ...n, read: true } : n,
+      ),
+    })),
+  dismissNotification: (id) =>
+    set((s) => ({ notifications: s.notifications.filter((n) => n.id !== id) })),
+
+  // -------------------------------------------------------------------- //
+  // Research (PRD.md §8.5)
+  // -------------------------------------------------------------------- //
+
+  strategies: STRATEGIES,
+  chat: [],
+  dispositions: {},
+  executeRecommendation: (id) =>
+    set((s) => ({ dispositions: { ...s.dispositions, [id]: 'executed' } })),
+  queueRecommendation: (id) =>
+    set((s) => ({ dispositions: { ...s.dispositions, [id]: 'queued' } })),
+  dismissRecommendation: (id) =>
+    set((s) => ({ dispositions: { ...s.dispositions, [id]: 'dismissed' } })),
+  refreshRecommendations: () =>
+    set((s) => {
+      // Drops dismissals and keeps everything else. Rebuilding the whole map
+      // would also erase what you executed and queued, which are decisions
+      // rather than things you waved off.
+      const kept: Dispositions = {}
+      for (const [id, disposition] of Object.entries(s.dispositions)) {
+        if (disposition !== 'dismissed') kept[id] = disposition
+      }
+      return { dispositions: kept }
+    }),
+  sendChatMessage: (text) =>
+    set((s) => {
+      const trimmed = text.trim()
+      if (trimmed === '') return s
+
+      const at = new Date().toISOString()
+      const reply = chatReply(trimmed)
+
+      return {
+        chat: [
+          ...s.chat,
+          { id: `msg-user-${at}`, role: 'user' as const, text: trimmed, at, proposal: null },
+          {
+            id: `msg-bot-${at}`,
+            role: 'assistant' as const,
+            text: reply.text,
+            at,
+            proposal: reply.proposal,
+          },
+        ],
+      }
+    }),
+  acceptProposal: (proposal) =>
+    set((s) => ({ strategies: [...s.strategies, proposalToStrategy(proposal, s.strategies)] })),
+  renameStrategy: (id, name) =>
+    set((s) => {
+      const trimmed = name.trim()
+      if (trimmed === '') return s
+      return {
+        strategies: s.strategies.map((st) => (st.id === id ? { ...st, name: trimmed } : st)),
+      }
+    }),
+  setStrategyStatus: (id, status) =>
+    set((s) => {
+      const target = s.strategies.find((st) => st.id === id)
+      if (!target || !canTransition(target.status, status)) return s
+
+      return {
+        strategies: s.strategies.map((st) => {
+          if (st.id === id) return { ...st, status }
+          // §5.2 permits one active strategy. The incumbent steps back to
+          // paper rather than being retired — it keeps its record and can be
+          // promoted again.
+          if (status === 'active' && st.status === 'active') return { ...st, status: 'paper' }
+          return st
+        }),
+      }
+    }),
+  deleteStrategy: (id) =>
+    set((s) => {
+      const target = s.strategies.find((st) => st.id === id)
+      if (!target || target.status === 'active') return s
+
+      const strategies = s.strategies.filter((st) => st.id !== id)
+      return {
+        strategies,
+        // The dropdown cannot keep pointing at something that is gone.
+        activeStrategyId:
+          s.activeStrategyId === id ? (strategies[0]?.id ?? '') : s.activeStrategyId,
+      }
+    }),
 }))

@@ -4,12 +4,12 @@ import { useUIStore } from '../lib/store'
 import { contractLabel } from '../lib/store'
 import {
   ORDER_TYPE_LABEL,
-  RISK_LIMITS,
   TIME_IN_FORCE_LABEL,
   type OptionContract,
   type OrderType,
   type TimeInForce,
 } from '../lib/mockData'
+import { riskLimitFor } from '../lib/settings'
 import {
   OPEN_SIDES,
   ORDER_SIDE_LABEL,
@@ -53,8 +53,6 @@ function toNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-const MAX_RISK_PCT = RISK_LIMITS.find((l) => l.key === 'max_risk_per_trade_pct')?.value ?? 7
-
 interface ChainOrderTicketProps {
   contract: OptionContract
   /** Account equity, for the advisory risk estimate. Display only — the
@@ -78,6 +76,13 @@ interface ChainOrderTicketProps {
 export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketProps) {
   const submitOpenOrder = useUIStore((s) => s.submitOpenOrder)
   const isHalted = useUIStore((s) => s.isHalted)
+  /* Inside the component, and from the store.
+     This was a module-level const reading the fixture, which is worse than
+     stale: a module const is evaluated once at import, so a ceiling edited
+     in Settings would never reach this ticket again for the life of the tab,
+     across any number of remounts. */
+  const riskLimits = useUIStore((s) => s.riskLimits)
+  const maxRiskPct = riskLimitFor(riskLimits, 'max_risk_per_trade_pct')
   // From the store, not the fixture: the poll moves it, and a frozen spot
   // beside a moving chain would put the sentence and the row in
   // disagreement about the same stock.
@@ -124,7 +129,9 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
   const name = `${contract.symbol} ${contractLabel(contract)}`
   const crossing = openCrossingPrice(contract, side)
 
-  const overLimit = risk.kind === 'defined' && risk.pct > MAX_RISK_PCT
+  // No configured ceiling means nothing to be over. Warning against a
+  // fabricated default would be claiming a limit that was never set.
+  const overLimit = risk.kind === 'defined' && maxRiskPct !== null && risk.pct > maxRiskPct
   const money = contractMoneyness(spot ?? contract.strike, contract.strike, contract.type)
 
   function submit() {
@@ -288,7 +295,7 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
       {overLimit && (
         <p className="mt-2 max-w-prose text-caption text-error">
           {formatPct(risk.kind === 'defined' ? risk.pct : 0)} of equity is over the{' '}
-          {MAX_RISK_PCT}% per-trade ceiling. The engine enforces this limit and will reject the
+          {maxRiskPct}% per-trade ceiling. The engine enforces this limit and will reject the
           order; this warning is advisory only.
         </p>
       )}
