@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatDateET, formatDateOnly, formatExpiry } from './format'
+import { formatDateET, formatDateOnly, formatExpiry, formatSignedNumber } from './format'
 
 /** A bare 'YYYY-MM-DD' is a calendar date, not an instant. It parses as UTC
  * midnight, and ET is behind UTC, so rendering one in ET shows the previous
@@ -30,5 +30,30 @@ describe('formatDateOnly', () => {
   it('agrees with formatExpiry, which drops only the year', () => {
     expect(formatDateOnly('2026-11-21')).toBe('Nov 21, 2026')
     expect(formatExpiry('2026-11-21')).toBe('Nov 21')
+  })
+})
+
+
+describe('formatSignedNumber', () => {
+  it('signs a rise and a fall, with no currency or percent', () => {
+    expect(formatSignedNumber(0.45)).toBe('+0.45')
+    expect(formatSignedNumber(-0.45)).toBe('−0.45')
+  })
+
+  /** The same U+2212 the money and percent formatters use, not a hyphen —
+   * otherwise a column of signed values built from two helpers would not
+   * line up. */
+  it('uses the same minus sign as the other formatters', () => {
+    expect(formatSignedNumber(-1).startsWith('−')).toBe(true)
+    expect(formatSignedNumber(-1).startsWith('-')).toBe(false)
+  })
+
+  it('leaves zero unsigned', () => {
+    expect(formatSignedNumber(0)).toBe('0.00')
+  })
+
+  it('takes a digit count', () => {
+    expect(formatSignedNumber(-2.605, 1)).toBe('−2.6')
+    expect(formatSignedNumber(3, 0)).toBe('+3')
   })
 })

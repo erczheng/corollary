@@ -1944,6 +1944,15 @@ export const LLM_ORIGINATION = {
  * `news.ts` when it is built. */
 export const MARKET_PULSE = {
   vix: 16.8,
+  /** Yesterday's close, so the day's change is **derived** on the page
+   * rather than stored beside the level.
+   *
+   * Same reasoning as the sentiment composite: a stored change is a second
+   * number that can disagree with the two it sits between. Above the level,
+   * so the fixture exercises a *falling* VIX — the direction that would be
+   * coloured green by a naive trend line, which is exactly the case worth
+   * having on screen. */
+  vixPreviousClose: 17.25,
   topSector: 'Technology',
 }
 

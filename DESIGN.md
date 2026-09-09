@@ -131,31 +131,31 @@ semanticDark:
 typography:
   display-lg:
     fontFamily: Montserrat
-    fontSize: 48px
+    fontSize: 36px
     fontWeight: '600'
-    lineHeight: 56px
+    lineHeight: 44px
     letterSpacing: -0.02em
   display-lg-mobile:
     fontFamily: Montserrat
-    fontSize: 32px
+    fontSize: 28px
     fontWeight: '600'
-    lineHeight: 40px
+    lineHeight: 36px
     letterSpacing: -0.01em
   headline-md:
     fontFamily: Montserrat
-    fontSize: 32px
-    fontWeight: '500'
-    lineHeight: 40px
-  headline-md-mobile:
-    fontFamily: Montserrat
-    fontSize: 24px
+    fontSize: 26px
     fontWeight: '500'
     lineHeight: 32px
-  title-lg:
+  headline-md-mobile:
     fontFamily: Montserrat
     fontSize: 22px
     fontWeight: '500'
     lineHeight: 28px
+  title-lg:
+    fontFamily: Montserrat
+    fontSize: 18px
+    fontWeight: '500'
+    lineHeight: 24px
   body-lg:
     fontFamily: Montserrat
     fontSize: 18px
@@ -185,15 +185,15 @@ typography:
     fontVariantNumeric: tabular-nums
   data-lg:
     fontFamily: JetBrains Mono
-    fontSize: 20px
+    fontSize: 18px
     fontWeight: '600'
-    lineHeight: 28px
+    lineHeight: 24px
     fontVariantNumeric: tabular-nums
   data-xl:
     fontFamily: JetBrains Mono
-    fontSize: 32px
+    fontSize: 24px
     fontWeight: '600'
-    lineHeight: 40px
+    lineHeight: 32px
     fontVariantNumeric: tabular-nums
 fontStacks:
   display: "'Montserrat Variable', Montserrat, system-ui, sans-serif"
@@ -320,6 +320,7 @@ Note the deliberate split: `bearish` is a muted brick used for *market direction
 - **Numeric data:** JetBrains Mono with `tabular-nums`. **This is required for every price, strike, P&L, quantity, and percentage.** Proportional figures cause columns of numbers to visually wobble, which makes scanning a position table meaningfully slower. Non-negotiable in tables.
 - **Hierarchy:** use `label-md` (Plus Jakarta Sans, 0.05em tracking, uppercase) for eyebrow headers and category tags to create structural breaks inside Montserrat-driven layouts.
 - **Responsive:** `display-lg` and `headline-md` drop to their `-mobile` variants at ≤767px. Every other role holds its size across breakpoints.
+- **The headline roles are deliberately restrained.** `display-lg` 36px, `headline-md` 26px, `title-lg` 18px, `data-xl` 24px — each a step down from the sizes this scale opened with. A trading terminal is read at a desk, in one long session, and a page title set at 48px spends vertical room on a word you already know while pushing the numbers you came for below the fold. Density is the point: the reading roles (`body-*`, `label-md`, `caption`, `data-md`) were **not** reduced with them, because a table you scan for a strike price is the one place smaller text costs you. Section spacing was left alone too — the change is type size, not layout.
 - **Loading:** all three faces are self-hosted via `@fontsource`, not a CDN — the terminal runs on `127.0.0.1` and must render correctly with no internet. Fallback stacks are in the `fontStacks` frontmatter block.
 
 ## Layout & Spacing
