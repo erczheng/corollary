@@ -44,15 +44,10 @@ describe('recommendation dispositions', () => {
     expect(visible).toHaveLength(RECOMMENDATIONS.length - 1)
   })
 
-  /** Queued and executed rows stay on screen. A queued trade the engine has
-   * not placed yet is the one you most need to keep seeing, and an executed
-   * one disappearing would make the list lie about what you just did. */
-  it('keeps queued and executed rows visible', () => {
-    const visible = visibleRecommendations(RECOMMENDATIONS, {
-      'rec-1': 'queued',
-      'rec-2': 'executed',
-    })
-    expect(visible.map((r) => r.id)).toContain('rec-1')
+  /** An executed row disappearing would make the list lie about what you
+   * just did. */
+  it('keeps executed rows visible', () => {
+    const visible = visibleRecommendations(RECOMMENDATIONS, { 'rec-2': 'executed' })
     expect(visible.map((r) => r.id)).toContain('rec-2')
   })
 
@@ -65,10 +60,10 @@ describe('recommendation dispositions', () => {
 
 describe('recommendationCsvRows', () => {
   it('exports every recommendation with its disposition', () => {
-    const rows = recommendationCsvRows(RECOMMENDATIONS, { 'rec-1': 'queued' })
+    const rows = recommendationCsvRows(RECOMMENDATIONS, { 'rec-1': 'executed' })
 
     expect(rows).toHaveLength(RECOMMENDATIONS.length)
-    expect(rows[0].disposition).toBe('queued')
+    expect(rows[0].disposition).toBe('executed')
     expect(rows[1].disposition).toBe('open')
   })
 

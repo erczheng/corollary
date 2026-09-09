@@ -25,11 +25,16 @@ import {
 
 /** What has been done with a recommendation.
  *
- * `queued` is distinct from `executed` and the difference is real: executed
- * means an order was placed, queued means the engine will place it when it
- * next runs. Collapsing them would have the page claim an order exists at the
- * broker when nothing has been sent. */
-export type Disposition = 'open' | 'executed' | 'queued' | 'dismissed'
+ * Two actions, not three. A `queued` disposition used to sit between these —
+ * staged for the engine to place on its next run, distinct from executed
+ * because nothing had reached a broker yet. It was removed deliberately:
+ * every acceptance is now an immediate submission, so there is no state in
+ * which the app has said yes to a candidate but nothing has been sent.
+ *
+ * The consequence to know before adding it back: there is no longer a way to
+ * stage a candidate for the engine. Accepting one in Phase 6 goes straight
+ * through `RiskManager.approve()`. */
+export type Disposition = 'open' | 'executed' | 'dismissed'
 
 export type Dispositions = Record<string, Disposition>
 
@@ -39,9 +44,8 @@ export function dispositionOf(id: string, dispositions: Dispositions): Dispositi
 
 /** Rows to show. Only `dismissed` disappears.
  *
- * Queued and executed rows stay: a queued trade the engine has not placed yet
- * is the one you most need to keep an eye on, and an executed row vanishing
- * would make the list quietly disagree with what you just did. */
+ * Executed rows stay: one vanishing the moment you acted on it would make the
+ * list quietly disagree with what you just did. */
 export function visibleRecommendations(
   all: Recommendation[],
   dispositions: Dispositions,

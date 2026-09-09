@@ -39,7 +39,6 @@ const TD = 'px-3 py-2 align-middle'
 export function Research() {
   const dispositions = useUIStore((s) => s.dispositions)
   const executeRecommendation = useUIStore((s) => s.executeRecommendation)
-  const queueRecommendation = useUIStore((s) => s.queueRecommendation)
   const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
   const refreshRecommendations = useUIStore((s) => s.refreshRecommendations)
   const isHalted = useUIStore((s) => s.isHalted)
@@ -190,7 +189,6 @@ export function Research() {
                             disposition={disposition}
                             halted={engineHalted}
                             onExecute={() => setTradeTarget(r)}
-                            onQueue={() => queueRecommendation(r.id)}
                             onDismiss={() => dismissRecommendation(r.id)}
                           />
                         </div>

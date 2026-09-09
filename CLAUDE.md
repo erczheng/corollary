@@ -331,10 +331,11 @@ expect.** Every item below produced working-looking code that was wrong:
   received. Those happened; the record of them is not a preference.
 - `web/src/lib/research.ts` — recommendation dispositions, the scripted
   chat router, §5.2's lifecycle transitions, and §5.3's promotion gate.
-  Three to keep straight: **`queued` is not `executed`** (one means an
-  order went to the risk manager, the other that the engine will place it
-  later — collapsing them asserts an order exists that nothing sent);
-  `promotionGate` **reports rather than vetoes**, because the PRD says
+  Two to keep straight: a recommendation has **two actions, not three** —
+  `Disposition` is `open | executed | dismissed`, and a `queued` state
+  (staged for the engine, nothing sent) was deliberately removed, so
+  accepting a candidate always means submitting it; `promotionGate`
+  **reports rather than vetoes**, because the PRD says
   anything missing the gate can still be promoted by hand; and
   `chatReply` **must never improvise** — an unmatched question gets a
   reply admitting it is a shell, since a fluent non-answer is the one
@@ -355,7 +356,7 @@ expect.** Every item below produced working-looking code that was wrong:
   different set for a stated reason, not a stale copy. `/design` is
   absent: it proves the token system, it is not a destination.
 - `web/src/components/RecommendationBits.tsx` — the confidence slot,
-  disposition badge, and Execute/Queue/Dismiss actions, shared by the
+  disposition badge, and Execute/Dismiss actions, shared by the
   Dashboard panel and Research's table. Deliberately **atoms, not one
   table with two layouts** the way `ExecutionsTable` is: those two views
   are both tables differing only in columns, whereas these two are
@@ -370,13 +371,12 @@ expect.** Every item below produced working-looking code that was wrong:
   not** — an early `if (!open) return null` above it unmounted the dialog
   in the same tick Flatten asked for it, so the most destructive command
   had no guard at all. `CommandPalette.test.tsx` pins it.
-  It offers **all three** recommendation actions, and gates them the way
-  §8.5 does: Execute and Queue disappear while the engine is halted,
-  Dismiss never does, because waving off a candidate opens nothing. They
-  are *omitted* rather than shown disabled — a command list has no
-  disabled state, and a command that silently does nothing is worse than
-  an absent one. Queue was missing at first, which left the palette
-  offering only the irreversible half of the pair.
+  It gates its recommendation actions the way §8.5 does: Execute
+  disappears while the engine is halted, Dismiss never does, because
+  waving off a candidate opens nothing. Execute is *omitted* rather than
+  shown disabled — a command list has no disabled state, and a command
+  that silently does nothing is worse than an absent one. The palette was
+  not honouring the halt at all until this was added.
 - `web/src/components/ChainOrderTicket.tsx` — opening a position from a
   chain row. Deliberately *not* `OrderTicket`, which acts on something you
   already hold and derives its side from the position's direction; here

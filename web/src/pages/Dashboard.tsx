@@ -341,8 +341,8 @@ export function Dashboard() {
                       full table — see RecommendationBits. The confidence slot
                       in particular has three states that are easy to get
                       subtly wrong, and it had no business existing twice.
-                      `compact` drops Queue: §8.1 gives this panel a Trade
-                      action, and §8.5 is where the full set belongs. */}
+                      `compact` shortens Execute to Trade, which is the
+                      wording §8.1 uses for this panel. */}
                   <div className="flex shrink-0 items-center gap-2">
                     <ConfidenceBadge recommendation={r} />
                     <DispositionBadge disposition={dispositionOf(r.id, dispositions)} />
