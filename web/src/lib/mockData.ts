@@ -2054,6 +2054,93 @@ export const CHAT_SUGGESTIONS: string[] = [
   'How is my risk configured?',
 ]
 
+/** A conversation you have finished with.
+ *
+ * The transcript is stored **verbatim rather than replayed** through
+ * `CHAT_SCRIPT`. An archived conversation is a record of what was actually
+ * said at the time; regenerating the replies from today's script would
+ * quietly rewrite history the next time the table changes, which is the one
+ * thing a history is supposed to be proof against.
+ *
+ * `title` is derived once, on archive, and stored — see `conversationTitle`
+ * in `research.ts`. Deriving it at render time would be re-deriving a
+ * constant on every paint for no benefit.
+ */
+export interface ArchivedChat {
+  id: string
+  title: string
+  /** When the conversation was archived, not when it started. */
+  at: string
+  messages: ChatMessage[]
+}
+
+/** Seeded history, so the menu has something in it on a cold start.
+ *
+ * The live transcript still opens empty — that empty state is deliberate
+ * (see `CHAT_SUGGESTIONS`) and this does not disturb it. What it does is
+ * make the *populated* history reachable without first having to hold a
+ * conversation, which is the same reason every other fixture here covers
+ * the states a component can render rather than only the interesting one.
+ */
+export const CHAT_HISTORY: ArchivedChat[] = [
+  {
+    id: 'chat-2026-08-07-a',
+    title: 'How is my risk configured?',
+    at: '2026-08-07T14:22:00Z',
+    messages: [
+      {
+        id: 'chat-h1-m1',
+        role: 'user',
+        text: 'How is my risk configured?',
+        at: '2026-08-07T14:21:00Z',
+        proposal: null,
+      },
+      {
+        id: 'chat-h1-m2',
+        role: 'assistant',
+        text: 'Max risk per trade is 7% of equity, max daily loss 20%, and you can hold 8 concurrent positions. Exposure to any one underlying is capped at 25% and net directional at 40%. The engine enforces all five server-side — Settings edits what is stored, not what is allowed.',
+        at: '2026-08-07T14:21:00Z',
+        proposal: null,
+      },
+      {
+        id: 'chat-h1-m3',
+        role: 'user',
+        text: 'What counts as risk on a naked short?',
+        at: '2026-08-07T14:22:00Z',
+        proposal: null,
+      },
+      {
+        id: 'chat-h1-m4',
+        role: 'assistant',
+        text: 'An undefined-risk structure is sized against a stress loss at ±2σ of the underlying’s 20-day realized volatility. Defined-risk structures use maximum loss at expiry, and a long option uses the premium paid.',
+        at: '2026-08-07T14:22:00Z',
+        proposal: null,
+      },
+    ],
+  },
+  {
+    id: 'chat-2026-08-06-a',
+    title: 'What are today’s recommendations?',
+    at: '2026-08-06T17:40:00Z',
+    messages: [
+      {
+        id: 'chat-h2-m1',
+        role: 'user',
+        text: 'What are today’s recommendations?',
+        at: '2026-08-06T17:40:00Z',
+        proposal: null,
+      },
+      {
+        id: 'chat-h2-m2',
+        role: 'assistant',
+        text: 'Seven candidates are on the board. Five carry a backtested base rate, one is an LLM origination with no setup match — capped at a third of normal size — and one is a new setup class with too few samples to quote a rate at all.',
+        at: '2026-08-06T17:40:00Z',
+        proposal: null,
+      },
+    ],
+  },
+]
+
 // ---------------------------------------------------------------------- //
 // Dashboard header stats + Account page balances, per account
 // (PRD.md §8.1, §8.6)

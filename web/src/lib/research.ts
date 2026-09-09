@@ -1,6 +1,8 @@
 import {
   CHAT_FALLBACK,
   CHAT_SCRIPT,
+  type ArchivedChat,
+  type ChatMessage,
   type Recommendation,
   type Strategy,
   type StrategyProposal,
@@ -217,5 +219,57 @@ export function proposalToStrategy(
     status: 'draft',
     backtest: { winRate: 0, profitFactor: 0, maxDrawdown: 0, trades: 0 },
     live: null,
+  }
+}
+
+
+// ---------------------------------------------------------------------- //
+// Chat history
+// ---------------------------------------------------------------------- //
+
+/** How long a derived conversation title may run before it is clipped. */
+const TITLE_MAX = 48
+
+/** What a conversation gets called in the history menu.
+ *
+ * The **first user message**, never the first message overall and never the
+ * assistant's reply. The question is what you were asking about; the answer
+ * is what the app said back, and titling a conversation with the reply would
+ * label your own history in the shell's words rather than yours.
+ *
+ * Clipped on a word boundary where there is one, so a long question does not
+ * cut mid-word. A conversation with no user message has no subject yet and
+ * says so rather than inventing one — that state is reachable, because the
+ * transcript can hold a greeting before you have typed anything.
+ */
+export function conversationTitle(messages: ChatMessage[]): string {
+  const first = messages.find((m) => m.role === 'user')
+  const text = first?.text.trim() ?? ''
+  if (text === '') return 'Untitled conversation'
+  if (text.length <= TITLE_MAX) return text
+
+  const clipped = text.slice(0, TITLE_MAX)
+  const lastSpace = clipped.lastIndexOf(' ')
+  // Only break on a space if one falls late enough to leave a useful title;
+  // otherwise a single long token would clip down to almost nothing.
+  const stem = lastSpace > TITLE_MAX / 2 ? clipped.slice(0, lastSpace) : clipped
+  return `${stem}…`
+}
+
+/** Files a finished transcript into the history.
+ *
+ * Returns `null` for an empty transcript rather than an empty entry: opening
+ * the app and never typing is not a conversation, and a history full of blank
+ * rows is how a useful list becomes one nobody reads. The caller treats null
+ * as "nothing to file" — which is why `newChat` on an untouched chat is a
+ * no-op rather than an archive.
+ */
+export function archiveChat(messages: ChatMessage[], at: string): ArchivedChat | null {
+  if (messages.length === 0) return null
+  return {
+    id: `chat-${at}`,
+    title: conversationTitle(messages),
+    at,
+    messages,
   }
 }

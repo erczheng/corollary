@@ -4,7 +4,9 @@ import {
   CHAT_SCRIPT,
   LLM_ORIGINATION,
   RECOMMENDATIONS,
+  CHAT_HISTORY,
   STRATEGIES,
+  type ChatMessage,
   type Strategy,
   type StrategyStatus,
 } from './mockData'
@@ -12,8 +14,10 @@ import {
   GATE_THRESHOLDS,
   LIFECYCLE,
   activeStrategy,
+  archiveChat,
   canTransition,
   chatReply,
+  conversationTitle,
   dispositionOf,
   nextStatuses,
   promotionGate,
@@ -302,5 +306,101 @@ describe('the origination bucket', () => {
 
   it('has unvalidated trades to exclude, so the Dashboard note is reachable', () => {
     expect(LLM_ORIGINATION.unvalidated).toBeGreaterThan(0)
+  })
+})
+
+
+describe('conversationTitle', () => {
+  const msg = (role: ChatMessage['role'], text: string): ChatMessage => ({
+    id: `${role}-${text}`,
+    role,
+    text,
+    at: '2026-08-07T14:00:00Z',
+    proposal: null,
+  })
+
+  it('titles a conversation with the first user message, not the reply', () => {
+    const title = conversationTitle([
+      msg('user', 'How is my risk configured?'),
+      msg('assistant', 'Max risk per trade is 7% of equity.'),
+    ])
+    expect(title).toBe('How is my risk configured?')
+  })
+
+  /** The assistant speaking first is reachable — a greeting can land before
+   * you have typed. The subject is still whatever *you* asked. */
+  it('skips leading assistant messages', () => {
+    const title = conversationTitle([
+      msg('assistant', 'Ask about this account and its data.'),
+      msg('user', 'What are today’s recommendations?'),
+    ])
+    expect(title).toBe('What are today’s recommendations?')
+  })
+
+  it('says a conversation with no user message is untitled', () => {
+    expect(conversationTitle([])).toBe('Untitled conversation')
+    expect(conversationTitle([msg('assistant', 'Hello.')])).toBe('Untitled conversation')
+    expect(conversationTitle([msg('user', '   ')])).toBe('Untitled conversation')
+  })
+
+  it('clips a long question on a word boundary', () => {
+    const long =
+      'Propose a mean reversion strategy on the index ETFs using RSI and a twenty day moving average'
+    const title = conversationTitle([msg('user', long)])
+
+    const stem = title.slice(0, -1)
+
+    expect(title.endsWith('…')).toBe(true)
+    expect(title.length).toBeLessThanOrEqual(49)
+    expect(long.startsWith(stem)).toBe(true)
+    // Broke *at* a space, so the last word kept is whole rather than sliced
+    // through the middle.
+    expect(long[stem.length]).toBe(' ')
+  })
+
+  /** A single unbroken token has no late space to break on, and clipping to
+   * the first one would leave a title of almost nothing. */
+  it('clips mid-token when there is no usable word boundary', () => {
+    const title = conversationTitle([msg('user', `a ${'x'.repeat(80)}`)])
+    expect(title).toHaveLength(49)
+  })
+})
+
+describe('archiveChat', () => {
+  const at = '2026-08-07T15:00:00Z'
+  const messages: ChatMessage[] = [
+    { id: 'm1', role: 'user', text: 'What is my exposure?', at, proposal: null },
+    { id: 'm2', role: 'assistant', text: '25% per underlying.', at, proposal: null },
+  ]
+
+  it('files a transcript with a derived title and the messages intact', () => {
+    const filed = archiveChat(messages, at)
+
+    expect(filed).not.toBeNull()
+    expect(filed?.title).toBe('What is my exposure?')
+    expect(filed?.at).toBe(at)
+    expect(filed?.messages).toEqual(messages)
+  })
+
+  /** Opening the app and never typing is not a conversation. A history full
+   * of blank rows is how a useful list stops being read. */
+  it('refuses to file an empty transcript', () => {
+    expect(archiveChat([], at)).toBeNull()
+  })
+})
+
+describe('CHAT_HISTORY fixture', () => {
+  it('seeds the menu so a populated history is reachable on a cold start', () => {
+    expect(CHAT_HISTORY.length).toBeGreaterThan(0)
+  })
+
+  it('carries titles matching what conversationTitle would derive', () => {
+    for (const c of CHAT_HISTORY) {
+      expect(c.title).toBe(conversationTitle(c.messages))
+    }
+  })
+
+  it('has unique ids, so opening one is unambiguous', () => {
+    expect(new Set(CHAT_HISTORY.map((c) => c.id)).size).toBe(CHAT_HISTORY.length)
   })
 })

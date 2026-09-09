@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import App from './App'
 import { useUIStore } from './lib/store'
 import { unreadCount } from './lib/notifications'
+import { DESTINATIONS } from './lib/routes'
 
 const initialState = useUIStore.getState()
 
@@ -145,5 +146,54 @@ describe('App shell', () => {
       'aria-pressed',
       'true',
     )
+  })
+})
+
+
+/** Without a catch-all, an unknown URL rendered the header over an empty
+ * `<main>` — every control present, nothing beneath them. On a terminal
+ * that otherwise always shows numbers, that reads as a crash rather than a
+ * wrong address. */
+describe('unknown routes', () => {
+  function renderAt(path: string) {
+    window.history.pushState({}, '', path)
+    render(<App />)
+  }
+
+  it('renders the not-found page instead of an empty main', () => {
+    renderAt('/positions')
+
+    expect(screen.getByRole('heading', { name: 'No page at this address' })).toBeInTheDocument()
+    expect(screen.getByRole('main')).not.toBeEmptyDOMElement()
+  })
+
+  it('names the address that missed', () => {
+    renderAt('/positions')
+    expect(screen.getByText('/positions')).toBeInTheDocument()
+  })
+
+  /** The reassurance is the reason this page is worth designing: a blank
+   * screen on a trading terminal should never be ambiguous about whether
+   * the engine is still standing. */
+  it('says the engine is unaffected', () => {
+    renderAt('/nope')
+    expect(screen.getByText(/not an engine fault/i)).toBeInTheDocument()
+  })
+
+  it('offers every real destination as a link out', () => {
+    renderAt('/nope')
+
+    const main = within(screen.getByRole('main'))
+    for (const d of DESTINATIONS) {
+      expect(main.getByRole('link', { name: new RegExp(`^${d.label}`) })).toHaveAttribute(
+        'href',
+        d.to,
+      )
+    }
+  })
+
+  it('leaves the header and its navigation working', () => {
+    renderAt('/nope')
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
   })
 })
