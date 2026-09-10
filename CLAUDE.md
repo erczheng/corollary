@@ -14,7 +14,7 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 
 | Layer | Choice |
 |---|---|
-| Backend | Python ≥3.12, FastAPI, uvicorn — `.python-version` pins **3.14**, because uv's managed 3.12 build fails to launch on this machine (missing runtime DLL, not a policy block) |
+| Backend | Python ≥3.12, FastAPI, uvicorn — `.python-version` pins **3.14**, because uv's managed 3.12 build is blocked by Windows Application Control on this machine and cannot launch (`os error 4551`) — a policy block, not a missing DLL. That blocked install also makes `uv python list` fail outright, and any bare `uvx` invocation that resolves to 3.12 dies instantly |
 | Package manager | `uv` (not pip, not poetry) |
 | Frontend | React 18 + Vite + TypeScript |
 | Styling | Tailwind v4, CSS-first config via `@theme`, no `tailwind.config.js` |

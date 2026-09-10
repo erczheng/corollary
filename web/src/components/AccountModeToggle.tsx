@@ -9,11 +9,13 @@ import { ConfirmDialog } from './ConfirmDialog'
  * (PRD.md §2, CLAUDE.md rule 5).
  *
  * **Buying power leads, not cash.** They differ on this account — a cash
- * account can only spend what has *settled*, so quoting the cash figure in
- * the dialog that precedes real trading would overstate what you can
- * actually deploy by the unsettled amount. Cash is named beside it so the
- * gap is visible rather than silently resolved in either direction; it is
- * the same distinction the Account page exists to make.
+ * account has no margin and so can spend less than its balance, which makes
+ * quoting the cash figure alone in the dialog that precedes real trading an
+ * overstatement of what can actually be deployed. Cash is named beside it so
+ * the gap is visible rather than silently resolved in either direction; it is
+ * the same distinction the Account page exists to make. The dialog states the
+ * gap and not its cause, because Alpaca reports buying power without
+ * reporting what it is holding back.
  *
  * Phase 2 swaps `ACCOUNT_SNAPSHOTS` for the Alpaca account endpoint and
  * changes nothing here. */
@@ -61,11 +63,11 @@ export function AccountModeToggle() {
           <>
             Orders placed from here on use real money in the account connected to your live Alpaca
             keys — buying power {formatUsd(cash.buyingPower)}, of {formatUsd(cash.cash)} cash.
-            {cash.unsettled > 0 ? (
+            {cash.cash > cash.buyingPower ? (
               <>
                 {' '}
-                The {formatUsd(cash.unsettled)} difference is unsettled proceeds: yours, but not
-                spendable yet.
+                The {formatUsd(cash.cash - cash.buyingPower)} difference is yours but not spendable
+                yet.
               </>
             ) : null}
           </>

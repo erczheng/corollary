@@ -57,9 +57,9 @@ describe('AccountModeToggle', () => {
       expect(within(dialog()).getByText(/real money/)).toBeInTheDocument()
     })
 
-    /** Buying power leads. On a cash account it is the *settled* balance, so
-     * quoting cash alone in the dialog that precedes real trading would
-     * overstate what can actually be deployed — here by $240. */
+    /** Buying power leads. A cash account has no margin and so can spend less
+     * than its balance, which makes quoting cash alone in the dialog that
+     * precedes real trading an overstatement — here by $240. */
     it('quotes buying power, not cash alone', () => {
       const text = dialog().textContent ?? ''
 
@@ -68,10 +68,16 @@ describe('AccountModeToggle', () => {
       expect(text).toMatch(/buying power/i)
     })
 
-    it('accounts for the gap between them rather than leaving it unexplained', () => {
-      expect(CASH.cash - CASH.buyingPower).toBeCloseTo(CASH.unsettled, 2)
-      expect(dialog().textContent ?? '').toContain(formatUsd(CASH.unsettled))
-      expect(within(dialog()).getByText(/unsettled/)).toBeInTheDocument()
+    /** The gap is stated but not attributed. It is arithmetic over two figures
+     * Alpaca supplies; *why* the broker is holding it back is not something
+     * the account endpoint reports, and the dialog before real trading is the
+     * last place to guess. */
+    it('states the gap between them rather than leaving it unexplained', () => {
+      const gap = CASH.cash - CASH.buyingPower
+
+      expect(gap).toBeGreaterThan(0)
+      expect(dialog().textContent ?? '').toContain(formatUsd(gap))
+      expect(within(dialog()).getByText(/not spendable yet/)).toBeInTheDocument()
     })
 
     /** The figures are the ones the Account page shows for the same book, so

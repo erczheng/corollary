@@ -45,11 +45,11 @@ export function positionsValue(positions: Position[]): number {
 
 /** Cash plus the market value of open positions.
  *
- * `cash` is the account's **total** cash, settled and unsettled together, so
- * this figure includes money that has not cleared. That is the right choice
- * for an equity number — the proceeds are yours, they are simply not
- * spendable yet — but it is not self-evident, so the page says so in words
- * beside it rather than leaving you to work out which reading it took.
+ * `cash` is the account's **total** cash whatever its settlement state, so
+ * this figure can include money that is not yet spendable. That is the right
+ * choice for an equity number — the proceeds are yours either way — and the
+ * page points at buying power for what can actually be deployed, since
+ * Alpaca reports that figure but never its composition.
  *
  * Ticks with the position stream, since `Position.value` is re-marked on
  * every tick. That is why the page skeletons this line until the first price

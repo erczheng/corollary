@@ -4,16 +4,16 @@ import { cashTransfers, netTransfers, positionsValue, totalEquity } from './acco
 
 const MODES: AccountMode[] = ['paper', 'cash']
 
-/** The Account page asserts a settled/unsettled split and then reconciles
- * against total cash. If those three numbers don't agree, the page is doing
- * arithmetic in front of you and getting it wrong — worse than showing
- * nothing. Pinned per account because they are separate books. */
+/** The three balances the Account page reconciles against. Each relationship
+ * below is a claim about what can actually be deployed, and getting one
+ * backwards overstates capacity — which is the only direction that costs
+ * money. Pinned per account because they are separate books.
+ *
+ * A `settled`/`unsettled` split used to be pinned here too. It was removed
+ * with the fields: Alpaca publishes no settlement breakdown, so the invariant
+ * was asserting arithmetic over two numbers nothing could verify. See
+ * PRD.md §8.6. */
 describe('balance fixtures', () => {
-  it.each(MODES)('settled + unsettled equals cash in the %s account', (mode) => {
-    const a = ACCOUNT_SNAPSHOTS[mode]
-    expect(a.settled + a.unsettled).toBeCloseTo(a.cash, 2)
-  })
-
   /** Options are not marginable. On a margin account buying power is 2× cash
    * while options buying power is not, and sizing an option order against the
    * wrong one overstates capacity by 2×. */
@@ -22,9 +22,12 @@ describe('balance fixtures', () => {
     expect(a.optionsBuyingPower).toBeLessThanOrEqual(a.buyingPower)
   })
 
-  it('gives the cash account no margin — buying power is the settled balance', () => {
+  /** No margin means buying power cannot exceed the balance, and here it is
+   * strictly below it — the broker is holding something back. The fixture
+   * keeps that gap because a real cash account has one; what it no longer
+   * does is name a cause Alpaca doesn't report. */
+  it('gives the cash account no margin — buying power is below cash', () => {
     const a = ACCOUNT_SNAPSHOTS.cash
-    expect(a.buyingPower).toBeCloseTo(a.settled, 2)
     expect(a.buyingPower).toBeLessThan(a.cash)
   })
 
