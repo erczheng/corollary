@@ -39,8 +39,12 @@ decide only whether its approval is **still true** at the moment you act.
    `.env.local`, `.env.production`, or matches `*.pem`/`*.key`. Then
    `git diff --cached` and reject on anything shaped like a credential:
    `ALPACA_*KEY` or `ANTHROPIC_API_KEY` with a value after it, a 40-plus
-   character base64-looking literal, or an `sk-` prefix. `.env.example`
-   carrying bare names with **no values** is fine and expected.
+   character base64-looking literal, or an API-key prefix matched as
+   `sk-[A-Za-z0-9_-]{20,}` — **anchor it**, because a bare `sk-` matches
+   inside ordinary prose such as "risk-free" and a scanner that cries wolf
+   gets waved through. `.env.example` carrying bare names with **no
+   values** is fine and expected. When a hit is a false positive, say so
+   with the surrounding text rather than silently passing it.
 4. **The suites actually pass.** Re-run what the entry's `verified` block
    claims. Backend: `uv run pytest`, plus `uv run pytest -m risk` and
    `uv run mypy corollary` whenever any `corollary/**` path is listed.
