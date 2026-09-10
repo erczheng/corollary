@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
   ACCOUNT_SNAPSHOTS,
-  ACTIVITY_STATUS_LABEL,
   BENCHMARK_HISTORY,
   CHAIN_EXPIRATIONS,
   MARKET_TODAY,
@@ -10,8 +9,8 @@ import {
   STRATEGIES,
   UNDERLYINGS,
   activityStats,
-  type ActivityStatus,
 } from './mockData'
+import { ACTIVITY_STATUS_LABEL, type ActivityStatus } from './types'
 
 /** The fixtures are generated from a seeded PRNG so screenshots and tests
  * don't flake between runs (CLAUDE.md, mockData.ts). "Seeded" only holds if

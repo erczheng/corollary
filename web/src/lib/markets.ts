@@ -8,12 +8,8 @@
  * the previous view's ordering behind in the data itself.
  */
 
-import {
-  OPTION_CHAIN,
-  type OptionContract,
-  type StockQuote,
-  type UnderlyingQuote,
-} from './mockData'
+import { OPTION_CHAIN } from './mockData'
+import { type OptionContract, type StockQuote, type UnderlyingQuote } from './types'
 
 export type SortDirection = 'ascending' | 'descending'
 

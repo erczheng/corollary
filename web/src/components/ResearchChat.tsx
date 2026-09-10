@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Chip } from './Chip'
 import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
-import { CHAT_SUGGESTIONS, type StrategyProposal } from '../lib/mockData'
+import { CHAT_SUGGESTIONS } from '../lib/mockData'
+import { type StrategyProposal } from '../lib/types'
 import { formatDateTimeET, formatTimeET } from '../lib/format'
 
 /** The Research chat (PRD.md §8.5).

@@ -20,15 +20,13 @@ import {
 } from './news'
 import {
   CALENDAR_EVENTS,
-  MACRO_SECTOR,
   NEWS_INCOMING,
   NEWS_ITEMS,
   SECTOR_CONSENSUS,
   SENTIMENT_COMPONENTS,
   SOCIAL_ATTENTION,
-  type CalendarEvent,
-  type NewsItem,
 } from './mockData'
+import { MACRO_SECTOR, type CalendarEvent, type NewsItem } from './types'
 
 /** The feed's own clock. Every lookback and the calendar are measured
  * against this, never the wall clock — see the note in `News.tsx`. */

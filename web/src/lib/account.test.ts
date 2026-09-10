@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { ACCOUNT_SNAPSHOTS, CONTRACT_MULTIPLIER, isOrderAction, type AccountMode } from './mockData'
+import { ACCOUNT_SNAPSHOTS, CONTRACT_MULTIPLIER, isOrderAction } from './mockData'
+import { type AccountMode } from './types'
 import { cashTransfers, netTransfers, positionsValue, totalEquity } from './account'
 
 const MODES: AccountMode[] = ['paper', 'cash']

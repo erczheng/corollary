@@ -3,7 +3,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { NotificationBell } from './NotificationBell'
 import { GearIcon, UserIcon } from './icons'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_LABEL } from '../lib/mockData'
+import { ACCOUNT_LABEL } from '../lib/types'
 
 /** The five pages you move between while trading. They keep their words:
  * these are destinations you pick deliberately, and a row of five unlabeled

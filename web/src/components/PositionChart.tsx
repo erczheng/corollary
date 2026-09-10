@@ -9,7 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { sliceRange, type Position } from '../lib/mockData'
+import { sliceRange } from '../lib/mockData'
+import { type Position } from '../lib/types'
 import { useUIStore } from '../lib/store'
 import { breakevens, maxLoss, maxProfit, payoffCurve } from '../lib/orders'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'

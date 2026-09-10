@@ -15,7 +15,7 @@ import {
   type SectorConsensus,
   type SentimentComponent,
   type SocialAttentionItem,
-} from './mockData'
+} from './types'
 
 // ---------------------------------------------------------------------- //
 // Market sentiment composite

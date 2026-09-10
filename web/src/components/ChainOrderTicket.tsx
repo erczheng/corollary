@@ -8,7 +8,7 @@ import {
   type OptionContract,
   type OrderType,
   type TimeInForce,
-} from '../lib/mockData'
+} from '../lib/types'
 import { riskLimitFor } from '../lib/settings'
 import {
   OPEN_SIDES,

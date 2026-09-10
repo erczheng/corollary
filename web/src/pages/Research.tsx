@@ -18,8 +18,8 @@ import {
   RECOMMENDATIONS,
   SENTIMENT_COMPONENTS,
   recommendationTitle,
-  type Recommendation,
 } from '../lib/mockData'
+import { type Recommendation } from '../lib/types'
 import { compositeScore } from '../lib/news'
 import { dispositionOf, recommendationCsvRows, visibleRecommendations } from '../lib/research'
 import { downloadCsv } from '../lib/csv'

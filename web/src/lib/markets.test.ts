@@ -20,13 +20,8 @@ import {
   type ChainSortKey,
   type StockSortKey,
 } from './markets'
-import {
-  OPTION_CHAIN,
-  STOCKS,
-  type OptionContract,
-  type StockQuote,
-  type UnderlyingQuote,
-} from './mockData'
+import { OPTION_CHAIN, STOCKS } from './mockData'
+import { type OptionContract, type StockQuote, type UnderlyingQuote } from './types'
 
 const CHAIN_KEYS: ChainSortKey[] = [
   'ladder',

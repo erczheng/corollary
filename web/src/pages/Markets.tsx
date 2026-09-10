@@ -8,7 +8,8 @@ import { TableSkeleton } from '../components/Skeleton'
 import { usePagination } from '../hooks/usePagination'
 import { useMarketPoll } from '../hooks/useMarketPoll'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_SNAPSHOTS, STOCKS, type OptionContract } from '../lib/mockData'
+import { ACCOUNT_SNAPSHOTS, STOCKS } from '../lib/mockData'
+import { type OptionContract } from '../lib/types'
 import {
   CHAIN_DEFAULT_DIRECTION,
   CHAIN_LADDER_SORT,

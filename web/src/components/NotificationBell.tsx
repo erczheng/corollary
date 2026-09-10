@@ -8,7 +8,7 @@ import {
   unreadCount,
   visibleNotifications,
 } from '../lib/notifications'
-import { NOTIFICATION_EVENT_LABEL } from '../lib/mockData'
+import { NOTIFICATION_EVENT_LABEL } from '../lib/types'
 import { formatDateTimeET, formatTimeET } from '../lib/format'
 
 const ICON_BUTTON =

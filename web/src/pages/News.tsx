@@ -6,22 +6,19 @@ import { TableSkeleton } from '../components/Skeleton'
 import { usePagination } from '../hooks/usePagination'
 import { useNewsPoll } from '../hooks/useNewsPoll'
 import { useUIStore } from '../lib/store'
+import { CALENDAR_EVENTS, SECTOR_CONSENSUS, SOCIAL_ATTENTION, SOCIAL_AS_OF } from '../lib/mockData'
 import {
-  CALENDAR_EVENTS,
   CALENDAR_TYPE_LABEL,
-  SECTOR_CONSENSUS,
   SENTIMENT_CLASS,
   SENTIMENT_LABEL,
   SENTIMENT_SHORT,
   SENTIMENT_TIER_DETAIL,
   SENTIMENT_TIER_LABEL,
-  SOCIAL_ATTENTION,
-  SOCIAL_AS_OF,
   type CalendarEvent,
   type CalendarEventType,
   type NewsItem,
   type Sentiment,
-} from '../lib/mockData'
+} from '../lib/types'
 import {
   DEFAULT_NEWS_FILTER,
   LOOKBACKS,

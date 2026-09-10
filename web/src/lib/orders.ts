@@ -8,15 +8,15 @@
  * through `RiskManager.approve()` and nowhere else (CLAUDE.md rule 1).
  */
 
+import { CONTRACT_MULTIPLIER } from './mockData'
 import {
-  CONTRACT_MULTIPLIER,
   type AttachedExit,
   type OrderSide,
   type OrderType,
   type Position,
   type PositionLeg,
   type TimeInForce,
-} from './mockData'
+} from './types'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 

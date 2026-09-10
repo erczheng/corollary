@@ -22,6 +22,8 @@ import {
   mulberry32,
   priceContract,
   surfaceIv,
+} from './mockData'
+import {
   type UnderlyingQuote,
   type AccountMode,
   type ActivityItem,
@@ -47,7 +49,7 @@ import {
   type StrategyProposal,
   type StrategyStatus,
   type WorkingOrder,
-} from './mockData'
+} from './types'
 import {
   auditEntry,
   feedOptionsFor,

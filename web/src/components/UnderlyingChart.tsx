@@ -9,7 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { sliceRange, type ChartRange } from '../lib/mockData'
+import { sliceRange } from '../lib/mockData'
+import { type ChartRange } from '../lib/types'
 import { useUIStore } from '../lib/store'
 import { rangeChange } from '../lib/chart'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
