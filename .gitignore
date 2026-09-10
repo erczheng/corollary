@@ -16,3 +16,6 @@ dist/
 # Commit approval queue -- scaffolding for a commit, never part of one
 .claude/commit-queue/*
 !.claude/commit-queue/README.md
+
+# Claude Code worktrees -- isolated checkouts, never part of the repo
+.claude/worktrees/
