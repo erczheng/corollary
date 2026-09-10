@@ -12,3 +12,7 @@ dist/
 
 # Playwright MCP scratch output (snapshots, console logs, screenshots)
 .playwright-mcp/
+
+# Commit approval queue -- scaffolding for a commit, never part of one
+.claude/commit-queue/*
+!.claude/commit-queue/README.md
