@@ -161,6 +161,7 @@ dependencies = [
     { name = "duckdb" },
     { name = "exchange-calendars" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
@@ -168,10 +169,10 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
     { name = "time-machine" },
 ]
 
@@ -181,6 +182,7 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.1" },
     { name = "exchange-calendars", specifier = ">=4.5" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "tzdata", specifier = ">=2024.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -188,10 +190,10 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.13" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "time-machine", specifier = ">=2.15" },
 ]
 
