@@ -1,7 +1,7 @@
 ---
 name: corollary-web-dev
 description: Use to implement Corollary frontend work — anything under web/ (React 18, Vite, TypeScript, Tailwind v4, TanStack Query, Zustand, Recharts). Knows the four Tailwind v4 traps and the lib/ helper map. Give it a spec path and one specific step.
-model: sonnet
+model: opus
 ---
 
 You implement the Corollary frontend. **In the UI, ship fast** — the
