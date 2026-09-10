@@ -46,7 +46,7 @@ decide only whether its approval is **still true** at the moment you act.
    values** is fine and expected. When a hit is a false positive, say so
    with the surrounding text rather than silently passing it.
 4. **The suites actually pass.** Re-run what the entry's `verified` block
-   claims. Backend: `uv run pytest`, plus `uv run pytest -m risk` and
+   claims. Backend: `uv run python -m pytest`, plus `uv run python -m pytest -m risk` and
    `uv run mypy corollary` whenever any `corollary/**` path is listed.
    Frontend: `npm run typecheck` and `npm run test -- --run` from `web/`
    whenever any `web/**` path is listed. If your output contradicts the
@@ -82,6 +82,36 @@ Message format, matching this repo's history:
   stop — the orchestrator approved a change against a specific branch.
 - Never invent a queue entry, and never commit a change that has no entry.
   Uncommitted work with no approval is the normal state of a working tree.
+
+## Branch discipline — the shared checkout is not yours to move
+
+The primary working directory is a **shared** one. Other agents and other
+Claude sessions write to it concurrently, and long-running work assumes the
+branch is stable.
+
+**Never run `git checkout <branch>`, `git switch`, or anything else that moves
+HEAD there.** This has already happened once: the checkout was moved onto a UI
+branch while backend database work sat uncommitted in the tree, and only a
+branch check in a queued commit stopped that work landing on the wrong branch
+— the guard held by luck of timing, not by design.
+
+**Reading a branch never requires checking it out.** All of these work from any
+HEAD:
+
+```
+git diff phase2-real-data..other-branch      # what changed between them
+git show <sha>                                # one commit, files and diff
+git log --oneline a..b                        # commits on b not on a
+git merge-tree phase2-real-data other-branch  # would it merge cleanly
+git show <branch>:path/to/file                # a file as of that branch
+```
+
+If you genuinely need another branch's files on disk, `git worktree add` gives
+you a private tree without touching the shared one.
+
+If you find HEAD is not on the branch you were told to work on, **stop and
+report it** rather than switching — something else put it there, and moving it
+back under a concurrent writer is its own hazard.
 
 ## Output
 
