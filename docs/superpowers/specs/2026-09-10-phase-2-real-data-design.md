@@ -1,7 +1,7 @@
 # Phase 2: read-only real data
 
 **Date:** 2026-09-10
-**Status:** Approved, not yet implemented
+**Status:** Approved, not yet implemented. **Amended 2026-09-10** after probing the real paper account. Three claims taken from Alpaca's published specs turned out to be wrong on this plan, and two of them leave the Markets page blocked on a decision. See *What the probe reached, and what it could not* and *Open questions*.
 **Scope:** The backend (`corollary/`), and the Dashboard, Activity, Markets and Account pages
 **Phase:** 2 — Alpaca paper connected, read-only. **No order reaches a broker.**
 
@@ -15,7 +15,9 @@ Two things stand between here and there.
 
 **There is no backend.** `corollary/` is 124 lines of docstrings. `RiskManager` is nine lines of comment, `MarketDataProvider` does not exist, `db/` is a file header. `alpaca-py` is not a dependency, `httpx` is dev-only, no `alembic.ini` exists, and `vite.config.ts` has no proxy — the browser on `:5173` has no route to an API.
 
-**Alpaca's shapes do not match the fixture shapes.** Phase 1's fixtures were written to match "the eventual API shape so Phase 2 is a data-source swap, not a component rewrite." That holds for most of the surface and fails in five specific places, each documented under Constraints below. Those five are the real work of this phase.
+**Alpaca's shapes do not match the fixture shapes.** Phase 1's fixtures were written to match "the eventual API shape so Phase 2 is a data-source swap, not a component rewrite." That holds for most of the surface and fails in six specific places, each documented under Constraints below. Those six are the real work of this phase.
+
+The sixth was found by probing the account rather than by reading the specs, and it is the worst of them: **three columns and two named screens on the Markets page have no data source on the Basic plan at all.** Not a shape mismatch that a mapper resolves — an absence. See *Open questions*.
 
 PRD §12's open question — *"engine and API: one process or two… needs deciding before Phase 2"* — is resolved here.
 
@@ -23,11 +25,21 @@ PRD §12's open question — *"engine and API: one process or two… needs decid
 
 ## Constraints verified against Alpaca
 
-These were read from the published API specs, not assumed. Everything in this section is verified unless marked otherwise. A wrong assumption here reshapes the position model rather than producing a fixable bug.
+The original set was read from the published API specs, not assumed. On 2026-09-10 the same claims were checked against the **real paper account** using the `.env` credentials, which work — key ID prefix `PK`, every trading endpoint 200. Several of them did not survive contact.
+
+Everything here is verified unless marked otherwise, and each subsection now says *which kind* of verified: **spec** (read from Alpaca's OpenAPI documents or docs pages) or **probed** (observed on the live paper account today). Probed beats spec wherever the two disagree, and this amendment exists because they disagreed three times. A wrong assumption in this section reshapes the position model rather than producing a fixable bug.
+
+### What the probe reached, and what it could not
+
+**The paper account is completely empty.** Zero positions, zero orders, zero `FILL` activities. Its entire history is one `JNLC` funding journal. Everything downstream of a fill — the ledger, the grouper, the P&L arithmetic — was therefore checked against published shapes and Alpaca's own doc examples, never against this account's data. Decisions 4 and 5 are the ones this bites; see *Open questions* and *Testing*.
+
+**The Alpaca MCP server is configured with non-paper keys.** It returns 401 on every trading endpoint while market data works fine. This blocks nothing — rule 3 keeps MCP out of the engine and the `.env` keys are the ones that matter — but it means **MCP is not a verification path for account, positions, orders or activities**, and nobody should spend an afternoon rediscovering that. It stays useful for docs and market data, which is how the option-event shapes below were checked.
+
+**`ALPACA_STOCK_FEED_REALTIME` is unset in `.env`.** The other two are set (`indicative`, `sip`). CLAUDE.md requires all three and `.env.example` carries the name, so this is a setup gap rather than a design one: the value is `iex` on Basic. The design consequence is that `AlpacaProvider` must **fail loudly on a missing feed variable rather than defaulting**. A silent default is fine for the realtime var and catastrophic for the historical one — defaulting historical bars to IEX is the `min_avg_volume` error CLAUDE.md spends a paragraph on, measuring a 5,000,000 threshold against a fortieth of real volume.
 
 ### Positions are per contract, with no grouping
 
-`GET /v2/positions` keys on the OCC symbol and returns `asset_class`, `asset_id`, `symbol`, `qty`, `qty_available`, `side`, `avg_entry_price`, `cost_basis`, `market_value`, `current_price`, `lastday_price`, `change_today`, `unrealized_pl`, `unrealized_plpc`, `unrealized_intraday_pl`, `unrealized_intraday_plpc`.
+**Spec.** Not probed — this account holds nothing. `GET /v2/positions` keys on the OCC symbol and returns `asset_class`, `asset_id`, `symbol`, `qty`, `qty_available`, `side`, `avg_entry_price`, `cost_basis`, `market_value`, `current_price`, `lastday_price`, `change_today`, `unrealized_pl`, `unrealized_plpc`, `unrealized_intraday_pl`, `unrealized_intraday_plpc`.
 
 It carries **no leg grouping, no order linkage, and no open date**. A four-leg iron condor is four positions. Every numeric field is a **string**, which is ideal: they parse straight to `Decimal` and no float ever touches money.
 
@@ -35,7 +47,7 @@ Consequence: `Position.legs[]`, the payoff curve, max-loss and the DTE column al
 
 ### Multi-leg orders exist; multi-leg positions do not
 
-`order_class: "mleg"` with a `legs[]` array of `{symbol, ratio_qty, side, position_intent}`. Two rules constrain reconstruction:
+**Spec.** Not probed — this account has never placed an order. `order_class: "mleg"` with a `legs[]` array of `{symbol, ratio_qty, side, position_intent}`. Two rules constrain reconstruction:
 
 - Leg ratios must be in simplest form — the GCD across `ratio_qty` values must be 1.
 - Every leg must be covered within the same order. Alpaca rejects an mleg order with an uncovered short leg, which is why rolling a short spread is impossible and PRD §8.2 already defers it.
@@ -44,37 +56,88 @@ Order cost basis is `maintenance_margin + net_price × multiplier`, computed und
 
 ### There is no realized P&L anywhere
 
-`GET /v2/account/activities/FILL` returns `activity_type`, `id`, `order_id`, `order_status`, `symbol`, `side`, `qty`, `cum_qty`, `leaves_qty`, `price`, `transaction_time`, `type` (`fill` | `partial_fill`). `page_size` maxes at 100.
+**Spec.** The `FILL` shape below is *not* probed — this account has no fills. `GET /v2/account/activities/FILL` returns `activity_type`, `id`, `order_id`, `order_status`, `symbol`, `side`, `qty`, `cum_qty`, `leaves_qty`, `price`, `transaction_time`, `type` (`fill` | `partial_fill`). `page_size` maxes at 100.
 
 **No P&L field, and no `position_intent`.** `side` is buy/sell; `ActivityItem.action` is BTO/STC/STO/BTC. `position_intent` lives on the *order*, so every ledger row needs a fill→order join.
 
 `ActivityItem.pnl` / `pnlPct` and all three Activity header cards therefore have no source. Alpaca does not compute this.
 
-### An option expiring is not a fill
+### An option expiring is not a fill, and it is not even the same schema
 
 `OPEXP` (expiration), `OPASN` (assignment) and `OPEXC` (exercise) are their own activity types, alongside `OPTRD`, `OPCA` and `OPCSH`. Fees arrive as `FEE` with sub-types `ORF`, `OCC`, `TAF`, `CAT`, `COM`, `REG`. Cash movements are `TRANS` / `CSD` / `CSW`.
 
 Phase 1's ledger has four statuses and no concept of expiry — so the most common way an option position ends has no render path, and it is a realized loss.
 
+**Probed, and the original spec described only half the surface.** The activities endpoint returns **two different object shapes**. The one `JNLC` row on this account came back as `{id, activity_type, date, created_at, net_amount, description, status, currency}` — **no `symbol`, no `qty`, no `price`, no `side`**.
+
+The OpenAPI document confirms the split: the `200` response is `oneOf [TradingActivities, NonTradeActivities]`, chosen by the `activity_type` in the path. `NonTradeActivities` is `{activity_type, activity_sub_type, created_at, currency, cusip, date, group_id, id, net_amount, per_share_amount, qty, status, symbol}`, with `symbol` and `qty` both documented as *"not present for all activity types"* — exactly what the live `JNLC` demonstrated.
+
+Two fields appear in live responses and in Alpaca's own doc examples but **not** in the published `NonTradeActivities` schema: `description` (seen live) and `price` (seen on the `OPTRD` examples below). Model the non-trade branch permissively; do not assume the published schema is complete, because it demonstrably is not.
+
+Ingestion needs **two branches discriminated on `activity_type`, not one**. And the non-trade branch has **no `order_id` at all** — `group_id`, *"ID used to link activities who share a sibling relationship"*, is the only linkage a non-trade activity gets. That contradicts the fee-attribution design below, corrected there.
+
+### An option event carries no price of its own
+
+**Verified against Alpaca's documented examples, not against this account**, which has never held an option. Marked accordingly, and it is the first thing to re-check against a real event.
+
+An option event arrives as a **pair** of rows — the event on the contract, and an `OPTRD` on the underlying carrying the money:
+
+- **Exercise** — `OPEXC` on `AAPL230721C00150000`, `qty: "-2"`, `net_amount: "0"`; paired `OPTRD` on `AAPL`, `qty: "200"`, `price: "150"`, `net_amount: "-30000"`.
+- **Assignment** — `OPASN` on the contract, `qty: "2"`, `net_amount: "0"`; paired `OPTRD` on `AAPL`, `qty: "-200"`, `price: "150"`, `net_amount: "30000"`.
+- **OTM expiry** — a lone `OPEXP`, `qty: "-2"`, `net_amount: "0"`, and nothing else. The position is flattened.
+
+Three consequences, each contradicting something the Design section originally said:
+
+1. **`net_amount` on the option row is zero.** The design said `OPASN` and `OPEXC` *"close at intrinsic"* — but there is no intrinsic value anywhere on that row. It has to come from the paired `OPTRD`'s `price`, which is the strike, or from the strike parsed out of the OCC symbol. The matcher cannot read a close price off the event row itself, and a matcher that trusts `net_amount` books every exercise as a total loss.
+2. **`qty` is signed on non-trade rows** — `-2` when contracts leave a long, `+2` when a short is assigned away — where `FILL` rows carry an unsigned `qty` and a separate `side`. Two conventions in one ingest path.
+3. **An ITM expiry never produces `OPEXP`.** Alpaca auto-exercises ITM contracts absent a DNE instruction, so ITM expiry arrives as the `OPEXC` pair. `OPEXP` is the OTM case *only* — which makes *"`OPEXP` closes remaining lots at zero"* correct, but for a reason the original spec did not state, and it leaves the ITM path as the underspecified one.
+
+**Unverified, and it is a schema risk rather than a logic one:** Alpaca's doc examples give both rows of a pair the *same* `id`. That is probably a copy-paste artifact, but if it is real then `fill(activity_id UNIQUE)` silently drops the second row of every option event. Check it against the first real event; `group_id` is the field intended for the linkage.
+
 ### The account object has no settlement breakdown
 
-`GET /v2/account` returns `cash`, `buying_power`, `options_buying_power`, `non_marginable_buying_power`, `regt_buying_power`, `equity`, `last_equity`, `long_market_value`, `short_market_value`, `multiplier`, `initial_margin`, `maintenance_margin`, `sma`, `accrued_fees`, `pending_transfer_in`, `pending_transfer_out`, `options_approved_level`, `options_trading_level`, `status`.
+**Probed.** `GET /v2/account` returns `cash`, `buying_power`, `effective_buying_power`, `options_buying_power`, `non_marginable_buying_power`, `regt_buying_power`, `equity`, `last_equity`, `long_market_value`, `short_market_value`, `position_market_value`, `portfolio_value`, `multiplier`, `initial_margin`, `maintenance_margin`, `last_maintenance_margin`, `sma`, `accrued_fees`, `intraday_adjustments`, `pending_reg_taf_fees`, `balance_asof`, `crypto_tier`, `options_approved_level`, `options_trading_level`, `admin_configurations`, `user_configurations`, `status`.
 
-No `settled`, no `unsettled`, no settled-cash field. Two doc searches found no settlement concept either. **Already actioned**: the split was removed from the codebase and PRD §8.6 on 2026-09-10, with the reasoning recorded there.
+Three corrections to the list the original spec took from the published docs:
 
-Three useful positives: `multiplier` tells you margin class (1 cash / 2 Reg T / 4 PDT), `options_trading_level` reports the real approval level, and `last_equity` is equity at the previous close — a day change for free.
+- **`pending_transfer_in` and `pending_transfer_out` are absent.** Nothing reads them, so nothing breaks — but they must not appear as required fields on a Pydantic model, which is how an absent field becomes a 500 on every account request.
+- **`options_approved_level` and `options_trading_level` are integers, not strings** — both `3` here. Every *other* numeric field on the object is a string, so a parser that maps the whole object through `Decimal(str)` uniformly will break on exactly these two. Confirms the account is Level 3 without hardcoding it.
+- Ten fields were present and unlisted: `effective_buying_power`, `position_market_value`, `portfolio_value`, `intraday_adjustments`, `pending_reg_taf_fees`, `last_maintenance_margin`, `balance_asof`, `crypto_tier`, `admin_configurations`, `user_configurations`. **`position_market_value` is the one worth naming**: §8.6 defines total equity as *"cash + the market value of open positions"* and the broker supplies the second term directly, so the reconciliation on screen can be checked against the broker's own figure rather than only against a sum over positions.
 
-### Chain data is split across two endpoints
+**No `settled`, no `unsettled`, no settled-cash field of any kind** — now confirmed on the live object rather than merely absent from the docs. This independently validates decision 9. Two doc searches had found no settlement concept either. **Already actioned**: the split was removed from the codebase and PRD §8.6 on 2026-09-10, with the reasoning recorded there.
 
-`GET /v1beta1/options/snapshots/{underlying}` returns per contract: `latestQuote` (`bp`/`ap`/`bs`/`as`), `latestTrade` (`p`), `dailyBar` (`v` = volume), `prevDailyBar` (`c` = previous close), `impliedVolatility`, and full `greeks` (delta, gamma, theta, vega, rho). Server-side filters: `type`, `strike_price_gte`/`lte`, `expiration_date`(`_gte`/`_lte`), `root_symbol`. Limit defaults to 100, maxes at 1000, and **applies to total data points rather than per symbol**; paginate on `next_page_token`.
+Three useful positives, all confirmed live: `multiplier` tells you margin class (1 cash / 2 Reg T / 4 PDT), `options_trading_level` reports the real approval level, and `last_equity` is equity at the previous close — a day change for free.
 
-It carries **no open interest**. That comes from `GET /v2/options/contracts`, which returns `open_interest` and `open_interest_date`, `close_price`, `strike_price`, `expiration_date`, `type`, `style`, `root_symbol`, `multiplier`, `size`, `deliverables`, `status`, `tradable`, `name`. Limit maxes at 10,000.
+**`multiplier` is `'4'` on this paper account, which makes it a PDT margin account.** That contradicts on-screen text: PRD §8.6 states *"Paper is a margin account at 2× cash"*, and at 4× that sentence is wrong in the direction that **overstates capacity**. The Account page must read `multiplier` and say what it finds rather than asserting a number — the whole point of §8.6's "the page says why" is that the figure be true.
 
-So Markets' "highest open interest" screen is a join across two endpoints, not a column.
+The wider consequence needs no decision but should be understood: paper is a **weaker rehearsal for Phase 7 Cash than the PRD's framing implies**. §2 presents Paper/Cash as *"which Alpaca account keys are in use"*, as though the accounts differed only in whose money is at stake; they also differ in margin class, and a strategy sized comfortably against 4× buying power is untestable on a cash account with none. What holds the framing together is that `options_buying_power` — the figure that actually binds an options trader, and which is never the margin figure because options are not marginable — is supplied on both and is the right thing to size against on both. Say that on the page instead of "2×".
+
+### Chain data is split across two endpoints, and on Basic neither one is complete
+
+**Probed, and this is where the published spec was most wrong.**
+
+`GET /v1beta1/options/snapshots/{underlying}` returns per contract: `latestQuote` (`bp`/`ap`/`bs`/`as`), `latestTrade` (`p`), `dailyBar` (`v` = volume), `minuteBar`, and `prevDailyBar` (`c` = previous close) where one exists. Server-side filters: `type`, `strike_price_gte`/`lte`, `expiration_date`(`_gte`/`_lte`), `root_symbol`. Limit defaults to 100, maxes at 1000, and **applies to total data points rather than per symbol**; paginate on `next_page_token`. All of that is confirmed.
+
+**`impliedVolatility` and `greeks` are both `None` on `feed=indicative`.** The original spec claimed both, taken from the OpenAPI document — where they *are* real properties of `option_snapshot`, but, read carefully, **optional ones**: neither appears in any `required` list, and both are described as *"calculated using the Black-Scholes model"*. Alpaca derives them rather than receiving them, and does not serve them on the free feed. The example response in the docs shows them populated, which is how this got into the spec.
+
+**`feed=opra` returns HTTP 403 `{"message": "OPRA agreement is not signed"}`.** That is an *agreement* error, not a plan or entitlement error, and the wording is the entire finding — Alpaca's own docs say only that *"OPRA feed is only available to subscribed users"* and are silent on whether the agreement is a separate step. See *Open questions*; do not assume it either way.
+
+This is the most consequential correction in this amendment, because two shipped behaviours rest on the missing fields:
+
+- Markets' chain renders an **IV column**, and PRD §8.4 lists "highest IV" as a named screen.
+- The fixture's day-change model **scales the underlying's move by delta**, which `mockData.test.ts` pins as an invariant. Without a delta there is no model.
+
+Neither has a source on Basic. The one mitigating fact is the one the OpenAPI document gives away: Alpaca's greeks are *computed*, not observed, so computing them locally reproduces the method rather than approximating a measurement.
+
+The snapshot also carries **no open interest**, as originally stated. That comes from `GET /v2/options/contracts`, which returns `open_interest` and `open_interest_date`, `close_price`, `strike_price`, `expiration_date`, `type`, `style`, `root_symbol`, `multiplier`, `size`, `deliverables`, `status`, `tradable`, `name`. Limit maxes at 10,000.
+
+**But `open_interest` is `null` on every contract sampled** — including established Oct 2026 expiries, so this is not a not-yet-populated new listing. `open_interest_date` and `close_price` are null too. So Markets' "highest open interest" screen is not merely a join across two endpoints: on this plan it is a join that yields a column of nulls, and the screen ranks on nothing. That needs a decision rather than a designed null state.
+
+The **structural** fields on the same endpoint — `strike_price`, `expiration_date`, `type`, `root_symbol`, `multiplier`, `size` — are populated. The adjusted-contract detection below is therefore unaffected, which matters more than the screen does: it is the one that feeds rule 4.
 
 ### The adjusted-contract warning has an exact answer
 
-`/v2/options/contracts` returns `multiplier` **and** `size` as separate fields, with the spec stating explicitly that `size` *"should not be used as a multiplier"*. It also returns `root_symbol` and, on request, `deliverables`.
+**Spec, and the fields it depends on are probed present.** `/v2/options/contracts` returns `multiplier` **and** `size` as separate fields, with the spec stating explicitly that `size` *"should not be used as a multiplier"*. It also returns `root_symbol` and, on request, `deliverables`. Unlike `open_interest` on the same endpoint, all four come back populated.
 
 Detection is `root_symbol != underlying_symbol`. Sizing and P&L read `multiplier` per contract, never the frontend's `CONTRACT_MULTIPLIER = 100`.
 
@@ -87,7 +150,87 @@ Carried forward as implementation-time checks rather than assumptions:
 - The stock snapshots endpoint's exact field shape.
 - Whether `order_class: oco` is accepted for *options* — carried over unresolved from the Open Positions spec. Phase 6's problem, not this one.
 - `non_marginable_buying_power` semantics on a cash account.
-- **The MCP Alpaca server returns 401.** Until it has working paper keys, the provider is built against published specs rather than a real account, which is where a field-shape mismatch would surface first.
+- Whether the same `id` really appears on both rows of an option-event pair, which would make `fill(activity_id UNIQUE)` drop half of every event. Check against the first real one.
+- Whether `open_interest` is null because of the plan or because Alpaca populates it only after a settlement cycle this account has never had.
+
+**Resolved since the original list:** the MCP 401 is diagnosed — the server holds non-paper keys, and the `.env` keys work — so the provider is no longer being built blind. The account, contracts, snapshot, portfolio-history and activities shapes above are probed.
+
+---
+
+## Open questions
+
+Added by the 2026-09-10 amendment. These are the places where the probe found
+an absence rather than a mismatch, so no amount of care in the mapper resolves
+them. Each blocks a specific shipped behaviour, and each is a judgement about
+what the terminal should say when it does not know something.
+
+### 1. IV, greeks and open interest have no source on Basic
+
+Blocks: the chain's IV column, PRD §8.4's "highest IV" and "highest open
+interest" screens, and the delta-scaled day-change model that
+`mockData.test.ts` currently pins.
+
+Four ways out, and they are not mutually exclusive:
+
+- **Compute IV and greeks locally** from the mid price with Black-Scholes.
+  The OpenAPI document describes Alpaca's own values as *"calculated using
+  the Black-Scholes model"*, so this reproduces their method rather than
+  approximating a measurement — which is a much stronger position than it
+  first sounds. Needs a risk-free rate and a dividend assumption, and it
+  does nothing for open interest, which is a fact about the market that
+  cannot be derived from a price.
+- **Check the OPRA agreement first.** The 403 says *"OPRA agreement is not
+  signed"*, which is an agreement, not an entitlement. If signing it in the
+  Alpaca dashboard is free, all three fields arrive and this question
+  disappears. Cheapest thing to try and it should be tried before any code
+  is written.
+- **Mark the columns unavailable**, in the same words as §8.5's fixture
+  markers. Honest, and consistent with the rule that a fluent non-answer is
+  worse than an admitted gap — but two named screens stop working.
+- **Drop the columns and the screens** until a plan or provider supplies
+  them.
+
+The one option that is *not* open is inventing values. An IV column that
+renders a plausible number nobody computed is precisely the failure §8.5
+names when it says a table of invented numbers reads as invented.
+
+### 2. The ledger has no data to be validated against
+
+Blocks: confidence in decisions 4 and 5, not the decisions themselves.
+
+This account has zero fills. Decision 4's stated argument against matching
+only Corollary-placed trades — that it *"leaves a paper account's existing
+history blank"* — is moot, because the history is blank either way. The
+decision still stands on its other leg (lifetime P&L is the truest thing on
+the Activity page), but it is now standing on one leg and the spec should
+not pretend otherwise.
+
+Three ways to get validation data:
+
+- **Place a handful of paper trades by hand** — including one multi-leg
+  order and one contract held to expiry — purely to generate real fills.
+  A few dollars of fake money buys recorded fixtures with real shapes, and
+  it is the only option that tests the grouper against an actual `mleg`
+  order rather than an imagined one. Slowest, because expiry takes a week.
+- **Author fixtures from Alpaca's documented examples**, which is what the
+  option-event section above already had to do. Fast, and it proves the
+  arithmetic is self-consistent while proving nothing about the shapes.
+- **Defer the ledger to a later phase** and ship Phase 2 with the Activity
+  header cards marked unavailable. Contradicts decision 4 and lowers the
+  bar of *"you'd open it in the morning and learn something true."*
+
+### 3. Paper is a 4× PDT margin account, and the PRD says 2×
+
+Not a question so much as a correction that needs making somewhere. PRD
+§8.6 asserts *"Paper is a margin account at 2× cash"*; this account reports
+`multiplier: '4'`. The number on screen must come from the account object
+rather than from prose, and the prose should go.
+
+The deeper point, recorded here rather than acted on: paper is a weaker
+rehearsal for Phase 7 Cash than §2's *"which Alpaca account keys are in
+use"* framing implies, because the two differ in margin class as well as in
+whose money is at stake. `options_buying_power` is the figure that binds an
+options trader on both, and is the right thing to size against on both.
 
 ---
 
@@ -270,7 +413,13 @@ Pure function, fill sequence → realized trades. No I/O, `Decimal` throughout.
 
 An open-lot queue per contract symbol. `*_to_open` pushes a lot; `*_to_close` pops FIFO, emitting a trade per matched slice. Long P&L is `(close − open) × qty × multiplier`; short inverts. `multiplier` is per contract from the contracts endpoint, cached.
 
-`OPEXP` closes remaining lots at zero — a full loss on a long, the full credit kept on a short. `OPASN` and `OPEXC` close at intrinsic and emit a flag; Corollary is not a stock app, so the resulting shares are named, not tracked. Fees attribute by `order_id` where one is present, with unattributed fees reported separately rather than dropped.
+`OPEXP` closes remaining lots at zero — a full loss on a long, the full credit kept on a short. Per the option-event finding above, `OPEXP` is the **OTM case only**: Alpaca auto-exercises ITM contracts absent a DNE instruction, so an ITM expiry arrives as an `OPEXC` pair and never reaches this branch.
+
+`OPASN` and `OPEXC` close at the strike, **read from the paired `OPTRD` row's `price` or parsed from the OCC symbol — never from the event row's `net_amount`, which is zero.** A matcher that trusts `net_amount` here books every exercise as a total loss. They emit a flag; Corollary is not a stock app, so the resulting shares are named, not tracked.
+
+The matcher also normalises two conventions into one: `FILL` rows carry an unsigned `qty` with a separate `side`, while non-trade rows carry a **signed** `qty` and no `side` at all. Normalise on ingest, so the matcher itself sees one convention.
+
+Fees attribute by `order_id` where one is present. **Non-trade activities have no `order_id`** — `group_id` is the only linkage they get — so fee attribution for expiry, assignment and exercise runs through `group_id`, and anything still unattributed is reported separately rather than dropped.
 
 `pnl_pct` denominates on cost basis — `open_price × qty × multiplier` — so a short's basis is the credit received, matching `orders.ts`'s negative `openUnitValue`.
 
@@ -324,7 +473,8 @@ Halting stops nothing this phase, because nothing trades. The state, the notific
 
 **Backend.**
 
-- `ledger.py` — long and short round trips both directions, partial closes, FIFO across two lots at different prices, expiry-worthless both directions, `multiplier != 100`, fee attribution. Plus the reconciliation invariant: `Σ realized + unrealized ≈ account P&L` within fees.
+- `ledger.py` — long and short round trips both directions, partial closes, FIFO across two lots at different prices, expiry-worthless both directions, `multiplier != 100`, fee attribution. Plus the reconciliation invariant: `Σ realized + unrealized ≈ account P&L` within fees. Also the two conventions the probe surfaced: a signed non-trade `qty` normalises to the same lot movement as an unsigned `FILL` `qty` plus `side`, and an `OPEXC` pair closes at the strike rather than at `net_amount`'s zero.
+- **Where the fills come from is itself a decision** — this paper account is empty, so every ledger test is authored rather than recorded. That is fine for the arithmetic and worthless for the shapes: a hand-written fixture proves the matcher is self-consistent, never that it matches what Alpaca sends. See *Open questions*. Whatever the answer, the first real fill is a reconciliation checkpoint, not a formality.
 - `grouping.py` — two-leg spread groups; iron condor groups; one leg closed ungroups; ratio mismatch does not group; **two unrelated same-expiry positions do not group**, which is what proves this is not a heuristic.
 - Provider — recorded Alpaca responses as fixtures, no live calls. Feed-name resolution from the three env vars. Rate limiter. Adjusted contracts filtered on `root_symbol`.
 - Watchdog — halts on timeout, halts on WS close, never resumes itself.
@@ -344,13 +494,18 @@ Halting stops nothing this phase, because nothing trades. The state, the notific
 - **PRD §8.1** — equity curve is Alpaca's, with a t₀ marker.
 - **PRD §12** — one process, resolved.
 - **PRD §8.2** — the realized-P&L ledger exists; expiry and assignment are ledger states.
-- **PRD §8.6** — *"keeps no ledger"* scoped to cash transfers. *(Settled/unsettled: done 2026-09-10.)*
+- **PRD §8.6** — *"keeps no ledger"* scoped to cash transfers. *(Settled/unsettled: done 2026-09-10.)* Also: **drop *"Paper is a margin account at 2× cash"*** — this account reports `multiplier: '4'`, and the figure must be read from the account object rather than asserted in prose. Point the page at `options_buying_power`, which is what actually binds an options trader and is supplied on both account types.
+- **PRD §8.4** — the "highest IV" and "highest open interest" screens depend on fields Basic does not serve. Whatever *Open questions* §1 resolves to, §8.4 has to say it.
 - **CLAUDE.md** — the vendor surface gains `BrokerAccount`; layout gains `engine/{ledger,grouping,runtime,stream}.py`, `api/routes/`, `api/schemas.py`; `CONTRACT_MULTIPLIER` is a fixture default and real multipliers are per contract; options level is read from the account, not hardcoded to 3.
 
 ---
 
 ## Order of work
 
+0. **Check whether signing the OPRA agreement is free.** Not code, and it
+   gates *Open questions* §1 — if it unlocks IV, greeks and open interest,
+   several downstream steps get simpler and nothing needs computing locally.
+   Do it before writing any Markets code.
 1. Type extraction and vite proxy — pure refactors.
 2. DB and Alembic wired; three config tables, audit log, engine state. Settings goes server-backed.
 3. `MarketDataProvider` + `AlpacaProvider`: quotes, snapshots, bars, chain, contracts. Rate limiter, feed config.
