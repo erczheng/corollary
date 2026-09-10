@@ -43,6 +43,8 @@ Everything here is verified unless marked otherwise, and each subsection now say
 
 It carries **no leg grouping, no order linkage, and no open date**. A four-leg iron condor is four positions. Every numeric field is a **string**, which is ideal: they parse straight to `Decimal` and no float ever touches money.
 
+**Probed.** Seven logical positions produced **eleven** rows — four verticals contributing two each, three singles contributing one — which is the grouping problem in its plainest form. Two fields not in the list above are present: `asset_marginable` and `exchange` (empty string on options). And a short leg reports `qty: "-1"` **alongside** `side: "short"`, with **`cost_basis` and `market_value` both negative** (`-4155`, `-4250` on the AMD 470 put). That independently confirms `orders.ts`'s rule that a short's `openUnitValue` is negative because a credit is a liability — the broker agrees, in its own numbers.
+
 Consequence: `Position.legs[]`, the payoff curve, max-loss and the DTE column all assume one logical position. A short leg rendered alone reports as an *undefined-risk* naked short, so a defined-risk credit spread would state the wrong risk class — the exact failure CLAUDE.md rule 4 exists to prevent.
 
 ### Multi-leg orders exist; multi-leg positions do not
@@ -56,7 +58,37 @@ Order cost basis is `maintenance_margin + net_price × multiplier`, computed und
 
 ### There is no realized P&L anywhere
 
-**Spec.** The `FILL` shape below is *not* probed — this account has no fills. `GET /v2/account/activities/FILL` returns `activity_type`, `id`, `order_id`, `order_status`, `symbol`, `side`, `qty`, `cum_qty`, `leaves_qty`, `price`, `transaction_time`, `type` (`fill` | `partial_fill`). `page_size` maxes at 100.
+**Probed 2026-09-10, second pass.** Seven recommendation-shaped orders were
+placed on the paper account (four `mleg` verticals, three single-leg), and one
+single-leg long was closed for a round trip. The `FILL` shape is now observed
+rather than assumed, and it corrected three things.
+
+**`side` has three values, not two.** Observed: `buy` ×7, `sell_short` ×4,
+`sell` ×1. The original claim that *"`side` is buy/sell"* is wrong, and the
+error is not cosmetic — `sell_short` is an opening sale (STO) while `sell` is
+a closing one (STC), so `side` alone distinguishes those two. It does **not**
+distinguish `buy`: BTO and BTC are both `buy`, which is what makes the
+fill→order join for `position_intent` mandatory rather than merely convenient.
+
+**A fill's `order_id` is the *leg* id, not the parent order's.** For a simple
+order they coincide. For an `mleg` order each leg is a full order object with
+its own `id`, and that is what lands on the fill; the parent id appears
+nowhere on it. Reaching the parent requires `GET /v2/orders?nested=true` and a
+leg-id → parent-id map built from `legs[]`. Decision 5's *"join legs to the
+historical mleg order that opened them"* is therefore a **two-hop join**, and
+a one-hop implementation silently groups nothing — every fill would look like
+a single-leg order that happens to exist.
+
+**The activity `id` is composite**: `20260910131125598::68cda3e9-…`, a
+timestamp concatenated with a UUID. It sorts chronologically as a string,
+which is convenient for the `fill(activity_id UNIQUE)` upsert and for
+resuming ingestion, but it is not a bare UUID and must not be typed as one.
+
+The round trip — IWM 280P bought at `8.21`, sold at `8.14` — is the first
+real realized trade on the account: a **−$7.00** loss at a 100 multiplier, and
+the arithmetic the FIFO matcher must reproduce exactly.
+
+**Spec (unchanged, still unprobed for the fields below).** `GET /v2/account/activities/FILL` returns `activity_type`, `id`, `order_id`, `order_status`, `symbol`, `side`, `qty`, `cum_qty`, `leaves_qty`, `price`, `transaction_time`, `type` (`fill` | `partial_fill`). `page_size` maxes at 100.
 
 **No P&L field, and no `position_intent`.** `side` is buy/sell; `ActivityItem.action` is BTO/STC/STO/BTC. `position_intent` lives on the *order*, so every ledger row needs a fill→order join.
 
@@ -195,6 +227,24 @@ renders a plausible number nobody computed is precisely the failure §8.5
 names when it says a table of invented numbers reads as invented.
 
 ### 2. The ledger has no data to be validated against
+
+**Largely resolved 2026-09-10.** Seven orders were placed on the paper account
+— four `mleg` verticals and three single-leg — and one long was closed for a
+round trip. That supplies real fills, a real `mleg` order with real
+`ratio_qty` values for the grouper, eleven position rows across seven logical
+positions, and one realized trade (−$7.00) for the matcher. Three of the
+corrections above came out of it, including the two-hop join that decision 5
+depends on.
+
+**What it does not yet supply is the option-event path.** Every position
+opened expires in November 2026 or later, so `OPEXP`, `OPEXC` and `OPASN`
+remain verified only against Alpaca's documented examples — and that is
+exactly where the spec is most likely to be wrong, because the money sits on a
+different row than the event. The open item is now narrow: hold something to
+expiry. A near-dated contract would answer it within days rather than months.
+
+What follows is the original framing, kept because the reasoning still applies
+to the part that is open.
 
 Blocks: confidence in decisions 4 and 5, not the decisions themselves.
 
@@ -411,7 +461,7 @@ Ingestion runs on startup and on an interval — pull activities newer than the 
 
 Pure function, fill sequence → realized trades. No I/O, `Decimal` throughout.
 
-An open-lot queue per contract symbol. `*_to_open` pushes a lot; `*_to_close` pops FIFO, emitting a trade per matched slice. Long P&L is `(close − open) × qty × multiplier`; short inverts. `multiplier` is per contract from the contracts endpoint, cached.
+An open-lot queue per contract symbol. `*_to_open` pushes a lot; `*_to_close` pops FIFO, emitting a trade per matched slice. Intent comes from the order, never from `side`: the probe found `side` takes **three** values — `sell_short` opens a short, `sell` closes a long, and `buy` is *both* BTO and BTC. Two of the four actions are indistinguishable without the join. Long P&L is `(close − open) × qty × multiplier`; short inverts. `multiplier` is per contract from the contracts endpoint, cached.
 
 `OPEXP` closes remaining lots at zero — a full loss on a long, the full credit kept on a short. Per the option-event finding above, `OPEXP` is the **OTM case only**: Alpaca auto-exercises ITM contracts absent a DNE instruction, so an ITM expiry arrives as an `OPEXC` pair and never reaches this branch.
 
@@ -426,6 +476,11 @@ Fees attribute by `order_id` where one is present. **Non-trade activities have n
 ### Multi-leg grouping
 
 Pure. Broker positions plus mleg history → logical positions.
+
+The join is **two-hop**, per the probe: a fill carries its *leg's* order id, so
+reaching the parent `mleg` order means `GET /v2/orders?nested=true` and a
+leg-id → parent-id map built from `legs[]`. A one-hop join groups nothing at
+all, and does so silently.
 
 Each historical mleg order proposes a group. A group is **live** only if every leg still holds a nonzero position on the expected side, with quantities consistent with the order's ratios. Live groups become one logical position with `legs[]` populated. Everything else is a single-leg position labelled `ungrouped`.
 
