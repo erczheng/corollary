@@ -331,6 +331,19 @@
   line-height: 24px;
 }
 
+/* The dense step of the scale — 14px Montserrat on a 20px line. Table and
+   list rows use this rather than body-md: a row's numeric cells are
+   data-md, also 14px on a 20px line, so the descriptive column and the
+   figures beside it finally share one size and one line box. At 16px the
+   text column outweighed its own numbers. Prose outside a row stays
+   body-md. */
+@utility text-body-sm {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 20px;
+}
+
 @utility text-label-md {
   font-family: var(--font-label);
   font-weight: 600;
@@ -339,11 +352,37 @@
   letter-spacing: 0.05em;
 }
 
+/* label-md's dense counterpart, for table headers, in-row buttons and the
+   chips that sit inside a row. Same family, weight and tracking, one step
+   down — uppercase 12px keeps the tracking that makes it legible, which is
+   what `caption` lacks and why table headers hand-rolled `tracking-wide`
+   on top of it before this role existed. */
+@utility text-label-sm {
+  font-family: var(--font-label);
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.05em;
+}
+
 @utility text-caption {
   font-family: var(--font-label);
   font-weight: 500;
   font-size: 12px;
   line-height: 16px;
+}
+
+/* Numbers small enough to sit inside something else — a confidence pill, a
+   badge, a secondary figure trailing a larger one. Still mono and still
+   tabular: a percentage is a number wherever it lands (see CLAUDE.md), so
+   this is the role to reach for instead of dropping a pill to `caption`.
+   Table number columns stay data-md. */
+@utility text-data-sm {
+  font-family: var(--font-data);
+  font-weight: 500;
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
 }
 
 @utility text-data-md {

@@ -98,8 +98,14 @@ const COLUMNS: Record<ColumnKey, { label: string; align: 'left' | 'right'; grow?
   status: { label: 'Status', align: 'right' },
 }
 
-const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
-const TD = 'px-3 py-1 align-top'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
+/** Every table row in the app is 32px: `h-8` here, `px-3 py-1` on the
+ * cells. The height is set on the row rather than by the padding because a
+ * row action is 24px tall and a line of row text is 20px — left to the
+ * padding alone the two would land 4px apart, which is what made a table
+ * with buttons taller than a table without one. See DESIGN.md "Tables". */
+const TR = 'h-8 border-t border-outline/10 hover:bg-surface-container-low'
 const TD_NUM = `${TD} text-right text-data-md text-on-surface`
 
 /** P&L if the trade produced one, the cash moved if it was a deposit or a
@@ -166,7 +172,7 @@ function Cell({
             : `${ACTIVITY_ACTION_LABEL[item.action]} ${item.contract}`
       return (
         <td
-          className={`${TD} max-w-0 text-body-md text-on-surface`}
+          className={`${TD} max-w-0 text-body-sm text-on-surface`}
           title={cashMovement ? undefined : item.contract}
         >
           <span className="block truncate">{text}</span>
@@ -275,7 +281,7 @@ export function ExecutionsTable({
       </thead>
       <tbody>
         {items.map((a) => (
-          <tr key={a.id} className="border-t border-outline/10 hover:bg-surface-container-low">
+          <tr key={a.id} className={TR}>
             {columns.map((key) => (
               <Cell
                 key={key}
