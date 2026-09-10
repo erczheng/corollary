@@ -198,6 +198,12 @@ what the terminal should say when it does not know something.
 
 ### 1. IV, greeks and open interest have no source on Basic
 
+**RESOLVED 2026-09-10 — see decision 10.** The OPRA agreement was checked and
+is paywalled, not a free click: it comes with Algo Trader Plus at $99/mo. The
+decision is to derive IV and greeks locally, report open interest as
+unavailable, and buy the plan as a Phase 6 prerequisite. The framing below is
+kept because it is the reasoning decision 10 rests on.
+
 Blocks: the chain's IV column, PRD §8.4's "highest IV" and "highest open
 interest" screens, and the delta-scaled day-change model that
 `mockData.test.ts` currently pins.
@@ -286,7 +292,7 @@ options trader on both, and is the right thing to size against on both.
 
 ## Decisions
 
-Nine decisions, taken 2026-09-09/10. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
+Ten decisions, taken 2026-09-09/10. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
 
 ### 1. One process
 
@@ -360,6 +366,49 @@ Settings mixes real and mock within one page, so its markers sit on the affected
 
 Actioned 2026-09-10. See PRD §8.6 for the reasoning and the consequence to weigh before reinstating.
 
+### 10. Derive IV and greeks; report open interest as absent; buy the plan at Phase 6
+
+Taken 2026-09-10, after the OPRA agreement was confirmed paywalled rather than
+a free signature.
+
+**IV and greeks are computed locally** with Black-Scholes, from the mid of the
+indicative quote. This is not a workaround for a missing measurement: Alpaca's
+own OpenAPI document describes its `impliedVolatility` and `greeks` as
+*"calculated using the Black-Scholes model"*, so the vendor derives them too
+and paying $99/mo buys the same arithmetic run on their hardware. The risk-free
+rate comes from FRED, already a planned §7 dependency, and the dividend
+assumption is stated rather than hidden.
+
+**Open interest is reported absent**, in §8.5's fixture-marker words. It is a
+fact about the market and cannot be derived from a price at any effort. PRD
+§8.4's "highest open interest" screen has no ranking key on this plan and must
+say so rather than rank on nulls.
+
+**The plan is bought before Phase 6, not before Phase 2.** What the
+subscription actually buys is three things: open interest, real-time quotes
+instead of 15-minute-delayed, and unlimited stream symbols instead of thirty.
+None of the three changes anything while the terminal is read-only. All three
+change something the moment it executes — and the middle one is the reason the
+timing is a rule rather than a preference: **an order priced off a
+15-minute-old options quote is a loss mechanism, not a display nicety.** The
+same staleness that is acceptable in a column is unacceptable in a fill.
+
+The honest cost of deriving: greeks computed from a delayed mid are *delayed*
+greeks. Correct method, stale inputs. That is fine for a column and not fine
+for sizing, which is the same boundary stated above from the other side.
+
+Rejected: buying now, which spends roughly $400 across phases 2–5 to change no
+behaviour in any of them. Also rejected: dropping the IV column, which
+discards shipped Phase 1 work to avoid arithmetic the vendor has already
+told us how to do. Also rejected: ranking the open-interest screen on nulls,
+which is the invented-number failure §8.5 exists to prevent.
+
+**Consequence for `engine/stream.py`:** the 30-symbol budget manager stays,
+and stays necessary. It was designed for the pessimistic reading of the cap
+and is the component the subscription would make redundant — but it is also
+the graceful-degradation path, so it survives the upgrade rather than being
+deleted by it.
+
 ---
 
 ## Three rule reinterpretations, approved
@@ -375,7 +424,7 @@ API routes depend on `BrokerAccount` only, so `submit_order` is not in a type th
 
 ### `Decimal` serializes as a JSON number
 
-Money is `Decimal` everywhere it is *computed* — Alpaca's strings parse straight to `Decimal` on ingest, DB columns are `Numeric`, the matcher and engine are `Decimal` throughout. The API boundary is a display boundary and serializes to a JSON number.
+Money is `Decimal` everywhere it is *computed* — Alpaca's strings parse straight to `Decimal` on ingest, money DB columns are `Money` (see Database below — on SQLite that is TEXT, not `Numeric`, and it is stricter rather than looser), the matcher and engine are `Decimal` throughout. The API boundary is a display boundary and serializes to a JSON number.
 
 Chosen on ease, as directed: the alternative converts 34 frontend files and every `format.ts` helper to strings for a single-user terminal whose largest figure is five digits. The constraint this carries: **client-side money arithmetic is display-only.** `account.ts` sums position value and equity; the server computes both authoritatively, and the client's version is the live estimate between refreshes, marked from the stream — which is what §8.6 already describes.
 
@@ -445,11 +494,15 @@ corollary/
 
 SQLite, WAL, one writer. Ten tables.
 
-- `risk_limit(key, value Numeric)` · `data_feed(key, value)` · `notification_route(event, channel, enabled)` — typed separately rather than one key/value table, because the limits need `Numeric`.
+**Money columns are `Money`, not `Numeric` — a deliberate deviation from CLAUDE.md's letter, made to keep its intent.** SQLite has no exact-decimal storage class and applies NUMERIC *affinity* to the declared type, so a `Numeric` column converts `'7.5'` to an IEEE double on the way in; SQLAlchemy warns as much. `corollary.db.types.Money` stores TEXT and converts back to `Decimal` on read, so no float touches the path.
+
+The cost is that SQL compares that text **lexicographically**. Against the five seeded ceilings (7, 20, 8, 25, 40), `MAX(value)` is `8`, `MIN(value)` is `20`, `WHERE value > 10` matches all five, and `ORDER BY value` gives 20, 25, 40, 7, 8 — every one a plausible number, none an error. `select(RiskLimit).where(RiskLimit.value < computed_risk)` therefore approves a 35%-of-account trade against the 40% ceiling and calls the 7% per-trade limit unbreached. So `Money` **raises `MoneyComparisonError`** on every ordering, equality, aggregate and arithmetic operation instead of answering; comparison happens in Python on `Decimal`, via `db.seed.risk_limits`.
+
+- `risk_limit(key, value Money)` · `data_feed(key, value)` · `notification_route(event, channel, enabled)` — typed separately rather than one key/value table, because the limits need an exact decimal and the other two do not. `value` also carries `ck_risk_limit_value`, a text-shape CHECK that rejects `Infinity`, `NaN`, negatives, zero and absurd magnitudes: rule 4 puts enforcement on the server, and `validateRiskLimit` in `settings.ts` is the client. Python validation (`models.validate_risk_limit`) mirrors the per-limit ranges the Settings page shows.
 - `audit_log(id, at, category, field, previous_value, new_value)` — spans all three, per §8.7's *"one log rather than three"*.
 - `engine_state(id=1, halted, halted_reason, halted_at, t0)` — singleton.
 - `fill(id, account, activity_id UNIQUE, order_id, symbol, side, position_intent, qty, price, at)` — raw activities. Needed because `page_size` maxes at 100 and re-fetching all history per request is untenable.
-- `realized_trade(id, account, symbol, opened_at, closed_at, qty, open_price, close_price, pnl Numeric, pnl_pct Numeric, close_kind)` — matcher output. `close_kind` ∈ `fill` | `expiry` | `exercise` | `assignment`.
+- `realized_trade(id, account, symbol, opened_at, closed_at, qty, open_price, close_price, pnl Money, pnl_pct Money, close_kind)` — matcher output. `close_kind` ∈ `fill` | `expiry` | `exercise` | `assignment`. `pnl` is signed, so "biggest loser" is a Python sort over the loaded rows, not `ORDER BY pnl`.
 - `mleg_group(id, account, order_id, opened_at, net_price)` + `mleg_leg(group_id, symbol, ratio, side, position_intent)` — the grouping evidence.
 - `notification(id, at, event, severity, account, title, body, read_at, dismissed_at)` — engine events only this phase.
 
@@ -557,10 +610,9 @@ Halting stops nothing this phase, because nothing trades. The state, the notific
 
 ## Order of work
 
-0. **Check whether signing the OPRA agreement is free.** Not code, and it
-   gates *Open questions* §1 — if it unlocks IV, greeks and open interest,
-   several downstream steps get simpler and nothing needs computing locally.
-   Do it before writing any Markets code.
+0. ~~Check whether signing the OPRA agreement is free.~~ **Done — it is
+   paywalled.** Resolved as decision 10: derive IV and greeks, report open
+   interest absent, buy the plan at Phase 6. Markets work is unblocked.
 1. Type extraction and vite proxy — pure refactors.
 2. DB and Alembic wired; three config tables, audit log, engine state. Settings goes server-backed.
 3. `MarketDataProvider` + `AlpacaProvider`: quotes, snapshots, bars, chain, contracts. Rate limiter, feed config.
