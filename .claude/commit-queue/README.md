@@ -43,7 +43,11 @@ twenty minutes ago describes a tree that has since changed.
 
 Filename order, which is timestamp order. Per entry:
 
-1. Every path in `files` exists and has a pending change. A listed file with
+1. Every path in `files` exists and has a pending change, per
+   `git status --porcelain -uall`. **The `-uall` is load-bearing** — plain
+   `--porcelain` collapses an untracked directory into one line, so a literal
+   reading of this check can pass against `?? .claude/agents/` without ever
+   confirming that each named file is really pending. A listed file with
    nothing pending means the approval is stale — reject.
 2. Stage **only** the listed paths. Never `git add -A`, never `git add .`. An
    unrelated file swept into a commit is how the engine's history stops being
@@ -51,9 +55,16 @@ Filename order, which is timestamp order. Per entry:
 3. Reject on anything credential-shaped in the staged diff, and on any staged
    path that is `.env*`, `*.pem` or `*.key`. `.env.example` with bare names and
    no values is fine and expected.
-4. Re-run the `verified` checks. Backend paths pull in `pytest -m risk` and
-   `mypy`; frontend paths pull in `typecheck` and Vitest.
+4. **Re-derive which suites are in scope from the `files` list**, then run
+   them. Backend paths pull in `pytest -m risk` and `mypy`; frontend paths
+   pull in `typecheck` and Vitest. An entry may *claim* no suite applies;
+   that claim is a hint, never a substitute for checking the paths yourself.
 5. Commit, then delete the queue file.
+
+The `Co-Authored-By:` trailer comes from the **attribution directive in the
+committer's own invocation context**, never from a string baked into a role
+file. A hardcoded model name goes stale the moment the model behind the agent
+changes, and it will change.
 
 On failure the entry is **not** deleted. It is renamed `<name>.rejected.json`
 with a sibling `<name>.rejected.txt` holding the exact failing output. A

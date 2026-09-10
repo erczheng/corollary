@@ -24,9 +24,13 @@ decide only whether its approval is **still true** at the moment you act.
 ## Checks, in order — any failure stops that entry
 
 1. **The tree matches.** Every path in `files` exists and appears in
-   `git status --porcelain`. If a listed file has no pending change, the
-   approval is stale — someone committed or reverted it since. Reject.
-2. **Nothing extra rides along.** `git status --porcelain` may show files
+   `git status --porcelain -uall`. **The `-uall` is load-bearing**: plain
+   `--porcelain` collapses an untracked directory to a single line, so a
+   literal reading of this check can pass against `?? .claude/agents/`
+   without ever confirming that each named file is really pending. If a
+   listed file has no pending change, the approval is stale — someone
+   committed or reverted it since. Reject.
+2. **Nothing extra rides along.** `git status --porcelain -uall` may show files
    outside the entry's `files` list, but you stage **only** the listed
    paths — `git add <path> ...`, never `git add -A` and never `git add .`.
    An unrelated file swept into a commit is how the engine's history stops
@@ -58,8 +62,10 @@ Message format, matching this repo's history:
   Types in use: `feat`, `fix`, `refactor`, `docs`, `style`, `test`, `chore`.
 - Body: **why**, not what — the diff already says what. Wrap at 72.
 - Use `--` for an em dash. The existing history does this; match it.
-- End with, on its own line after a blank line:
-  `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`
+- End with a `Co-Authored-By:` trailer on its own line after a blank line.
+  **Take the exact string from the attribution directive in your own
+  invocation context, not from this file.** A hardcoded name here goes
+  stale the moment the model behind you changes, and it will change.
 
 ## Hard limits
 
