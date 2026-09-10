@@ -166,17 +166,34 @@ typography:
     fontSize: 16px
     fontWeight: '400'
     lineHeight: 24px
+  body-sm:
+    fontFamily: Montserrat
+    fontSize: 14px
+    fontWeight: '400'
+    lineHeight: 20px
   label-md:
     fontFamily: Plus Jakarta Sans
     fontSize: 14px
     fontWeight: '600'
     lineHeight: 20px
     letterSpacing: 0.05em
+  label-sm:
+    fontFamily: Plus Jakarta Sans
+    fontSize: 12px
+    fontWeight: '600'
+    lineHeight: 16px
+    letterSpacing: 0.05em
   caption:
     fontFamily: Plus Jakarta Sans
     fontSize: 12px
     fontWeight: '500'
     lineHeight: 16px
+  data-sm:
+    fontFamily: JetBrains Mono
+    fontSize: 12px
+    fontWeight: '500'
+    lineHeight: 16px
+    fontVariantNumeric: tabular-nums
   data-md:
     fontFamily: JetBrains Mono
     fontSize: 14px
@@ -397,12 +414,19 @@ Pick the shortest duration that still reads as intentional. When in doubt, `base
 ## Components
 
 - **Buttons.** Primary: `primary #355255` fill, white text, `label-md`, 0.5rem radius. Secondary: 1px `outline #717879` border, transparent fill. Destructive: 1px `error #ba1a1a` border with error text — outlined rather than filled, so a Close button never competes with a Trade button for attention.
+- **Row actions are the small size: `h-6` (24px), `px-2`, `label-sm`.** Close, Cancel, Trade, Chart, Execute — every control that lives inside a table row. 24px is the floor, not a preference: it is WCAG 2.2's minimum target size, and it is also exactly what fits a 32px row with 4px of cell padding either side. The three fills above are unchanged; only the height and the label step down. Section controls (Export CSV, a filter select, a range pill) keep `label-md` and `py-2` — they sit in a panel header, not in a row, and matching them to a row action would flatten the difference between acting on one position and acting on the panel.
 - **Inputs.** 1px `outline #717879`, 0.5rem radius. Placeholder text in `on-surface-variant #414849`. Focus transitions the border to `primary #355255` and adds a 2px ring in `primary` with a 2px offset in `surface`, so the ring reads against both the input and the page.
 - **Cards.** Flat, 1px `outline-warm #b7b7a5`, 1rem radius. Featured cards fill `tertiary #455045` at 10% opacity.
-- **Chips & tags.** `label-md` type, `full` radius. Sentiment chips use the semantic container pairs: bullish on `#dae6d8`, bearish on `#ffdad6`, neutral on `#e4e4d0`, pending on `#eae7c0`. `NEW` and `unvalidated` markers use `accent-container #f6ddd7` with `on-accent-container #5c2d24`. In dark theme all of these resolve through `semanticDark`.
+- **Chips & tags.** `label-sm` type, `h-6` (24px), `px-2`, `full` radius — sized to the row action beside it, since a chip and a button in the same row that disagree by 6px read as a mistake. A marker *inside* a line of row text (the `Critical` flag, a `2 legs` count, a key's present/absent state) is smaller again — `px-2 py-0.5`, 20px — so it never exceeds the 20px line it sits in and cannot set the row's height from within a cell. Sentiment chips use the semantic container pairs: bullish on `#dae6d8`, bearish on `#ffdad6`, neutral on `#e4e4d0`, pending on `#eae7c0`. `NEW` and `unvalidated` markers use `accent-container #f6ddd7` with `on-accent-container #5c2d24`. In dark theme all of these resolve through `semanticDark`.
 - **Notification badge.** `accent #ce8f82` fill with `on-accent #3a1710` count text. The unread dot is `accent` at full strength, 8px.
-- **Tables.** Header row on `surface-container #f0efdb` with `label-md` uppercase labels. Row dividers 1px `outline` at 10% opacity. Numeric columns right-aligned in `data-md`. Row hover fills `surface-container-low #f5f5e1`.
-- **Row density is `px-3 py-1` — 4px vertical, every cell, every table.** One value across all nine tables so a row on Markets is the same height as a row on Activity. 4px is on the spacing scale above; `py-1.5` (6px) is not, which is why it is not used here even though it looks like the gentler step. That yields ~33px text rows and ~39px where a row carries a button — the button's own `py-1` plus its border is the floor, so cutting cell padding further would only desynchronise button rows from text rows without making the table shorter.
+- **Tables.** Header row on `surface-container #f0efdb` with `label-sm` uppercase labels — one step below the data, because in a dense table the figures are the content and a 14px uppercase header competes with them. Row dividers 1px `outline` at 10% opacity. Numeric columns right-aligned in `data-md`. Row hover fills `surface-container-low #f5f5e1`.
+- **Row density is `px-3 py-1` on every cell and `h-8` on every row — 32px, plus its 1px divider.** One value across all nine tables, so a row on Markets is the height of a row on Activity whether or not either carries a button. 4px padding is on the spacing scale above; `py-1.5` (6px) is not, which is why it is not used even though it looks like the gentler step.
+
+  The height belongs on the row rather than on the padding because a row's contents are not one size: a line of row text is 20px, a row action is 24px. Left to padding alone those land 4px apart, and the table with buttons in it stands 39px to the other's 33px — which is what every table did before this rule existed. `h-8` takes the taller of the two as the grid and centres the shorter one in it (`align-middle`, not `align-top`, or a 20px line would sit 4px from the top of a 32px row and 8px from the bottom).
+
+  **Row text is `body-sm`, not `body-md`.** 14px on a 20px line, which is exactly what `data-md` gives the numeric columns — so the descriptive column and the figures beside it share a size and a baseline. At 16px the text column outweighed its own numbers and needed a 24px line to hold it, which is what set the old row height.
+
+  **A control or a chip alone in a cell needs `flex`, not the inline default** — `ml-auto flex w-fit` on the control itself, or a `flex` wrapper where a cell holds several. An inline-level box in a cell rides the cell's text baseline and pulls a descender's worth of strut in with it: 25.5px around a 24px button, enough to push one table's rows 2px above every other's. `align-middle` does not fix it; only taking the control out of inline layout does.
 - **Charts.** Gridlines in `outline-warm #b7b7a5` at 40% opacity. Portfolio series in `primary #355255`; benchmark series in `accent #ce8f82`.
 - **Lists.** 1px dividers, `outline` at 10%.
 - **Logo.** "corollary" in Montserrat, lowercase, `primary #355255`.

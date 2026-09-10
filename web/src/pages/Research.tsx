@@ -25,7 +25,7 @@ import { dispositionOf, recommendationCsvRows, visibleRecommendations } from '..
 import { downloadCsv } from '../lib/csv'
 import { formatExpiry, formatSignedNumber, formatUsd, signClass } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
 const TD = 'px-3 py-1 align-middle'
 
 /** PRD.md §8.5. The page for deciding what to trade and which strategy should
@@ -181,8 +181,8 @@ export function Research() {
                 {visible.map((r) => {
                   const disposition = dispositionOf(r.id, dispositions)
                   return (
-                    <tr key={r.id} className="border-b border-outline-variant last:border-0">
-                      <td className={`${TD} text-body-md text-on-surface`}>
+                    <tr key={r.id} className="h-8 border-b border-outline-variant last:border-0">
+                      <td className={`${TD} text-body-sm text-on-surface`}>
                         {recommendationTitle(r)}
                       </td>
                       {/* Formatted in UTC. A bare YYYY-MM-DD parses as UTC
@@ -194,16 +194,20 @@ export function Research() {
                       <td className={`${TD} text-caption text-on-surface-variant`}>{r.setup}</td>
                       <td className={`${TD} text-caption text-on-surface-variant`}>{r.reason}</td>
                       <td className={TD}>
-                        {r.origin === 'llm' ? (
-                          <Chip variant="accent" title="Originated by the LLM layer, not the scanner">
-                            LLM
-                          </Chip>
-                        ) : (
-                          <span className="text-caption text-on-surface-variant">Scanner</span>
-                        )}
+                        <div className="flex items-center">
+                          {r.origin === 'llm' ? (
+                            <Chip variant="accent" title="Originated by the LLM layer, not the scanner">
+                              LLM
+                            </Chip>
+                          ) : (
+                            <span className="text-caption text-on-surface-variant">Scanner</span>
+                          )}
+                        </div>
                       </td>
                       <td className={`${TD} text-right`}>
-                        <ConfidenceBadge recommendation={r} />
+                        <div className="flex items-center justify-end">
+                          <ConfidenceBadge recommendation={r} />
+                        </div>
                       </td>
                       <td className={`${TD} text-right`}>
                         <div className="flex items-center justify-end gap-2">

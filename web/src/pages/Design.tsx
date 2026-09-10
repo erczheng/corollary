@@ -275,8 +275,11 @@ export function Design() {
           <p className="text-title-lg text-on-surface">Title large</p>
           <p className="text-body-lg text-on-surface">Body large — the quick brown fox jumps over the lazy dog.</p>
           <p className="text-body-md text-on-surface">Body medium — the quick brown fox jumps over the lazy dog.</p>
+          <p className="text-body-sm text-on-surface">Body small — dense table and list rows.</p>
           <p className="text-label-md text-on-surface-variant">Label medium — eyebrow header</p>
+          <p className="text-label-sm text-on-surface-variant">LABEL SMALL — TABLE HEADER, ROW BUTTON</p>
           <p className="text-caption text-on-surface-variant">Caption — secondary detail text</p>
+          <p className="text-data-sm text-on-surface">Data small — 71% in a pill</p>
           <p className="text-data-md text-on-surface">Data medium — $1,234.56 (+2.10%)</p>
           <p className="text-data-lg text-on-surface">Data large — $1,234.56</p>
           <p className="text-data-xl text-on-surface">Data XL — $1,234.56</p>
@@ -386,21 +389,21 @@ export function Design() {
           <table className="w-full border-collapse">
             <thead>
               <tr className="bg-surface-container">
-                <th className="px-3 py-1 text-left text-label-md uppercase text-on-surface-variant">Symbol</th>
-                <th className="px-3 py-1 text-left text-label-md uppercase text-on-surface-variant">Contract</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Last</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Cost basis</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Value</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">P&amp;L ($)</th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">P&amp;L (%)</th>
+                <th className="px-3 py-1 text-left text-label-sm uppercase text-on-surface-variant">Symbol</th>
+                <th className="px-3 py-1 text-left text-label-sm uppercase text-on-surface-variant">Contract</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">Qty</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">Last</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">Cost basis</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">Value</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">P&amp;L ($)</th>
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">P&amp;L (%)</th>
               </tr>
             </thead>
             <tbody>
               {POSITIONS.map((p) => (
-                <tr key={p.symbol} className="border-t border-outline/10 hover:bg-surface-container-low">
-                  <td className="px-3 py-1 text-body-md text-on-surface">{p.symbol}</td>
-                  <td className="px-3 py-1 text-body-md text-on-surface-variant">{p.contract}</td>
+                <tr key={p.symbol} className="h-8 border-t border-outline/10 hover:bg-surface-container-low">
+                  <td className="px-3 py-1 text-body-sm text-on-surface">{p.symbol}</td>
+                  <td className="px-3 py-1 text-body-sm text-on-surface-variant">{p.contract}</td>
                   <td className="px-3 py-1 text-right text-data-md text-on-surface">{p.qty}</td>
                   <td className="px-3 py-1 text-right text-data-md text-on-surface">${p.last.toFixed(2)}</td>
                   <td className="px-3 py-1 text-right text-data-md text-on-surface">${p.costBasis.toFixed(2)}</td>

@@ -89,14 +89,14 @@ function ActionsMenu({
     'block w-full px-3 py-2 text-left text-label-md text-on-surface hover:bg-surface-container-low'
 
   return (
-    <div className="relative inline-block" ref={ref}>
+    <div className="relative inline-flex" ref={ref}>
       <button
         ref={triggerRef}
         type="button"
         aria-label={`More actions for ${position.symbol} ${position.contract}`}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="rounded border border-outline px-2 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
+        className="inline-flex h-6 items-center rounded border border-outline px-2 text-label-sm text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low"
       >
         ⋯
       </button>
@@ -182,8 +182,12 @@ export function PositionRow({
 
   return (
     <>
-      <tr className="border-t border-outline/10 hover:bg-surface-container-low">
-        <td className="max-w-0 px-3 py-1 text-body-md text-on-surface">
+      {/* 32px, like every other table row in the app — the row action
+          inside it is 24px and a line of row text is 20px, so the height
+          is set here rather than left to whichever cell happens to be
+          tallest. See DESIGN.md "Tables". */}
+      <tr className="h-8 border-t border-outline/10 hover:bg-surface-container-low">
+        <td className="max-w-0 px-3 py-1 text-body-sm text-on-surface">
           <button
             type="button"
             onClick={onToggle}
@@ -237,7 +241,7 @@ export function PositionRow({
               type="button"
               onClick={() => onSelectMode('close')}
               title={`Close ${position.symbol} ${position.contract}`}
-              className="rounded border border-error px-3 py-1 text-label-md text-error transition-colors duration-base ease-standard hover:bg-error-container"
+              className="inline-flex h-6 items-center rounded border border-error px-2 text-label-sm text-error transition-colors duration-base ease-standard hover:bg-error-container"
             >
               Close
             </button>
