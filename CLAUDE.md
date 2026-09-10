@@ -29,13 +29,20 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 
 ```bash
 uv sync                          # install
-uv run pytest                    # backend tests
-uv run pytest -m risk            # risk manager tests only — run before any engine change
-uv run alembic upgrade head      # migrations — NOT YET WIRED, no alembic.ini exists yet
+uv run python -m pytest           # backend tests — NOT `uv run pytest`, see below
+uv run python -m pytest -m risk   # risk tests only — run before any engine change
+uv run alembic upgrade head       # migrations — wired, 0001 is head
 uv run python -m corollary.engine    # start engine
 uv run uvicorn corollary.api:app --reload   # start API
 uv run mypy corollary            # type check, must be clean
 ```
+
+**`uv run pytest` does not work on this machine** — the console shim is
+blocked by Windows Application Control (`os error 4551`), the same policy that
+blocks uv's managed 3.12 build. `uv run python -m pytest` runs the identical
+suite and is unaffected, because it goes through the interpreter rather than
+the generated `pytest.exe`. `uv run mypy` and `uv run alembic` are fine, so
+this is specific to pytest's entry point, not to uv.
 
 Frontend commands run from `web/`:
 
@@ -515,14 +522,14 @@ Coverage requirements scale with blast radius:
 | Scanner | Deterministic: same inputs produce identical output. |
 | UI | Typecheck passes. Component tests for tables and forms. |
 
-Run `uv run pytest -m risk` before any change to the engine, no exceptions. The `risk` marker is registered in `pyproject.toml` under `--strict-markers`, so a typo fails loudly instead of quietly running zero tests.
+Run `uv run python -m pytest -m risk` before any change to the engine, no exceptions. The `risk` marker is registered in `pyproject.toml` under `--strict-markers`, so a typo fails loudly instead of quietly running zero tests.
 
 ---
 
 ## Conventions
 
 - Type hints everywhere in Python. `mypy` clean.
-- Money as `Decimal`, never `float`. Currency arithmetic in floats is a real bug source. SQLAlchemy columns are `Numeric`, not `Float`, or the rule leaks at the database boundary.
+- Money as `Decimal`, never `float`. Currency arithmetic in floats is a real bug source. SQLAlchemy columns are `Numeric`, not `Float`, or the rule leaks at the database boundary. **SQLite is the one exception, and it goes the other way**: SQLite has no exact-decimal storage class and applies NUMERIC *affinity* to the declared type, so a `Numeric` column coerces `'7.5'` to a REAL on the way in — `Numeric` is the leak here, not the fix. Money columns use `corollary.db.types.Money`, which stores TEXT and converts back to `Decimal` on read; no float exists anywhere on the path. The cost is that SQL then compares that text **lexicographically** — `MAX` over the five seeded ceilings (7, 20, 8, 25, 40) is `8`, and `WHERE value > 10` matches all five — so `Money` **raises** rather than answering: `<`, `>`, `<=`, `>=`, `==`, `ORDER BY`, `MIN`, `MAX`, `SUM` and arithmetic are all refused at the call site. Load the rows and compare as `Decimal` in Python (`db.seed.risk_limits`).
 - All timestamps stored UTC, displayed in `America/New_York`. Market data is Eastern; never assume local. On Windows this requires the `tzdata` package — `zoneinfo` raises without it.
 - Session boundaries come from a market calendar, never hardcoded 09:30–16:00. Half-days and holidays are real.
 - Log structurally (JSON) with a correlation ID per decision, so a trade can be traced from scan → LLM → risk → order → fill.
