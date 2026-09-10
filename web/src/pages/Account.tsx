@@ -132,20 +132,15 @@ export function Account() {
       </p>
 
       <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatCard
-          label="Cash"
-          value={formatUsd(snapshot.cash)}
-          icon={<BankIcon />}
-          note="Settled and unsettled together"
-        />
+        <StatCard label="Cash" value={formatUsd(snapshot.cash)} icon={<BankIcon />} />
         <StatCard
           label="Buying power"
           value={formatUsd(snapshot.buyingPower)}
           icon={<TrendingUpIcon />}
           // Two genuinely different figures, and the reason differs by
-          // account: margin doubles it on Paper, while a Cash account has no
-          // margin and can only spend what has settled.
-          note={isCashAccount ? 'Settled funds only — no margin' : 'Margin account — 2× cash'}
+          // account: margin doubles it on Paper, while a Cash account has
+          // none and so can spend less than its balance.
+          note={isCashAccount ? 'Cash account — no margin' : 'Margin account — 2× cash'}
         />
         <StatCard
           label="Options buying power"
@@ -155,27 +150,7 @@ export function Account() {
         />
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Panel id="settlement-heading" title="Settled vs unsettled">
-          <Line label="Settled" value={formatUsd(snapshot.settled)} />
-          <Line label="Unsettled" value={formatUsd(snapshot.unsettled)} />
-          <Line label="Total cash" value={formatUsd(snapshot.cash)} total />
-
-          <p className="mt-4 max-w-prose text-caption text-on-surface-variant">
-            Proceeds settle on T+1, so unsettled cash is normally the previous session's sales.
-            {isCashAccount ? (
-              <>
-                {' '}
-                This is a <strong className="font-semibold text-on-surface">Cash account</strong>:
-                spending unsettled proceeds before they clear is a good-faith violation, which is
-                why buying power above is the settled balance and not total cash.
-              </>
-            ) : (
-              <> On this margin account it is already reflected in buying power.</>
-            )}
-          </p>
-        </Panel>
-
+      <div className="mt-4">
         <Panel
           id="equity-heading"
           title="Total equity"
@@ -186,7 +161,7 @@ export function Account() {
           // claiming more than is true.
           aside={<LiveStatus />}
         >
-          <Line label="Cash" value={formatUsd(snapshot.cash)} note="incl. unsettled" />
+          <Line label="Cash" value={formatUsd(snapshot.cash)} />
           <Line
             label="Open positions"
             note={`${positions.length} held`}
@@ -207,8 +182,8 @@ export function Account() {
           />
 
           <p className="mt-4 max-w-prose text-caption text-on-surface-variant">
-            Position value is the contracts' market value, marked from the price stream. Equity
-            includes unsettled cash — that money is yours, it is simply not spendable yet.
+            Position value is the contracts' market value, marked from the price stream. Cash is the
+            full balance — some of it may not be spendable yet, and buying power above is what is.
           </p>
         </Panel>
       </div>

@@ -2187,29 +2187,28 @@ export interface AccountSnapshot {
   positions: Position[]
   activity: ActivityItem[]
   workingOrders: WorkingOrder[]
-  /** Total cash in the account — **settled plus unsettled**. The invariant
-   * `settled + unsettled === cash` holds in both books and is pinned by a
-   * test, because the Account page reconciles against it and a balance that
-   * doesn't add up is worse than one that isn't shown. */
+  /** Total cash in the account, whatever its settlement state.
+   *
+   * There was a `settled`/`unsettled` split here, removed deliberately:
+   * **Alpaca's account endpoint publishes no settlement breakdown**, so both
+   * numbers would have been derived from activity dates with nothing to
+   * validate them against. See PRD.md §8.6 before adding it back. */
   cash: number
   /** What the broker will let you spend. Paper is a margin account, so this
-   * is 2× cash; the Cash account has no margin, so it is the *settled*
-   * balance and nothing more. That difference is the whole reason the
-   * settled/unsettled split is on the page. */
+   * is 2× cash; the Cash account has no margin, so it is *less* than cash.
+   * The gap is whatever the broker is holding — the account endpoint reports
+   * the figure, never its composition. */
   buyingPower: number
   /** Always ≤ `buyingPower`: **options are not marginable**, so on the
    * margin account this is cash rather than twice it. Sizing an option
    * order against equity buying power overstates capacity by 2× — which is
    * why the two are separate fields instead of one number the caller
-   * halves. */
+   * halves.
+   *
+   * This is the figure that actually binds an options trader on a margin
+   * account, which is why its absence would matter and the settlement split's
+   * does not. */
   optionsBuyingPower: number
-  /** Cash that has cleared. On the Cash account this is the only money you
-   * can actually trade with — reusing unsettled proceeds is a good-faith
-   * violation, which the Account page says in words. */
-  settled: number
-  /** Proceeds not yet cleared. T+1 since May 2024, so this is normally
-   * yesterday's sales. */
-  unsettled: number
 }
 
 export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
@@ -2226,8 +2225,6 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     cash: 12_480.32,
     buyingPower: 24_960.64,
     optionsBuyingPower: 12_480.32,
-    settled: 11_200.0,
-    unsettled: 1_280.32,
   },
   cash: {
     portfolioHistory: CASH_HISTORY,
@@ -2237,14 +2234,13 @@ export const ACCOUNT_SNAPSHOTS: Record<AccountMode, AccountSnapshot> = {
     positions: CASH_POSITIONS,
     activity: CASH_ACTIVITY,
     workingOrders: CASH_WORKING_ORDERS,
-    // No margin here, so buying power is the *settled* balance — not total
-    // cash. The $240 of unsettled proceeds is money you can see and cannot
-    // spend, which is the distinction the Account page exists to make.
+    // No margin here, so buying power is *below* total cash rather than
+    // twice it — $240 of this balance is money you can see and cannot spend.
+    // Why, exactly, is the broker's business: Alpaca reports the figure and
+    // not its composition.
     cash: 3_180.45,
     buyingPower: 2_940.45,
     optionsBuyingPower: 2_940.45,
-    settled: 2_940.45,
-    unsettled: 240.0,
   },
 }
 

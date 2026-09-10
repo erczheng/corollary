@@ -44,12 +44,12 @@ describe('Account balances', () => {
     expect(screen.getByText('Options are not marginable')).toBeInTheDocument()
   })
 
-  it('describes paper buying power as margin and cash buying power as settled funds', () => {
+  it('describes paper buying power as margin and the cash account as having none', () => {
     render(<App />)
     expect(screen.getByText(/Margin account/)).toBeInTheDocument()
 
     act(() => useUIStore.setState({ accountMode: 'cash' }))
-    expect(screen.getByText(/Settled funds only/)).toBeInTheDocument()
+    expect(screen.getByText(/no margin/)).toBeInTheDocument()
     expect(screen.queryByText(/Margin account/)).not.toBeInTheDocument()
   })
 
@@ -75,29 +75,19 @@ describe('Account balances', () => {
   })
 })
 
-describe('settled vs unsettled', () => {
-  it('adds up to total cash', () => {
+/** The settled/unsettled panel was removed with the fields behind it —
+ * Alpaca's account endpoint publishes no settlement breakdown, so the panel
+ * was three derived numbers presented as broker facts. This asserts it stays
+ * gone, since the page it was on is otherwise entirely real values and a
+ * plausible-looking reconstruction is the one thing that would not be. */
+describe('settlement', () => {
+  it('claims no settlement breakdown Alpaca does not supply', () => {
     render(<App />)
-    const p = panel('Settled vs unsettled')
-
-    expect(within(p).getByText(formatUsd(PAPER.settled))).toBeInTheDocument()
-    expect(within(p).getByText(formatUsd(PAPER.unsettled))).toBeInTheDocument()
-    expect(within(p).getByText(formatUsd(PAPER.cash))).toBeInTheDocument()
-  })
-
-  /** The whole reason the split is on the page: on a Cash account unsettled
-   * proceeds are money you can see and cannot spend. */
-  it('warns about good-faith violations only on the cash account', () => {
-    render(<App />)
-    expect(screen.queryByText(/good-faith violation/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Settled vs unsettled' })).not.toBeInTheDocument()
 
     act(() => useUIStore.setState({ accountMode: 'cash' }))
-    expect(screen.getByText(/good-faith violation/)).toBeInTheDocument()
-  })
-
-  it('mentions T+1 settlement rather than asserting the split unexplained', () => {
-    render(<App />)
-    expect(within(panel('Settled vs unsettled')).getByText(/T\+1/)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Settled vs unsettled' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/good-faith violation/)).not.toBeInTheDocument()
   })
 })
 
@@ -112,9 +102,15 @@ describe('total equity', () => {
     ).toBeInTheDocument()
   })
 
-  it('says whether unsettled cash is included, rather than leaving it implied', () => {
+  /** Equity sums the *full* cash balance, some of which may not be spendable.
+   * The page has to say which reading it took, and point at the figure that
+   * answers the other question, rather than leaving both implied. */
+  it('says it sums the full balance and names buying power as the spendable one', () => {
     render(<App />)
-    expect(within(panel('Total equity')).getByText(/includes unsettled cash/)).toBeInTheDocument()
+    const p = panel('Total equity')
+
+    expect(within(p).getByText(/full balance/)).toBeInTheDocument()
+    expect(within(p).getByText(/buying power/)).toBeInTheDocument()
   })
 
   /** Position value is marked from the stream and cash is not. Before the
