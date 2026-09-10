@@ -5,7 +5,7 @@ import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { formatStrategyName } from '../lib/format'
 import { nextStatuses, promotionGate } from '../lib/research'
-import type { Strategy, StrategyStatus } from '../lib/mockData'
+import type { Strategy, StrategyStatus } from '../lib/types'
 
 const STATUS_LABEL: Record<StrategyStatus, string> = {
   draft: 'Draft',

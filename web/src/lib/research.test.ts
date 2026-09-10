@@ -6,10 +6,8 @@ import {
   RECOMMENDATIONS,
   CHAT_HISTORY,
   STRATEGIES,
-  type ChatMessage,
-  type Strategy,
-  type StrategyStatus,
 } from './mockData'
+import { type ChatMessage, type Strategy, type StrategyStatus } from './types'
 import {
   GATE_THRESHOLDS,
   LIFECYCLE,

@@ -1,7 +1,8 @@
 import { Chip } from './Chip'
 import { XIcon } from './icons'
 import { CONFIDENCE_TIER_CLASS, confidenceTier } from '../lib/format'
-import { recommendationTitle, type Recommendation } from '../lib/mockData'
+import { recommendationTitle } from '../lib/mockData'
+import { type Recommendation } from '../lib/types'
 import type { Disposition } from '../lib/research'
 
 /** The parts of a recommendation row that both the Dashboard panel and

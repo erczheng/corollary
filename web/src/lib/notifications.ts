@@ -1,9 +1,4 @@
-import type {
-  AccountMode,
-  Notification,
-  NotificationEvent,
-  NotificationRoute,
-} from './mockData'
+import type { AccountMode, Notification, NotificationEvent, NotificationRoute } from './types'
 import type { NotificationChannel } from './settings'
 
 /** Everything the bell needs, as pure functions with no React in them.

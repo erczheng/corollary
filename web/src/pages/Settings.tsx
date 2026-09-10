@@ -4,16 +4,14 @@ import { RiskLimitField } from '../components/RiskLimitField'
 import { SettingsSection } from '../components/SettingsSection'
 import { ThemeToggle } from '../components/ThemeToggle'
 import { useUIStore } from '../lib/store'
+import { ACCOUNT_SNAPSHOTS, DATA_SOURCES, SENTIMENT_ACCURACY } from '../lib/mockData'
 import {
   ACCOUNT_LABEL,
-  ACCOUNT_SNAPSHOTS,
   DATA_PLANS,
-  DATA_SOURCES,
   NOTIFICATION_EVENT_LABEL,
-  SENTIMENT_ACCURACY,
   type DataSourceStatus,
   type NotificationEvent,
-} from '../lib/mockData'
+} from '../lib/types'
 import { totalEquity } from '../lib/account'
 import {
   SENTIMENT_FLOOR,

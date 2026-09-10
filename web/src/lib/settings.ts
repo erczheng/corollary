@@ -1,7 +1,6 @@
+import { DATA_FEEDS, RISK_LIMITS } from './mockData'
 import {
-  DATA_FEEDS,
   NOTIFICATION_EVENT_LABEL,
-  RISK_LIMITS,
   type AuditCategory,
   type AuditLogEntry,
   type DataPlan,
@@ -10,7 +9,7 @@ import {
   type RiskLimit,
   type RiskLimitKey,
   type SentimentAccuracy,
-} from './mockData'
+} from './types'
 
 /** Every rule the Settings page needs, as pure functions with no React and
  * no store in them — the same arrangement `orders.ts` and `markets.ts` have.

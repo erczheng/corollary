@@ -29,8 +29,8 @@ import {
   LLM_ORIGINATION,
   RECOMMENDATIONS,
   recommendationTitle,
-  type Recommendation,
 } from '../lib/mockData'
+import { type Recommendation } from '../lib/types'
 import { downloadCsv } from '../lib/csv'
 import {
   formatExpiry,

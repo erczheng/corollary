@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, within, fireEvent, act } from '@testing-library/react'
 import App from '../App'
 import { useUIStore } from '../lib/store'
-import { NOTIFICATIONS, NOTIFICATION_EVENT_LABEL } from '../lib/mockData'
+import { NOTIFICATIONS } from '../lib/mockData'
+import { NOTIFICATION_EVENT_LABEL } from '../lib/types'
 import { unreadCount, visibleNotifications } from '../lib/notifications'
 
 const initialState = useUIStore.getState()

@@ -6,7 +6,13 @@ import { ValueSkeleton } from '../components/Skeleton'
 import { BankIcon, TargetIcon, TrendingUpIcon } from '../components/icons'
 import { useLiveTick } from '../hooks/useLiveTick'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_LABEL, ACCOUNT_SNAPSHOTS, ACTIVITY_ACTION_LABEL, ACTIVITY_STATUS_CLASS, ACTIVITY_STATUS_LABEL } from '../lib/mockData'
+import { ACCOUNT_SNAPSHOTS } from '../lib/mockData'
+import {
+  ACCOUNT_LABEL,
+  ACTIVITY_ACTION_LABEL,
+  ACTIVITY_STATUS_CLASS,
+  ACTIVITY_STATUS_LABEL,
+} from '../lib/types'
 import { cashTransfers, netTransfers, positionsValue, totalEquity } from '../lib/account'
 import { formatDateTimeET, formatUsd, signClass } from '../lib/format'
 

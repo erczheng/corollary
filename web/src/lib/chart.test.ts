@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { rangeChange } from './chart'
-import type { PricePoint } from './mockData'
+import type { PricePoint } from './types'
 
 const series: PricePoint[] = [
   { date: '2026-01-05', value: 1000 },

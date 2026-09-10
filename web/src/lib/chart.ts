@@ -1,4 +1,4 @@
-import type { PricePoint } from './mockData'
+import type { PricePoint } from './types'
 
 export interface RangeChange {
   from: PricePoint

@@ -1,10 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import {
-  NOTIFICATIONS,
-  NOTIFICATION_EVENT_LABEL,
-  NOTIFICATION_ROUTES,
-  type NotificationEvent,
-} from './mockData'
+import { NOTIFICATIONS, NOTIFICATION_ROUTES } from './mockData'
+import { NOTIFICATION_EVENT_LABEL, type NotificationEvent } from './types'
 import {
   SEVERITY_CLASS,
   SEVERITY_DOT_CLASS,

@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
 import { useUIStore } from '../lib/store'
+import { MARKET_TODAY } from '../lib/mockData'
 import {
-  MARKET_TODAY,
   ORDER_TYPE_LABEL,
   TIME_IN_FORCE_LABEL,
   type OrderType,
   type Position,
   type TimeInForce,
-} from '../lib/mockData'
+} from '../lib/types'
 import { riskLimitFor } from '../lib/settings'
 import {
   MULTI_LEG_NOTE,

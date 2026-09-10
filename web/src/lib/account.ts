@@ -1,4 +1,5 @@
-import { isOrderAction, type ActivityItem, type Position } from './mockData'
+import { isOrderAction } from './mockData'
+import { type ActivityItem, type Position } from './types'
 
 /** The Account page's arithmetic, as pure functions with no React in them —
  * the arrangement `orders.ts` and `markets.ts` already use.

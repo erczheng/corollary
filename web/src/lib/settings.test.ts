@@ -1,13 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import {
-  AUDIT_LOG,
-  DATA_FEEDS,
-  NOTIFICATION_EVENT_LABEL,
-  RISK_LIMITS,
-  SENTIMENT_ACCURACY,
-  type NotificationEvent,
-  type RiskLimit,
-} from './mockData'
+import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_ACCURACY } from './mockData'
+import { NOTIFICATION_EVENT_LABEL, type NotificationEvent, type RiskLimit } from './types'
 import {
   SENTIMENT_FLOOR,
   auditEntry,

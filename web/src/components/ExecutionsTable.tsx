@@ -4,7 +4,7 @@ import {
   ACTIVITY_STATUS_LABEL,
   type ActivityItem,
   type ActivityStatus,
-} from '../lib/mockData'
+} from '../lib/types'
 import { formatDateTimeET, formatUsd, signClass } from '../lib/format'
 
 /** One table, two pages, two column sets. The Dashboard's "Recent

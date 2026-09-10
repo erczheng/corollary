@@ -2,11 +2,7 @@ import { useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
 import { TableSkeleton } from './Skeleton'
 import { useUIStore } from '../lib/store'
-import {
-  ORDER_TYPE_LABEL,
-  TIME_IN_FORCE_LABEL,
-  type WorkingOrder,
-} from '../lib/mockData'
+import { ORDER_TYPE_LABEL, TIME_IN_FORCE_LABEL, type WorkingOrder } from '../lib/types'
 import { ORDER_SIDE_LABEL } from '../lib/orders'
 import { formatDateTimeET, formatUsd } from '../lib/format'
 

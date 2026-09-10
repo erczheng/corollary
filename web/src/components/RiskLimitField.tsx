@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
 import { isRaise, riskDollars, validateRiskLimit } from '../lib/settings'
 import { formatUsd } from '../lib/format'
-import type { RiskLimit } from '../lib/mockData'
+import type { RiskLimit } from '../lib/types'
 
 /** One editable risk ceiling.
  *

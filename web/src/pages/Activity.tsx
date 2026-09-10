@@ -17,7 +17,8 @@ import {
 import { usePagination } from '../hooks/usePagination'
 import { useUIStore } from '../lib/store'
 import { downloadCsv } from '../lib/csv'
-import { ACCOUNT_LABEL, ACCOUNT_SNAPSHOTS, activityStats } from '../lib/mockData'
+import { ACCOUNT_SNAPSHOTS, activityStats } from '../lib/mockData'
+import { ACCOUNT_LABEL } from '../lib/types'
 import type { TicketMode } from '../lib/orders'
 import { formatPct, formatUsd, signClass } from '../lib/format'
 

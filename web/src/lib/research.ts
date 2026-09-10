@@ -1,13 +1,12 @@
+import { CHAT_FALLBACK, CHAT_SCRIPT } from './mockData'
 import {
-  CHAT_FALLBACK,
-  CHAT_SCRIPT,
   type ArchivedChat,
   type ChatMessage,
   type Recommendation,
   type Strategy,
   type StrategyProposal,
   type StrategyStatus,
-} from './mockData'
+} from './types'
 
 /** The Research page's rules, as pure functions with no React in them — the
  * arrangement `orders.ts`, `markets.ts` and `settings.ts` already use.

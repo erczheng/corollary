@@ -9,12 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import {
-  BENCHMARK_HISTORY,
-  sliceRange,
-  type ChartRange,
-  type PricePoint,
-} from '../lib/mockData'
+import { BENCHMARK_HISTORY, sliceRange } from '../lib/mockData'
+import { type ChartRange, type PricePoint } from '../lib/types'
 import { rangeChange } from '../lib/chart'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 

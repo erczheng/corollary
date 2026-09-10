@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { Sentiment } from '../lib/mockData'
+import type { Sentiment } from '../lib/types'
 
 export type ChipVariant = 'bullish' | 'bearish' | 'neutral' | 'caution' | 'accent'
 

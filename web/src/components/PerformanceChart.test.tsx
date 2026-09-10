@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { PerformanceChart } from './PerformanceChart'
-import type { PricePoint } from '../lib/mockData'
+import type { PricePoint } from '../lib/types'
 
 const history: PricePoint[] = [
   { date: '2025-08-08', value: 25_000 },

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS, type Position } from './mockData'
+import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS } from './mockData'
+import { type Position } from './types'
 import {
   MULTI_LEG_NOTE,
   availableOrderTypes,
