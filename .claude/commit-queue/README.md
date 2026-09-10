@@ -53,8 +53,11 @@ Filename order, which is timestamp order. Per entry:
    unrelated file swept into a commit is how the engine's history stops being
    a debugging tool.
 3. Reject on anything credential-shaped in the staged diff, and on any staged
-   path that is `.env*`, `*.pem` or `*.key`. `.env.example` with bare names and
-   no values is fine and expected.
+   path that is `.env*`, `*.pem` or `*.key`. Anchor the key-prefix pattern as
+   `sk-[A-Za-z0-9_-]{20,}` — a bare `sk-` matches inside ordinary prose like
+   "risk-free", and a scanner that cries wolf gets waved through. Report false
+   positives with their surrounding text rather than passing them silently.
+   `.env.example` with bare names and no values is fine and expected.
 4. **Re-derive which suites are in scope from the `files` list**, then run
    them. Backend paths pull in `pytest -m risk` and `mypy`; frontend paths
    pull in `typecheck` and Vitest. An entry may *claim* no suite applies;
