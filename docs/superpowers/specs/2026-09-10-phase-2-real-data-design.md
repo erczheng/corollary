@@ -366,7 +366,40 @@ Settings mixes real and mock within one page, so its markers sit on the affected
 
 Actioned 2026-09-10. See PRD §8.6 for the reasoning and the consequence to weigh before reinstating.
 
-### 10. Derive IV and greeks; report open interest as absent; buy the plan at Phase 6
+### 10. Derive IV and greeks where Alpaca does not; buy the plan at Phase 6
+
+**Amended 2026-09-10, second probe.** The first probe sampled two contracts
+and generalised from them. Both of its conclusions were wrong, and the error
+has one shape: `/v2/options/contracts` and the snapshots endpoint both return
+contracts ordered by strike, so a small `limit` returns the deep-in-the-money
+tail — the least liquid, most recently listed end of the chain — and nothing
+about it generalises to the book.
+
+**`impliedVolatility` and `greeks` ARE served on `indicative`,** for the
+contracts where Alpaca's own solve succeeds: 19 of 100 on NVDA, 12 of 100 on
+AAPL, concentrated near the money and on established expiries. Not absent —
+*partial*. The provider therefore passes vendor analytics through where they
+exist and derives only where they do not, and must record which of the two a
+number came from, because a chain silently mixing measured and derived values
+is worse than either alone.
+
+**`open_interest` IS populated,** on 98 of 100 NVDA contracts and 79 of 100
+AAPL, with `open_interest_date` and `close_price` alongside. The first probe's
+nulls were newly-listed contracts that genuinely had no settled interest yet —
+which the original "Not verified" list had offered as a hypothesis and the
+first amendment wrongly dismissed. **PRD §8.4's "highest open interest" screen
+has a ranking key and should be built.** A null still means absent and must
+survive as null, but it is now the exception rather than the column.
+
+What survives unchanged is the timing, and it is worth restating because the
+reasons it rests on have narrowed: what the subscription buys is **real-time
+quotes instead of 15-minute-delayed, and unlimited stream symbols instead of
+thirty.** Neither matters while the terminal is read-only; both matter the
+moment it executes, because an order priced off a 15-minute-old quote is a
+loss mechanism where a stale column is only a stale column. The original
+decision was right for reasons that were partly wrong.
+
+
 
 Taken 2026-09-10, after the OPRA agreement was confirmed paywalled rather than
 a free signature.
