@@ -64,9 +64,15 @@ const POLL_MS = 2_000
 /** The chain section's anchor, so the stock table can send you to it. */
 const CHAIN_SECTION_ID = 'options-chains'
 
-const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
 const TD = 'px-3 py-1 align-middle'
 const TD_NUM = `${TD} whitespace-nowrap text-right text-data-md text-on-surface`
+/** Trade and Chart — this page's two row actions. 24px inside a 32px row,
+ * and `flex w-fit` rather than inline because a lone inline-level control
+ * in a cell rides the cell's text baseline and brings a descender's worth
+ * of strut with it. `ml-auto` right-aligns it without a wrapper. */
+const ROW_BUTTON =
+  'ml-auto flex h-6 w-fit items-center rounded border border-outline px-2 text-label-sm text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container'
 
 const SELECT =
   'rounded border border-outline bg-surface px-2 py-2 text-label-md text-on-surface focus:border-primary'
@@ -325,15 +331,15 @@ function OptionsChains({
                   return (
                     <Fragment key={key}>
                       <tr
-                        className={`border-t border-outline/10 ${
+                        className={`h-8 border-t border-outline/10 ${
                           open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
                         }`}
                       >
-                        <td className={`${TD} text-body-md text-on-surface`}>{c.symbol}</td>
+                        <td className={`${TD} text-body-sm text-on-surface`}>{c.symbol}</td>
                         {/* An expiry is a date, not an instant — formatExpiry
                             parses it as UTC. Rendered in ET it would show
                             the day before. */}
-                        <td className={`${TD} whitespace-nowrap text-body-md text-on-surface-variant`}>
+                        <td className={`${TD} whitespace-nowrap text-body-sm text-on-surface-variant`}>
                           {formatExpiry(c.expiration)}
                         </td>
                         <td className={`${TD} text-label-md text-on-surface`}>
@@ -359,7 +365,7 @@ function OptionsChains({
                                button three times. */
                             aria-label={`${open ? 'Close' : 'Trade'} ${c.symbol} ${c.strike} ${c.type} ${formatExpiry(c.expiration)}`}
                             onClick={() => setExpanded(open ? null : key)}
-                            className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
+                            className={ROW_BUTTON}
                           >
                             {open ? 'Close' : 'Trade'}
                           </button>
@@ -481,13 +487,13 @@ function StocksAndEtfs({
                 return (
                   <Fragment key={s.symbol}>
                     <tr
-                      className={`border-t border-outline/10 ${
+                      className={`h-8 border-t border-outline/10 ${
                         open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
                       }`}
                     >
-                      <td className={`${TD} text-body-md text-on-surface`}>{s.symbol}</td>
+                      <td className={`${TD} text-body-sm text-on-surface`}>{s.symbol}</td>
                       <td
-                        className={`${TD} max-w-0 text-body-md text-on-surface-variant`}
+                        className={`${TD} max-w-0 text-body-sm text-on-surface-variant`}
                         title={s.name}
                       >
                         <span className="block truncate">{s.name}</span>
@@ -538,7 +544,7 @@ function StocksAndEtfs({
                           aria-expanded={open}
                           aria-label={`${open ? 'Hide' : 'Show'} ${s.symbol} chart`}
                           onClick={() => setExpanded(open ? null : s.symbol)}
-                          className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container"
+                          className={ROW_BUTTON}
                         >
                           {open ? 'Hide' : 'Chart'}
                         </button>

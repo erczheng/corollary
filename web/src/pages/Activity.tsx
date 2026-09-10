@@ -178,26 +178,26 @@ export function Activity() {
           <table className="w-full border-collapse">
             <thead>
               <tr className="bg-surface-container">
-                <th className="w-full px-3 py-1 text-left text-label-md uppercase text-on-surface-variant">
+                <th className="w-full px-3 py-1 text-left text-label-sm uppercase text-on-surface-variant">
                   Position
                 </th>
-                <th className="whitespace-nowrap px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="whitespace-nowrap px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   DTE
                 </th>
-                <th className="whitespace-nowrap px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="whitespace-nowrap px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   Last
                 </th>
-                <th className="whitespace-nowrap px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="whitespace-nowrap px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   Cost basis
                 </th>
-                <th className="whitespace-nowrap px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="whitespace-nowrap px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   Value
                 </th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">Qty</th>
-                <th className="whitespace-nowrap px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">Qty</th>
+                <th className="whitespace-nowrap px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   Unrealized P&L
                 </th>
-                <th className="px-3 py-1 text-right text-label-md uppercase text-on-surface-variant">
+                <th className="px-3 py-1 text-right text-label-sm uppercase text-on-surface-variant">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>

@@ -10,8 +10,21 @@ import {
 import { ORDER_SIDE_LABEL } from '../lib/orders'
 import { formatDateTimeET, formatUsd } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-1 text-label-md uppercase text-on-surface-variant'
-const TD = 'px-3 py-1 align-top'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
+const TD = 'px-3 py-1 align-middle'
+/** 32px rows — see DESIGN.md "Tables". This table carries a Cancel button,
+ * so without the height it would sit 4px taller than a table that
+ * doesn't. */
+const TR = 'h-8 border-t border-outline/10 hover:bg-surface-container-low'
+/** A row action: 24px tall, so it clears the 24px minimum target size and
+ * still leaves 4px either side of it in a 32px row. `flex w-fit` rather
+ * than the inline default because a lone inline-level control in a cell
+ * sits on the cell's text baseline and drags a descender's worth of strut
+ * in with it — 25.5px around a 24px button, which is what made this row
+ * 1px taller than the same row on Activity. `ml-auto` right-aligns it
+ * without an extra wrapper. */
+const ROW_BUTTON =
+  'ml-auto flex h-6 w-fit items-center rounded border border-outline px-2 text-label-sm text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low hover:text-on-surface'
 
 /** The price the order is actually working at. A stop-limit has both a
  * trigger and a limit and they are not interchangeable, so both are shown
@@ -69,11 +82,11 @@ export function WorkingOrders({ loading, accountLabel }: { loading: boolean; acc
           </thead>
           <tbody>
             {orders.map((o) => (
-              <tr key={o.id} className="border-t border-outline/10 hover:bg-surface-container-low">
+              <tr key={o.id} className={TR}>
                 <td className={`${TD} whitespace-nowrap text-caption text-on-surface-variant`}>
                   {formatDateTimeET(o.placedAt)}
                 </td>
-                <td className={`${TD} max-w-0 text-body-md text-on-surface`}>
+                <td className={`${TD} max-w-0 text-body-sm text-on-surface`}>
                   <span className="block truncate" title={o.contract}>
                     {o.contract}
                   </span>
@@ -94,7 +107,7 @@ export function WorkingOrders({ loading, accountLabel }: { loading: boolean; acc
                     type="button"
                     onClick={() => setCancelTarget(o)}
                     title={`Cancel ${o.side} ${o.contract}`}
-                    className="rounded border border-outline px-3 py-1 text-label-md text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-low hover:text-on-surface"
+                    className={ROW_BUTTON}
                   >
                     Cancel
                   </button>

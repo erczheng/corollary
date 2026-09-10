@@ -25,7 +25,7 @@ export function Chip({
   return (
     <span
       title={title}
-      className={`inline-flex items-center rounded-full px-3 py-1 text-label-md ${VARIANT_CLASSES[variant]}`}
+      className={`inline-flex h-6 items-center rounded-full px-2 text-label-sm ${VARIANT_CLASSES[variant]}`}
     >
       {children}
     </span>

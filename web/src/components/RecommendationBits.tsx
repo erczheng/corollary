@@ -46,7 +46,7 @@ export function ConfidenceBadge({ recommendation }: { recommendation: Recommenda
   if (confidence !== null) {
     return (
       <span
-        className={`rounded-full px-3 py-1 text-data-md ${CONFIDENCE_TIER_CLASS[confidenceTier(confidence)]}`}
+        className={`inline-flex h-6 items-center rounded-full px-2 text-data-sm ${CONFIDENCE_TIER_CLASS[confidenceTier(confidence)]}`}
         title={`${confidenceTier(confidence)} confidence — backtested hit rate for this setup class`}
       >
         {confidence}%
@@ -67,7 +67,7 @@ export function ConfidenceBadge({ recommendation }: { recommendation: Recommenda
 
   return (
     <span
-      className="px-3 py-1 text-data-md text-on-surface-variant"
+      className="inline-flex h-6 items-center px-2 text-data-sm text-on-surface-variant"
       title="No backtested base rate for this setup yet"
     >
       —
@@ -135,7 +135,7 @@ export function RecommendationActions({
   const acted = disposition === 'executed'
 
   const button =
-    'rounded border px-3 py-1 text-label-md transition-colors duration-base ease-standard disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50'
+    'inline-flex h-6 items-center rounded border px-2 text-label-sm transition-colors duration-base ease-standard disabled:pointer-events-none disabled:border-outline-warm disabled:text-on-surface-variant disabled:opacity-50'
 
   return (
     <div className="flex shrink-0 items-center gap-2">
@@ -154,7 +154,7 @@ export function RecommendationActions({
         onClick={onDismiss}
         aria-label={`Dismiss ${title}`}
         title="Dismiss"
-        className="flex h-8 w-8 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
+        className="flex h-6 w-6 items-center justify-center rounded-full text-on-surface-variant transition-colors duration-base ease-standard hover:bg-surface-container-high hover:text-on-surface"
       >
         <XIcon className="h-3.5 w-3.5" />
       </button>

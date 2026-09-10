@@ -24,7 +24,7 @@ const ALPACA_URL = 'https://app.alpaca.markets/'
  * here needs a faster clock than the positions screen. */
 const TICK_MS = 400
 
-const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
 const TD = 'px-3 py-1 align-middle'
 
 /** A panel on this page. `region` so the tests and a screen reader can tell
@@ -235,11 +235,11 @@ export function Account() {
                 </thead>
                 <tbody>
                   {transfers.map((t) => (
-                    <tr key={t.id} className="border-b border-outline-variant last:border-0">
+                    <tr key={t.id} className="h-8 border-b border-outline-variant last:border-0">
                       <td className={`${TD} whitespace-nowrap text-data-md text-on-surface-variant`}>
                         {formatDateTimeET(t.time)}
                       </td>
-                      <td className={`${TD} text-body-md text-on-surface`}>
+                      <td className={`${TD} text-body-sm text-on-surface`}>
                         {ACTIVITY_ACTION_LABEL[t.action]}
                       </td>
                       {/* Signed textually as well as by colour — DESIGN.md
@@ -257,7 +257,7 @@ export function Account() {
                   ))}
                 </tbody>
                 <tfoot>
-                  <tr className="border-t border-outline-warm">
+                  <tr className="h-8 border-t border-outline-warm">
                     <td className={`${TD} text-label-md text-on-surface`} colSpan={2}>
                       Net transferred
                     </td>
