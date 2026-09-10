@@ -24,7 +24,7 @@ import {
 } from '../lib/settings'
 import { formatDateTimeET, formatInteger, formatUsd } from '../lib/format'
 
-const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
 const TD = 'px-3 py-1 align-middle'
 
 const SELECT =
@@ -145,7 +145,7 @@ export function Settings() {
             </thead>
             <tbody>
               {apiKeys.map((key) => (
-                <tr key={key.envVar} className="border-b border-outline-variant last:border-0">
+                <tr key={key.envVar} className="h-8 border-b border-outline-variant last:border-0">
                   <td className={`${TD} text-data-md text-on-surface`}>{key.envVar}</td>
                   <td className={`${TD} text-caption text-on-surface-variant`}>{key.purpose}</td>
                   <td className={TD}>
@@ -154,7 +154,7 @@ export function Settings() {
                         Phase 7, and colouring that amber would train the eye
                         to ignore the colour. */}
                     <span
-                      className={`rounded-full px-2 py-0.5 text-label-md ${
+                      className={`rounded-full px-2 py-0.5 text-label-sm ${
                         key.present
                           ? 'bg-bullish-container text-on-bullish-container'
                           : key.optional
@@ -244,13 +244,13 @@ export function Settings() {
                 const label = NOTIFICATION_EVENT_LABEL[route.event]
                 const critical = isCriticalEvent(route.event)
                 return (
-                  <tr key={route.event} className="border-b border-outline-variant last:border-0">
-                    <td className={`${TD} text-body-md text-on-surface`}>
+                  <tr key={route.event} className="h-8 border-b border-outline-variant last:border-0">
+                    <td className={`${TD} text-body-sm text-on-surface`}>
                       {label}
                       {critical ? (
                         /* Marked, not locked. It says why the confirm will
                            appear before you meet it. */
-                        <span className="ml-2 rounded-full bg-error-container px-2 py-0.5 text-label-md text-on-error-container">
+                        <span className="ml-2 rounded-full bg-error-container px-2 py-0.5 text-label-sm text-on-error-container">
                           Critical
                         </span>
                       ) : null}
@@ -304,7 +304,7 @@ export function Settings() {
                 <span className="flex items-center gap-3">
                   <span className="text-caption text-on-surface-variant">{source.detail}</span>
                   <span
-                    className={`rounded-full px-2 py-0.5 text-label-md ${SOURCE_CLASS[source.status]}`}
+                    className={`rounded-full px-2 py-0.5 text-label-sm ${SOURCE_CLASS[source.status]}`}
                   >
                     {SOURCE_LABEL[source.status]}
                   </span>
@@ -411,8 +411,8 @@ export function Settings() {
             </thead>
             <tbody>
               {SENTIMENT_ACCURACY.map((row) => (
-                <tr key={row.source} className="border-b border-outline-variant last:border-0">
-                  <td className={`${TD} text-body-md text-on-surface`}>{row.source}</td>
+                <tr key={row.source} className="h-8 border-b border-outline-variant last:border-0">
+                  <td className={`${TD} text-body-sm text-on-surface`}>{row.source}</td>
                   <td className={`${TD} text-caption text-on-surface-variant`}>{row.tier}</td>
                   {/* `caution` on a failing figure, never `error` — a signal
                       that stopped working is not a system fault, and never
@@ -468,11 +468,11 @@ export function Settings() {
               </thead>
               <tbody>
                 {auditLog.map((entry) => (
-                  <tr key={entry.id} className="border-b border-outline-variant last:border-0">
+                  <tr key={entry.id} className="h-8 border-b border-outline-variant last:border-0">
                     <td className={`${TD} whitespace-nowrap text-data-md text-on-surface-variant`}>
                       {formatDateTimeET(entry.time)}
                     </td>
-                    <td className={`${TD} text-body-md text-on-surface`}>
+                    <td className={`${TD} text-body-sm text-on-surface`}>
                       {auditFieldLabel(entry)}
                     </td>
                     <td className={`${TD} text-right text-data-md text-on-surface-variant`}>

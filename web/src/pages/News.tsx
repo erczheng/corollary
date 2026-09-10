@@ -67,7 +67,7 @@ const POLL_MS = 15_000
  * reading down a column of headlines — where Activity's is a reconciliation
  * surface you read one row of at a time. ExecutionsTable already set the
  * precedent for small text in a packed table. */
-const TH = 'whitespace-nowrap px-3 py-1 text-caption uppercase tracking-wide text-on-surface-variant'
+const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
 const TD = 'px-3 py-1 align-middle'
 
 const SELECT =
@@ -290,7 +290,7 @@ function LiveFeed({ loading }: { loading: boolean }) {
               {pageItems.map((item) => (
                 <tr
                   key={item.id}
-                  className="border-t border-outline/10 hover:bg-surface-container-low"
+                  className="h-8 border-t border-outline/10 hover:bg-surface-container-low"
                 >
                   <td className={`${TD} whitespace-nowrap text-data-md text-on-surface-variant`}>
                     {formatDateTimeET(item.time)}
@@ -310,7 +310,7 @@ function LiveFeed({ loading }: { loading: boolean }) {
                       dropdown answers "show me Technology" better than a
                       label repeated under every row ever could. */}
                   <td
-                    className={`${TD} max-w-0 text-body-md text-on-surface`}
+                    className={`${TD} max-w-0 text-body-sm text-on-surface`}
                     title={`${item.headline} — ${item.sector}`}
                   >
                     <span className="block truncate">{item.headline}</span>
