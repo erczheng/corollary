@@ -264,7 +264,7 @@ Recommendations expire at market close and are archived, not deleted.
 | Real-time equities + options | **Alpaca Basic** (free), upgrading at Phase 6 | Equities: IEX for live, SIP free for historical >15 min. Options `indicative` feed. 200 req/min. **Websocket capped at 30 symbols.** |
 | Historical options | **Alpaca** | From Feb 2024; bars only beyond 7 days (see §5.3) |
 | News | **Alpaca news feed** + **Finnhub** | Ticker-tagged |
-| News sentiment | Provider scores → rules → LLM | See §9 |
+| News sentiment | Rules → LLM | See §9. **Neither Alpaca nor Finnhub ships a score** — probed 2026-09-11, provider tier removed |
 | Economic + earnings calendar | **Finnhub** | Consensus, prior, actual |
 | Central bank dates | **Official sources**, seeded annually | Fed/ECB/BoE/BoJ publish years ahead |
 | Geopolitical events | **Manual entry** | No clean API; editorial control preferred |
@@ -293,7 +293,7 @@ The morning page. Answers "what is my state and what should I look at."
 
 - **Header stats:** total balance, 24h volume, strategy win rate (live, validated trades only — excludes LLM-originated `unvalidated` trades, which live in Research).
 - **Controls:** account toggle (Paper/Cash), execution toggle (Manual/Auto), strategy dropdown, Halt, Flatten.
-- **Performance chart:** portfolio value over time. Ranges 1D / 1W / 1M / 3M / YTD / 1Y / All. Series begins at first run, seeded with the then-current Alpaca portfolio value; no pre-Corollary reconstruction. Ranges extending before t₀ render only the available window and label the start date. Optional benchmark overlay (SPY) in `accent`.
+- **Performance chart:** portfolio value over time. Ranges 1D / 1W / 1M / 3M / YTD / 1Y / All. **The series is Alpaca's own, from `/v2/account/portfolio/history`, with t₀ — the first time Corollary ran — marked on it.** Amended 2026-09-10: reading the broker's record is not reconstruction, since nothing is simulated and §8.6's principle is that Alpaca is the source of truth. The t₀ marker preserves what *"no pre-Corollary reconstruction"* was actually protecting — this chart sits beside a strategy win rate, and it must not claim credit for trading done by hand before the engine existed. Ranges extending before the account's own history render only the available window and label the start date. Optional benchmark overlay (SPY) in `accent`.
 - **Recommended Trades:** scrollable, refresh button, confidence per row, `unvalidated` badge where applicable. "View all" → Research.
 - **Recent Executions:** scrollable table, filter, export CSV. "View all" → Activity.
 
@@ -301,7 +301,10 @@ The morning page. Answers "what is my state and what should I look at."
 
 Scoped to the account whose keys are in use. Paper and Cash are separate books, and the page shows one of them at a time — never a merged view. The Paper/Cash toggle sits on the page title line, since every section below it is account-scoped; the header badge names the account too, as it does everywhere (§3).
 
-- **Header stats:** average win ($ and %), average loss ($ and %), lifetime P&L — three cards in a row, the same treatment the Dashboard gives its header stats. Computed from the feed below rather than stored separately, so the header can't disagree with the rows under it. Realized trades only — deposits and withdrawals are money moved, not money made, and are excluded. An average over zero trades renders as an em dash, never as $0.00.
+- **Header stats:** average win ($ and %), average loss ($ and %), lifetime P&L — three cards in a row, the same treatment the Dashboard gives its header stats. Realized trades only — deposits and withdrawals are money moved, not money made, and are excluded. An average over zero trades renders as an em dash, never as $0.00.
+  - **Corollary keeps a realized-P&L ledger, and these three figures come from it.** Amended 2026-09-10: Alpaca returns no realized P&L on any endpoint — there is no P&L field on any activity and no `position_intent` on a fill — so these are Corollary's own arithmetic over the broker's raw record, not a figure read off it. Closing fills are matched against opening fills FIFO per contract symbol, `Decimal` throughout. This is the one place the terminal computes money rather than displaying it, which is why it is the most heavily tested arithmetic in the codebase.
+  - **Expiry, exercise and assignment are closing states of that ledger, not absences from it.** A contract that expires worthless is a realized loss of the full premium on a long and the full credit kept on a short; an exercise or an assignment closes at the strike. Alpaca reports each as its own activity type (`OPEXP`, `OPEXC`, `OPASN`) carrying **no price** — the money sits on a paired trade row — so a position that leaves the book without a closing order still has to arrive in these three cards, and arrive correct.
+  - The cards still cannot disagree with the rows beneath them, because both read the same matched trades. What changed is where those trades live.
 - **Open Positions:** symbol, **days to expiry**, last price (the *contract's*, not the underlying's), cost basis, current value, quantity, unrealized P&L.
   - The column reads `Expired`, `Today`, or a day count, and the fixtures carry one of each — a render path with no fixture behind it is a state nobody can see. An expired contract stays in the book until settlement clears it, and those are exactly the hours you want the row saying so.
   - DTE is flagged in `caution` — never `error`, since running out of time is a deadline rather than a system failure — once the position is inside its strategy's own `time_stop_dte` (§5.1), or inside a week if it's detached. Expiry is the most time-sensitive fact about an option and previously lived only inside the contract string, where nothing could count it down. Each row **expands in place** into a chart and an order ticket; one row at a time, nothing modal, so the rest of the book and the live account stay on screen while you size a trade.
@@ -340,6 +343,9 @@ Scoped to the account whose keys are in use. Paper and Cash are separate books, 
 ### 8.4 Markets
 
 - **Options chains:** symbol, strike, expiration, last, change, change %, bid, ask. Filter by underlying, volume, top gainers, top losers, highest IV, highest open interest. Paginated.
+  - **Both the IV and open-interest screens survive the Basic plan, but not for the reason first assumed.** Amended 2026-09-10 after a second probe corrected the first. `impliedVolatility` and `greeks` **are** served on the `indicative` feed, for the contracts where Alpaca's own solve succeeds — 19 of 100 on NVDA, 12 of 100 on AAPL, concentrated near the money and on established expiries. Partial, not absent. Corollary therefore **passes vendor analytics through where they exist and derives the rest locally** with Black-Scholes from the mid, and **records which of the two produced any given number**: a chain that silently mixes measured and derived values is worse than one that is wholly either. Deriving is not a workaround — Alpaca's own documentation describes its figures as Black-Scholes output, so the $99/mo plan buys the same arithmetic on someone else's hardware.
+  - `open_interest` **is** populated — 98 of 100 NVDA contracts, 79 of 100 AAPL — with `open_interest_date` alongside. The first probe's nulls were newly-listed contracts with no settled interest yet, which is a real absence rather than a plan limit. A null stays null and never ranks; the screen has a ranking key and is built.
+  - The honest cost of deriving: greeks computed from a 15-minute-delayed mid are *delayed* greeks. Correct method, stale inputs. Acceptable in a column, unacceptable for sizing — which is the boundary at which the plan gets bought, before Phase 6 rather than before Phase 2.
 - **Stocks & ETFs:** symbol, name, price, change, change %, volume, market cap. Filter by most active, top gainers, top losers, new, market cap. Paginated.
 
 ### 8.5 Research
@@ -364,9 +370,10 @@ Scoped to the account whose keys are in use. Paper and Cash are separate books, 
 
 ### 8.6 Account
 
-Replaces "Wallet." Alpaca is the source of truth; Corollary keeps no ledger.
+Replaces "Wallet." Alpaca is the source of truth, and **Corollary keeps no ledger of cash** — deposits, withdrawals and balances are read, never reconstructed. That scope matters: it does *not* extend to realized P&L, where §8.2 now records that Corollary keeps a genuine ledger because Alpaca supplies no such figure to read. Money moved is the broker's record; money made is Corollary's arithmetic.
 
-- Cash, buying power, options buying power. Buying power differs by account and the page says why: Paper is a margin account at 2× cash, while a Cash account has no margin and can spend less than its balance. Options buying power is never the margin figure — options are not marginable, and sizing against equity buying power overstates capacity by 2×.
+- Cash, buying power, options buying power. Buying power differs by account and the page says why — **reading the account's own `multiplier` rather than asserting a number in prose.** An earlier revision said *"Paper is a margin account at 2× cash"*; this project's paper account reports `multiplier: 4`, so the sentence was both wrong and the wrong shape. A Cash account has no margin and can spend less than its balance. **Options buying power is never the margin figure** — options are not marginable, and sizing against equity buying power overstates capacity by the multiplier, whatever it happens to be.
+  - `options_buying_power` is the figure that actually binds an options trader, it is supplied on both account types, and it is what sizing reads. That also narrows how good a rehearsal paper is for Phase 7 Cash: the two differ in margin class as well as in whose money is at stake, which is more than "which keys are loaded".
   - **Settled vs unsettled was removed deliberately.** An earlier revision put the split on this page. Alpaca does not supply it: `/v2/account` returns `cash`, `buying_power` and `options_buying_power` with no settlement breakdown and no settled-cash field anywhere on the object. Both figures would have been reconstructed from activity dates against a business-day calendar, with deposits, dividends, fees and assignments each clearing on their own schedule and **nothing to validate the result against** — and the error that matters runs in one direction only, telling you money is spendable when it is not. The page therefore states the *gap* between cash and buying power, which is arithmetic over two numbers the broker does supply, and does not attribute it to a cause.
   - The consequence to weigh before reinstating it: on a Cash account, spending unsettled proceeds is a good-faith violation, and the page no longer warns about that in words. What makes the absence safe is that the figure which actually binds an options trader — `options_buying_power` — *is* supplied, and Cash trading does not arrive until Phase 7. That is also the first point at which a derivation could be checked against a real cash account, which is the earliest it should be attempted.
 - **Total equity, reconciled on screen:** cash + the market value of open positions. Derived, not a maintained balance. Position value is marked from the price stream, so it carries the live pill and shows a loading state until the first price arrives rather than briefly presenting cost basis as equity.
@@ -389,13 +396,31 @@ Replaces the user menu. No authentication while bound to `127.0.0.1`.
 
 ## 9. News sentiment — zero human review
 
-Three tiers, in order:
+Two tiers, in order:
 
-1. **Provider-supplied** — Finnhub / Alpaca ship a score. Published as-is.
-2. **Rules** — deterministic headline patterns for high-signal events: beat/miss vs estimates, guidance raised/cut, upgrade/downgrade, M&A, secondary offering, buyback, executive departure, FDA action.
-3. **LLM** — batched (20 headlines per call), cached by article ID.
+1. **Rules** — deterministic headline patterns for high-signal events: beat/miss vs estimates, guidance raised/cut, upgrade/downgrade, M&A, secondary offering, buyback, executive departure, FDA action.
+2. **LLM** — batched (20 headlines per call), cached by article ID.
 
-**Confidence gating.** Tier 3 publishes a direction only above a confidence threshold. Below it, the item displays as `Unclassified`. Silence beats a wrong label.
+**A provider-supplied tier was removed 2026-09-11, on evidence.** It read *"Finnhub / Alpaca ship a score. Published as-is"*, and neither of them does. Probed against this project's own keys:
+
+| Endpoint | Result |
+|---|---|
+| Alpaca `/v1beta1/news` | 200, `source: benzinga`. Fields are `author, content, created_at, headline, id, images, source, summary, symbols, updated_at, url` — **no sentiment field** |
+| Finnhub `/company-news` | 200, 245 NVDA articles. Fields are `category, datetime, headline, id, image, related, source, summary, url` — **no sentiment field** |
+| Finnhub `/news-sentiment` | **502**, an HTML error page, on three attempts across two symbols |
+| Finnhub `/quote` *(control)* | 200 with live data, same key |
+
+**The 502 is a paywall** — confirmed against the Finnhub account on 2026-09-11. The endpoint sits on a paid plan and answers an unentitled request with an HTML gateway error rather than a JSON 403, which is why the probe alone could not distinguish "gated" from "dead". The control had already established that much: the key is valid and the vendor is up, so the failure was specific to that endpoint.
+
+That makes this **the second time in this project a missing field turned out to be priced rather than absent** — the first was OPRA's implied volatility and greeks, which the Phase 2 design found paywalled after the same kind of hunt. Worth stating as a habit: when a documented field does not arrive, check the bill before concluding the data does not exist.
+
+A tier whose two named sources both ship headlines and no score is not a tier, and leaving it written down would have had the pipeline silently start at what used to be tier 2 while the document claimed three. So it is removed — but removed as *unbought*, not as unavailable.
+
+**Restoring it is therefore a purchase decision, not a vendor hunt.** Finnhub Premium ($11.99–99.99/mo) returns the endpoint this section was originally written against. The alternative is a source that ships a score on a free tier, and there the candidate is Alpha Vantage's `NEWS_SENTIMENT` for one specific reason: it publishes its score thresholds, and a documented scale is what lets the self-audit below hold a provider to account rather than merely record it. Its request budget is the obstacle. Marketaux is the roomier alternative and the weaker one.
+
+Either way the rule stands: **probe it before it is written in here.** This section asserted a working provider tier for months on the strength of a plausible-sounding sentence, which is exactly the failure the tier itself was meant to prevent elsewhere.
+
+**Confidence gating.** Tier 2 publishes a direction only above a confidence threshold. Below it, the item displays as `Unclassified`. Silence beats a wrong label.
 
 **Self-auditing.** A weekly job scores every published label against that ticker's realized forward return at 1 hour and 1 day, producing an accuracy figure per source and per tier. That figure lives in Settings. If accuracy falls below 52% — coin-flip territory — the system fires a notification and **automatically demotes news sentiment from a scanner input to display-only**.
 
