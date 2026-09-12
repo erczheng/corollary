@@ -19,7 +19,20 @@ from corollary.db.session import create_db_engine, database_url
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``disable_existing_loggers=False`` is load-bearing, not tidiness.
+    #
+    # ``logging.config.fileConfig`` defaults it to **True**, which switches off
+    # every logger that already exists at the moment it runs. Decision 1 puts
+    # the engine and the API in one process, so the natural place to run
+    # ``upgrade head`` is the FastAPI lifespan -- and with the default, doing
+    # that silences every ``corollary.*`` logger for the life of the process.
+    #
+    # Rule 8: "A rejected order records the rule that rejected it, the inputs,
+    # and the timestamp. Silent rejection is a bug." This is exactly how that
+    # bug arrives: nothing raises, nothing is configured wrongly, and the
+    # rejection log is simply empty. ``test_migrating_does_not_silence_the_
+    # engines_loggers`` pins it.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
