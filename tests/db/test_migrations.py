@@ -21,6 +21,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, inspect
 from sqlalchemy.orm import Session
 
@@ -36,11 +37,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_INI = REPO_ROOT / "alembic.ini"
 
 EXPECTED_TABLES = {
+    # 0001 — config, audit, engine state
     "risk_limit",
     "data_feed",
     "notification_route",
     "audit_log",
     "engine_state",
+    # 0002 — the ledger
+    "fill",
+    "realized_trade",
+    "mleg_group",
+    "mleg_leg",
 }
 
 
@@ -62,16 +69,28 @@ def test_alembic_ini_exists() -> None:
     assert ALEMBIC_INI.is_file()
 
 
-def test_upgrade_head_creates_the_five_tables(migrated: Engine) -> None:
+def test_upgrade_head_creates_the_nine_tables(migrated: Engine) -> None:
     tables = set(inspect(migrated).get_table_names())
     assert EXPECTED_TABLES <= tables
 
 
 def test_upgrade_head_does_not_create_a_later_phase_table(migrated: Engine) -> None:
-    """Steps 5, 6 and 8 own the other five tables; this one must not."""
+    """``notification`` is step 8's, and the last one still outstanding."""
     tables = set(inspect(migrated).get_table_names())
-    later = {"fill", "realized_trade", "mleg_group", "mleg_leg", "notification"}
-    assert tables & later == set()
+    assert "notification" not in tables
+
+
+def test_there_is_exactly_one_head(db_path: Path) -> None:
+    """Two revisions revising 0001 breaks ``alembic upgrade head`` outright.
+
+    Steps 5 and 6 both want new tables and both run against ``0002``, in
+    parallel. Either one adding its own revision on top of ``0001`` gives
+    Alembic two heads and an ambiguous target — which is why the ledger
+    schema is one revision written ahead of both, and why this test exists
+    rather than the convention being left to memory.
+    """
+    script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
+    assert script.get_heads() == ["0002"]
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:
