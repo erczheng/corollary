@@ -1,0 +1,33 @@
+{
+  "body": [
+    {
+      "activity_type": "FILL",
+      "cum_qty": "1",
+      "id": "20260910131125421::192381b6-04b5-5465-ae2c-7754092f7251",
+      "leaves_qty": "0",
+      "order_id": "9ffb7b12-3649-5207-991b-a361647300e6",
+      "order_status": "filled",
+      "price": "12.55",
+      "qty": "1",
+      "side": "buy",
+      "symbol": "AAPL261218C00340000",
+      "transaction_time": "2026-09-10T17:11:25.421826Z",
+      "type": "fill"
+    },
+    {
+      "activity_type": "FILL",
+      "cum_qty": "1",
+      "id": "20260910131125438::4acaa93e-84e4-51ae-be7e-6a8a17255a69",
+      "leaves_qty": "0",
+      "order_id": "3ddf4ba1-caac-55f7-817e-0ddaa7226b06",
+      "order_status": "filled",
+      "price": "16.1",
+      "qty": "1",
+      "side": "buy",
+      "symbol": "TSLA261218P00330000",
+      "transaction_time": "2026-09-10T17:11:25.438268Z",
+      "type": "fill"
+    }
+  ],
+  "status_code": 200
+}
