@@ -243,11 +243,50 @@ corrections above came out of it, including the two-hop join that decision 5
 depends on.
 
 **What it does not yet supply is the option-event path.** Every position
-opened expires in November 2026 or later, so `OPEXP`, `OPEXC` and `OPASN`
+opened expires in November 2026 or later *(true on 2026-09-10 and false by the
+next afternoon — see the resolution below)*, so `OPEXP`, `OPEXC` and `OPASN`
 remain verified only against Alpaca's documented examples — and that is
 exactly where the spec is most likely to be wrong, because the money sits on a
 different row than the event. The open item is now narrow: hold something to
 expiry. A near-dated contract would answer it within days rather than months.
+
+**Resolved 2026-09-11 — the data already exists; no further orders needed.**
+Buying near-dated contracts was approved, and then a read of the live account
+found the test already running. Three single-leg NVDA positions were opened
+2026-09-10 13:37 ET expiring **2026-09-11**, and with NVDA closing at 218.17
+they cover all three branches at once:
+
+| Contract | Position | Close vs strike | Event |
+|---|---|---|---|
+| `NVDA260911C00205000` | long | ITM by $13.17 | auto-exercise → `OPEXC` pair |
+| `NVDA260911C00240000` | long | OTM | worthless → `OPEXP` |
+| `NVDA260911P00230000` | **short** | ITM | assignment → `OPASN` |
+
+`OPASN` was written off above as the branch that would be validated by
+accident or not at all. It is covered, because a *short* near-dated put was
+among them. All three settle overnight, so the activity rows land 2026-09-14
+at the latest. **Record them as fixtures before anything else in step 5** —
+this is the one window where they exist and nobody has to imagine them.
+
+Two facts the same read established, both of which the spec asserts elsewhere
+and now has evidence for: `/v2/positions` returns **no multiplier field at
+all** (`multiplier: None` on every row), so per-contract multipliers genuinely
+must come from the contracts endpoint; and the account reports
+`multiplier: 4`, `options_approved_level: 3`, `options_buying_power: 69886.08`
+against `cash: 96886.08`.
+
+Consequence to expect on 2026-09-14: the exercise and the assignment both
+deliver **stock**. The account will open holding roughly 200 NVDA shares —
+100 bought at 205 through the call, 100 at 230 through the assigned put. That
+is the case the matcher handles by *naming* the shares rather than tracking
+them, so it is also a live test of that boundary rather than a hypothetical.
+
+The reason this is worth days of waiting rather than a fixture: the failure
+mode is **silent and directional**. Nothing raises, because `net_amount: 0` is
+a well-formed number. Every ITM expiry books as a total loss, and lifetime
+P&L, average win, average loss and win rate are then all wrong in the same
+direction with nothing on screen to say so. The first symptom is a terminal
+that believes you never win.
 
 What follows is the original framing, kept because the reasoning still applies
 to the part that is open.
@@ -292,7 +331,7 @@ options trader on both, and is the right thing to size against on both.
 
 ## Decisions
 
-Ten decisions, taken 2026-09-09/10. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
+Twelve decisions, taken 2026-09-09/10/11. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
 
 ### 1. One process
 
@@ -441,6 +480,58 @@ and stays necessary. It was designed for the pessimistic reading of the cap
 and is the component the subscription would make redundant — but it is also
 the graceful-degradation path, so it survives the upgrade rather than being
 deleted by it.
+
+### 11. The Activity page folds every trade, and pages the table
+
+Taken 2026-09-11. `Money` raises on `SUM`, `AVG`, `MIN`, `MAX` and `ORDER BY`,
+so lifetime realized P&L, average win, average loss and win rate are Python
+folds over loaded `realized_trade` rows rather than SQL aggregates. The
+decision is **which rows to load**, and it is: all of them for the header
+cards, with pagination on the table itself.
+
+A single-user account will not approach a painful row count for years, and the
+alternative failure is worse than a slow query. A capped window makes four
+figures labelled "lifetime" mean something narrower than the word, and a
+precomputed rolling aggregate introduces state that can drift from the trades
+it summarises — drift in a P&L figure being exactly the kind that goes
+unnoticed. If the fold ever does get expensive, the fix is a cached aggregate
+*derived on write from the same rows*, so it can be rebuilt and checked
+against them; that is a different thing from a counter that is only ever
+incremented.
+
+Rejected: a trailing-12-month window with the period named in the card
+(honest, but discards the truest number on the page), and maintained running
+totals (fastest, unreconcilable).
+
+### 12. Finnhub stays, reaffirmed 2026-09-11
+
+Decision 7 was re-examined against the alternatives and stands. The market-cap
+column was never the real question: PRD §7 already assigns Finnhub the news
+feed, the economic and earnings calendar, and analyst consensus via
+`recommendation-trends`, so dropping it for step 9 defers a dependency rather
+than removing one.
+
+What the survey found, recorded so it is not re-run: `yfinance` is far and away
+the most popular financial-data library in the Python ecosystem (~25k GitHub
+stars against `finnhub-python`'s ~870), and is nonetheless the wrong
+dependency here — an unofficial Yahoo scraper with no SLA and a record of
+breaking when Yahoo moves. Among official keyed APIs with a usable free tier,
+Finnhub is both the most popular and the most generous (60 req/min). FMP ships
+no official client; Alpha Vantage's free tier has narrowed to the point of
+being unusable and is already benched in PRD §7 as the documented consensus
+fallback; Polygon has rebranded to Massive and moved real-time behind $199/mo.
+
+The one genuinely vendor-free alternative, kept on the record because it may
+matter later: market cap is shares outstanding × price, Alpaca already
+supplies the price, and SEC EDGAR's XBRL `companyfacts` API supplies shares
+outstanding for free with no API key. Its costs are a CIK mapping, tag
+selection across the `dei` and `us-gaap` taxonomies, a declared User-Agent,
+and a share count stale by up to a filing quarter — immaterial for a column
+used to rank and bucket, since price moves dominate. Its coverage gap is
+funds, which file no share count, and that gap lands exactly on the `null`
+`markets.ts` already renders deliberately for a fund's `marketCap`. If Finnhub
+is ever dropped project-wide, this is the replacement for this column, and
+that decision belongs at the PRD §7 level rather than at step 9.
 
 ---
 
@@ -632,12 +723,83 @@ Halting stops nothing this phase, because nothing trades. The state, the notific
 
 ## Doc amendments
 
-- **PRD §8.1** — equity curve is Alpaca's, with a t₀ marker.
+**PRD: the five listed amendments are applied as of 2026-09-11.** Approved and
+written that evening rather than held for step 10, because the evidence behind
+four of them was in hand and reconstructing it later is how a doc pass turns
+into archaeology.
+
+- ~~**PRD §8.1** — equity curve is Alpaca's, with a t₀ marker.~~ **Done 2026-09-11.**
 - **PRD §12** — one process, resolved.
-- **PRD §8.2** — the realized-P&L ledger exists; expiry and assignment are ledger states.
-- **PRD §8.6** — *"keeps no ledger"* scoped to cash transfers. *(Settled/unsettled: done 2026-09-10.)* Also: **drop *"Paper is a margin account at 2× cash"*** — this account reports `multiplier: '4'`, and the figure must be read from the account object rather than asserted in prose. Point the page at `options_buying_power`, which is what actually binds an options trader and is supplied on both account types.
-- **PRD §8.4** — the "highest IV" and "highest open interest" screens depend on fields Basic does not serve. Whatever *Open questions* §1 resolves to, §8.4 has to say it.
+- ~~**PRD §8.2** — the realized-P&L ledger exists; expiry and assignment are ledger states.~~ **Done 2026-09-11**, as three sub-bullets under the header stats.
+- ~~**PRD §8.6** — *"keeps no ledger"* scoped to cash transfers, and *"Paper is a margin account at 2× cash"* dropped.~~ **Done 2026-09-11.** The scoping sentence now states the boundary in both directions: money moved is the broker's record, money made is Corollary's arithmetic. The multiplier is read from the account object; this one reports `4`.
+- ~~**PRD §8.4** — the "highest IV" and "highest open interest" screens.~~ **Done 2026-09-11**, per decision 10's amended finding: both screens survive, vendor analytics pass through where they exist, derived values are labelled as derived, and a null open interest stays null and never ranks.
+- ~~**PRD §9** — the provider-supplied sentiment tier.~~ **Removed 2026-09-11, on evidence**, and the section is now two tiers. Not on the original list, because the original list assumed the tier worked. Probed on this project's keys: Alpaca `/v1beta1/news` returns `source: benzinga` with **no sentiment field**; Finnhub `/company-news` returns 245 NVDA articles with **no sentiment field**; Finnhub `/news-sentiment` answers **502 (HTML)** on three attempts across two symbols while `/quote` returns 200 on the same key. The control established the key was valid and the vendor up; **the account holder then confirmed the endpoint is paywalled**, which is what the 502 was — an unentitled request answered with a gateway error instead of a JSON 403. §7's data-source table was updated in the same pass.
+
+  This is the **second** missing field in this project to turn out priced rather than absent, after OPRA's IV and greeks in decision 10. The habit that follows: when a documented field does not arrive, check the bill before concluding the data does not exist. The tier is removed as *unbought* — restoring it is a $11.99–99.99/mo Finnhub Premium decision, not a vendor hunt.
+
+**Follow-up this opens, deliberately not done in Phase 2:** `web/src/lib/types.ts`
+still declares `SentimentTier = 'provider' | 'rules' | 'llm'` with a
+`SENTIMENT_TIER_DETAIL` entry reading *"Tier 1 — a score shipped by Finnhub or
+Alpaca, published as-is"*, which the PRD now denies. Eight fixtures in
+`mockData.ts` carry `tier: 'provider'` and `news.test.ts:212` asserts all three
+tiers appear. That is Phase 3's News surface and out of scope here by this
+spec's own exclusion list, so it is recorded rather than fixed — but it is a
+live contradiction between the PRD and shipped types, and whoever builds the
+News page owns it.
 - **CLAUDE.md** — the vendor surface gains `BrokerAccount`; layout gains `engine/{ledger,grouping,runtime,stream}.py`, `api/routes/`, `api/schemas.py`; `CONTRACT_MULTIPLIER` is a fixture default and real multipliers are per contract; options level is read from the account, not hardcoded to 3.
+- **CLAUDE.md, layout — `corollary/wire.py` is not in the module layout above and
+  needs naming.** Added during step 4 because *both* vendor HTTP files have to turn
+  prices into exact `Decimal`, nanosecond RFC-3339 stamps into aware UTC datetimes,
+  and counts into `int | None`, and the alternative was the broker importing the
+  market-data provider's privates. It is vendor-**neutral** by design — no `alpaca`
+  import, no `.json()`, and `as_decimal` *raises* on a `float` rather than converting
+  one — which is the test `AlpacaCredentials` deliberately fails, so credentials stay
+  in `data/providers/alpaca.py` and the broker imports them.
+- **This spec, "An option expiring is not a fill" — fee attribution must not run
+  through `group_id` alone.** Probed 2026-09-11 while recording step 4's fixtures:
+  `group_id` is **null on every non-trade row** on this account. What is present is
+  **`execution_id`, on 15 of 19 `FEE` rows** — a *third* field absent from Alpaca's
+  published `NonTradeActivities` schema, after `description` and `price`. The
+  attribution chain is `order_id`, then `execution_id`, then `group_id`, and anything
+  still unattributed is reported separately rather than dropped. `group_id` stays in
+  the chain: it is the documented linkage for an option-event pair, which this account
+  has never produced.
+- **This spec, "There is no realized P&L anywhere" — the composite activity `id` does
+  *not* sort chronologically, and neither does `transaction_time`.** The claim that it
+  *"sorts chronologically as a string"* holds only for the 17-digit **stamp**. The whole
+  id does not: stamps repeat and the UUID half then breaks ties arbitrarily. And
+  `transaction_time` does not either at microsecond resolution even with
+  `direction=asc` — `…438268` was returned before `…438263`. Alpaca orders by the
+  millisecond stamp and the sub-millisecond tail is not a tiebreak. **A FIFO matcher
+  must not depend on a global sort.** The invariant that does hold, measured on real
+  data: per contract symbol the fills are ordered, and no symbol has two fills inside
+  a second.
+- **This spec, "The account object has no settlement breakdown" — `crypto_tier` is a
+  third integer field**, alongside `options_approved_level` and `options_trading_level`.
+  *"Every other numeric field on the account object is a string"* is true of every
+  **money** field, not of every numeric one.
+- **This spec, "Positions are per contract" — the account has grown since the probe.**
+  **13 position rows across 9 logical positions** (4 verticals + 5 singles), not 11/7;
+  15 fills (`buy`×9, `sell_short`×5, `sell`×1 — still three values), 19 `FEE` rows and
+  1 `JNLC`. `multiplier: '4'`, both options levels integer `3`, and
+  `pending_transfer_in`/`out` absent are all re-confirmed.
+- **The fixture recorder needs a redaction note: Alpaca embeds the account number in
+  free text.** A `FEE` row's `description` reads *"CAT fee for proceed of 15 trades on
+  2026-09-10 by PA0EXAMPLE00"* — the account number there is a placeholder, because
+  rule 6 covers this document too and the shape is the whole of the point. Field-name
+  redaction cannot see inside prose, and the first recording wrote the real one into
+  eight fixture rows in plain text before this was caught. Redaction is now a substring
+  pass as well as a field pass, the account identifiers are in the scanned-secrets set
+  so a miss aborts the run, and a shape-based sweep over every `.py`, `.md` and
+  recorded fixture in the tree guards it — widened from the fixture directory alone
+  after this very note, and two like it, were found carrying the value they describe.
+  Rule 6 is the reason this is recorded rather than just fixed.
+- **This spec, "Order of work" step 2 — *"Settings goes server-backed"* is wrong and
+  belongs to step 7.** Confirmed 2026-09-11: the three config tables exist and are
+  seeded, but `api/__init__.py` is still the Phase 1 health-check app, there is no
+  `api/routes/` or `api/schemas.py`, `web/src/lib/api.ts` does not exist, and
+  `Settings.tsx` still imports from `mockData`. Nothing serves the tables. Step 2 is
+  complete as scoped; the sentence over-claimed.
 
 ---
 
