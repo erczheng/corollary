@@ -32,8 +32,15 @@ number, format: double``. So the only way to reach an exact ``Decimal`` from a
 quote is to control the JSON decoder, and ``json.loads(text,
 parse_float=Decimal)`` does exactly that: ``4.15`` becomes ``Decimal('4.15')``
 having never existed as a float. ``httpx``'s ``.json()`` offers no hook for
-this and neither does ``alpaca-py``. :func:`_decode` below is the whole reason
-this argument matters, and it is four lines.
+this and neither does ``alpaca-py``. :func:`corollary.wire.decode_json` is the
+whole reason this argument matters, and it is four lines.
+
+The coercions themselves moved to :mod:`corollary.wire` in step 4, when
+``engine/execution/alpaca.py`` turned out to need exactly the same decode
+path -- including the nanosecond truncation in
+:func:`~corollary.wire.as_datetime`, which is thirty lines that must not exist
+twice. They are re-bound below under the private names this file already used,
+so nothing here changed but where the source sits.
 
 The supporting three:
 
@@ -62,7 +69,6 @@ accident, in the direction nobody chose. The environment is the input;
 appears in this module.
 """
 
-import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -105,6 +111,18 @@ from corollary.ratelimit import (
     ALPACA_PAPER_TRADING_HOST,
     HostRateLimiter,
     default_limiter,
+)
+from corollary.wire import (
+    as_date,
+    as_datetime,
+    as_decimal,
+    as_int,
+    clean_params,
+    decode_json,
+    require_aware,
+    rfc3339,
+    translating,
+    vendor_detail,
 )
 
 __all__ = [
@@ -362,123 +380,19 @@ class AlpacaCredentials:
 # --------------------------------------------------------------------------
 
 
-def _decode(text: str) -> Any:
-    """Parse a response body with every JSON number as an exact ``Decimal``.
-
-    The whole Decimal argument for this file rests on these two lines.
-    ``json.loads`` builds a ``float`` for ``4.15`` by default and the
-    precision is gone before any of our code sees it; ``parse_float=Decimal``
-    hands back ``Decimal('4.15')``, constructed from the literal text.
-
-    Integers keep their ``int`` type — ``parse_int`` is left alone
-    deliberately, because volume and trade counts are counts, not money.
-    """
-    return json.loads(text, parse_float=Decimal)
-
-
-def _as_decimal(value: Any) -> Decimal | None:
-    """A wire value as an exact ``Decimal``, or ``None`` if absent.
-
-    Handles all three shapes Alpaca uses across its two APIs: a JSON number
-    already decoded to ``Decimal`` by :func:`_decode`, an integer, and the
-    trading API's strings. **A ``float`` raises** rather than being converted —
-    reaching this with one means the decoder was bypassed, which is the exact
-    silent-precision-loss this module is arranged to prevent.
-    """
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, bool):  # bool is an int subclass; never money
-        raise TypeError(f"expected a number, got a bool: {value!r}")
-    if isinstance(value, int):
-        return Decimal(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        try:
-            return Decimal(stripped)
-        except ArithmeticError as exc:
-            raise ProviderError(f"{value!r} is not a number") from exc
-    if isinstance(value, float):
-        raise TypeError(
-            f"a float ({value!r}) reached the Decimal boundary. Responses must "
-            "be parsed with _decode(), which uses parse_float=Decimal — see "
-            "the module docstring."
-        )
-    raise TypeError(f"cannot read {type(value).__name__} ({value!r}) as a number")
-
-
-def _as_int(value: Any) -> int | None:
-    """A count, or ``None``. Absent stays absent — never coerced to zero.
-
-    Open interest is the caller that matters, and the reason is *not* that the
-    plan withholds it: 98 of the 100 contracts in
-    ``tests/fixtures/alpaca/option_contracts_nvda.json`` carry one. The design
-    spec's claim that it is null on every contract came from a sample of the
-    deep-ITM tail, and ``interface.py``'s module docstring records the
-    correction. Some contracts genuinely have none, and a zero there would be
-    a claim about the market — that nobody holds the contract — where a null
-    is a claim about the data.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise TypeError(f"expected a count, got a bool: {value!r}")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, Decimal):
-        return int(value)
-    if isinstance(value, str):
-        stripped = value.strip()
-        return int(stripped) if stripped else None
-    raise TypeError(f"cannot read {type(value).__name__} ({value!r}) as a count")
-
-
-def _as_datetime(value: Any) -> datetime:
-    """An RFC-3339 timestamp as an aware UTC ``datetime``.
-
-    Alpaca stamps to nanoseconds; Python resolves to microseconds, so the tail
-    is truncated rather than rounded. That is lossless for every use here —
-    nothing sequences trades by sub-microsecond ties — and stated so nobody
-    later assumes the value round-trips exactly.
-    """
-    if not isinstance(value, str):
-        raise ProviderError(f"expected an RFC-3339 timestamp, got {value!r}")
-    text = value.strip()
-    if text.endswith(("Z", "z")):
-        text = text[:-1] + "+00:00"
-    # fromisoformat accepts at most 6 fractional digits; Alpaca sends 9.
-    if "." in text:
-        head, _, tail = text.partition(".")
-        digits = ""
-        rest = tail
-        for index, char in enumerate(tail):
-            if not char.isdigit():
-                digits, rest = tail[:index], tail[index:]
-                break
-        else:
-            digits, rest = tail, ""
-        text = f"{head}.{digits[:6]:0<6}{rest}"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise ProviderError(f"{value!r} is not an RFC-3339 timestamp") from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _as_date(value: Any) -> date | None:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    if not isinstance(value, str):
-        raise ProviderError(f"expected a YYYY-MM-DD date, got {value!r}")
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError as exc:
-        raise ProviderError(f"{value!r} is not a YYYY-MM-DD date") from exc
+#: The coercions themselves live in :mod:`corollary.wire`, vendor-neutral,
+#: because ``engine/execution/alpaca.py`` needs the identical decode path and
+#: ``as_datetime``'s nanosecond truncation must not exist twice. They are
+#: re-bound here under the private names every call site below already uses,
+#: and wrapped in :func:`corollary.wire.translating` so a malformed value
+#: still surfaces as the ``ProviderError`` this module's callers handle. A
+#: ``TypeError`` is deliberately not translated: a float reaching the money
+#: path is a bug in this repository, not a vendor response.
+_decode = translating(ProviderError, decode_json)
+_as_decimal = translating(ProviderError, as_decimal)
+_as_int = translating(ProviderError, as_int)
+_as_datetime = translating(ProviderError, as_datetime)
+_as_date = translating(ProviderError, as_date)
 
 
 def _price_or_none(value: Any) -> Decimal | None:
@@ -527,6 +441,14 @@ def _bar(symbol: str, payload: Mapping[str, Any] | None) -> Bar | None:
     def need(key: str) -> Decimal:
         value = _as_decimal(payload.get(key))
         if value is None:
+            # ``payload!r`` is unbounded and unredacted deliberately. This is
+            # reached only after a 200 -- ``_get`` raises on >= 400 before
+            # ``_decode`` -- so it is one decoded OHLCV row: no free text, no
+            # credential, no account identifier. It is one of exactly two
+            # interpolations on this vendor surface that do NOT pass through
+            # ``wire.vendor_detail``. If a 200 payload ever gains free text,
+            # that exemption stops holding and this must route through
+            # ``_detail`` like the error branches already do.
             raise ProviderError(f"bar for {symbol} is missing {key!r}: {payload!r}")
         return value
 
@@ -561,6 +483,13 @@ def _option_contract(payload: Mapping[str, Any]) -> OptionContract:
     multiplier = _as_decimal(payload["multiplier"])
     size = _as_decimal(payload["size"])
     if strike is None or multiplier is None or size is None:
+        # Unbounded ``payload!r`` on purpose -- the second of the two sites
+        # noted in ``_bar``. Bounding costs more here than anywhere: an
+        # adjusted contract's ``deliverables`` runs to ~986 characters, and
+        # that field is exactly what distinguishes a ``GME1`` delivering
+        # 100 GME + 10 GME.WS from a standard contract. Truncating it would
+        # remove the diagnostic that ``ledger.RejectionRule.
+        # UNVERIFIED_DELIVERABLE`` exists to make answerable.
         raise ProviderError(
             f"contract {symbol} is missing strike, multiplier or size: {payload!r}"
         )
@@ -681,6 +610,30 @@ class AlpacaProvider(MarketDataProvider):
 
     # ---------------------------------------------------------------- HTTP
 
+    def _detail(self, response: httpx.Response) -> str:
+        """This response's body, bounded and de-identified for an error message.
+
+        **Both halves of the key pair** go in as literals, because both are
+        sent: :meth:`AlpacaCredentials.headers` puts the key id in
+        ``APCA-API-KEY-ID`` and the secret in ``APCA-API-SECRET-KEY`` on every
+        request this provider makes. Alpaca echoes neither in an error body,
+        and nothing about that is a guarantee — anything in front of it that
+        reflects request headers into an error page (a WAF, a corporate proxy,
+        a future error shape) writes a credential into a body this method then
+        quotes into an exception message, and rule 6 covers log output.
+
+        The 403 branch is the one that matters most. An entitlement or auth
+        rejection is precisely the response most likely to quote back what it
+        rejected, and this provider's 403 is not rare: ``feed=opra`` inside
+        the 15-minute window answers with one on every call. A 40-character
+        secret sits well inside :data:`ERROR_BODY_MAX`, so the bound is no
+        protection here; the substitution is.
+        """
+        return vendor_detail(
+            response.text,
+            secrets=(self._credentials.key_id, self._credentials.secret_key),
+        )
+
     async def _get(
         self, base_url: str, path: str, params: Mapping[str, Any] | None = None
     ) -> Any:
@@ -702,13 +655,17 @@ class AlpacaProvider(MarketDataProvider):
 
         if response.status_code == 403:
             raise FeedAccessError(
-                f"GET {path} returned 403: {response.text.strip()}. This is an "
+                f"GET {path} returned 403: {self._detail(response)}. This is an "
                 "entitlement, not a bug — the Basic plan serves `indicative` "
                 "options and IEX real-time equities, and `opra`/`sip` inside "
                 "the last 15 minutes answers with an auth error rather than "
                 "empty data. Check the plan before debugging the code."
             )
         if response.status_code == 429:
+            # The body is deliberately not quoted here: `X-RateLimit-Reset` is
+            # an epoch second, it is the only useful field in a 429, and it is
+            # not credential-shaped. Anything added to this branch later goes
+            # through `_detail` like the two above.
             raise RateLimitedError(
                 f"GET {path} returned 429 despite the local budget. The server "
                 "window and the local bucket disagree — another process may be "
@@ -717,7 +674,8 @@ class AlpacaProvider(MarketDataProvider):
             )
         if response.status_code >= 400:
             raise ProviderError(
-                f"GET {path} returned {response.status_code}: {response.text.strip()}"
+                f"GET {path} returned {response.status_code}: "
+                f"{self._detail(response)}"
             )
         return _decode(response.text)
 
@@ -1317,28 +1275,10 @@ def _collect_bars(pages: Sequence[Any]) -> dict[str, list[Bar]]:
     return collected
 
 
-def _require_aware(moment: datetime | None, name: str) -> None:
-    """Refuse a naive datetime, naming which argument it was.
-
-    Same reason ``UtcDateTime`` refuses one at the database boundary: market
-    data is Eastern, the server clock is whatever the machine says, and
-    guessing between them is a silent multi-hour window error that returns
-    plausible bars.
-    """
-    if moment is None:
-        return
-    if moment.tzinfo is None or moment.utcoffset() is None:
-        raise ValueError(
-            f"{name} must be timezone-aware; got a naive datetime {moment!r}"
-        )
-
-
-def _rfc3339(moment: datetime | None) -> str | None:
-    """A UTC RFC-3339 string, or ``None`` to let the vendor default it."""
-    if moment is None:
-        return None
-    _require_aware(moment, "start/end")
-    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+#: Request-side encoding, also from :mod:`corollary.wire` -- the trading host
+#: builds the same ``after``/``until`` parameters from aware datetimes.
+_require_aware = require_aware
+_rfc3339 = rfc3339
 
 
 def _plain(value: Decimal | None) -> str | None:
@@ -1350,21 +1290,4 @@ def _plain(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
 
-def _clean_params(params: Mapping[str, Any] | None) -> dict[str, str]:
-    """Drop ``None`` values and render the rest as strings.
-
-    ``httpx`` would happily send ``feed=None``; Alpaca would answer 400.
-    """
-    if not params:
-        return {}
-    cleaned: dict[str, str] = {}
-    for key, value in params.items():
-        if value is None:
-            continue
-        if isinstance(value, bool):
-            cleaned[key] = "true" if value else "false"
-        elif isinstance(value, (date, datetime)):
-            cleaned[key] = value.isoformat()
-        else:
-            cleaned[key] = str(value)
-    return cleaned
+_clean_params = clean_params

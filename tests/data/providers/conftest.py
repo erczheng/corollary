@@ -122,30 +122,50 @@ def recorded_chain_instant(name: str) -> datetime:
     return datetime.fromisoformat(latest[:26].rstrip("Z") + "+00:00")
 
 
+#: What a route may hand back: a fixture name, or a literal
+#: ``(status, body)`` for a response no recording could ever contain.
+#:
+#: The tuple form exists for the error-body tests. A body that echoes the
+#: request's ``APCA-API-SECRET-KEY`` header back is not something Alpaca has
+#: ever sent and not something the recorder could capture even if it had --
+#: rule 6 forbids a fixture holding key material. It has to be synthesised in
+#: the test, which is why this mirrors the broker conftest's ``Served``.
+Served = str | tuple[int, str | bytes] | None
+Route = Callable[[httpx.Request], Served]
+
+
 class RecordingTransport(httpx.MockTransport):
     """A mock transport that logs what it served.
 
-    ``route`` maps a request to a fixture name. Returning ``None`` from it is
-    a test failure rather than a 404, because an unrouted request means the
-    provider built a URL nobody predicted — exactly the thing these tests
-    exist to catch.
+    ``route`` maps a request to a fixture name, or to a literal
+    ``(status, body)`` pair. Returning ``None`` from it is a test failure
+    rather than a 404, because an unrouted request means the provider built a
+    URL nobody predicted — exactly the thing these tests exist to catch.
     """
 
-    def __init__(self, route: Callable[[httpx.Request], str | None]) -> None:
+    def __init__(self, route: Route) -> None:
         self.requests: list[httpx.Request] = []
         self._route = route
         super().__init__(self._handle)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        name = self._route(request)
-        if name is None:
+        served = self._route(request)
+        if served is None:
             raise AssertionError(
                 f"no fixture routed for {request.method} {request.url}"
             )
+        if isinstance(served, tuple):
+            status, body = served
+            return httpx.Response(
+                status_code=status,
+                content=body.encode("utf-8") if isinstance(body, str) else body,
+                headers={"content-type": "application/json"},
+                request=request,
+            )
         return httpx.Response(
-            status_code=int(load_fixture(name)["status_code"]),
-            content=fixture_body_bytes(name),
+            status_code=int(load_fixture(served)["status_code"]),
+            content=fixture_body_bytes(served),
             headers={"content-type": "application/json"},
             request=request,
         )
@@ -189,8 +209,9 @@ def make_provider(
     created: list[httpx.AsyncClient] = []
 
     def build(
-        route: Callable[[httpx.Request], str | None],
+        route: Route,
         *,
+        credentials: AlpacaCredentials = TEST_CREDENTIALS,
         feeds: FeedConfig = BASIC_FEEDS,
         now: datetime = RECORDED_AT,
         **kwargs: Any,
@@ -199,7 +220,7 @@ def make_provider(
         client = httpx.AsyncClient(transport=transport)
         created.append(client)
         provider = AlpacaProvider(
-            credentials=TEST_CREDENTIALS,
+            credentials=credentials,
             feeds=feeds,
             client=client,
             limiter=limiter,
@@ -211,12 +232,12 @@ def make_provider(
     yield build
 
 
-def single(name: str) -> Callable[[httpx.Request], str | None]:
+def single(name: str) -> Route:
     """Route every request to one fixture."""
     return lambda _request: name
 
 
-def sequence(*names: str) -> Callable[[httpx.Request], str | None]:
+def sequence(*names: Served) -> Route:
     """Serve the named fixtures in order, then repeat the last one.
 
     Used for the pagination loop. The final fixture must be one whose
@@ -225,7 +246,7 @@ def sequence(*names: str) -> Callable[[httpx.Request], str | None]:
     """
     calls = {"n": 0}
 
-    def choose(_request: httpx.Request) -> str:
+    def choose(_request: httpx.Request) -> Served:
         index = min(calls["n"], len(names) - 1)
         calls["n"] += 1
         return names[index]
@@ -233,10 +254,10 @@ def sequence(*names: str) -> Callable[[httpx.Request], str | None]:
     return choose
 
 
-def by_path(mapping: dict[str, Callable[[httpx.Request], str | None] | str]):
+def by_path(mapping: dict[str, Route | str]):
     """Dispatch on a path fragment to a fixture name or a nested router."""
 
-    def choose(request: httpx.Request) -> str | None:
+    def choose(request: httpx.Request) -> Served:
         for fragment, target in mapping.items():
             if fragment in str(request.url):
                 return target(request) if callable(target) else target
@@ -245,7 +266,7 @@ def by_path(mapping: dict[str, Callable[[httpx.Request], str | None] | str]):
     return choose
 
 
-def chain_page(name: str) -> Callable[[httpx.Request], str | None]:
+def chain_page(name: str) -> Route:
     """One recorded chain page, then a terminal page so the loop stops.
 
     The recorded pages all carry a ``next_page_token`` -- they are real pages
@@ -256,6 +277,6 @@ def chain_page(name: str) -> Callable[[httpx.Request], str | None]:
     return sequence(name, "option_chain_end")
 
 
-def contracts_page(name: str) -> Callable[[httpx.Request], str | None]:
+def contracts_page(name: str) -> Route:
     """One recorded contracts page, then a terminal page."""
     return sequence(name, "option_contracts_end")

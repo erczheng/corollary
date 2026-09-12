@@ -32,6 +32,7 @@ from corollary.ratelimit import (
     ALPACA_PAPER_TRADING_HOST,
     DEFAULT_REQUESTS_PER_MINUTE,
 )
+from corollary.wire import ERROR_BODY_MAX, REDACTED
 
 from .conftest import (
     BASIC_FEEDS,
@@ -1393,9 +1394,6 @@ async def test_an_empty_symbol_list_costs_no_request(make_provider) -> None:
 
 # --------------------------------------------------------------------------
 # Credentials -- rule 6
-
-# --------------------------------------------------------------------------
-# Credentials -- rule 6
 # --------------------------------------------------------------------------
 
 
@@ -1405,3 +1403,190 @@ async def test_the_key_never_appears_in_a_url(make_provider) -> None:
     for request in transport.requests:
         assert "PKTEST" not in str(request.url)
         assert request.headers["APCA-API-KEY-ID"] == "PKTESTTESTTESTTEST"
+
+
+# --------------------------------------------------------------------------
+# What a vendor error body may write into a log -- rule 6
+# --------------------------------------------------------------------------
+#
+# `_get` used to interpolate `response.text` verbatim into both of its error
+# branches, with no redaction and no bound at all. The broker's equivalent
+# already went through `vendor_detail`; this file's did not, and the 403
+# branch -- the one an entitlement or auth rejection takes, and so the one
+# most likely to meet a middlebox that echoes request headers back -- was the
+# worse of the two.
+
+
+#: Forty characters, the width Alpaca issues, and obviously not one of them.
+#: The width is the point: a real secret fits inside :data:`ERROR_BODY_MAX`
+#: five times over, so the bound is no protection against one arriving in a
+#: body. Registered by value in ``tests/fixtures/test_record_alpaca.py``'s
+#: ``PLACEHOLDER_IDENTIFIERS``; ``conftest``'s stand-in secret is seventeen
+#: characters and would not prove the claim under test.
+FAKE_SECRET_KEY = "PROVIDERnotarealsecretPROVIDERnotareal00"
+
+#: The pair the echo tests authenticate with. The key id is ``conftest``'s,
+#: because that half is already the right shape.
+ECHOING_CREDENTIALS = AlpacaCredentials(
+    key_id="PKTESTTESTTESTTEST",
+    secret_key=FAKE_SECRET_KEY,
+    trading_base_url="https://paper-api.alpaca.markets",
+    is_paper=True,
+)
+
+#: A paper account number's shape, invented, and deliberately a different
+#: value from the broker tests' -- a test that passed because some other
+#: file's constant happened to be redacted would still have to fail here.
+FAKE_ACCOUNT_NUMBER = "PA9PROVIDER0"
+
+#: The body under test: a gateway quoting the request's own auth headers back.
+ECHO_BODY = (
+    '{"message": "blocked at the gateway; request headers were '
+    f"APCA-API-KEY-ID: {ECHOING_CREDENTIALS.key_id}, "
+    f'APCA-API-SECRET-KEY: {FAKE_SECRET_KEY}"}}'
+)
+
+
+async def test_a_403_body_that_echoes_the_key_pair_is_redacted(
+    make_provider,
+) -> None:
+    """The realistic branch, and the one that had a raw ``response.text`` in it.
+
+    A 403 is an entitlement or auth rejection -- exactly the response a WAF or
+    a corporate proxy answers by reflecting what it rejected, which on every
+    request this provider makes includes ``APCA-API-SECRET-KEY``. The message
+    then reaches the logs, every traceback holding the provider, and rule 9's
+    watchdog path.
+
+    Of the two halves the secret is the one that must not survive, so both are
+    asserted separately rather than through one combined check.
+    """
+    assert len(ECHO_BODY) <= ERROR_BODY_MAX, (
+        "the whole body sits inside the bound, so truncation cannot be what "
+        "removes anything below"
+    )
+
+    provider, _ = make_provider(
+        lambda _request: (403, ECHO_BODY), credentials=ECHOING_CREDENTIALS
+    )
+    with pytest.raises(FeedAccessError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+
+    message = str(raised.value)
+    assert FAKE_SECRET_KEY not in message
+    assert ECHOING_CREDENTIALS.key_id not in message
+    # Two substitutions, not a dropped body: an error nobody can read is its
+    # own failure, and a `_get` that quoted nothing would pass a bare
+    # "secret not in message" check while telling whoever is on call nothing.
+    assert message.count(REDACTED) == 2
+    assert "blocked at the gateway" in message
+    # The branch still says what it is for.
+    assert "entitlement" in message
+
+
+async def test_a_generic_4xx_body_that_echoes_the_key_pair_is_redacted(
+    make_provider,
+) -> None:
+    """The other interpolating branch. Both call sites, not just the first read."""
+    assert len(ECHO_BODY) <= ERROR_BODY_MAX
+
+    provider, _ = make_provider(
+        lambda _request: (500, ECHO_BODY), credentials=ECHOING_CREDENTIALS
+    )
+    with pytest.raises(ProviderError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+
+    message = str(raised.value)
+    assert FAKE_SECRET_KEY not in message
+    assert ECHOING_CREDENTIALS.key_id not in message
+    assert message.count(REDACTED) == 2
+    assert "blocked at the gateway" in message
+    assert "500" in message
+
+
+@pytest.mark.parametrize("status", [403, 404, 500])
+async def test_an_account_number_in_an_error_body_is_redacted(
+    make_provider, status
+) -> None:
+    """Matched by shape, because it is not a credential the caller holds.
+
+    Real: a ``FEE`` activity's ``description`` on this host reads *"CAT fee
+    for proceed of N trades on <date> by PA..."*, so this vendor does put an
+    account number in free text where a rule about field names cannot see it.
+    An error ``message`` is free text from the same vendor.
+    """
+    body = f'{{"message": "rejected for account {FAKE_ACCOUNT_NUMBER}"}}'
+    provider, _ = make_provider(lambda _request: (status, body))
+    with pytest.raises(ProviderError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+
+    message = str(raised.value)
+    assert FAKE_ACCOUNT_NUMBER not in message
+    # Redacted, not deleted: the sentence still says what happened.
+    assert "rejected for account" in message
+
+
+async def test_an_occ_symbol_survives_the_redaction(make_provider) -> None:
+    """The bound and the redaction are not allowed to eat the error.
+
+    ``PANW251219C00150000`` opens with the same two letters as a paper account
+    number and is the single most useful token in a 404 about a contract --
+    which, on a market-data provider, is the 404 that actually happens.
+    """
+    contract = "PANW251219C00150000"
+    body = f'{{"code": 40410000, "message": "contract {contract} not found"}}'
+    provider, _ = make_provider(lambda _request: (404, body))
+    with pytest.raises(ProviderError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+    assert contract in str(raised.value)
+
+
+@pytest.mark.parametrize("status", [403, 500])
+async def test_a_huge_error_body_is_bounded(make_provider, status) -> None:
+    """An HTML error page from a proxy is not a reason to write 40kB to a log.
+
+    ``_get`` had no cap on either branch, so a middlebox answering with a
+    stack trace copied the whole thing into an exception message.
+    """
+    body = '{"message": "' + "x" * 40_000 + '"}'
+    provider, _ = make_provider(lambda _request: (status, body))
+    with pytest.raises(ProviderError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+
+    message = str(raised.value)
+    assert len(message) < 1_000
+    # Truncation that does not announce itself is indistinguishable from a
+    # vendor that sent exactly that much.
+    assert "truncated" in message
+
+
+async def test_a_multiline_error_body_becomes_one_line(make_provider) -> None:
+    """One record per line, so a stray HTML page cannot fake log records."""
+    body = '{\n  "code": 40110000,\n  "message": "nope"\n}'
+    provider, _ = make_provider(lambda _request: (500, body))
+    with pytest.raises(ProviderError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+    assert "\n" not in str(raised.value)
+    assert "nope" in str(raised.value)
+
+
+async def test_a_429_quotes_the_reset_header_and_not_the_body(
+    make_provider,
+) -> None:
+    """The 429 branch interpolates one header value, and that stays true.
+
+    ``X-RateLimit-Reset`` is an epoch second -- not credential-shaped, and the
+    single most useful thing in a 429. The body is deliberately *not* quoted
+    there, and this pins that: adding it later means adding the redaction with
+    it, and a test that failed is a cheaper reminder than a leaked key.
+    """
+    provider, _ = make_provider(
+        lambda _request: (429, ECHO_BODY), credentials=ECHOING_CREDENTIALS
+    )
+    with pytest.raises(RateLimitedError) as raised:
+        await provider.stock_snapshots(["NVDA"])
+
+    message = str(raised.value)
+    assert FAKE_SECRET_KEY not in message
+    assert "blocked at the gateway" not in message
+    assert "Reset header" in message
