@@ -25,14 +25,21 @@ The orchestrator writes one JSON file per approved unit of work:
   ],
   "branch": "phase2-real-data",
   "verified": {
-    "uv run pytest": "142 passed",
-    "uv run pytest -m risk": "18 passed",
+    "uv run python -m pytest": "142 passed",
+    "uv run python -m pytest -m risk": "18 passed",
     "uv run mypy corollary": "Success: no issues found in 31 source files"
   },
   "approved_by": "corollary-orchestrator",
   "approved_at": "2026-09-10T15:42:00Z"
 }
 ```
+
+The command keys are the **`python -m` forms on purpose**. `uv run pytest` is
+blocked by Windows Application Control on this machine (`os error 4551`, the
+generated console shim), so a key written that way re-runs as a failure and the
+committer rejects an approval that was actually sound. Record the form that
+runs. Omit the timing line — it differs on every run by design, and a
+committer comparing it literally would reject every entry.
 
 `verified` holds the **actual output** `corollary-test-runner` reported — not
 the orchestrator's expectation of it. The committer re-runs these checks and

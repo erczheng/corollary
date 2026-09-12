@@ -31,18 +31,21 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 uv sync                          # install
 uv run python -m pytest           # backend tests — NOT `uv run pytest`, see below
 uv run python -m pytest -m risk   # risk tests only — run before any engine change
-uv run alembic upgrade head       # migrations — wired, 0001 is head
+uv run alembic upgrade head       # migrations — wired, 0002 is head
 uv run python -m corollary.engine    # start engine
-uv run uvicorn corollary.api:app --reload   # start API
+uv run python -m uvicorn corollary.api:app --reload   # start API — NOT `uv run uvicorn`
 uv run mypy corollary            # type check, must be clean
 ```
 
-**`uv run pytest` does not work on this machine** — the console shim is
-blocked by Windows Application Control (`os error 4551`), the same policy that
-blocks uv's managed 3.12 build. `uv run python -m pytest` runs the identical
-suite and is unaffected, because it goes through the interpreter rather than
-the generated `pytest.exe`. `uv run mypy` and `uv run alembic` are fine, so
-this is specific to pytest's entry point, not to uv.
+**`uv run pytest` and `uv run uvicorn` do not work on this machine** — the
+generated console shim is blocked by Windows Application Control (`os error
+4551`), the same policy that blocks uv's managed 3.12 build. The `python -m`
+form of each runs the identical code and is unaffected, because it goes
+through the interpreter rather than the generated `.exe`. `uv run mypy` and
+`uv run alembic` are fine, so this is specific to the blocked entry points,
+not to uv — and **not** specific to pytest, which is what the uvicorn block
+(hit 2026-09-11, same `os error 4551`) established. Assume any new console
+script is blocked until shown otherwise, and reach for `python -m` first.
 
 Frontend commands run from `web/`:
 
