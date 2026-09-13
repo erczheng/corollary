@@ -603,6 +603,60 @@ and is the component the subscription would make redundant — but it is also
 the graceful-degradation path, so it survives the upgrade rather than being
 deleted by it.
 
+### 15. Open interest has a free source, and we may not use it -- 2026-09-12
+
+Decision 10 said open interest is unavailable on Basic and left it there. That
+was right about Alpaca and incomplete as a statement about the world, so the
+question got asked again. Recording the answer so it does not get asked a
+third time.
+
+**CBOE publishes it, free and unauthenticated.** The endpoint its own quote
+pages read returns 4,026 NVDA contracts, 2,988 of them with non-zero
+`open_interest`, and carries `iv`, `delta`, `gamma`, `theta`, `vega`, `rho`
+and a theoretical price besides -- everything decision 10 writes off. The
+underlying close it reported (218.29) matches the official SIP close.
+
+**We may not build on it.** CBOE's delayed-quote pages state that it is
+*"strictly prohibited to download delayed quote table data ... by using
+auto-extraction programs/queries and/or software"*, that they *"will block IP
+addresses of all parties who attempt to do so"*, and that downloading *"in any
+other way than by manual ticker symbol entry is strictly prohibited"*. The
+data is CBOE LiveVol's property. A scheduled fetch is precisely the prohibited
+case. The sanctioned route is their commercial All Access API, which is itself
+the answer to why this is not free.
+
+So decision 10 stands, with its wording corrected: open interest has **no
+permissible free source we have found**, which is a different claim from
+"unavailable". Two documented APIs with terms that do permit programmatic use
+-- Alpha Vantage's `HISTORICAL_OPTIONS` and Tradier's sandbox -- are untested
+and were deliberately deferred: Phase 6 buys Algo Trader Plus anyway, and that
+supplies open interest, IV and greeks from the vendor already in the order
+path rather than adding a provider to maintain for one column.
+
+Consequence for the Markets page: the OI **column** stays and renders
+unavailable, per decision 10. The named **sort screen** *"Highest open
+interest"* is **removed**. A ranking option that returns the list unsorted is
+worse than an absent one -- the same reason the command palette omits Execute
+while the engine is halted rather than showing it disabled. It comes back when
+the data does.
+
+### 16. A Phase 2 surface with no source states why, from real state -- 2026-09-12
+
+The Dashboard's *Recommended Trades* panel has no source in this phase: the
+scanner and the LLM layer are both explicitly out of scope, so nothing can
+generate a candidate.
+
+It renders an **empty state driven by `/api/engine/state`** rather than
+fixtures or a hidden panel. The engine seeds halted on cold start (rule 9), so
+"the engine is halted, no candidates are being generated" is a true sentence
+assembled from live data, not a placeholder -- and the panel becomes real for
+free when Phase 4 arrives, with no layout to rebuild.
+
+Rejected: keeping the mock recommendations behind a fixture badge, because
+PRD §8.5 is explicit that a table of invented numbers reads as invented, and
+this one carries strike, expiry and a confidence score. Also rejected: hiding
+the panel, which changes the layout now and changes it back later.
+
 ### 11. The Activity page folds every trade, and pages the table
 
 Taken 2026-09-11. `Money` raises on `SUM`, `AVG`, `MIN`, `MAX` and `ORDER BY`,
@@ -1026,7 +1080,7 @@ News page owns it.
 4. `BrokerAccount` + `AlpacaBroker` read surface.
 5. Fill ingestion, FIFO matcher, `realized_trade`.
 6. Multi-leg grouping.
-7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
+7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets, **and Settings**. Settings was added 2026-09-12: it sizes risk ceilings against `ACCOUNT_SNAPSHOTS` fixture equity, so its raise-confirm quotes a dollar consequence computed from $100,000 of fake money rather than the real balance. It cannot place a trade and the engine enforces the true ceiling server-side regardless, so this is a misquote rather than a hole -- but rule 4's whole point is that the number a human approves is the real one. Its endpoints already exist. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
 8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`. **Also persist the matcher's refusals — decision 14.** `EngineRuntime` owns the ingest loop and therefore owns `IngestResult`, which is the cheapest point to hand a rejection's rule and inputs to the API; doing it here is what lets the Activity page name a gap's cause instead of only counting it.
 9. Finnhub market cap; fixture markers.
 10. Doc amendments.
