@@ -4,8 +4,16 @@ import {
   API_BASE,
   ApiError,
   HTTP_ERROR,
+  MAX_SERIES_PERIOD_DAYS,
   NETWORK_UNREACHABLE,
   apiUrl,
+  formatSeriesKey,
+  isInvalidSeriesWindow,
+  quoteSeries,
+  resolutionForTimeframe,
+  seriesChange,
+  seriesSpansDays,
+  windowForRange,
   fetchAccount,
   fetchAccountHistory,
   fetchActivity,
@@ -27,7 +35,7 @@ import {
   updateRiskLimits,
   wireMoney,
 } from './api'
-import type { AccountMode } from './types'
+import type { AccountMode, UnderlyingQuote } from './types'
 
 /** A response stub carrying only what `request` touches. Built by hand
  * rather than from the platform `Response`, so the tests do not depend on
@@ -276,14 +284,32 @@ describe('query parameters FastAPI spells its own way', () => {
     expect(calledUrl(fetchMock)).toBe('/api/markets/chain/AAPL?expiration=2026-11-21')
   })
 
-  it('sends history_days in snake case', async () => {
+  it('asks for the window the range control resolved to', async () => {
     const fetchMock = stubFetch(jsonResponse(200, []))
 
-    await fetchUnderlyings(['NVDA', 'AAPL'], 90)
+    await fetchUnderlyings(['NVDA', 'AAPL'], { period: '1D', timeframe: '5Min' })
 
     expect(calledUrl(fetchMock)).toBe(
-      '/api/markets/underlyings?symbols=NVDA%2CAAPL&history_days=90',
+      '/api/markets/underlyings?symbols=NVDA%2CAAPL&period=1D&timeframe=5Min',
     )
+  })
+
+  it('never sends history_days, which is a deprecated alias for period', async () => {
+    // Sending both is a 422. One spelling on this side is what makes that
+    // unreachable rather than merely unlikely.
+    const fetchMock = stubFetch(jsonResponse(200, []))
+
+    await fetchUnderlyings(['NVDA'], { period: '400D', timeframe: '1D' })
+
+    expect(calledUrl(fetchMock)).not.toContain('history_days')
+  })
+
+  it('omits the window entirely when none is given, leaving the server its defaults', async () => {
+    const fetchMock = stubFetch(jsonResponse(200, []))
+
+    await fetchUnderlyings(['NVDA'])
+
+    expect(calledUrl(fetchMock)).toBe('/api/markets/underlyings?symbols=NVDA')
   })
 
   it('omits an empty symbol list rather than sending an empty filter', async () => {
@@ -409,5 +435,210 @@ describe('halt and resume', () => {
     expect(calledInit(fetchMock).method).toBe('POST')
     expect(calledInit(fetchMock).body).toBeUndefined()
     expect(state.halted).toBe(false)
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * Series — the window a range asks for, and the answer it got
+ * ---------------------------------------------------------------------- */
+
+function quoteWith(parts: Partial<UnderlyingQuote>): UnderlyingQuote {
+  return {
+    symbol: 'AAPL',
+    price: 232.1,
+    previousClose: 230.0,
+    change: 2.1,
+    changePct: 0.91,
+    history: [],
+    intraday: [],
+    ...parts,
+  }
+}
+
+describe('windowForRange', () => {
+  const at = new Date('2026-09-13T16:00:00Z') // noon ET, a Sunday
+
+  it('asks for the day at five-minute bars, not one daily close', () => {
+    // The whole defect: 1D over daily closes is a single point.
+    expect(windowForRange('1D', at)).toEqual({ period: '1D', timeframe: '5Min' })
+  })
+
+  it('asks for the week finer than hourly', () => {
+    expect(windowForRange('1W', at)).toEqual({ period: '1W', timeframe: '15Min' })
+  })
+
+  it('spells a year A, not Y', () => {
+    expect(windowForRange('1Y', at).period).toBe('1A')
+  })
+
+  it('takes All to the deepest window the server serves', () => {
+    expect(windowForRange('All', at)).toEqual({
+      period: `${MAX_SERIES_PERIOD_DAYS}D`,
+      timeframe: '1D',
+    })
+  })
+
+  it('computes YTD rather than reusing the one-year window', () => {
+    // Jan 1 through Sep 13 inclusive is 256 days in 2026. Mapped onto `1A`
+    // instead, YTD and 1Y would be the same request, the same cache entry
+    // and the same chart — the defect that made 3M, YTD, 1Y and All
+    // identical in the first place.
+    expect(windowForRange('YTD', at)).toEqual({ period: '256D', timeframe: '1D' })
+    expect(windowForRange('YTD', at)).not.toEqual(windowForRange('1Y', at))
+  })
+
+  it('measures YTD from the market day, not the UTC one', () => {
+    // 04:00 UTC on Jan 1 is 23:00 ET on Dec 31 — still last year in the
+    // only time zone this terminal counts days in.
+    expect(windowForRange('YTD', new Date('2026-01-01T04:00:00Z')).period).toBe('365D')
+    expect(windowForRange('YTD', new Date('2026-01-01T14:00:00Z')).period).toBe('1D')
+  })
+
+  it('gives every range its own window, so no two draw the same chart', () => {
+    const windows = (['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'] as const).map((r) =>
+      JSON.stringify(windowForRange(r, at)),
+    )
+
+    expect(new Set(windows).size).toBe(windows.length)
+  })
+
+  it('only ever produces a period the server’s grammar accepts', () => {
+    for (const range of ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'] as const) {
+      expect(windowForRange(range, at).period).toMatch(/^[1-9][0-9]{0,2}[DWMA]$/)
+    }
+  })
+})
+
+describe('quoteSeries', () => {
+  it('reads the resolution off the response rather than the request', () => {
+    const series = quoteSeries(
+      quoteWith({
+        intraday: [
+          { at: '2026-09-11T13:30:00Z', value: 231.0 },
+          { at: '2026-09-11T13:35:00Z', value: 231.4 },
+        ],
+      }),
+    )
+
+    expect(series.resolution).toBe('intraday')
+    expect(series.points).toEqual([
+      { key: '2026-09-11T13:30:00Z', value: 231.0 },
+      { key: '2026-09-11T13:35:00Z', value: 231.4 },
+    ])
+  })
+
+  it('keeps a daily key as the bare date it arrived as', () => {
+    const series = quoteSeries(
+      quoteWith({
+        history: [
+          { date: '2026-09-10', value: 229.5 },
+          { date: '2026-09-11', value: 231.0 },
+        ],
+      }),
+    )
+
+    expect(series.resolution).toBe('daily')
+    expect(series.points.map((p) => p.key)).toEqual(['2026-09-10', '2026-09-11'])
+  })
+
+  it('states no resolution when the window held no session', () => {
+    // 1D asked on a Sunday. Neither field is populated, and the honest
+    // answer is nothing to draw — not a flat line at the last price.
+    expect(quoteSeries(quoteWith({}))).toEqual({ resolution: null, points: [] })
+  })
+})
+
+describe('resolutionForTimeframe', () => {
+  it('reads a day as daily, in either spelling', () => {
+    expect(resolutionForTimeframe('1D')).toBe('daily')
+    expect(resolutionForTimeframe('1Day')).toBe('daily')
+  })
+
+  it('reads everything finer as intraday', () => {
+    for (const tf of ['1Min', '5Min', '15Min', '1H', '1Hour']) {
+      expect(resolutionForTimeframe(tf)).toBe('intraday')
+    }
+  })
+})
+
+describe('formatSeriesKey', () => {
+  it('formats a daily key in UTC, so a date does not render a day early', () => {
+    expect(formatSeriesKey('daily', '2026-11-21')).toBe('Nov 21, 2026')
+  })
+
+  it('formats an intraday key in ET, because an instant carries its own offset', () => {
+    // 13:30Z on a September day is 9:30 ET — the opening bar.
+    expect(formatSeriesKey('intraday', '2026-09-11T13:30:00Z')).toBe('Sep 11, 9:30 AM')
+    expect(formatSeriesKey('intraday', '2026-09-11T13:30:00Z', { compact: true })).toBe('9:30 AM')
+  })
+})
+
+describe('seriesSpansDays', () => {
+  const day = (at: string) => ({ key: at, value: 1 })
+
+  it('is false inside one session, where a bare clock time is unambiguous', () => {
+    expect(seriesSpansDays([day('2026-09-11T13:30:00Z'), day('2026-09-11T20:00:00Z')])).toBe(false)
+  })
+
+  it('is true across sessions, where it would not be', () => {
+    expect(seriesSpansDays([day('2026-09-10T13:30:00Z'), day('2026-09-11T20:00:00Z')])).toBe(true)
+  })
+
+  it('measures the ET day, not the UTC one', () => {
+    // 00:30Z on the 11th is 20:30 ET on the 10th: one ET evening, two UTC
+    // dates.
+    expect(seriesSpansDays([day('2026-09-10T22:00:00Z'), day('2026-09-11T00:30:00Z')])).toBe(false)
+  })
+})
+
+describe('seriesChange', () => {
+  const points = [
+    { key: '2026-09-11T13:30:00Z', value: 100 },
+    { key: '2026-09-11T13:35:00Z', value: 110 },
+    { key: '2026-09-11T13:40:00Z', value: 90 },
+  ]
+
+  it('measures from the earlier index whichever way the drag went', () => {
+    expect(seriesChange(points, 0, 2)).toEqual(seriesChange(points, 2, 0))
+    expect(seriesChange(points, 0, 2)?.change).toBe(-10)
+    expect(seriesChange(points, 0, 2)?.changePct).toBeCloseTo(-10, 10)
+  })
+
+  it('is not a window when it never left its starting point', () => {
+    expect(seriesChange(points, 1, 1)).toBeNull()
+  })
+
+  it('withholds the reading rather than dividing by a zero start', () => {
+    expect(seriesChange([{ key: 'a', value: 0 }, { key: 'b', value: 5 }], 0, 1)).toBeNull()
+  })
+
+  it('withholds it for an index that is not in the series', () => {
+    expect(seriesChange(points, 0, 99)).toBeNull()
+    expect(seriesChange([], 0, 1)).toBeNull()
+  })
+})
+
+describe('isInvalidSeriesWindow', () => {
+  it('recognises the refusal a window past the point ceiling gets', () => {
+    const refused = new ApiError({
+      status: 422,
+      code: 'invalid_series_window',
+      message: 'Ask for 1W at 5Min instead, or shorten the period.',
+      url: '/api/markets/underlyings',
+    })
+
+    expect(isInvalidSeriesWindow(refused)).toBe(true)
+    // The message is the server's and is rendered verbatim: it names the
+    // finest timeframe that would have fit.
+    expect(refused.message).toContain('1W at 5Min')
+  })
+
+  it('is false for every other failure', () => {
+    expect(isInvalidSeriesWindow(new Error('nope'))).toBe(false)
+    expect(
+      isInvalidSeriesWindow(
+        new ApiError({ status: 500, code: HTTP_ERROR, message: 'boom', url: '/api' }),
+      ),
+    ).toBe(false)
   })
 })

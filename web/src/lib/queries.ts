@@ -22,7 +22,7 @@
  * hooks cover the things that are *fetched*: balances, the ledger,
  * positions, chains, settings.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   DEFAULT_HISTORY_PERIOD,
   DEFAULT_HISTORY_TIMEFRAME,
@@ -57,6 +57,7 @@ import type {
   NotificationRouteUpdate,
   PageParams,
   RiskLimitUpdate,
+  SeriesWindow,
 } from './api'
 import { useUIStore } from './store'
 import type { AccountMode } from './types'
@@ -99,8 +100,19 @@ export const queryKeys = {
   workingOrders: (account: AccountMode) => ['positions', account, 'working'] as const,
 
   stocks: (symbols?: readonly string[]) => ['markets', 'stocks', symbols ?? null] as const,
-  underlyings: (symbols?: readonly string[], historyDays?: number) =>
-    ['markets', 'underlyings', symbols ?? null, historyDays ?? null] as const,
+  /** The window is **part of the key**. A range control drives the request
+   * now, so 1D-at-5Min and 1Y-at-1D are two different answers to two
+   * different questions; keyed on the symbols alone every range would
+   * collide on one cache entry and the second one clicked would draw the
+   * first one's data. */
+  underlyings: (symbols?: readonly string[], window?: SeriesWindow) =>
+    [
+      'markets',
+      'underlyings',
+      symbols ?? null,
+      window?.period ?? null,
+      window?.timeframe ?? null,
+    ] as const,
   chain: (underlying: string, query: ChainQuery = {}) =>
     [
       'markets',
@@ -162,6 +174,12 @@ export function useAccountHistory(window: HistoryWindow = {}, account?: AccountM
   return useQuery({
     queryKey: queryKeys.accountHistory(mode, window),
     queryFn: ({ signal }) => fetchAccountHistory(mode, window, { signal }),
+    // The window is a control the reader operates, so switching it must not
+    // blank the chart: the previous range stays drawn until the new one
+    // lands, with `isPlaceholderData` saying that is what is on screen. An
+    // empty plot between two ranges reads as "there is no data", which is a
+    // different and much worse claim than "still reading".
+    placeholderData: keepPreviousData,
   })
 }
 
@@ -231,11 +249,20 @@ export function useStocks(symbols?: readonly string[]) {
   })
 }
 
-export function useUnderlyings(symbols?: readonly string[], historyDays?: number) {
+/** Quoted underlyings and their series.
+ *
+ * `window` is what a range control resolved to (`windowForRange`), and it is
+ * in the key — see `queryKeys.underlyings`. Whether the answer is daily or
+ * intraday is read off the response (`quoteSeries`), never inferred from
+ * what was asked for. */
+export function useUnderlyings(symbols?: readonly string[], window?: SeriesWindow) {
   return useQuery({
-    queryKey: queryKeys.underlyings(symbols, historyDays),
-    queryFn: ({ signal }) => fetchUnderlyings(symbols, historyDays, { signal }),
+    queryKey: queryKeys.underlyings(symbols, window),
+    queryFn: ({ signal }) => fetchUnderlyings(symbols, window, { signal }),
     staleTime: MARKET_STALE_TIME,
+    // Same reason as the equity curve: a range click is a new key, and
+    // without this the chart empties for as long as the request takes.
+    placeholderData: keepPreviousData,
   })
 }
 

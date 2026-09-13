@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { StatCard } from '../components/StatCard'
 import { PerformanceChart } from '../components/PerformanceChart'
@@ -31,14 +31,21 @@ import {
   usePositions,
   useResumeEngine,
 } from '../lib/queries'
-import { isAccountUnavailable, isApiError } from '../lib/api'
+import {
+  isAccountUnavailable,
+  isApiError,
+  resolutionForTimeframe,
+  windowForRange,
+  type SeriesPoint,
+  type SeriesResolution,
+} from '../lib/api'
 /* A pure predicate, not a fixture — `account.ts` reads it from here too, and
    it is the one thing this page still imports from `mockData`. It belongs in
    `types.ts` beside `ActivityAction`; that file is owned by another dispatch
    this round, so the move is reported rather than made. */
 import { isOrderAction } from '../lib/mockData'
 import { ACCOUNT_LABEL } from '../lib/types'
-import type { ActivityItem, ActivityStats, EquityCurvePoint, PricePoint } from '../lib/types'
+import type { ActivityItem, ActivityStats, ChartRange, EquityCurvePoint } from '../lib/types'
 import { downloadCsv } from '../lib/csv'
 import {
   formatDateTimeET,
@@ -65,13 +72,15 @@ const EXECUTIONS_SHOWN = 10
  * links to the ledger for the rest. */
 const EXECUTIONS_FETCHED = 30
 
-/** A year of daily closes, so the chart's own range control has something to
- * slice. Asking for the default 1M and then offering a 1Y button would draw
- * one month under a one-year label.
+/** Where the performance chart opens.
  *
- * `1A` rather than `1Y`: the server's grammar is a count followed by D, W, M
- * or A, and it rejects anything else with a stated reason. */
-const HISTORY_WINDOW = { period: '1A', timeframe: '1D' } as const
+ * There is no fixed window any more. This page used to ask for `1A` at `1D`
+ * once and let the chart slice it, which made `1D` a single point and `1W`
+ * about five — the control offered a resolution the request had never asked
+ * for. The selected range now resolves to a `period` and a `timeframe`
+ * through `windowForRange`, both are in the query key, and the day comes
+ * back at five-minute bars. */
+const DEFAULT_RANGE: ChartRange = '3M'
 
 /** Spec decision 2 — every write control is inert in this phase, disabled
  * with a one-line reason. Closing a position is an order, every order goes
@@ -101,18 +110,29 @@ const HALT_REASON = 'Halted by hand from the Dashboard'
  *   against that scale. Only the *leading* run goes: a zero later in a curve
  *   is a real, catastrophic balance and must stay visible.
  *
- * `at` is an ISO datetime in UTC and `PricePoint.date` is date-only, so the
- * date is taken off the UTC instant rather than through a local `Date` — the
- * same off-by-one trap `formatExpiry` documents.
+ * **`resolution` decides what a point is keyed by, and it comes off the
+ * response** — `resolutionForTimeframe` reads the `timeframe` the server
+ * echoed, rather than the one this page asked for. At `daily` the key is the
+ * calendar date taken off the UTC instant, never through a local `Date`,
+ * which is the same off-by-one trap `formatExpiry` documents. At every finer
+ * timeframe the key is the **whole instant**: seventy-eight five-minute
+ * points on one day would otherwise share a date and draw at the same x,
+ * which looks like working code and is not.
  *
  * Exported for the test: it is the one piece of arithmetic on this page, and
  * it is worth asserting without rendering Recharts. */
-export function equityCurve(points: readonly EquityCurvePoint[]): PricePoint[] {
-  const series: PricePoint[] = []
+export function equityCurve(
+  points: readonly EquityCurvePoint[],
+  resolution: SeriesResolution = 'daily',
+): SeriesPoint[] {
+  const series: SeriesPoint[] = []
   for (const point of points) {
     if (point.equity === null) continue
     if (series.length === 0 && point.equity === 0) continue
-    series.push({ date: point.at.slice(0, 10), value: point.equity })
+    series.push({
+      key: resolution === 'daily' ? point.at.slice(0, 10) : point.at,
+      value: point.equity,
+    })
   }
   return series
 }
@@ -208,8 +228,14 @@ export function Dashboard() {
 
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all')
 
+  // The chart's range control drives this request. Held here rather than
+  // inside the chart because the request is made here: a control that only
+  // sliced what had already arrived is the defect this replaces.
+  const [chartRange, setChartRange] = useState<ChartRange>(DEFAULT_RANGE)
+  const historyWindow = useMemo(() => windowForRange(chartRange), [chartRange])
+
   const accountQuery = useAccount()
-  const historyQuery = useAccountHistory(HISTORY_WINDOW)
+  const historyQuery = useAccountHistory(historyWindow)
   const statsQuery = useActivityStats()
   const positionsQuery = usePositions()
   const engineQuery = useEngineState()
@@ -508,9 +534,16 @@ export function Dashboard() {
             isPending={historyQuery.isPending}
             isError={historyQuery.isError}
             error={historyQuery.error}
+            // The window that was *served*, not the one that was asked for.
+            timeframe={historyQuery.data?.timeframe ?? historyWindow.timeframe}
             points={historyQuery.data?.points}
             t0={historyQuery.data?.t0 ?? null}
             accountLabel={accountLabel}
+            range={chartRange}
+            onRangeChange={setChartRange}
+            // The previous range is still what is drawn while the new one is
+            // in flight. Dimmed and stated, never blanked.
+            stale={historyQuery.isPlaceholderData}
           />
         </div>
       </section>
@@ -639,40 +672,55 @@ function WinRateCard({
  * The chart is handed a series, not a response — it is the same component
  * that drew the fixture curve, and the shaping happens here so the chart
  * stays a chart. */
+/** Query state → the chart's props, and nothing else.
+ *
+ * Every branch that used to live here — pending, failed, too short to draw —
+ * moved *inside* `PerformanceChart`, because each of them used to replace
+ * the range control along with the chart. A window the server refuses, or an
+ * account with no session inside it, would then have left no way back to a
+ * range that works. */
 function EquityCurve({
   isPending,
   isError,
   error,
+  timeframe,
   points,
   t0,
   accountLabel,
+  range,
+  onRangeChange,
+  stale,
 }: {
   isPending: boolean
   isError: boolean
   error: unknown
+  timeframe: string
   points: readonly EquityCurvePoint[] | undefined
   t0: string | null
   accountLabel: string
+  range: ChartRange
+  onRangeChange: (range: ChartRange) => void
+  stale: boolean
 }) {
-  if (isPending) {
-    return <TableSkeleton rows={4} columns={1} label="Loading the equity curve" />
-  }
-  if (isError || !points) {
-    return <RequestFailed error={error} what="the equity curve" />
-  }
+  // Read from the response, not assumed from the request: `/account/history`
+  // echoes the timeframe it served, which is this endpoint's version of the
+  // two-field split on a quote.
+  const resolution = resolutionForTimeframe(timeframe)
+  const series = points === undefined ? [] : equityCurve(points, resolution)
 
-  const series = equityCurve(points)
-  if (series.length < 2) {
-    return (
-      <p className="max-w-prose text-body-md text-on-surface-variant">
-        {series.length === 0
-          ? `No equity history for ${accountLabel} yet. The broker reports the curve once the account has been funded and a session has closed on it.`
-          : `Only one day of equity history for ${accountLabel} so far — a curve needs two closes to have a shape. It fills in as sessions close.`}
-      </p>
-    )
-  }
-
-  return <PerformanceChart history={series} t0={t0} />
+  return (
+    <PerformanceChart
+      series={{ resolution: series.length === 0 ? null : resolution, points: series }}
+      range={range}
+      onRangeChange={onRangeChange}
+      isPending={isPending}
+      isError={isError || (!isPending && points === undefined)}
+      error={error}
+      stale={stale}
+      accountLabel={accountLabel}
+      t0={t0}
+    />
+  )
 }
 
 /** Spec decision 16 — a Phase 2 surface with no source states why, from real

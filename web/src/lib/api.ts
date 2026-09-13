@@ -28,6 +28,7 @@
  * runs the other way: a risk ceiling being *written* leaves as a string,
  * because it is stored exactly — see `wireMoney`.
  */
+import { formatDateET, formatDateOnly, formatDateTimeET, formatTimeET, marketToday } from './format'
 import type {
   AccountMode,
   AccountResponse,
@@ -37,6 +38,7 @@ import type {
   ApiErrorBody,
   ApiKeyPresence,
   AuditLogEntry,
+  ChartRange,
   DataFeed,
   DataSourceStatus,
   EngineStateResponse,
@@ -244,6 +246,232 @@ export const DEFAULT_HISTORY_PERIOD = '1M'
 export const DEFAULT_HISTORY_TIMEFRAME = '1D'
 
 /* -------------------------------------------------------------------------
+ * Series — what a range asks for, and how to read the answer
+ *
+ * A range control that slices one fixed daily series is not a range control:
+ * `1D` over daily closes is a single point and `1W` is about five. The button
+ * has to drive the *request*, which is what everything in this section is
+ * for. `/api/markets/underlyings` and `/api/account/history` both take
+ * `period` + `timeframe`, so one table serves both charts.
+ * ---------------------------------------------------------------------- */
+
+/** Every timeframe the series endpoints accept.
+ *
+ * **`1H` and `1D`, not the provider's `1Hour`/`1Day`.** The API owns that
+ * normalisation; sending the vendor's own spelling is a 422. */
+export type SeriesTimeframe = '1Min' | '5Min' | '15Min' | '1H' | '1D'
+
+/** Which resolution a response came back at.
+ *
+ * `daily` points are keyed by a bare `YYYY-MM-DD` — a *date*, formatted in
+ * UTC (format.ts#formatDateOnly), because rendering a date-only value in ET
+ * shows the previous day. `intraday` points are keyed by a full ISO
+ * **instant**, which carries its own offset and is rendered in
+ * America/New_York like every other timestamp. Two rules in one chart; keep
+ * them straight. */
+export type SeriesResolution = 'daily' | 'intraday'
+
+/** One window of a series: a depth and a resolution.
+ *
+ * `period` is `^[1-9][0-9]{0,2}[DWMA]$` and is **inclusive of today**. `A`
+ * means years, not `Y`. */
+export interface SeriesWindow {
+  period: string
+  timeframe: SeriesTimeframe
+}
+
+/** The deepest window the server will serve, and the reason the quoted
+ * universe has carried 400 calendar days all along: at a quarter of history,
+ * 3M, YTD, 1Y and All all draw the same chart. */
+export const MAX_SERIES_PERIOD_DAYS = 400
+
+/** The server's own ceiling: 2,000 points per symbol, 20,000 per request.
+ * Quoted here so a new mapping can be checked without going to read the API.
+ * A long period at a fine timeframe is refused with `invalid_series_window`,
+ * and **that 422's message names the finest timeframe that would have fit** —
+ * surface it, do not reword it. */
+export const MAX_SERIES_POINTS_PER_SYMBOL = 2_000
+
+/** The 422 a window past the ceiling answers with. Its message is written to
+ * be read by a person ("Ask for 1W at 5Min instead, or shorten the period"),
+ * so the UI renders it verbatim. */
+export const INVALID_SERIES_WINDOW = 'invalid_series_window'
+
+export function isInvalidSeriesWindow(error: unknown): boolean {
+  return isApiError(error) && error.code === INVALID_SERIES_WINDOW
+}
+
+/** Year-to-date as a day count, inclusive of January 1 and of today.
+ *
+ * Computed rather than mapped onto `1A`, so YTD and 1Y stay two different
+ * questions. Mapping several ranges onto one window is exactly the defect
+ * that made 3M, YTD, 1Y and All draw the same chart.
+ *
+ * The arithmetic runs on **today's calendar date in market time**, parsed as
+ * UTC on both sides — a local `new Date()` on one side of a date comparison
+ * is an off-by-one on any afternoon in New York. */
+function ytdPeriod(now: Date): string {
+  const [year, month, day] = marketToday(now).split('-').map(Number)
+  const elapsedMs = Date.UTC(year, month - 1, day) - Date.UTC(year, 0, 1)
+  const days = Math.round(elapsedMs / 86_400_000) + 1
+  // A year is at most 366 days, so the clamp is defensive: it is what stops
+  // a bad clock producing a period the server would refuse.
+  return `${Math.min(Math.max(days, 1), MAX_SERIES_PERIOD_DAYS)}D`
+}
+
+/** What a range button asks the server for.
+ *
+ *     1D  -> period 1D    timeframe 5Min    ~192 points
+ *     1W  -> period 1W    timeframe 15Min   ~256
+ *     1M  -> period 1M    timeframe 1D       ~22
+ *     3M  -> period 3M    timeframe 1D       ~64
+ *     YTD -> period nD    timeframe 1D       n × 5/7, n = days since Jan 1
+ *     1Y  -> period 1A    timeframe 1D      ~251
+ *     All -> period 400D  timeframe 1D      ~275
+ *
+ * Every row sits inside the 2,000-point-per-symbol ceiling with room to
+ * spare. Finer is permitted where it fits — 1M at 15Min is 1,408 points —
+ * but a year at 5Min across the quoted universe is ~1.26M bars against a
+ * budget the Markets page already polls into, and a ~900px chart can only
+ * draw ~900 of them.
+ *
+ * `now` is injectable so the YTD row is testable without a clock. */
+export function windowForRange(range: ChartRange, now: Date = new Date()): SeriesWindow {
+  switch (range) {
+    case '1D':
+      return { period: '1D', timeframe: '5Min' }
+    case '1W':
+      return { period: '1W', timeframe: '15Min' }
+    case '1M':
+      return { period: '1M', timeframe: '1D' }
+    case '3M':
+      return { period: '3M', timeframe: '1D' }
+    case 'YTD':
+      return { period: ytdPeriod(now), timeframe: '1D' }
+    case '1Y':
+      return { period: '1A', timeframe: '1D' }
+    case 'All':
+      return { period: `${MAX_SERIES_PERIOD_DAYS}D`, timeframe: '1D' }
+  }
+}
+
+/** One plotted point, with its x key left exactly as the server stated it.
+ *
+ * Deliberately **not** `PricePoint`: that type's `date` is a *day*, and
+ * seventy-eight five-minute points sharing one `date` would all draw at the
+ * same x — working-looking code that is not. What `key` means is stated by
+ * the series' `resolution`, never guessed from the string. */
+export interface SeriesPoint {
+  key: string
+  value: number
+}
+
+/** A series and the resolution it is actually at. */
+export interface ChartSeries {
+  /** `null` means **no resolution was stated**: for an underlying, neither
+   * `history` nor `intraday` was populated, which is what `1D` asked on a
+   * Sunday looks like. Render "no session in this window", not an empty
+   * chart and not a flat line. */
+  resolution: SeriesResolution | null
+  points: SeriesPoint[]
+}
+
+/** Read an underlying's series **off the response**, not off what was asked
+ * for.
+ *
+ * `history` and `intraday` are never both populated: whichever is non-empty
+ * states the resolution. Inferring it from the requested timeframe would be
+ * right until the server answered something else, and then wrong silently. */
+export function quoteSeries(quote: UnderlyingQuote): ChartSeries {
+  if (quote.intraday.length > 0) {
+    return {
+      resolution: 'intraday',
+      points: quote.intraday.map((point) => ({ key: point.at, value: point.value })),
+    }
+  }
+  if (quote.history.length > 0) {
+    return {
+      resolution: 'daily',
+      points: quote.history.map((point) => ({ key: point.date, value: point.value })),
+    }
+  }
+  return { resolution: null, points: [] }
+}
+
+/** The resolution an echoed `timeframe` states.
+ *
+ * `/api/account/history` has no two-field split to read — it echoes the
+ * `timeframe` it served, which answers the same question. Both spellings of
+ * a day are accepted so a provider literal leaking through cannot quietly
+ * turn a daily series into an intraday one. */
+export function resolutionForTimeframe(timeframe: string): SeriesResolution {
+  return timeframe === '1D' || timeframe === '1Day' ? 'daily' : 'intraday'
+}
+
+/** How a point's x key reads on an axis, a tooltip or a readout.
+ *
+ * The two resolutions take **two different rules and always will**: a daily
+ * key is a bare `YYYY-MM-DD`, which is UTC midnight and prints the previous
+ * day if it goes through an ET formatter; an intraday key is an instant
+ * carrying its own offset, and every timestamp in this terminal is shown in
+ * America/New_York. Nothing here formats anything itself — it picks which of
+ * `format.ts`'s formatters the key has earned.
+ *
+ * `compact` drops the date, for an axis whose whole window is one ET day.
+ *
+ * This belongs in `format.ts` beside `formatDateOnly`; that file is owned by
+ * another dispatch this round, so the move is reported rather than made. */
+export function formatSeriesKey(
+  resolution: SeriesResolution,
+  key: string,
+  opts: { compact?: boolean } = {},
+): string {
+  if (resolution === 'daily') return formatDateOnly(key)
+  return opts.compact === true ? formatTimeET(key) : formatDateTimeET(key)
+}
+
+/** Does an intraday window cross an ET date boundary?
+ *
+ * A 1D window does not, so its ticks read `9:30 AM`. A 1W window does, and a
+ * tick reading `3:45 PM` four times over would not say which day it meant. */
+export function seriesSpansDays(points: readonly SeriesPoint[]): boolean {
+  if (points.length < 2) return false
+  return formatDateET(points[0].key) !== formatDateET(points[points.length - 1].key)
+}
+
+export interface SeriesChange {
+  from: SeriesPoint
+  to: SeriesPoint
+  change: number
+  changePct: number
+}
+
+/** The change between two points of a series.
+ *
+ * The same arithmetic as `chart.ts#rangeChange`, over a series whose x may
+ * be an instant rather than a day: indices arrive in whichever order the
+ * drag happened, a drag that never left its start is not a window, and a
+ * zero starting value makes the percentage meaningless rather than merely
+ * large. Fold the two together when `chart.ts` is next in scope — this
+ * change does not own that file.
+ *
+ * Display-only, like every other figure computed in the browser. */
+export function seriesChange(
+  points: readonly SeriesPoint[],
+  a: number,
+  b: number,
+): SeriesChange | null {
+  const lo = Math.min(a, b)
+  const hi = Math.max(a, b)
+  if (lo === hi) return null
+  const from = points[lo]
+  const to = points[hi]
+  if (!from || !to || from.value === 0) return null
+  const change = to.value - from.value
+  return { from, to, change, changePct: (change / from.value) * 100 }
+}
+
+/* -------------------------------------------------------------------------
  * Account
  * ---------------------------------------------------------------------- */
 
@@ -370,20 +598,29 @@ export function fetchStocks(
   })
 }
 
-/** Quoted underlyings with their daily series. `historyDays` is capped at
- * 400 server-side and the cap is the point: with a quarter of data, 3M, YTD,
- * 1Y and All all draw the same chart. */
+/** Quoted underlyings with their series, at the resolution asked for.
+ *
+ * `window` is whatever a range control resolved to — see `windowForRange`.
+ * Omit it and the server's own defaults apply (`400D` at `1D`).
+ *
+ * **`history_days` is not sent and is not accepted here any more.** It is a
+ * deprecated alias for `period`, and sending both is a 422; one spelling on
+ * this side is what makes that unreachable. */
 export function fetchUnderlyings(
   symbols?: readonly string[],
-  historyDays?: number,
+  window?: SeriesWindow,
   options: RequestOptions = {},
 ): Promise<UnderlyingQuote[]> {
   return request<UnderlyingQuote[]>('/markets/underlyings', {
-    // Snake case, and deliberately so: FastAPI names a query parameter by
-    // its Python spelling unless it carries an alias, and only `pageSize`
-    // and `type` do. Guessing camelCase here sends an unknown parameter and
-    // silently gets the default back.
-    params: { symbols: symbolList(symbols), history_days: historyDays },
+    // FastAPI names a query parameter by its Python spelling unless it
+    // carries an alias, and only `pageSize` and `type` do — so a
+    // multi-word parameter is snake case here. `period` and `timeframe`
+    // are one word each and are the same on both sides.
+    params: {
+      symbols: symbolList(symbols),
+      period: window?.period,
+      timeframe: window?.timeframe,
+    },
     ...options,
   })
 }

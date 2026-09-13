@@ -336,7 +336,7 @@ describe('equityCurve', () => {
     const series = equityCurve(HISTORY.points)
 
     expect(series).toHaveLength(4)
-    expect(series[0]).toEqual({ date: '2026-08-04', value: 100000 })
+    expect(series[0]).toEqual({ key: '2026-08-04', value: 100000 })
   })
 
   it('keeps a zero that appears after the curve has started', () => {
@@ -358,7 +358,7 @@ describe('equityCurve', () => {
       { at: '2026-08-06T00:00:00Z', equity: 120, profitLoss: 20, profitLossPct: 20 },
     ]
 
-    expect(equityCurve(gap).map((p) => p.date)).toEqual(['2026-08-04', '2026-08-06'])
+    expect(equityCurve(gap).map((p) => p.key)).toEqual(['2026-08-04', '2026-08-06'])
   })
 
   it('takes the date off the UTC instant, not a local one', () => {
@@ -368,7 +368,22 @@ describe('equityCurve', () => {
       { at: '2026-08-05T00:30:00Z', equity: 100, profitLoss: 0, profitLossPct: 0 },
     ]
 
-    expect(equityCurve(points)[0].date).toBe('2026-08-05')
+    expect(equityCurve(points)[0].key).toBe('2026-08-05')
+  })
+
+  /** At a finer timeframe the key has to stay the whole instant. Truncated
+   * to a date, seventy-eight five-minute points would share one x and draw
+   * on top of each other — working-looking code that is not. */
+  it('keeps the instant when the response came back finer than daily', () => {
+    const points: EquityCurvePoint[] = [
+      { at: '2026-09-11T13:30:00Z', equity: 100, profitLoss: 0, profitLossPct: 0 },
+      { at: '2026-09-11T13:35:00Z', equity: 110, profitLoss: 10, profitLossPct: 10 },
+    ]
+
+    expect(equityCurve(points, 'intraday').map((p) => p.key)).toEqual([
+      '2026-09-11T13:30:00Z',
+      '2026-09-11T13:35:00Z',
+    ])
   })
 })
 
@@ -741,6 +756,83 @@ describe('Performance is the broker’s curve, with t₀ marked', () => {
     render(<App />)
 
     expect(await screen.findByText('Loading the equity curve')).toBeInTheDocument()
+  })
+
+  /* -----------------------------------------------------------------------
+   * The range control asks for the resolution it displays.
+   *
+   * It used to hard-code `1A` at `1D` and let the chart slice the answer, so
+   * `1D` drew a single point and `1W` drew about five — the buttons offered
+   * a resolution nothing had ever requested.
+   * -------------------------------------------------------------------- */
+
+  it('opens on the three-month window at daily closes', async () => {
+    const windows: string[] = []
+    stubFetch({ onHistory: (p) => windows.push(`${p.get('period')}/${p.get('timeframe')}`) })
+    await renderDashboard()
+
+    expect(windows).toContain('3M/1D')
+  })
+
+  it('asks the server for five-minute bars when the day is selected', async () => {
+    const windows: string[] = []
+    stubFetch({ onHistory: (p) => windows.push(`${p.get('period')}/${p.get('timeframe')}`) })
+    await renderDashboard()
+    const panel = within(section('Performance'))
+
+    fireEvent.click(panel.getByRole('button', { name: '1D' }))
+
+    await waitFor(() => expect(windows).toContain('1D/5Min'))
+  })
+
+  it('asks for the week at fifteen-minute bars, not five daily closes', async () => {
+    const windows: string[] = []
+    stubFetch({ onHistory: (p) => windows.push(`${p.get('period')}/${p.get('timeframe')}`) })
+    await renderDashboard()
+    const panel = within(section('Performance'))
+
+    fireEvent.click(panel.getByRole('button', { name: '1W' }))
+
+    await waitFor(() => expect(windows).toContain('1W/15Min'))
+  })
+
+  it('draws the intraday answer in ET, off the timeframe the response states', async () => {
+    // The server decides the resolution and echoes it; the page reads that
+    // rather than assuming its own request came back unchanged.
+    stubFetch({
+      history: {
+        ...HISTORY,
+        period: '1D',
+        timeframe: '5Min',
+        points: [
+          { at: '2026-09-11T13:30:00Z', equity: 99_800, profitLoss: -100, profitLossPct: -0.001 },
+          { at: '2026-09-11T13:35:00Z', equity: 99_901.08, profitLoss: 1, profitLossPct: 0.001 },
+        ],
+      },
+    })
+    await renderDashboard()
+    const panel = within(section('Performance'))
+
+    expect(await panel.findByText(/from Sep 11, 9:30 AM ET/)).toBeInTheDocument()
+  })
+
+  it('keeps the ranges reachable when a window is refused', async () => {
+    // 422 `invalid_series_window`: the message names the finest timeframe
+    // that would have fit, and is rendered as the server wrote it. If the
+    // error had replaced the control there would be no way back.
+    stubFetch({
+      history: jsonResponse(422, {
+        error: {
+          code: 'invalid_series_window',
+          message: 'Ask for 1W at 5Min instead, or shorten the period.',
+        },
+      }),
+    })
+    await renderDashboard()
+    const panel = within(section('Performance'))
+
+    expect(await panel.findByRole('alert')).toHaveTextContent('Ask for 1W at 5Min instead')
+    expect(panel.getByRole('button', { name: '1D' })).toBeInTheDocument()
   })
 })
 

@@ -75,6 +75,28 @@ describe('query keys', () => {
     )
   })
 
+  /** A range control drives the request now, so the window has to be in the
+   * key. Without it every range would collide on one entry and the second
+   * range clicked would draw the first one's data. */
+  it('carry the series window, so two ranges are two cache entries', () => {
+    const day = queryKeys.underlyings(['AAPL'], { period: '1D', timeframe: '5Min' })
+    const year = queryKeys.underlyings(['AAPL'], { period: '1A', timeframe: '1D' })
+
+    expect(day).not.toEqual(year)
+    expect(day).toEqual(['markets', 'underlyings', ['AAPL'], '1D', '5Min'])
+    // Same length with no window as with one, so the unfiltered entry is
+    // still reached by an invalidation of the filtered one.
+    expect(queryKeys.underlyings(['AAPL'])).toHaveLength(day.length)
+  })
+
+  it('separate two windows that share a period but not a resolution', () => {
+    // 1D at 5Min and 1D at 1D are 192 points and one point. Keyed on the
+    // period alone they would be the same entry.
+    expect(queryKeys.underlyings(['AAPL'], { period: '1D', timeframe: '5Min' })).not.toEqual(
+      queryKeys.underlyings(['AAPL'], { period: '1D', timeframe: '1D' }),
+    )
+  })
+
   it('leave markets and settings unscoped by account', () => {
     expect(queryKeys.stocks()).toEqual(['markets', 'stocks', null])
     expect(queryKeys.riskLimits()).toEqual(['settings', 'limits'])
