@@ -1,9 +1,22 @@
 """The FastAPI application: lifespan, routers, and one error envelope.
 
 ``uv run uvicorn corollary.api:app`` is the whole app -- design spec decision
-1, *One process*. The scheduler and the streams become asyncio tasks in this
-lifespan at step 8; today it builds the service registry, bootstraps the
-database, and tears both down.
+1, *One process*. The lifespan builds the service registry, bootstraps the
+database, and constructs the one :class:`~corollary.engine.runtime.EngineRuntime`
+-- which writes ``t0``, supervises rule 9's watchdog, and never clears a halt
+-- then tears all three down.
+
+**That watchdog cannot fire yet, and this is the file where that is easiest
+to misread.** Rule 9's two conditions are implemented and tested in
+``engine/runtime.py``, but nothing in the shipped app records a message, a
+successful poll, a stream open or a stream close: there is no websocket client
+under ``corollary/`` and ``RiskManager`` has no body, so neither the
+connection condition nor the heartbeat condition has a producer. What the
+lifespan supervises today is a proven switch with no wire attached to it.
+Step 8d's ``api/routes/ws.py`` attaches the first wire; a ``RiskManager`` with
+a body attaches the second. Wiring the supervisor now is deliberate -- it is
+the part that would otherwise be written under time pressure on the day the
+transport lands -- but "supervised" must not be read as "armed".
 
 Two things about this module are constraints rather than choices.
 
@@ -35,7 +48,6 @@ import logging
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Final
 
 from fastapi import FastAPI, Request
@@ -55,7 +67,6 @@ from corollary.api.routes import (
     positions_router,
     settings_router,
 )
-from corollary.api.routes.engine import mark_started
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
@@ -76,6 +87,7 @@ from corollary.engine.execution.interface import (
     BrokerError,
     BrokerRateLimitedError,
 )
+from corollary.engine.runtime import EngineRuntime
 from corollary.wire import vendor_detail
 
 __all__ = ["SECRET_ENV_VARS", "app", "create_app"]
@@ -276,7 +288,7 @@ def _unhandled_handler(request: Request, exc: Exception) -> Response:
 
 
 def _bootstrap_database(db_engine: Engine) -> None:
-    """Seed the default rows and write ``t0`` if this is the first ever start.
+    """Seed the default rows. ``t0`` belongs to ``EngineRuntime.start``.
 
     ``seed`` is idempotent by design -- Settings is server-backed and
     re-seeding must never undo a change a human made -- so running it on every
@@ -292,7 +304,6 @@ def _bootstrap_database(db_engine: Engine) -> None:
         with Session(db_engine) as session:
             inserted = seed(session)
             session.commit()
-            mark_started(session, at=datetime.now(timezone.utc))
         if inserted:
             logger.info(
                 "seeded %d default rows",
@@ -337,9 +348,25 @@ def create_app(
         if getattr(app.state, "db_engine", None) is None:
             app.state.db_engine = get_engine()
         _bootstrap_database(app.state.db_engine)
+        # Design spec decision 1: one process. The engine runtime is a member
+        # of this app rather than a service beside it, so rule 9's switch runs
+        # wherever the API runs and there is one answer to "is it halted".
+        # ``start`` writes ``t0`` on the first ever start and never touches
+        # ``halted``; ``supervise`` puts the watchdog on its own task.
+        #
+        # That watchdog has no producer yet -- see the module docstring. It
+        # ticks, evaluates and finds nothing, because nothing in this process
+        # records a message or a socket close. Step 8d attaches the transport
+        # that does.
+        db_engine = app.state.db_engine
+        runtime = EngineRuntime(session_factory=lambda: Session(db_engine))
+        app.state.engine_runtime = runtime
+        runtime.start()
+        runtime.supervise()
         try:
             yield
         finally:
+            await runtime.aclose()
             await app.state.registry.aclose()
 
     app = FastAPI(
@@ -349,6 +376,10 @@ def create_app(
     )
     app.state.registry = registry
     app.state.db_engine = db_engine
+    # Replaced in the lifespan. Present so that a route reading it outside a
+    # running app gets ``None`` rather than an AttributeError from Starlette's
+    # State, which is a confusing way to learn the app was never started.
+    app.state.engine_runtime = None
     app.state.secret_values = (
         _environment_secrets if secrets is None else (lambda: tuple(secrets))
     )
