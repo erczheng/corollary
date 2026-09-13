@@ -36,6 +36,14 @@ export function netTransfers(transfers: ActivityItem[]): number {
 
 /** Market value of everything held.
  *
+ * **Phase 2 note.** The Account page no longer calls this: `GET /api/account`
+ * publishes `netPositionValue` (long + short) and the broker's own `equity`,
+ * and where the server has a figure the page reads it rather than deriving a
+ * second one — two derivations that disagreed would have no way to say which
+ * is right. This and `totalEquity` stay for `Settings.tsx`, which still sizes
+ * risk ceilings against fixture equity and is a later step's migration. Any
+ * new caller wanting *the* equity figure wants `useAccount()`.
+ *
  * Sums `Position.value`, which is the **contract's** price × quantity × 100 —
  * not the underlying's. The two live in different fields for exactly this
  * reason, and summing `underlying` here would quote a number roughly fifty
