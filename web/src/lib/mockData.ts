@@ -380,6 +380,17 @@ export function activityStats(items: ActivityItem[]): ActivityStats {
   const losses = realized.filter((r) => r.pnl < 0)
   const mean = (xs: number[]) => (xs.length === 0 ? null : xs.reduce((t, x) => t + x, 0) / xs.length)
 
+  // A closing that booked no realized P&L — the same arithmetic the server
+  // does across `fill` and `realized_trade`, stated over the one feed this
+  // file has. Derived rather than stored for the reason the whole function
+  // is: a count that disagrees with the rows beneath it is worse than none.
+  // A *rejected* close is excluded deliberately — it closed nothing, so it
+  // is not a gap in the ledger, and counting it would report a shortfall
+  // where there is not one.
+  const unbooked = items.filter(
+    (a) => (a.action === 'STC' || a.action === 'BTC') && a.status === 'filled' && a.pnl === null,
+  )
+
   return {
     avgWin: mean(wins.map((r) => r.pnl)),
     avgWinPct: mean(wins.map((r) => r.pnlPct)),
@@ -388,6 +399,8 @@ export function activityStats(items: ActivityItem[]): ActivityStats {
     lifetimePnl: round2(realized.reduce((t, r) => t + r.pnl, 0)),
     wins: wins.length,
     losses: losses.length,
+    notBooked: unbooked.length,
+    notBookedSymbols: [...new Set(unbooked.map((a) => a.contract))].sort(),
   }
 }
 

@@ -119,6 +119,26 @@ export interface ActivityStats {
   lifetimePnl: number
   wins: number
   losses: number
+  /** How many closings the figures above are missing. 0 on a complete
+   * ledger.
+   *
+   * An adjusted root reaching an OPEXC/OPASN branch is refused rather
+   * than guessed: a real GME1 delivers 100 GME *plus* 10 GME.WS while
+   * `multiplier` and `size` both report 100, so there is no honest
+   * dollar figure to book, and inventing one would suppress a Phase 6
+   * `max_daily_loss_pct` halt that should have fired. The contracts
+   * still left the book, so the lifetime figure is genuinely incomplete
+   * and the page says so beside the cards.
+   *
+   * This counts closings that produced no realized trade — an
+   * arithmetic fact about two tables. It deliberately does not claim
+   * each one's *cause*: the rejection rule is logged by the ledger and
+   * no Phase 2 table stores it. */
+  notBooked: number
+  /** The contracts behind `notBooked`, OCC-spelled and sorted. A bare
+   * count cannot be reconciled by hand; a symbol can be looked up in the
+   * log and in the broker's own history. */
+  notBookedSymbols: string[]
 }
 
 export type OrderType = 'market' | 'limit' | 'stop' | 'stop_limit'
@@ -831,4 +851,137 @@ export interface ApiKeyPresence {
   purpose: string
   present: boolean
   optional: boolean
+}
+
+/* -------------------------------------------------------------------------
+ * Wire responses
+ *
+ * Shapes that exist only at the API boundary — an envelope, a stated error,
+ * a balances read — rather than things the pages model in their own right.
+ * They live here with the rest of the contract so there is one home for
+ * "what the server sends", the same reason `mockData.ts` was split in the
+ * first place.
+ *
+ * None of these are in `tests/api/test_schema_contract.py`'s `MIRRORED` map
+ * yet, which is why they can be added at all: that test pins the twenty
+ * interfaces and ten unions above field-for-field against
+ * `corollary/api/schemas.py`, and renaming one of those breaks a Python
+ * test. These were written from the same file by hand and match it as of
+ * step 7; adding them to `MIRRORED` later is a Python-side change and needs
+ * no edit here.
+ * ---------------------------------------------------------------------- */
+
+/** One page of a long list.
+ *
+ * `total` is **rows matching the query**, not rows on this page, and the
+ * Activity header cards are folded over every trade server-side rather than
+ * over `items` — a lifetime figure computed from a window means something
+ * narrower than the word. `page` is **zero-based**, which `usePagination`
+ * (1-based, client-side) is not; the two are different objects. */
+export interface Page<ItemT> {
+  items: ItemT[]
+  total: number
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+/** The stated condition behind every non-2xx, including FastAPI's own 404
+ * and 422. `code` is stable and machine-readable — branch on it, never on
+ * the prose, which is written for a human and may be reworded. */
+export interface ApiErrorBody {
+  code: string
+  message: string
+}
+
+/** How the broker classifies the account's margin. `pdt` is a pattern-day-
+ * trader account at 4× intraday; `cash` has no leverage at all. */
+export type MarginClassName = 'cash' | 'reg_t' | 'pdt' | 'unknown'
+
+export interface MarginSummary {
+  multiplier: number
+  marginClass: MarginClassName
+  label: string
+  note: string
+}
+
+/** `GET /api/account` — balances, margin class and options entitlement for
+ * one book.
+ *
+ * `derivedEquity`, `equityReconciles` and `equityDifference` are the
+ * server's own arithmetic against the broker's `equity`, not something to
+ * recompute in the browser: client-side money arithmetic is display-only,
+ * and a second derivation that disagreed would have no way to say which one
+ * is right.
+ *
+ * `cashAccountAvailable` is what the account toggle reads. When it is false
+ * the Cash control disables with `cashAccountUnavailableReason` stated —
+ * the same condition that answers `?account=cash` with a 409 rather than
+ * with paper's numbers under the other book's name. */
+export interface AccountResponse {
+  account: AccountMode
+  status: string
+  currency: string
+  cash: number
+  equity: number
+  lastEquity: number
+  dayChange: number
+  balanceTrend: Trend | null
+  buyingPower: number
+  optionsBuyingPower: number | null
+  longMarketValue: number
+  shortMarketValue: number
+  netPositionValue: number
+  grossPositionValue: number | null
+  derivedEquity: number
+  equityReconciles: boolean
+  equityDifference: number
+  margin: MarginSummary
+  optionsApprovedLevel: number | null
+  optionsTradingLevel: number | null
+  tradingBlocked: boolean
+  accountBlocked: boolean
+  transfersBlocked: boolean
+  cashAccountAvailable: boolean
+  cashAccountUnavailableReason: string | null
+  missingLiveCredentialEnvVars: string[]
+}
+
+/** One point on the broker's own equity curve. Every figure is nullable:
+ * Alpaca returns nulls for sessions it has no record of, and a zero there
+ * would draw a crash that never happened. */
+export interface EquityCurvePoint {
+  at: string // ISO datetime
+  equity: number | null
+  profitLoss: number | null
+  profitLossPct: number | null
+}
+
+/** `GET /api/account/history` — Alpaca's equity curve, with t₀ marked.
+ *
+ * `t0` is when Corollary first ran, written once and never rewritten, and
+ * `pointsBeforeT0` is how much of this curve predates it. `null` there is
+ * *unknown*, not zero: zero would claim the whole curve as Corollary's,
+ * which beside a strategy win rate is a claim about who made the money. */
+export interface PortfolioHistoryResponse {
+  account: AccountMode
+  period: string
+  timeframe: string
+  baseValue: number | null
+  baseValueAsof: string | null // ISO date
+  points: EquityCurvePoint[]
+  t0: string | null // ISO datetime
+  pointsBeforeT0: number | null
+}
+
+/** `GET /api/engine/state` — the halt state and the start marker.
+ *
+ * `halted` is the cold-start default: the engine comes up halted until its
+ * opening snapshot succeeds, and rule 9 requires an explicit human resume
+ * out of any halt. Nothing in the client may call resume automatically. */
+export interface EngineStateResponse {
+  halted: boolean
+  haltedReason: string | null
+  haltedAt: string | null // ISO datetime
+  t0: string | null // ISO datetime
 }
