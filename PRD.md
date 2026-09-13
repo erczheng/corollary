@@ -416,7 +416,17 @@ That makes this **the second time in this project a missing field turned out to 
 
 A tier whose two named sources both ship headlines and no score is not a tier, and leaving it written down would have had the pipeline silently start at what used to be tier 2 while the document claimed three. So it is removed — but removed as *unbought*, not as unavailable.
 
-**Restoring it is therefore a purchase decision, not a vendor hunt.** Finnhub Premium ($11.99–99.99/mo) returns the endpoint this section was originally written against. The alternative is a source that ships a score on a free tier, and there the candidate is Alpha Vantage's `NEWS_SENTIMENT` for one specific reason: it publishes its score thresholds, and a documented scale is what lets the self-audit below hold a provider to account rather than merely record it. Its request budget is the obstacle. Marketaux is the roomier alternative and the weaker one.
+**Restoring it is therefore a purchase decision, not a vendor hunt.** Finnhub Premium ($11.99–99.99/mo) returns the endpoint this section was originally written against.
+
+**But the strongest candidate is free, and was probed on 2026-09-12: Massive (formerly Polygon), `/v2/reference/news`.** `MASSIVE_API_KEY` is in `.env`. On the free tier it returned **5 of 5 articles carrying an `insights[]` array**, each entry holding `ticker`, `sentiment` **and `sentiment_reasoning`**. Three properties make it the right shape for this section specifically:
+
+- **Sentiment is per ticker, not per article.** One Motley Fool story tagging eight symbols scored `VRT` positive, `NVDA` neutral and `AMD` neutral in the same payload. The self-audit below grades a label against *that ticker's* forward return, so a per-article score would be noise by construction.
+- **It ships a stated rationale.** `sentiment_reasoning` is prose — *"Nvidia demonstrated strong financial performance with $96.22 billion in quarterly revenue…"*. When the audit demotes a source, that is the difference between diagnosing why and shrugging. No other candidate at any price offers it.
+- Publishers observed were **Zacks and The Motley Fool** — a multi-publisher feed, not merely the Benzinga articles Alpaca already supplies.
+
+Two caveats recorded with it. The free tier is **5 requests/minute** — verified, a 429 on the fifth call — which suits a scheduled watchlist poll and not a broad scan; $29/mo removes it. And several reasonings *restate the day's price move* (*"Stock declined 2.4% on Thursday due to rising Treasury yields"*), which describes the past rather than predicting the future. Against forward returns at 1h and 1d that will score near coin-flip and be auto-demoted — the audit working exactly as designed, but a reason not to assume the scores carry alpha because the prose reads well.
+
+Alpha Vantage's `NEWS_SENTIMENT` remains the fallback, for the same auditability reason: it publishes its score thresholds. Its request budget is the obstacle. Marketaux is the roomier alternative and the weaker one.
 
 Either way the rule stands: **probe it before it is written in here.** This section asserted a working provider tier for months on the strength of a plausible-sounding sentence, which is exactly the failure the tier itself was meant to prevent elsewhere.
 
