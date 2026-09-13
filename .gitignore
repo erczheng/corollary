@@ -24,3 +24,6 @@ dist/
 corollary.db
 corollary.db-wal
 corollary.db-shm
+
+# Agent scratch notes — working memory, not project record.
+.claude/scratch/

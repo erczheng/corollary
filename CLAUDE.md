@@ -31,9 +31,9 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 uv sync                          # install
 uv run python -m pytest           # backend tests — NOT `uv run pytest`, see below
 uv run python -m pytest -m risk   # risk tests only — run before any engine change
-uv run alembic upgrade head       # migrations — wired, 0002 is head
+uv run alembic upgrade head       # migrations — wired, 0003 is head
 uv run python -m corollary.engine    # start engine
-uv run python -m uvicorn corollary.api:app --reload   # start API — NOT `uv run uvicorn`
+uv run python -m uvicorn corollary.api:app --reload --env-file .env   # start API — see below
 uv run mypy corollary            # type check, must be clean
 ```
 
@@ -46,6 +46,15 @@ through the interpreter rather than the generated `.exe`. `uv run mypy` and
 not to uv — and **not** specific to pytest, which is what the uvicorn block
 (hit 2026-09-11, same `os error 4551`) established. Assume any new console
 script is blocked until shown otherwise, and reach for `python -m` first.
+
+**`--env-file .env` is not optional on the API.** Nothing under `corollary/`
+reads `.env` — the process environment is the engine's input, which is what
+keeps rule 2's scrubbed backtest environment actually scrubbed. Without the
+flag the server starts fine and `/api/health` answers, but every route that
+needs a broker returns a 503 naming `ALPACA_PAPER_API_KEY` and
+`ALPACA_PAPER_SECRET_KEY`. That is the app behaving correctly and is easy to
+misread as a credentials problem: the keys are in `.env`, the server just was
+not given them. Load the file at the launcher, never inside `create_app()`.
 
 Frontend commands run from `web/`:
 
