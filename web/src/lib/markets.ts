@@ -336,15 +336,27 @@ export type VolumeBasis = 'partial' | 'session' | 'stale' | 'absent'
 export function latestVolumeDate(stocks: StockQuote[]): string | null {
   let latest: string | null = null
   for (const s of stocks) {
-    if (s.volumeDate !== null && (latest === null || s.volumeDate > latest)) latest = s.volumeDate
+    // `!= null`, not `!== null`: an older server omits the key entirely, and
+    // `undefined !== null` is true, so a strict check assigns `undefined` to
+    // `latest` and this returns it under a `string | null` annotation.
+    if (s.volumeDate != null && (latest === null || s.volumeDate > latest)) latest = s.volumeDate
   }
   return latest
 }
 
 export function volumeBasis(s: StockQuote, latestDate: string | null): VolumeBasis {
-  if (s.volume === null || s.volumeSession === null) return 'absent'
+  // Every guard here is `== null`, never `=== null`. These fields are nullable
+  // by contract, but they are also *absent* whenever the server predates the
+  // commit that added them -- and `request<StockQuote[]>` casts unvalidated
+  // JSON, so the types promise a shape the wire does not enforce. Under a
+  // strict check `undefined` slipped past all three and fell through to
+  // `'session'`, so a 10:30 partial rendered as "full session": NVDA at 30M of
+  // a 126M day, relative volume 0.24x, a mega cap reading dead quiet. That is
+  // the exact failure the volume-session feature was built to prevent, and it
+  // was silent -- unlike the crash it replaced.
+  if (s.volume == null || s.volumeSession == null) return 'absent'
   if (s.volumeSession === 'in_progress') return 'partial'
-  if (s.volumeDate !== null && latestDate !== null && s.volumeDate < latestDate) return 'stale'
+  if (s.volumeDate != null && latestDate != null && s.volumeDate < latestDate) return 'stale'
   return 'session'
 }
 

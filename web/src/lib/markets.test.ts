@@ -402,6 +402,36 @@ describe('which session the volume column is counting', () => {
     )
   })
 
+  it('reports a session the server never sent as absent, not as complete', () => {
+    // Not hypothetical, and worse than the crash it replaced. A server that
+    // predates the volume-session commit omits these keys rather than nulling
+    // them, and `request<StockQuote[]>` casts unvalidated JSON, so `undefined`
+    // reaches here under a type that promises `string | null`. Every guard was
+    // strict, `undefined === null` is false, and the fall-through was
+    // `'session'` -- so a half-traded morning rendered "full session" and a
+    // mega cap at a quarter of its usual volume read as dead quiet.
+    const absent = stock({ volume: 1, volumeSession: 'completed', volumeDate: latest }) as unknown as Record<
+      string,
+      unknown
+    >
+    delete absent.volumeSession
+    delete absent.volumeDate
+
+    expect(volumeBasis(absent as unknown as StockQuote, latest)).toBe('absent')
+  })
+
+  it('never returns a date the response did not carry', () => {
+    // `undefined !== null` is true, so the strict guard assigned `undefined`
+    // to the accumulator and returned it under a `string | null` annotation.
+    const row = stock({ volume: 1, volumeSession: 'completed', volumeDate: latest }) as unknown as Record<
+      string,
+      unknown
+    >
+    delete row.volumeDate
+
+    expect(latestVolumeDate([row as unknown as StockQuote])).toBeNull()
+  })
+
   it('takes the latest trading day from the response, never from the clock', () => {
     // Every boundary here is a New York one and the browser's clock is not.
     expect(
