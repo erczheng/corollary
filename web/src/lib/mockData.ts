@@ -623,6 +623,11 @@ function buildUnderlying(symbol: string, price: number, seed: number, sessions: 
     change,
     changePct: Math.round((change / previousClose) * 10_000) / 100,
     history: points,
+    // Empty, and correctly so: these fixtures are daily closes, which is
+    // what `timeframe=1D` serves. An intraday series is a separate request
+    // at a finer resolution, never a slice of this one -- slicing it is the
+    // defect the parameter exists to fix.
+    intraday: [],
   }
 }
 

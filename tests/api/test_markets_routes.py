@@ -1127,3 +1127,372 @@ def test_no_route_here_can_reach_an_order() -> None:
 
     assert "submit_order" not in source
     assert "BrokerDep" not in source
+
+
+# --------------------------------------------------------------------------
+# The series window: a period, a timeframe, and a ceiling on the two together
+# --------------------------------------------------------------------------
+#
+# The defect these cover: `/underlyings` served daily closes and nothing else,
+# so `UnderlyingChart`'s `1D` range drew a single point and `1W` drew about
+# five. The control implied a resolution the data could not supply.
+
+
+#: 09:30 ET on the recorded trading date, in UTC. The synthetic intraday bars
+#: start here so they sit inside the window the provider will ask for -- and
+#: comfortably inside its fifteen-minute embargo, which at 15:10 ET cuts the
+#: request off around 14:55.
+RECORDED_SESSION_OPEN = datetime(2026, 9, 10, 13, 30, tzinfo=timezone.utc)
+
+
+def intraday_bars(
+    symbol: str = "NVDA",
+    *,
+    start: datetime = RECORDED_SESSION_OPEN,
+    step: timedelta = timedelta(minutes=5),
+    count: int = 12,
+) -> Route:
+    """A synthetic intraday bars page for one symbol.
+
+    Synthesised rather than recorded, and the exception is stated rather than
+    quiet: every other figure in this module comes out of
+    ``tests/fixtures/alpaca/``, but the recordings there are *daily* bars and
+    the property under test is the **shape** of an intraday series -- one
+    point per interval, stamped at the interval's open, oldest first -- not
+    any particular price. Recording a minute series would pin a day of prices
+    into the repository to assert something none of them decide.
+    """
+    rows_out = [
+        {
+            "t": (start + step * index).isoformat().replace("+00:00", "Z"),
+            "o": 175.0 + index,
+            "h": 176.0 + index,
+            "l": 174.0 + index,
+            "c": 175.5 + index,
+            "v": 1_000 + index,
+            "n": 10 + index,
+            "vw": 175.4 + index,
+        }
+        for index in range(count)
+    ]
+    body = json.dumps({"bars": {symbol: rows_out}, "next_page_token": None})
+    return lambda _request: (200, body)
+
+
+def refusal(client: TestClient, path: str, **params: Any) -> dict[str, Any]:
+    """The ``error`` object of a 422, asserted to be one."""
+    response = client.get(path, params=params)
+    assert response.status_code == 422, response.text
+    body = response.json()["error"]
+    assert isinstance(body, dict)
+    return body
+
+
+def test_an_intraday_timeframe_serves_the_resolution_the_range_control_implies(
+    make_market_client: MarketClient,
+) -> None:
+    """A day at 5Min is a day's worth of points, not one.
+
+    The whole defect in one assertion: sliced out of a daily series, ``1D``
+    is a single point and the chart is a dot.
+    """
+    client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
+
+    quote = by_symbol(
+        rows(
+            client,
+            "/api/markets/underlyings",
+            symbols="NVDA",
+            period="1D",
+            timeframe="5Min",
+        )
+    )["NVDA"]
+
+    assert len(quote["intraday"]) > 1
+    stamps = [point["at"] for point in quote["intraday"]]
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == len(stamps)
+    # The daily series is not half-filled alongside it: one field carries the
+    # answer and the other is empty, so no client can read both and disagree.
+    assert quote["history"] == []
+
+
+def test_the_intraday_series_ends_at_the_live_price_not_fifteen_minutes_short(
+    make_market_client: MarketClient,
+) -> None:
+    """The embargo must not be visible as a gap at the right-hand edge.
+
+    ``stock_bars`` resolves ``end`` to fifteen minutes ago, so the last bar is
+    stale by construction. The range control reports the move *over the window
+    on screen*, and a chart that stops a quarter of an hour short reports on a
+    window nobody is looking at.
+    """
+    client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
+
+    quote = by_symbol(
+        rows(
+            client,
+            "/api/markets/underlyings",
+            symbols="NVDA",
+            period="1D",
+            timeframe="5Min",
+        )
+    )["NVDA"]
+
+    last = quote["intraday"][-1]
+    assert last["value"] == quote["price"]
+    last_bar_at = RECORDED_SESSION_OPEN + timedelta(minutes=55)
+    assert datetime.fromisoformat(last["at"]) > last_bar_at
+
+
+def test_the_intraday_request_asks_for_the_timeframe_and_the_historical_feed(
+    make_market_client: MarketClient,
+) -> None:
+    client, transport = make_market_client(market_data_routes(bars=intraday_bars()))
+
+    rows(
+        client,
+        "/api/markets/underlyings",
+        symbols="NVDA",
+        period="1D",
+        timeframe="15Min",
+    )
+
+    params = transport.params_for("/v2/stocks/bars")
+    assert params["timeframe"] == "15Min"
+    assert feeds_for(transport, "/v2/stocks/bars") == ["sip"]
+
+
+def test_the_default_window_is_the_four_hundred_day_daily_series(
+    make_market_client: MarketClient,
+) -> None:
+    """The existing behaviour, reachable and unchanged.
+
+    Named explicitly rather than left implied: ``period=400D`` and
+    ``timeframe=1D`` must produce identical output to asking for nothing at
+    all, or the parameter broke the callers it was added for.
+    """
+    client, _ = make_market_client(market_data_routes())
+
+    default = rows(client, "/api/markets/underlyings", symbols="NVDA")
+    spelled = rows(
+        client,
+        "/api/markets/underlyings",
+        symbols="NVDA",
+        period="400D",
+        timeframe="1D",
+    )
+
+    assert default == spelled
+    assert default[0]["intraday"] == []
+
+
+def test_a_timeframe_outside_the_vocabulary_is_refused_naming_the_five(
+    make_market_client: MarketClient,
+) -> None:
+    """Same vocabulary and same refusal style as ``/api/account/history``.
+
+    Two endpoints answering the same question in two grammars is how a client
+    learns one and gets a vendor 400 from the other.
+    """
+    client, transport = make_market_client(market_data_routes())
+
+    body = refusal(
+        client, "/api/markets/underlyings", symbols="NVDA", timeframe="5min"
+    )
+
+    assert body["code"] == "invalid_series_window"
+    assert "15Min, 1D, 1H, 1Min, 5Min" in body["message"]
+    # Refused before it cost a request against either bucket.
+    assert transport.requests == []
+
+
+def test_a_malformed_period_is_refused_and_says_a_year_is_a_not_y(
+    make_market_client: MarketClient,
+) -> None:
+    client, transport = make_market_client(market_data_routes())
+
+    body = refusal(client, "/api/markets/underlyings", symbols="NVDA", period="1Y")
+
+    assert body["code"] == "invalid_series_window"
+    assert "A, not Y" in body["message"]
+    assert transport.requests == []
+
+
+def test_a_window_deeper_than_the_endpoint_serves_is_refused_naming_the_limit(
+    make_market_client: MarketClient,
+) -> None:
+    """``3A`` at ``1D`` would otherwise be answerable and wrong.
+
+    The daily cache holds 400 calendar days. A period reaching past it would
+    come back silently short -- three years asked for, thirteen months served,
+    nothing said.
+    """
+    client, _ = make_market_client(market_data_routes())
+
+    body = refusal(client, "/api/markets/underlyings", symbols="NVDA", period="3A")
+
+    assert body["code"] == "invalid_series_window"
+    assert "400D" in body["message"]
+
+
+def test_a_period_and_timeframe_too_fine_to_draw_are_refused_naming_a_coarser_one(
+    make_market_client: MarketClient,
+) -> None:
+    """The combination is what is bounded, not either half.
+
+    A year at ``5Min`` is ~48,000 points per symbol: ~5 paginated vendor
+    requests per symbol against a shared 200/min budget, megabytes on the
+    wire, and roughly fifty points per pixel on a chart that can draw about
+    nine hundred. The refusal has to name what to ask for instead.
+    """
+    client, transport = make_market_client(market_data_routes())
+
+    body = refusal(
+        client,
+        "/api/markets/underlyings",
+        symbols="NVDA",
+        period="1A",
+        timeframe="5Min",
+    )
+
+    assert body["code"] == "invalid_series_window"
+    assert "1D" in body["message"]
+    assert transport.requests == []
+
+
+def test_the_ceiling_permits_the_largest_window_that_still_draws(
+    make_market_client: MarketClient,
+) -> None:
+    """Every limit proves it rejects **and** proves it permits at the boundary.
+
+    Two sessions at ``1Min`` is 1,920 points -- inside the 2,000 ceiling by
+    eighty. Three is 2,880 and is not.
+    """
+    client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
+
+    permitted = client.get(
+        "/api/markets/underlyings",
+        params={"symbols": "NVDA", "period": "2D", "timeframe": "1Min"},
+    )
+    assert permitted.status_code == 200, permitted.text
+
+    refused = client.get(
+        "/api/markets/underlyings",
+        params={"symbols": "NVDA", "period": "3D", "timeframe": "1Min"},
+    )
+    assert refused.status_code == 422, refused.text
+
+
+def test_the_estimate_counts_sessions_from_the_calendar_not_calendar_days(
+    make_market_client: MarketClient,
+) -> None:
+    """Half-days and holidays are real, and this is where that bites.
+
+    6--10 September 2026 is five calendar days and **three** sessions: the 5th
+    and 6th are a weekend and the 7th is Labor Day. Counting days rather than
+    sessions would put the estimate at 4,800 points where the window holds
+    2,880.
+    """
+    client, _ = make_market_client(market_data_routes())
+
+    body = refusal(
+        client,
+        "/api/markets/underlyings",
+        symbols="NVDA",
+        period="5D",
+        timeframe="1Min",
+    )
+
+    assert "2,880" in body["message"]
+    assert "4,800" not in body["message"]
+
+
+def test_the_ceiling_counts_every_symbol_in_the_request(
+    make_market_client: MarketClient,
+) -> None:
+    """One symbol's series is not the response, and the response is the cost.
+
+    ``/underlyings`` takes a list. A window each symbol can afford on its own
+    is one the request as a whole may not.
+    """
+    client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
+
+    one = client.get(
+        "/api/markets/underlyings",
+        params={"symbols": "NVDA", "period": "1D", "timeframe": "1Min"},
+    )
+    assert one.status_code == 200, one.text
+
+    many = client.get(
+        "/api/markets/underlyings",
+        params={
+            "symbols": ",".join(markets_routes.UNIVERSE_SYMBOLS),
+            "period": "1D",
+            "timeframe": "1Min",
+        },
+    )
+    assert many.status_code == 422, many.text
+    assert "narrow" in many.json()["error"]["message"]
+
+
+def test_a_refused_window_records_the_rule_the_inputs_and_the_timestamp(
+    make_market_client: MarketClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 8. A silent rejection is a bug."""
+    client, _ = make_market_client(market_data_routes())
+
+    with caplog.at_level(logging.WARNING, logger=markets_routes.logger.name):
+        refusal(
+            client,
+            "/api/markets/underlyings",
+            symbols="NVDA",
+            period="1A",
+            timeframe="1Min",
+        )
+
+    record = next(
+        entry
+        for entry in caplog.records
+        if getattr(entry, "event", None) == "series_window_rejected"
+    )
+    assert record.rule
+    assert record.period == "1A"
+    assert record.timeframe == "1Min"
+    assert record.symbols == 1
+    assert record.at
+
+
+def test_the_deprecated_history_days_still_narrows_the_daily_window(
+    make_market_client: MarketClient,
+) -> None:
+    """The parameter the live frontend sends today keeps working.
+
+    Dropping it would not have errored -- FastAPI ignores an unknown query
+    parameter -- so a caller asking for 90 days would have been handed 400 and
+    told nothing.
+    """
+    client, _ = make_market_client(market_data_routes())
+
+    aliased = rows(client, "/api/markets/underlyings", symbols="NVDA", history_days=5)
+    spelled = rows(client, "/api/markets/underlyings", symbols="NVDA", period="5D")
+
+    assert aliased == spelled
+
+
+def test_history_days_and_period_together_are_refused_rather_than_ranked(
+    make_market_client: MarketClient,
+) -> None:
+    """Two windows in one request have no correct answer, so it gets none."""
+    client, _ = make_market_client(market_data_routes())
+
+    body = refusal(
+        client,
+        "/api/markets/underlyings",
+        symbols="NVDA",
+        period="1W",
+        history_days=90,
+    )
+
+    assert body["code"] == "invalid_series_window"
+    assert "history_days" in body["message"]

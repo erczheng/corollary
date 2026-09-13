@@ -125,7 +125,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import Annotated, Final, Generic, TypeVar
 from zoneinfo import ZoneInfo
@@ -135,6 +135,7 @@ from fastapi import APIRouter, Depends, Path, Query, Request
 from corollary.api.deps import ApiError, ProviderDep
 from corollary.api.schemas import (
     AnalyticsSource,
+    IntradayPoint,
     OptionContract,
     OptionRight,
     PricePoint,
@@ -299,6 +300,86 @@ HISTORY_DAYS: Final = 400
 #: strikes within 15% of spot.
 DEFAULT_MAX_DTE: Final = 60
 DEFAULT_MONEYNESS_PCT: Final = 15
+
+#: A window, spelled the way ``/api/account/history`` spells one: a count and
+#: a unit. Same regex, deliberately -- two endpoints answering "how far back?"
+#: in two grammars is how a client learns one and gets a vendor 400 from the
+#: other. The unit for a year is ``A``, not ``Y``.
+_PERIOD: Final = re.compile(r"^([1-9][0-9]{0,2})([DWMA])$")
+
+#: The five resolutions this API serves, in Alpaca's portfolio-history
+#: spelling, mapped to the provider's bar spelling.
+#:
+#: **The wire vocabulary is the account endpoint's, not the provider's.**
+#: ``BarTimeframe`` says ``1Hour`` and ``1Day`` where portfolio history says
+#: ``1H`` and ``1D``; the client should not have to know which route it is
+#: talking to, so the translation happens here, once. Ordered fine to coarse,
+#: which is what lets a refusal name the finest resolution that would fit.
+_TIMEFRAMES: Final[Mapping[str, BarTimeframe]] = {
+    "1Min": BarTimeframe.MINUTE,
+    "5Min": BarTimeframe.FIVE_MINUTE,
+    "15Min": BarTimeframe.FIFTEEN_MINUTE,
+    "1H": BarTimeframe.HOUR,
+    "1D": BarTimeframe.DAY,
+}
+
+#: Minutes covered by one bar, for the size estimate. ``1D`` is absent because
+#: a daily bar is one per session whatever the session's length.
+_TIMEFRAME_MINUTES: Final[Mapping[str, int]] = {
+    "1Min": 1,
+    "5Min": 5,
+    "15Min": 15,
+    "1H": 60,
+}
+
+#: The daily timeframe, spelled for the wire. The default, and the only one
+#: that fills :attr:`UnderlyingQuote.history` rather than ``intraday``.
+DAILY_TIMEFRAME: Final = "1D"
+
+#: The default window: the 400 calendar days the daily cache already holds,
+#: so the default response is exactly what it was before ``period`` existed.
+DEFAULT_PERIOD: Final = f"{HISTORY_DAYS}D"
+
+#: Minutes in a session **as the bars feed reports one**, not as the regular
+#: session runs.
+#:
+#: Measured rather than assumed, and the measurement is the whole point: one
+#: full session of NVDA at ``5Min`` comes back as **192 bars**, not the 78 that
+#: 09:30--16:00 would give. Alpaca includes extended hours, roughly
+#: 04:00--20:00 ET, so an estimate built on regular hours is 2.5x too
+#: generous and every ceiling derived from it is 2.5x too loose.
+#:
+#: An upper bound rather than an exact figure: a half-day's extended session
+#: is shorter, so the estimate over-counts there, which is the safe direction
+#: for a ceiling. The *session count* underneath it is exact and comes from
+#: the market calendar -- see :func:`_sessions_in`.
+EXTENDED_SESSION_MINUTES: Final = 960
+
+#: The most points one symbol's series may contain.
+#:
+#: **Expressed as "more points than any chart can render."** A chart in this
+#: app is about 900 pixels wide, so 2,000 points is already better than two
+#: per pixel and past the resolution a screen can show. Everything the range
+#: control actually needs sits well inside it: a day at ``5Min`` is 192
+#: points, a day at ``1Min`` is 960, a week at ``1H`` is 80, a year at ``1D``
+#: is 252. What it refuses is only the *combination* of a long period with a
+#: fine timeframe -- a year at ``5Min`` is ~48,000 points, which is fifty per
+#: pixel, tens of megabytes across a list of symbols, and invisible data paid
+#: for in full.
+MAX_SERIES_POINTS: Final = 2_000
+
+#: The most points one **response** may contain, across every symbol in it.
+#:
+#: A per-symbol ceiling is not a bound on this endpoint, because this endpoint
+#: takes a list: twenty-six symbols each just inside the per-symbol limit is a
+#: 52,000-point response. 20,000 is two things at once -- roughly 2 MB at the
+#: measured 110 bytes per bar, and **two pages** at Alpaca's 10,000-bar
+#: response cap, so a chart view costs at most two round trips against a
+#: ``data.alpaca.markets`` budget the Markets page is already polling into.
+#:
+#: It clears every current caller: the six default underlyings over 400 days
+#: of daily closes is ~1,650 points, and all twenty-six is ~7,150.
+MAX_RESPONSE_POINTS: Final = 20_000
 
 _CENTS: Final = Decimal("0.01")
 _HUNDRED: Final = Decimal(100)
@@ -711,6 +792,275 @@ def _session_state(day: date, *, now: datetime) -> SessionState:
 
 
 # --------------------------------------------------------------------------
+# The series window: a period, a timeframe, and a ceiling on the two together
+# --------------------------------------------------------------------------
+#
+# `/api/account/history` already answered "how far back, at what resolution?"
+# and this is the same question, so it gets the same grammar and the same
+# refusal style: validate here, 422 naming the field, never let the vendor
+# 400 three layers away. The one thing added is a ceiling on the *pair*,
+# which the account endpoint does not need because it serves one account and
+# this one serves a list of symbols.
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesSize:
+    """How large a window would come back, before it is asked for.
+
+    An estimate, and deliberately an over-estimate: :data:`
+    EXTENDED_SESSION_MINUTES` is the longest a session's bars can run, so a
+    window that passes this bound cannot exceed it in fact. The session count
+    is exact.
+    """
+
+    sessions: int
+    per_symbol: int
+    total: int
+
+
+def _months_before(day: date, months: int) -> date:
+    """``day`` less ``months`` calendar months, clamped to a real date.
+
+    31 March less one month is 28 or 29 February, not the 31st of a month
+    that has no 31st. Written out rather than taken from ``dateutil``, which
+    is not a dependency here.
+    """
+    index = day.year * 12 + (day.month - 1) - months
+    year, month = divmod(index, 12)
+    month += 1
+    first_of_next = date(year + month // 12, month % 12 + 1, 1)
+    last_day = (first_of_next - timedelta(days=1)).day
+    return date(year, month, min(day.day, last_day))
+
+
+def _period_start(period: str, *, today: date) -> date:
+    """The first day of the window, inclusive of both ends.
+
+    ``400D`` resolves to ``today - 399 days``, which is exactly what
+    ``history_days=400`` resolved to -- the default response is the one that
+    was already being served, not a new one that happens to look similar.
+
+    The caller has validated the shape; an unmatched period here is a
+    programming error rather than a request.
+    """
+    match = _PERIOD.match(period)
+    if match is None:  # pragma: no cover - guarded by `_check_series_window`
+        raise ValueError(f"unvalidated period {period!r}")
+    count, unit = int(match.group(1)), match.group(2)
+    if unit == "D":
+        return today - timedelta(days=count - 1)
+    if unit == "W":
+        return today - timedelta(days=count * 7 - 1)
+    months = count if unit == "M" else count * 12
+    return _months_before(today, months) + timedelta(days=1)
+
+
+def _sessions_in(start: date, end: date) -> int:
+    """Sessions in ``[start, end]``, from the market calendar.
+
+    Never a ratio of calendar days. 6--10 September 2026 is five days and
+    **three** sessions -- a weekend and Labor Day -- and the difference decides
+    whether a window is refused. Half-days count as sessions, which is right:
+    they are shorter, and :data:`EXTENDED_SESSION_MINUTES` is an upper bound
+    that already covers them.
+
+    A day the calendar has nothing to say about -- past the end of the
+    published schedule -- is not a session here. The window is bounded to 400
+    days back from today, so that case is always a *future* date and counting
+    it would be inventing a session.
+    """
+    day, count = start, 0
+    while day <= end:
+        if nyse_session_close(day) is not None:
+            count += 1
+        day += timedelta(days=1)
+    return count
+
+
+def _bars_per_session(timeframe: str) -> int:
+    """Bars one session yields at ``timeframe``, rounded up.
+
+    960, 192, 64 and 16 for the four intraday resolutions; one for ``1D``.
+    """
+    if timeframe == DAILY_TIMEFRAME:
+        return 1
+    minutes = _TIMEFRAME_MINUTES[timeframe]
+    return -(-EXTENDED_SESSION_MINUTES // minutes)
+
+
+def _series_size(sessions: int, timeframe: str, *, symbol_count: int) -> SeriesSize:
+    per_symbol = sessions * _bars_per_session(timeframe)
+    return SeriesSize(
+        sessions=sessions,
+        per_symbol=per_symbol,
+        total=per_symbol * symbol_count,
+    )
+
+
+def _fits(size: SeriesSize) -> bool:
+    return (
+        size.per_symbol <= MAX_SERIES_POINTS and size.total <= MAX_RESPONSE_POINTS
+    )
+
+
+def _finest_timeframe_that_fits(sessions: int, *, symbol_count: int) -> str | None:
+    """The most detail this window can carry, or ``None`` if even ``1D`` cannot.
+
+    ``_TIMEFRAMES`` runs fine to coarse, so the first that fits is the best
+    answer available -- which is what the refusal names. ``None`` means the
+    period itself is the problem, or there are simply too many symbols, and
+    the message says so instead of suggesting a timeframe that would also be
+    refused.
+    """
+    for name in _TIMEFRAMES:
+        if _fits(_series_size(sessions, name, symbol_count=symbol_count)):
+            return name
+    return None
+
+
+def _refuse_window(
+    message: str, *, rule: str, period: str, timeframe: str, symbol_count: int
+) -> ApiError:
+    """Record the rule, the inputs and the timestamp, then refuse (rule 8)."""
+    logger.warning(
+        "refused a series window: %s",
+        message,
+        extra={
+            "event": "series_window_rejected",
+            "rule": rule,
+            "code": "invalid_series_window",
+            "period": period,
+            "timeframe": timeframe,
+            "symbols": symbol_count,
+            "at": _utc_now().isoformat(),
+        },
+    )
+    return ApiError(status_code=422, code="invalid_series_window", message=message)
+
+
+def _check_series_window(
+    period: str, timeframe: str, *, symbol_count: int, today: date
+) -> None:
+    """Four refusals, in the order that costs least to decide.
+
+    Shape, then vocabulary, then depth, then size. Every one of them happens
+    **before** a request leaves for either bucket, which is the point of
+    validating here rather than letting the vendor answer.
+    """
+    if not _PERIOD.match(period):
+        raise _refuse_window(
+            f"period must be a count followed by D, W, M or A — {period!r} is "
+            "not. Note the unit for a year is A, not Y.",
+            rule=(
+                "a window is validated here rather than sent and 400'd by the "
+                "vendor three layers away"
+            ),
+            period=period,
+            timeframe=timeframe,
+            symbol_count=symbol_count,
+        )
+    if timeframe not in _TIMEFRAMES:
+        raise _refuse_window(
+            f"timeframe must be one of {', '.join(sorted(_TIMEFRAMES))} — "
+            f"{timeframe!r} is not.",
+            rule=(
+                "a window is validated here rather than sent and 400'd by the "
+                "vendor three layers away"
+            ),
+            period=period,
+            timeframe=timeframe,
+            symbol_count=symbol_count,
+        )
+
+    start = _period_start(period, today=today)
+    earliest = today - timedelta(days=HISTORY_DAYS - 1)
+    if start < earliest:
+        raise _refuse_window(
+            f"period reaches back to {start.isoformat()} and this endpoint "
+            f"serves {DEFAULT_PERIOD} at most, to {earliest.isoformat()}. Ask "
+            f"for {DEFAULT_PERIOD} or less.",
+            rule=(
+                "a window deeper than the series behind it is refused rather "
+                "than answered short — a silently truncated chart reports on a "
+                "window nobody asked for"
+            ),
+            period=period,
+            timeframe=timeframe,
+            symbol_count=symbol_count,
+        )
+
+    size = _series_size(
+        _sessions_in(start, today), timeframe, symbol_count=symbol_count
+    )
+    if _fits(size):
+        return
+    # Which half is over decides what the caller should do about it. Too many
+    # points per symbol is a timeframe that is too fine; a per-symbol series
+    # that fits while the response does not is a list that is too long, and
+    # suggesting a coarser timeframe there would be answering a question
+    # nobody asked.
+    remedy = "Shorten the period, or narrow ?symbols= to fewer names."
+    if size.per_symbol > MAX_SERIES_POINTS:
+        suggestion = _finest_timeframe_that_fits(
+            size.sessions, symbol_count=symbol_count
+        )
+        if suggestion is not None:
+            remedy = f"Ask for {period} at {suggestion} instead, or shorten the period."
+    raise _refuse_window(
+        f"{period} at {timeframe} is about {size.per_symbol:,} points per "
+        f"symbol over {size.sessions:,} session(s), {size.total:,} across "
+        f"{symbol_count} symbol(s) — more points than any chart can render. "
+        f"The ceiling is {MAX_SERIES_POINTS:,} per symbol and "
+        f"{MAX_RESPONSE_POINTS:,} per request. {remedy}",
+        rule=(
+            "a period and a timeframe are bounded as a pair, because the "
+            "product is what costs round trips and bytes"
+        ),
+        period=period,
+        timeframe=timeframe,
+        symbol_count=symbol_count,
+    )
+
+
+def _resolve_period(
+    period: str | None,
+    history_days: int | None,
+    *,
+    timeframe: str,
+    symbol_count: int,
+) -> str:
+    """One window out of the parameter and its deprecated predecessor.
+
+    ``history_days`` is the spelling the frontend sends today. Dropping it
+    would not have *errored* -- FastAPI ignores a query parameter no route
+    declares -- so a caller asking for 90 days would have been handed 400 and
+    told nothing, which is the quiet wrongness this codebase exists to avoid.
+    It is accepted, translated, and will be removed once no caller sends it.
+
+    Both together is refused rather than ranked: there is no correct answer to
+    two windows in one request, and picking one silently is how a client ends
+    up sure it asked for something it did not get.
+    """
+    if history_days is None:
+        return DEFAULT_PERIOD if period is None else period
+    if period is not None:
+        raise _refuse_window(
+            f"period={period!r} and history_days={history_days} are two "
+            "windows in one request. Send period alone; history_days is "
+            "deprecated and means the same as "
+            f"'{history_days}D'.",
+            rule=(
+                "two spellings of one window are refused rather than ranked — "
+                "a silent preference is a request the caller did not make"
+            ),
+            period=period,
+            timeframe=timeframe,
+            symbol_count=symbol_count,
+        )
+    return f"{history_days}D"
+
+
+# --------------------------------------------------------------------------
 # The daily series, fetched once a session
 # --------------------------------------------------------------------------
 
@@ -905,6 +1255,57 @@ async def _fetch_histories(
     }
 
 
+async def _fetch_intraday(
+    provider: MarketDataProvider,
+    symbols: tuple[str, ...],
+    *,
+    start: datetime,
+    timeframe: BarTimeframe,
+) -> Mapping[str, tuple[IntradayPoint, ...]]:
+    """Closes at a resolution finer than a day, oldest first.
+
+    **Deliberately not cached.** :class:`SessionCache` keys on the trading
+    date, which is exactly right for a series that changes only at a session
+    boundary and exactly wrong for one that moves all session long -- the
+    first poll of the morning would be served until midnight. A second cache
+    would also have to key on the window as well as the symbol, since ``1D``
+    at ``5Min`` and ``1W`` at ``1H`` are different series for the same name,
+    and a cache that got that wrong would serve one as the other.
+
+    The cost of not caching is bounded by what asks for this: a chart the user
+    expanded, not the 2s poll. The poll is ``/stocks``, which does not come
+    here at all, and the client's own query cache is the right place for the
+    rest.
+
+    ``start`` is **midnight Eastern**, not midnight UTC. UTC midnight on the
+    window's first day is 20:00 ET the evening before, which would pull in the
+    previous session's post-market bars and open the chart a day early.
+
+    Bars carry the feed the provider always uses for history -- SIP on this
+    plan -- because ``stock_bars`` is a historical endpoint and resolves its
+    own ``end``. They therefore stop fifteen minutes short of now; the live
+    point that closes that gap is appended at response time, from the quote.
+    """
+    bars = await provider.stock_bars(symbols, timeframe=timeframe, start=start)
+    return {
+        symbol: tuple(
+            IntradayPoint(at=bar.at, value=bar.close)
+            for bar in bars.get(symbol, [])
+        )
+        for symbol in symbols
+    }
+
+
+def _eastern_midnight(day: date) -> datetime:
+    """Midnight in New York on ``day``, as a UTC instant.
+
+    Market data is Eastern. A window that begins at UTC midnight begins at
+    20:00 the previous evening in New York, which is inside the previous
+    session's extended hours.
+    """
+    return datetime.combine(day, time.min, tzinfo=EASTERN).astimezone(timezone.utc)
+
+
 def _log_unpriced(symbols: Sequence[str], *, route: str) -> None:
     if not symbols:
         return
@@ -1025,39 +1426,109 @@ async def stocks(
     return table
 
 
-@router.get("/underlyings", summary="Quoted underlyings, with a daily series")
+@router.get("/underlyings", summary="Quoted underlyings, with a price series")
 async def underlyings(
     provider: ProviderDep,
     caches: CachesDep,
     symbols: SymbolsQuery = None,
+    period: Annotated[
+        str | None,
+        Query(
+            description=(
+                "How far back, as a count plus D, W, M or A — the same "
+                "grammar as /api/account/history. A is a year, not Y. "
+                f"Defaults to {DEFAULT_PERIOD}, which is also the deepest "
+                "window this endpoint serves."
+            ),
+        ),
+    ] = None,
+    timeframe: Annotated[
+        str,
+        Query(
+            description=(
+                "Resolution: 1Min, 5Min, 15Min, 1H or 1D. 1D fills history; "
+                "the other four fill intraday."
+            ),
+        ),
+    ] = DAILY_TIMEFRAME,
     history_days: Annotated[
-        int,
+        int | None,
         Query(
             ge=2,
             le=HISTORY_DAYS,
-            description="Calendar days of daily closes to return.",
+            deprecated=True,
+            description=(
+                "Deprecated: calendar days of daily closes. Equivalent to "
+                "period=<n>D, and refused if period is also sent."
+            ),
         ),
-    ] = HISTORY_DAYS,
+    ] = None,
 ) -> list[UnderlyingQuote]:
     """Price, previous close and the chart series for each underlying.
 
     A list rather than a map, so the order is the server's and the client can
-    key it however it likes. The series is completed sessions from the cache
-    plus **today's live price** as the final point: the chart's range control
-    reports the move over the window on screen, and a series that stops at
-    yesterday's close beside a price from a second ago reports on a chart
-    nobody is looking at.
+    key it however it likes.
+
+    **The resolution is asked for, not inferred.** This route served daily
+    closes and nothing else, while the chart's range control offered ``1D``
+    and ``1W`` -- so ``1D`` drew one point and ``1W`` drew about five, and the
+    control implied a resolution the data could not supply. ``timeframe`` is
+    what fixes that, and it carries the same five values, the same spelling
+    and the same refusals as ``/api/account/history``: one grammar for one
+    question across the API.
+
+    ``period`` replaces ``history_days`` for the same reason -- a count of
+    *days* cannot express the window an intraday request wants -- and
+    ``400D``, its default, is the window ``history_days`` defaulted to. A
+    caller that sends neither gets exactly the response it got before either
+    existed.
+
+    **The series ends at today's live price at every timeframe.** Bars are a
+    historical endpoint and stop fifteen minutes short of now, so the last
+    point is appended from the quote: the range control reports the move over
+    the window on screen, and a chart that stops a quarter of an hour short
+    reports on a window nobody is looking at. It is appended only when today
+    has actually traded -- on a Saturday the last bar is Friday's and a point
+    stamped now would draw a flat line across the weekend.
+
+    **One field carries the answer and the other is empty.** ``history`` is
+    daily closes, ``intraday`` is everything finer, and they are never both
+    populated -- a day cannot carry a five-minute stamp, so they cannot be one
+    field. Both are empty when the window holds no session, which is a real
+    condition rather than a failure: ``1D`` asked on a Sunday has nothing in
+    it, and the honest answer is nothing.
     """
     requested = _requested_symbols(symbols, default=UNDERLYING_SYMBOLS)
     today = caches.today()
+    now = caches.now()
+
+    resolved_period = _resolve_period(
+        period, history_days, timeframe=timeframe, symbol_count=len(requested)
+    )
+    _check_series_window(
+        resolved_period, timeframe, symbol_count=len(requested), today=today
+    )
+    window_start = _period_start(resolved_period, today=today)
+    daily = timeframe == DAILY_TIMEFRAME
 
     snapshots = await provider.stock_snapshots(requested)
-    histories = await caches.history.resolve(
-        requested,
-        today=today,
-        fetch=lambda missing: _fetch_histories(provider, missing, today=today),
-    )
-    window_start = today - timedelta(days=history_days - 1)
+    histories: Mapping[str, tuple[PricePoint, ...]] = {}
+    intradays: Mapping[str, tuple[IntradayPoint, ...]] = {}
+    if daily:
+        # Cached per trading date: 400 days of closes move once a session, and
+        # re-downloading them on every poll is what would break the budget.
+        histories = await caches.history.resolve(
+            requested,
+            today=today,
+            fetch=lambda missing: _fetch_histories(provider, missing, today=today),
+        )
+    else:
+        intradays = await _fetch_intraday(
+            provider,
+            requested,
+            start=_eastern_midnight(window_start),
+            timeframe=_TIMEFRAMES[timeframe],
+        )
 
     quotes: list[UnderlyingQuote] = []
     unpriced: list[str] = []
@@ -1068,13 +1539,17 @@ async def underlyings(
             unpriced.append(symbol)
             continue
         previous = snapshot.previous_close
+        traded_today = _has_traded_today(snapshot, today=today)
         history = [
             point
             for point in histories.get(symbol, ())
             if point.date >= window_start
         ]
-        if _has_traded_today(snapshot, today=today):
+        intraday = list(intradays.get(symbol, ()))
+        if traded_today and daily:
             history.append(PricePoint(date=today, value=price))
+        elif traded_today:
+            intraday.append(IntradayPoint(at=now, value=price))
         quotes.append(
             UnderlyingQuote(
                 symbol=symbol,
@@ -1083,6 +1558,7 @@ async def underlyings(
                 change=_change(price, previous),
                 change_pct=_change_pct(price, previous),
                 history=history,
+                intraday=intraday,
             )
         )
     _log_unpriced(unpriced, route="/api/markets/underlyings")

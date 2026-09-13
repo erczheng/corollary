@@ -19,6 +19,22 @@ export interface PricePoint {
   value: number
 }
 
+/** One point on a price series finer than a day.
+ *
+ * A second point type rather than a nullable field on `PricePoint`, and the
+ * reason is load-bearing: `PricePoint.date` is a **day**, so seventy-eight
+ * five-minute points would all share one `date` and a chart keyed on it
+ * would draw them at the same x. That looks like working code and is not.
+ *
+ * `at` is a full ISO instant in UTC, stamped at the interval's **open**.
+ * Render it in America/New_York — unlike a bare `YYYY-MM-DD` it carries its
+ * own offset, so the date-only trap in format.ts#formatExpiry does not
+ * apply here. */
+export interface IntradayPoint {
+  at: string // ISO instant, UTC
+  value: number
+}
+
 export type ChartRange = '1D' | '1W' | '1M' | '3M' | 'YTD' | '1Y' | 'All'
 
 export interface Recommendation {
@@ -281,7 +297,18 @@ export interface UnderlyingQuote {
    * from there is no move, and a 0.00 would claim the price was unchanged. */
   change: number | null
   changePct: number | null
+  /** Daily closes, oldest first, ending at today's live price. Served when
+   * the request asks for `timeframe=1D` — the default — and **empty at every
+   * other timeframe**, where `intraday` carries the series instead. */
   history: PricePoint[]
+  /** The same series at a resolution finer than a day: served when
+   * `timeframe` is `1Min`, `5Min`, `15Min` or `1H`, and empty at `1D`.
+   *
+   * **Never populated at the same time as `history`.** Whichever is
+   * non-empty is the answer, which is how the response states its own
+   * resolution. Both empty means the window held no session at all — `1D`
+   * asked on a Sunday — and the honest answer there is nothing to draw. */
+  intraday: IntradayPoint[]
 }
 
 /** An order that has been placed and hasn't filled.

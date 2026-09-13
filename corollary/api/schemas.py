@@ -77,6 +77,7 @@ __all__ = [
     "ExitHolder",
     "FeedKey",
     "HaltRequest",
+    "IntradayPoint",
     "JsonMoney",
     "ManagedExit",
     "MarginClassName",
@@ -363,6 +364,27 @@ class PricePoint(ApiModel):
     """One point on an equity or position-value series."""
 
     date: CalendarDate
+    value: JsonMoney
+
+
+class IntradayPoint(ApiModel):
+    """One point on a price series finer than a day.
+
+    A second point type rather than a nullable field on :class:`PricePoint`,
+    for the same reason :class:`PortfolioPoint` is one: ``PricePoint.date`` is
+    a **day**, and a day cannot carry a ``5Min`` or ``1H`` stamp at all.
+    Seventy-eight five-minute points would share one ``date``, so a chart
+    keyed on it would draw them all at the same x -- which looks like working
+    code and is not.
+
+    ``at`` is an instant in UTC, stamped at the interval's **open**, which is
+    the vendor's convention and the one the no-look-ahead rule depends on.
+    Render it in ``America/New_York``; unlike a bare ``YYYY-MM-DD`` it carries
+    its own offset, so the date-only trap in ``format.ts#formatExpiry`` does
+    not apply.
+    """
+
+    at: datetime
     value: JsonMoney
 
 
@@ -815,7 +837,23 @@ class UnderlyingQuote(ApiModel):
     #: measure the move from.
     change: JsonMoney | None
     change_pct: JsonMoney | None
+    #: Daily closes, oldest first, ending at today's live price. Served when
+    #: ``?timeframe=1D`` -- the default -- and **empty at every other
+    #: timeframe**, where :attr:`intraday` carries the series instead.
     history: list[PricePoint]
+    #: The same series at a resolution finer than a day: served when
+    #: ``?timeframe=`` is one of ``1Min``, ``5Min``, ``15Min`` or ``1H``, and
+    #: empty at ``1D``.
+    #:
+    #: **Two fields rather than one, and never both populated.** A day cannot
+    #: carry a five-minute stamp, so a single field would have meant a
+    #: nullable ``at`` on :class:`PricePoint` -- and a client that kept
+    #: reading ``date`` would then draw an entire session's points on one x
+    #: and look like it worked. Two fields make the resolution a thing the
+    #: response *states*: whichever is non-empty is the answer. Both are empty
+    #: when the window holds no session at all, which is honest rather than
+    #: ambiguous -- there is nothing to draw.
+    intraday: list[IntradayPoint]
 
 
 class StockQuote(ApiModel):
