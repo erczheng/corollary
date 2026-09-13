@@ -286,7 +286,14 @@ function volumeNote(basis: VolumeBasis, volumeDate: string | null): string {
 }
 
 function volumeTitle(basis: VolumeBasis, volumeDate: string | null): string {
-  const day = volumeDate === null ? 'an unnamed session' : formatExpiry(volumeDate)
+  // `== null`, not `=== null`. The field is nullable by contract, but it is
+  // also *absent* whenever the running server predates the commit that added
+  // it -- and a page served by a stale API is exactly when this renders. A
+  // strict check lets `undefined` through to `formatExpiry`, which throws
+  // `RangeError: Invalid time value` and unmounts the whole stocks table.
+  // That happened: version skew blanked the page with no message at all,
+  // which is a worse answer than naming the session we cannot name.
+  const day = volumeDate == null ? 'an unnamed session' : formatExpiry(volumeDate)
   switch (basis) {
     case 'partial':
       return `Traded so far on ${day}, which is still running`

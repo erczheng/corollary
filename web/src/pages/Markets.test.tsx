@@ -287,6 +287,31 @@ describe('the stock table reads the served universe', () => {
     expect(cellText(rowFor(stockTable(), 'ZZZ'), 6)).toContain('—')
   })
 
+  it('survives a server too old to send the volume session at all', async () => {
+    // Not a hypothetical: this blanked the page. `volumeSession` and
+    // `volumeDate` arrived in a later commit than the running API server, so
+    // the rows came back *without the keys*. The guard read `=== null`, which
+    // `undefined` walks straight past, and `formatExpiry(undefined)` threw
+    // `RangeError: Invalid time value` and unmounted the whole table -- an
+    // empty page with nothing on it saying why.
+    //
+    // The fixtures could not catch it because every one of them is complete.
+    // Only a *missing* key reproduces it, so this test builds one by deleting
+    // the fields rather than by setting them null, which is already covered.
+    const stale = STOCKS.map((quote) => {
+      const row: Record<string, unknown> = { ...quote }
+      delete row.volumeSession
+      delete row.volumeDate
+      return row
+    })
+
+    serve({ stocks: jsonResponse(200, stale) })
+    render(<App />)
+
+    await screen.findByText('NVIDIA Corp.')
+    expect(bodyRows(stockTable())).toHaveLength(STOCKS.length)
+  })
+
   it('renders an absent change as an absence rather than a flat day', async () => {
     serve()
     render(<App />)
