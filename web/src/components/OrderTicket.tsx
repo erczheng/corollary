@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
 import { useUIStore } from '../lib/store'
-import { MARKET_TODAY } from '../lib/mockData'
 import {
   ORDER_TYPE_LABEL,
   TIME_IN_FORCE_LABEL,
@@ -10,6 +9,7 @@ import {
   type TimeInForce,
 } from '../lib/types'
 import { riskLimitFor } from '../lib/settings'
+import { useRiskLimits } from '../lib/queries'
 import {
   MULTI_LEG_NOTE,
   ORDER_SIDE_LABEL,
@@ -26,7 +26,7 @@ import {
   type OrderDraft,
   type TicketMode,
 } from '../lib/orders'
-import { formatExpiry, formatPct, formatUsd } from '../lib/format'
+import { formatExpiry, formatPct, formatUsd, marketToday } from '../lib/format'
 
 const MODES: { key: TicketMode; label: string }[] = [
   { key: 'close', label: 'Close' },
@@ -62,13 +62,33 @@ interface OrderTicketProps {
   /** Account equity, for the advisory risk estimate. Display only. */
   equity: number
   strategyName: string | null
+  /** Why this ticket cannot be submitted, in words, or undefined if it can.
+   *
+   * **Set, the ticket is an estimate surface and nothing else**: the submit
+   * button renders disabled with the reason stated and the confirm cannot
+   * open. That is the honest Phase 2 state — the positions on screen are
+   * the broker's now, and the store action behind this button writes to a
+   * fixture book the page no longer reads, so leaving it live would mean a
+   * "Close position" confirm on a real position that silently did nothing.
+   *
+   * Disabled-with-a-reason rather than removed: the bid, the ask, the
+   * estimate and the payoff curve are all still worth reading, and a
+   * missing button does not say why it is missing. */
+  submitUnavailableReason?: string
 }
 
-export function OrderTicket({ position, mode, onModeChange, equity, strategyName }: OrderTicketProps) {
+export function OrderTicket({
+  position,
+  mode,
+  onModeChange,
+  equity,
+  strategyName,
+  submitUnavailableReason,
+}: OrderTicketProps) {
   const submitPositionOrder = useUIStore((s) => s.submitPositionOrder)
   const upsertExit = useUIStore((s) => s.upsertExit)
   const cancelExit = useUIStore((s) => s.cancelExit)
-  const riskLimits = useUIStore((s) => s.riskLimits)
+  const riskLimitsQuery = useRiskLimits()
 
   const types = availableOrderTypes(position)
 
@@ -132,14 +152,15 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
     () => addedRiskPct(position, draft.quantity, equity),
     [position, draft.quantity, equity],
   )
-  /* From the store, not the fixture: the ceiling is editable in Settings and
-     a ticket quoting a stale one is telling you about a limit that is no
-     longer in force. Null means none is configured — said in words below
-     rather than substituted with a number, which is what the old `?? 0`
-     did and it reported every trade as over-limit. */
-  const riskCeiling = riskLimitFor(riskLimits, 'max_risk_per_trade_pct')
+  /* From the server, not the store: Settings writes the ceiling over the
+     API now, so a store slice agrees at rest and diverges the moment a limit
+     is edited — Settings and the audit log showing the new number while this
+     ticket quoted the old one. Null means none is configured — said in words
+     below rather than substituted with a number, which is what the old
+     `?? 0` did and it reported every trade as over-limit. */
+  const riskCeiling = riskLimitFor(riskLimitsQuery.data ?? [], 'max_risk_per_trade_pct')
 
-  const dte = daysToExpiry(position.expiry, MARKET_TODAY)
+  const dte = daysToExpiry(position.expiry, marketToday())
   /* A GTC order cannot outlive the contract it is written on — the
      contract expires and takes the order with it. "Good til canceled" is
      the one phrase on this ticket that reads like a promise, and on a
@@ -175,7 +196,10 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
       // to place an order in one keystroke.
       onSubmit={(e) => {
         e.preventDefault()
-        if (errors.length === 0) setConfirming(true)
+        // The reason gate sits here as well as on the button: Enter in any
+        // field submits a form, so a disabled button alone would still let
+        // the keyboard open a confirm for an order nothing can place.
+        if (errors.length === 0 && submitUnavailableReason === undefined) setConfirming(true)
       }}
     >
       <div
@@ -386,15 +410,23 @@ export function OrderTicket({ position, mode, onModeChange, equity, strategyName
         </ul>
       )}
 
+      {submitUnavailableReason !== undefined && (
+        /* `caution`, not `error`: nothing failed. The terminal is read-only
+           by design in this phase, and painting that red would read as a
+           broken order path rather than an absent one. */
+        <p className="mt-3 max-w-prose text-caption text-caution">{submitUnavailableReason}</p>
+      )}
+
       <div className="mt-4 flex items-center gap-2">
         <button
           type="submit"
-          disabled={errors.length > 0}
+          disabled={errors.length > 0 || submitUnavailableReason !== undefined}
+          title={submitUnavailableReason}
           className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:bg-surface-container-high disabled:text-on-surface-variant"
         >
           {mode === 'exit' ? (existing ? 'Update exit' : 'Attach exit') : `Review ${MODES.find((m) => m.key === mode)!.label.toLowerCase()}`}
         </button>
-        {mode === 'exit' && existing && (
+        {mode === 'exit' && existing && submitUnavailableReason === undefined && (
           <button
             type="button"
             onClick={() => cancelExit(position.id)}

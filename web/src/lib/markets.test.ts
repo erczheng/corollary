@@ -3,25 +3,27 @@ import {
   CHAIN_LADDER_SORT,
   CHAIN_RANKS,
   CHAIN_RANK_SORT,
-  CHAIN_UNDERLYINGS,
   MIN_VOLUME_STEPS,
   STOCK_RANKS,
   STOCK_RANK_SORT,
   chainRankFor,
   contractMoneyness,
   filterChain,
-  liveStocks,
+  ivSourceOf,
+  latestVolumeDate,
   relativeVolume,
   searchStocks,
   searchUnderlyings,
   sortChain,
   sortStocks,
   stockRankFor,
+  underlyingSymbols,
+  volumeBasis,
   type ChainSortKey,
   type StockSortKey,
 } from './markets'
 import { OPTION_CHAIN, STOCKS } from './mockData'
-import { type OptionContract, type StockQuote, type UnderlyingQuote } from './types'
+import { type OptionContract, type StockQuote } from './types'
 
 const CHAIN_KEYS: ChainSortKey[] = [
   'ladder',
@@ -31,7 +33,6 @@ const CHAIN_KEYS: ChainSortKey[] = [
   'bid',
   'ask',
   'volume',
-  'openInterest',
   'iv',
 ]
 const STOCK_KEYS: StockSortKey[] = ['price', 'change', 'changePct', 'volume', 'relVolume', 'marketCap']
@@ -65,6 +66,8 @@ function stock(over: Partial<StockQuote>): StockQuote {
     change: 1,
     changePct: 1,
     volume: 1_000_000,
+    volumeSession: 'in_progress',
+    volumeDate: '2026-08-07',
     avgVolume: 1_000_000,
     marketCap: 100,
     ...over,
@@ -72,13 +75,21 @@ function stock(over: Partial<StockQuote>): StockQuote {
 }
 
 describe('filterChain', () => {
-  it('narrows to one underlying, and to the whole board on null', () => {
-    const rows = [contract({ symbol: 'AAPL' }), contract({ symbol: 'TSLA' })]
+  it('narrows on volume and leaves the underlying to the fetch', () => {
+    // Phase 1 filtered the underlying here too, because one fixture array
+    // held every chain and `symbol` was the underlying. Live, the chain is
+    // fetched one underlying at a time and `symbol` is the OCC contract
+    // symbol — `NVDA260914C00210000` — so filtering on it again would
+    // compare that against `NVDA` and empty the table.
+    const rows = [
+      contract({ symbol: 'NVDA260914C00210000', volume: 100 }),
+      contract({ symbol: 'NVDA260914P00220000', volume: 9_000 }),
+    ]
 
-    expect(filterChain(rows, { underlying: 'TSLA', minVolume: 0 }).map((c) => c.symbol)).toEqual([
-      'TSLA',
+    expect(filterChain(rows, { minVolume: 0 })).toHaveLength(2)
+    expect(filterChain(rows, { minVolume: 5_000 }).map((c) => c.symbol)).toEqual([
+      'NVDA260914P00220000',
     ])
-    expect(filterChain(rows, { underlying: null, minVolume: 0 })).toHaveLength(2)
   })
 
   it('keeps contracts at the volume floor, not just above it', () => {
@@ -86,7 +97,7 @@ describe('filterChain', () => {
 
     // A ">= 5,000" filter that drops the contract trading exactly 5,000 is
     // off by one against its own label.
-    expect(filterChain(rows, { underlying: null, minVolume: 5_000 }).map((c) => c.volume)).toEqual([
+    expect(filterChain(rows, { minVolume: 5_000 }).map((c) => c.volume)).toEqual([
       5_000, 5_001,
     ])
   })
@@ -115,24 +126,26 @@ describe('searchUnderlyings', () => {
 })
 
 describe('sortChain', () => {
-  it('reads the ladder by symbol, expiration, strike, then calls before puts', () => {
+  it('reads the ladder by expiration, strike, then calls before puts', () => {
+    // One underlying, because that is how a chain is fetched now. `symbol`
+    // is the OCC contract symbol and encodes the right *before* the strike,
+    // so sorting on it first would group every call above every put and
+    // stop the ladder reading as a ladder.
     const rows = sortChain(
       [
-        contract({ symbol: 'TSLA', expiration: '2026-08-21', strike: 230, type: 'call' }),
-        contract({ symbol: 'AAPL', expiration: '2026-09-18', strike: 225, type: 'call' }),
-        contract({ symbol: 'AAPL', expiration: '2026-08-21', strike: 230, type: 'put' }),
-        contract({ symbol: 'AAPL', expiration: '2026-08-21', strike: 230, type: 'call' }),
-        contract({ symbol: 'AAPL', expiration: '2026-08-21', strike: 225, type: 'call' }),
+        contract({ symbol: 'AAPL260918C00225000', expiration: '2026-09-18', strike: 225, type: 'call' }),
+        contract({ symbol: 'AAPL260821P00230000', expiration: '2026-08-21', strike: 230, type: 'put' }),
+        contract({ symbol: 'AAPL260821C00230000', expiration: '2026-08-21', strike: 230, type: 'call' }),
+        contract({ symbol: 'AAPL260821C00225000', expiration: '2026-08-21', strike: 225, type: 'call' }),
       ],
       CHAIN_LADDER_SORT,
     )
 
-    expect(rows.map((c) => `${c.symbol} ${c.expiration} ${c.strike}${c.type[0]}`)).toEqual([
-      'AAPL 2026-08-21 225c',
-      'AAPL 2026-08-21 230c',
-      'AAPL 2026-08-21 230p',
-      'AAPL 2026-09-18 225c',
-      'TSLA 2026-08-21 230c',
+    expect(rows.map((c) => `${c.expiration} ${c.strike}${c.type[0]}`)).toEqual([
+      '2026-08-21 225c',
+      '2026-08-21 230c',
+      '2026-08-21 230p',
+      '2026-09-18 225c',
     ])
   })
 
@@ -145,8 +158,11 @@ describe('sortChain', () => {
 
     for (const key of CHAIN_KEYS) {
       if (key === 'ladder') continue
-      const down = sortChain(rows, { key, direction: 'descending' }).map((c) => c[key])
-      const up = sortChain(rows, { key, direction: 'ascending' }).map((c) => c[key])
+      // Every figure on these rows is present, so `as number` reads the
+      // fixture rather than weakening the assertion. Null ordering has its
+      // own test below.
+      const down = sortChain(rows, { key, direction: 'descending' }).map((c) => c[key] as number)
+      const up = sortChain(rows, { key, direction: 'ascending' }).map((c) => c[key] as number)
 
       expect(down).toEqual([...down].sort((a, b) => b - a))
       expect(up).toEqual([...up].sort((a, b) => a - b))
@@ -227,7 +243,8 @@ describe('sortStocks', () => {
     ]
 
     for (const key of STOCK_KEYS) {
-      const read = (s: StockQuote) => (key === 'relVolume' ? relativeVolume(s) : (s[key] as number))
+      const read = (s: StockQuote) =>
+        (key === 'relVolume' ? relativeVolume(s) : s[key]) as number
       expect(sortStocks(rows, { key, direction: 'descending' }).map(read)).toEqual(
         rows.map(read).sort((a, b) => b - a),
       )
@@ -296,52 +313,119 @@ describe('sortStocks', () => {
   })
 })
 
-describe('liveStocks', () => {
-  function quote(price: number): UnderlyingQuote {
-    return {
-      symbol: 'AAPL',
-      price,
-      previousClose: price - 1,
-      change: 1,
-      changePct: 0.5,
-      history: [{ date: '2026-08-07', value: price }],
-    }
-  }
+describe('an absent figure is not a small one', () => {
+  it('sorts a null chain column last in both directions', () => {
+    // The rule the fund market cap has always followed, now shared with
+    // every column a real feed leaves empty: half a live ladder has no bid
+    // at all, and a bid of null is not a bid of zero.
+    const rows = [
+      contract({ strike: 1, bid: 2 }),
+      contract({ strike: 2, bid: null }),
+      contract({ strike: 3, bid: 9 }),
+    ]
 
-  it('re-quotes a row from the live price map', () => {
-    const [row] = liveStocks([stock({ symbol: 'AAPL', price: 100 })], { AAPL: quote(240) })
-
-    // Price belongs to the symbol, not to the row. A stock carrying its own
-    // copy is how the Markets table and an Activity row end up disagreeing
-    // about what AAPL costs.
-    expect(row.price).toBe(240)
-    expect(row.change).toBe(1)
-    expect(row.changePct).toBe(0.5)
+    expect(sortChain(rows, { key: 'bid', direction: 'descending' }).map((c) => c.bid)).toEqual([
+      9, 2, null,
+    ])
+    expect(sortChain(rows, { key: 'bid', direction: 'ascending' }).map((c) => c.bid)).toEqual([
+      2, 9, null,
+    ])
   })
 
-  it('leaves a row alone when the map has no quote for it', () => {
-    const [row] = liveStocks([stock({ symbol: 'XYZ', price: 42 })], { AAPL: quote(240) })
-    expect(row.price).toBe(42)
+  it('sorts a null stock column last in both directions', () => {
+    const rows = [
+      stock({ symbol: 'A', volume: 10 }),
+      stock({ symbol: 'B', volume: null }),
+      stock({ symbol: 'C', volume: 30 }),
+    ]
+
+    expect(
+      sortStocks(rows, { key: 'volume', direction: 'descending' }).map((s) => s.volume),
+    ).toEqual([30, 10, null])
+    expect(sortStocks(rows, { key: 'volume', direction: 'ascending' }).map((s) => s.volume)).toEqual(
+      [10, 30, null],
+    )
   })
 
-  it('keeps everything that is not a quote', () => {
-    const [row] = liveStocks([stock({ symbol: 'AAPL', marketCap: 3540, avgVolume: 52_000_000 })], {
-      AAPL: quote(240),
-    })
-    expect(row.marketCap).toBe(3540)
-    expect(row.avgVolume).toBe(52_000_000)
+  it('has no relative volume without both of its sides', () => {
+    // The denominator is the load-bearing one: a 0 average is a division by
+    // zero, so a name whose history could not be read would sort *first* on
+    // the screen built to find unusual activity.
+    expect(relativeVolume(stock({ volume: 2_000, avgVolume: 1_000 }))).toBe(2)
+    expect(relativeVolume(stock({ volume: null, avgVolume: 1_000 }))).toBeNull()
+    expect(relativeVolume(stock({ volume: 2_000, avgVolume: null }))).toBeNull()
+    expect(relativeVolume(stock({ volume: 2_000, avgVolume: 0 }))).toBeNull()
+  })
+
+  it('keeps a contract with no volume out of every floor above zero', () => {
+    const rows = [contract({ strike: 1, volume: null }), contract({ strike: 2, volume: 9_000 })]
+
+    expect(filterChain(rows, { minVolume: 0 })).toHaveLength(2)
+    expect(filterChain(rows, { minVolume: 5_000 }).map((c) => c.strike)).toEqual([2])
+  })
+
+  it('reads the IV source off the wire without declaring it', () => {
+    // `iv_source` is served and `types.ts` deliberately does not declare it,
+    // so a chain can still say which numbers it solved for itself.
+    expect(ivSourceOf(contract({}))).toBeNull()
+    expect(ivSourceOf({ ...contract({}), ivSource: 'derived' } as OptionContract)).toBe('derived')
+    expect(ivSourceOf({ ...contract({}), ivSource: 'vendor' } as OptionContract)).toBe('vendor')
+  })
+})
+
+describe('which session the volume column is counting', () => {
+  const latest = '2026-09-11'
+
+  it('names the running session and the completed one differently', () => {
+    // A column that silently means either "half a Tuesday morning" or "all
+    // of Monday" makes a busy stock read as quiet.
+    expect(
+      volumeBasis(stock({ volume: 1, volumeSession: 'in_progress', volumeDate: latest }), latest),
+    ).toBe('partial')
+    expect(
+      volumeBasis(stock({ volume: 1, volumeSession: 'completed', volumeDate: latest }), latest),
+    ).toBe('session')
+  })
+
+  it('calls a completed session stale once a later one exists', () => {
+    expect(
+      volumeBasis(
+        stock({ volume: 1, volumeSession: 'completed', volumeDate: '2026-09-04' }),
+        latest,
+      ),
+    ).toBe('stale')
+  })
+
+  it('reports an absent volume as absent rather than as a session', () => {
+    expect(volumeBasis(stock({ volume: null, volumeSession: null, volumeDate: null }), latest)).toBe(
+      'absent',
+    )
+  })
+
+  it('takes the latest trading day from the response, never from the clock', () => {
+    // Every boundary here is a New York one and the browser's clock is not.
+    expect(
+      latestVolumeDate([
+        stock({ symbol: 'A', volumeDate: '2026-09-04' }),
+        stock({ symbol: 'B', volumeDate: latest }),
+        stock({ symbol: 'C', volumeDate: null }),
+      ]),
+    ).toBe(latest)
+    expect(latestVolumeDate([stock({ symbol: 'A', volumeDate: null })])).toBeNull()
+    expect(latestVolumeDate([])).toBeNull()
   })
 })
 
 describe('the controls the page offers are backed by the fixture', () => {
-  it('lists every underlying that actually has a chain', () => {
-    expect(CHAIN_UNDERLYINGS.length).toBeGreaterThan(1)
-    for (const symbol of CHAIN_UNDERLYINGS) {
-      expect(OPTION_CHAIN.some((c) => c.symbol === symbol)).toBe(true)
-    }
-    // Derived from the chain rather than kept as a second list, so the two
-    // cannot drift.
-    expect(new Set(OPTION_CHAIN.map((c) => c.symbol)).size).toBe(CHAIN_UNDERLYINGS.length)
+  it('offers every quoted symbol as an underlying, once and in order', () => {
+    // Derived from the served universe rather than kept as a second list,
+    // so the combobox and the table cannot drift apart.
+    const symbols = underlyingSymbols(STOCKS)
+
+    expect(symbols.length).toBeGreaterThan(1)
+    expect(new Set(symbols).size).toBe(symbols.length)
+    expect(symbols).toEqual([...symbols].sort((a, b) => a.localeCompare(b)))
+    for (const row of STOCKS) expect(symbols).toContain(row.symbol)
   })
 
   it('gives every volume step something to do', () => {
@@ -349,7 +433,7 @@ describe('the controls the page offers are backed by the fixture', () => {
     // one. Each step has to cut the previous result set.
     let previous = OPTION_CHAIN.length
     for (const step of MIN_VOLUME_STEPS.slice(1)) {
-      const kept = filterChain(OPTION_CHAIN, { underlying: null, minVolume: step }).length
+      const kept = filterChain(OPTION_CHAIN, { minVolume: step }).length
       expect(kept).toBeLessThan(previous)
       expect(kept).toBeGreaterThan(0)
       previous = kept
@@ -360,8 +444,13 @@ describe('the controls the page offers are backed by the fixture', () => {
     // CLAUDE.md: a state absent from the fixtures is one nobody can see.
     // The thin name at the top volume floor is where that message lives.
     const highest = MIN_VOLUME_STEPS[MIN_VOLUME_STEPS.length - 1]
-    const emptySomewhere = CHAIN_UNDERLYINGS.some(
-      (symbol) => filterChain(OPTION_CHAIN, { underlying: symbol, minVolume: highest }).length === 0,
+    // One underlying at a time, the way the page fetches it.
+    const emptySomewhere = [...new Set(OPTION_CHAIN.map((c) => c.symbol))].some(
+      (symbol) =>
+        filterChain(
+          OPTION_CHAIN.filter((c) => c.symbol === symbol),
+          { minVolume: highest },
+        ).length === 0,
     )
 
     expect(emptySomewhere).toBe(true)

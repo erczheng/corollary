@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react'
 import { AccountModeToggle } from '../components/AccountModeToggle'
 import { RefreshButton } from '../components/RefreshButton'
+import { RequestFailed } from '../components/RequestFailed'
 import { StatCard } from '../components/StatCard'
 import { StatCardSkeleton, TableSkeleton, ValueSkeleton } from '../components/Skeleton'
 import { BankIcon, TargetIcon, TrendingDownIcon, TrendingUpIcon } from '../components/icons'
 import { useAccount, usePositions, useTransfers } from '../lib/queries'
-import { isAccountUnavailable, isApiError, isUnreachable } from '../lib/api'
+import { isAccountUnavailable, isApiError } from '../lib/api'
 import { useUIStore } from '../lib/store'
 import {
   ACCOUNT_LABEL,
@@ -136,22 +137,6 @@ function CashNotConfigured({
         to read, not because the account is empty.
       </p>
     </section>
-  )
-}
-
-/** A request that genuinely failed, as opposed to a book that is not
- * configured. `error`, not `bearish`: this is a system condition. */
-function RequestFailed({ error, what }: { error: unknown; what: string }) {
-  const message = isUnreachable(error)
-    ? 'The engine did not answer. Check that it is running, then try again.'
-    : isApiError(error)
-      ? error.message
-      : `Something went wrong loading ${what}.`
-
-  return (
-    <p role="alert" className="max-w-prose text-body-md text-error">
-      {message}
-    </p>
   )
 }
 

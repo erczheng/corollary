@@ -10,9 +10,11 @@ import {
   type TimeInForce,
 } from '../lib/types'
 import { riskLimitFor } from '../lib/settings'
+import { useRiskLimits } from '../lib/queries'
 import {
   OPEN_SIDES,
   ORDER_SIDE_LABEL,
+  type Quote,
   estimateOpen,
   midPrice,
   openCrossingPrice,
@@ -55,9 +57,24 @@ function toNumber(raw: string): number | null {
 
 interface ChainOrderTicketProps {
   contract: OptionContract
+  /** The two-sided quote this order is priced against, narrowed by the
+   * caller. A real chain has no bid on roughly half its contracts, and a
+   * mid taken from an invented bid is half the ask; the chain omits the
+   * Trade control rather than opening a ticket that cannot price. */
+  quote: Quote
+  /** The underlying's price. Passed in rather than fetched: the stock table
+   * on the same page already holds one quote per symbol, and a second read
+   * is how the sentence under the ticket and the row above it end up
+   * disagreeing about the same stock. */
+  spot: number | null
   /** Account equity, for the advisory risk estimate. Display only — the
-   * engine is what enforces the ceiling (CLAUDE.md rule 4). */
-  equity: number
+   * engine is what enforces the ceiling (CLAUDE.md rule 4).
+   *
+   * **Null means the balance could not be read**, and the ticket says so
+   * rather than quoting a percentage of a number nobody has. */
+  equity: number | null
+  /** Why it is null, in one bit: the selected book is not configured. */
+  equityUnavailable: boolean
   onDone: () => void
 }
 
@@ -73,25 +90,27 @@ interface ChainOrderTicketProps {
  * What the two do share is `orders.ts`, so the bid/ask rules are written
  * once. Selling hits the bid and buying lifts the ask in both.
  */
-export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketProps) {
+export function ChainOrderTicket({
+  contract,
+  quote,
+  spot,
+  equity,
+  equityUnavailable,
+  onDone,
+}: ChainOrderTicketProps) {
   const submitOpenOrder = useUIStore((s) => s.submitOpenOrder)
   const isHalted = useUIStore((s) => s.isHalted)
-  /* Inside the component, and from the store.
-     This was a module-level const reading the fixture, which is worse than
-     stale: a module const is evaluated once at import, so a ceiling edited
-     in Settings would never reach this ticket again for the life of the tab,
-     across any number of remounts. */
-  const riskLimits = useUIStore((s) => s.riskLimits)
-  const maxRiskPct = riskLimitFor(riskLimits, 'max_risk_per_trade_pct')
-  // From the store, not the fixture: the poll moves it, and a frozen spot
-  // beside a moving chain would put the sentence and the row in
-  // disagreement about the same stock.
-  const spot = useUIStore((s) => s.underlyings[contract.symbol])?.price ?? null
+  /* From the server, not the store. Settings writes the ceiling to the
+     server now, so a store slice would agree at rest and diverge the moment
+     a limit is edited — Settings and the audit log showing the new number
+     while this ticket quoted the old one. */
+  const riskLimitsQuery = useRiskLimits()
+  const maxRiskPct = riskLimitFor(riskLimitsQuery.data ?? [], 'max_risk_per_trade_pct')
 
   const [side, setSide] = useState<OpenSide>('BTO')
   const [quantity, setQuantity] = useState('1')
   const [orderType, setOrderType] = useState<OrderType>('limit')
-  const [limitPrice, setLimitPrice] = useState(String(midPrice(contract)))
+  const [limitPrice, setLimitPrice] = useState(String(midPrice(quote)))
   const [timeInForce, setTimeInForce] = useState<TimeInForce>('day')
   const [confirming, setConfirming] = useState(false)
 
@@ -110,7 +129,7 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
   // The mid moves with the poll. Reseeding the limit on every print would
   // overwrite what you typed, so it only follows the contract.
   useEffect(() => {
-    setLimitPrice(String(midPrice(contract)))
+    setLimitPrice(String(midPrice(quote)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
 
@@ -124,14 +143,19 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
   }
 
   const errors = validateOpenOrder(draft)
-  const est = estimateOpen(contract, draft)
-  const risk = openRisk(contract, draft, equity)
+  const est = estimateOpen(quote, draft)
+  // `?? 0` only reaches `pct`, which is suppressed below when the balance is
+  // unread — the dollar figure is a fact about the order, not the account.
+  const risk = openRisk(quote, draft, equity ?? 0)
   const name = `${contract.symbol} ${contractLabel(contract)}`
-  const crossing = openCrossingPrice(contract, side)
+  const crossing = openCrossingPrice(quote, side)
 
-  // No configured ceiling means nothing to be over. Warning against a
-  // fabricated default would be claiming a limit that was never set.
-  const overLimit = risk.kind === 'defined' && maxRiskPct !== null && risk.pct > maxRiskPct
+  // No configured ceiling means nothing to be over, and no readable balance
+  // means nothing to measure against one. Warning against a fabricated
+  // default would be claiming a limit that was never set — the failure the
+  // two tickets' `?? 7` and `?? 0` once produced between them.
+  const overLimit =
+    risk.kind === 'defined' && equity !== null && maxRiskPct !== null && risk.pct > maxRiskPct
   const money = contractMoneyness(spot ?? contract.strike, contract.strike, contract.type)
 
   function submit() {
@@ -144,7 +168,8 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-title-lg text-on-surface">{name}</h3>
         <p className="text-caption text-on-surface-variant">
-          Bid {formatUsd(contract.bid)} · Ask {formatUsd(contract.ask)} · IV {formatIv(contract.iv)}
+          Bid {formatUsd(quote.bid)} · Ask {formatUsd(quote.ask)} · IV{' '}
+          {contract.iv === null ? 'unavailable' : formatIv(contract.iv)}
         </p>
       </div>
 
@@ -272,7 +297,9 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
             ) : (
               <>
                 {formatUsd(risk.amount)}{' '}
-                <span className="text-label-md">{formatPct(risk.pct)} of equity</span>
+                <span className="text-label-md">
+                  {equity === null ? 'of a balance this page could not read' : `${formatPct(risk.pct)} of equity`}
+                </span>
               </>
             )}
           </dd>
@@ -289,6 +316,26 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
           Selling to open is an undefined-risk position. The engine sizes it against a ±2σ stress
           loss on {contract.symbol}’s 20-day realized volatility, which is computed server-side —
           this ticket cannot state a maximum loss, because there isn’t one.
+        </p>
+      )}
+
+      {/* Rule 4 is enforced server-side either way; what changes here is
+          whether this page can say anything advisory about it. Both of these
+          state the absence instead of substituting a number for it. */}
+      {risk.kind === 'defined' && equity === null && (
+        <p className="mt-2 max-w-prose text-caption text-caution">
+          {equityUnavailable
+            ? 'This account is not configured, so its balance could not be read'
+            : 'The account balance could not be read'}
+          . The dollar figure above is the premium this order pays; what share of the account that
+          is cannot be stated here.
+        </p>
+      )}
+
+      {risk.kind === 'defined' && equity !== null && maxRiskPct === null && (
+        <p className="mt-2 max-w-prose text-caption text-on-surface-variant">
+          No per-trade risk ceiling is configured, so there is nothing here to be over. Set one in
+          Settings — the engine enforces it, this page only reports it.
         </p>
       )}
 
@@ -355,9 +402,11 @@ export function ChainOrderTicket({ contract, equity, onDone }: ChainOrderTicketP
               </p>
               <p className="mt-2">
                 {est.kind === 'cost' ? 'Estimated cost' : 'Estimated credit'} {formatUsd(est.amount)}
-                {risk.kind === 'defined'
-                  ? `, risking ${formatUsd(risk.amount)} — ${formatPct(risk.pct)} of this account.`
-                  : '. Maximum loss is undefined on a short.'}
+                {risk.kind === 'undefined'
+                  ? '. Maximum loss is undefined on a short.'
+                  : equity === null
+                    ? `, risking ${formatUsd(risk.amount)} — a share of this account that could not be computed.`
+                    : `, risking ${formatUsd(risk.amount)} — ${formatPct(risk.pct)} of this account.`}
               </p>
               {orderType === 'limit' && (
                 <p className="mt-2">

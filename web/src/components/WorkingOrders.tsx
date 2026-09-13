@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { ConfirmDialog } from './ConfirmDialog'
+import { RequestFailed } from './RequestFailed'
 import { TableSkeleton } from './Skeleton'
-import { useUIStore } from '../lib/store'
 import { ORDER_TYPE_LABEL, TIME_IN_FORCE_LABEL, type WorkingOrder } from '../lib/types'
 import { ORDER_SIDE_LABEL } from '../lib/orders'
 import { formatDateTimeET, formatUsd } from '../lib/format'
@@ -34,27 +34,59 @@ function priceLabel(order: WorkingOrder): string {
   return '—'
 }
 
+interface WorkingOrdersProps {
+  orders: readonly WorkingOrder[]
+  loading: boolean
+  accountLabel: string
+  /** A failed request, as opposed to a book with no working orders. An
+   * empty table where the fetch failed would claim there is nothing
+   * resting at the broker, which is the one thing it cannot know. */
+  error?: unknown
+  /** Cancel a resting order. **Absent means there is no way to cancel**,
+   * and the control renders disabled with `cancelUnavailableReason` stated
+   * rather than silently doing nothing. Phase 2 is read-only — a cancel
+   * would be the first broker write in the codebase and would land before
+   * the risk manager exists — so nothing passes this yet. */
+  onCancel?: (order: WorkingOrder) => void
+  cancelUnavailableReason?: string
+}
+
 /** Orders that are placed and haven't filled.
  *
  * Attached exits are deliberately absent: they live on their position,
  * which is where they are edited and cancelled. Listing them here as well
- * would give one thing two homes that could disagree about it. */
-export function WorkingOrders({ loading, accountLabel }: { loading: boolean; accountLabel: string }) {
-  const orders = useUIStore((s) => s.workingOrders[s.accountMode])
-  const cancelWorkingOrder = useUIStore((s) => s.cancelWorkingOrder)
+ * would give one thing two homes that could disagree about it.
+ *
+ * Takes its orders as a prop rather than reading the store: they come from
+ * `GET /api/positions/working` now, and a component that read the store
+ * would render the Phase 1 fixtures beside live positions with nothing on
+ * screen to say the two came from different places. */
+export function WorkingOrders({
+  orders,
+  loading,
+  accountLabel,
+  error,
+  onCancel,
+  cancelUnavailableReason,
+}: WorkingOrdersProps) {
   const [cancelTarget, setCancelTarget] = useState<WorkingOrder | null>(null)
+  const canCancel = onCancel !== undefined
 
   return (
     <section className="mt-8 rounded-lg border border-outline-warm bg-surface-container-lowest">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm px-4 py-3">
         <h2 className="text-title-lg text-on-surface">Working Orders</h2>
         <span className="text-label-md text-on-surface-variant">
-          {loading ? 'Loading…' : `${orders.length} working in ${accountLabel}`}
+          {loading ? 'Loading…' : error ? '' : `${orders.length} working in ${accountLabel}`}
         </span>
       </div>
 
       {loading ? (
         <TableSkeleton rows={2} columns={6} label="Loading working orders" />
+      ) : error ? (
+        <div className="px-4 py-6">
+          <RequestFailed error={error} what="working orders" />
+        </div>
       ) : orders.length === 0 ? (
         <p className="px-4 py-6 text-body-md text-on-surface-variant">
           No working orders. A limit or stop order appears here until it fills or you cancel it — a market
@@ -101,9 +133,14 @@ export function WorkingOrders({ loading, accountLabel }: { loading: boolean; acc
                 <td className={`${TD} text-right`}>
                   <button
                     type="button"
+                    disabled={!canCancel}
                     onClick={() => setCancelTarget(o)}
-                    title={`Cancel ${o.side} ${o.contract}`}
-                    className={ROW_BUTTON}
+                    title={
+                      canCancel
+                        ? `Cancel ${o.side} ${o.contract}`
+                        : cancelUnavailableReason
+                    }
+                    className={`${ROW_BUTTON}${canCancel ? '' : ' cursor-not-allowed opacity-40'}`}
                   >
                     Cancel
                   </button>
@@ -112,6 +149,12 @@ export function WorkingOrders({ loading, accountLabel }: { loading: boolean; acc
             ))}
           </tbody>
         </table>
+      )}
+
+      {!canCancel && !loading && !error && orders.length > 0 && cancelUnavailableReason && (
+        <p className="border-t border-outline-variant px-4 py-3 text-caption text-on-surface-variant">
+          {cancelUnavailableReason}
+        </p>
       )}
 
       <ConfirmDialog
@@ -129,7 +172,7 @@ export function WorkingOrders({ loading, accountLabel }: { loading: boolean; acc
           )
         }
         onConfirm={() => {
-          if (cancelTarget) cancelWorkingOrder(cancelTarget.id)
+          if (cancelTarget && onCancel) onCancel(cancelTarget)
           setCancelTarget(null)
         }}
         onCancel={() => setCancelTarget(null)}

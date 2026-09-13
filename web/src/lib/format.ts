@@ -145,6 +145,32 @@ export function formatDateOnly(isoDate: string): string {
   return DATE_ONLY.format(new Date(`${isoDate}T00:00:00Z`))
 }
 
+/** Today's calendar date in market time, as 'YYYY-MM-DD'.
+ *
+ * `en-CA` because it is the locale whose short date *is* ISO order; the
+ * time zone is the point of the function. Every date-only comparison in the
+ * app parses as UTC midnight, and this returns a string of exactly that
+ * shape so it can be one side of that comparison.
+ *
+ * **Why not `new Date().toISOString().slice(0, 10)`** — that is today in
+ * UTC, which after 20:00 ET is tomorrow. A DTE computed against it reads
+ * one day short every evening, and "1 DTE" on a contract expiring tomorrow
+ * is the kind of wrong that gets acted on.
+ *
+ * Fixtures use `MARKET_TODAY` instead, which is a fixed date so they do not
+ * rot. Live positions use this: a real expiry is measured against the real
+ * day, and `MARKET_TODAY` drifts a day further from it every morning. */
+const MARKET_DAY = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+
+export function marketToday(now: Date = new Date()): string {
+  return MARKET_DAY.format(now)
+}
+
 /** Grouped integer — share counts, contract volume, open interest. Not
  * compact: a chain is scanned for exact size, and "37.5K" loses the digit
  * that distinguishes a busy strike from a very busy one. */

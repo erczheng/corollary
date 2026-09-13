@@ -3,6 +3,7 @@ import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
   type AuditLogEntry,
+  type DataFeed,
   type DataPlan,
   type FeedKey,
   type NotificationEvent,
@@ -73,8 +74,15 @@ export function validateRiskLimit(limit: RiskLimit, next: number): string | null
  *
  * Only a raise gets a confirm. Lowering a limit reduces what is at risk and
  * asking twice for it would train the habit of clicking through the dialog
- * that matters. */
+ * that matters.
+ *
+ * **A null previous value is not a raise.** There is no configured ceiling to
+ * raise *from*, so a confirm would have to quote a previous figure nobody
+ * set — the `?? 7` mistake wearing a dialog. Storing the first ceiling on a
+ * limit that had none is the constraining direction anyway, and the server
+ * audits it either way. */
 export function isRaise(limit: RiskLimit, next: number): boolean {
+  if (limit.value === null) return false
   return next > limit.value
 }
 
@@ -127,18 +135,38 @@ const CHANNEL_LABEL: Record<NotificationChannel, string> = {
   discord: 'Discord',
 }
 
+/** What a row's label can be resolved against.
+ *
+ * Passed in rather than read from the fixture so the log follows whatever the
+ * server served, the same reason `riskLimitFor` takes its limits. Defaults to
+ * the fixtures, which carry the identical labels — the server mirrors them —
+ * so a caller with nothing loaded yet still gets words rather than keys. */
+export interface AuditCatalog {
+  limits?: RiskLimit[]
+  feeds?: DataFeed[]
+}
+
 /** Turns a stored field key back into something readable.
  *
  * Falls back to the raw key rather than to an empty cell: an audit row you
  * cannot fully interpret is still evidence that something changed, and
- * blanking it would hide that. */
-export function auditFieldLabel(entry: AuditLogEntry): string {
+ * blanking it would hide that.
+ *
+ * **A feed row is keyed by its env var, not by its camelCase key.** The
+ * server writes `field = ALPACA_STOCK_FEED_HISTORICAL` (`settings.py`), while
+ * the feed it describes is `stockHistorical`, so matching on `key` alone
+ * printed the raw variable name in a column that promises readable settings.
+ * Both are accepted here because both are true names for the same row. */
+export function auditFieldLabel(entry: AuditLogEntry, catalog: AuditCatalog = {}): string {
   if (entry.category === 'risk') {
-    return RISK_LIMITS.find((l) => l.key === entry.field)?.label ?? entry.field
+    const limits = catalog.limits ?? RISK_LIMITS
+    return limits.find((l) => l.key === entry.field)?.label ?? entry.field
   }
 
   if (entry.category === 'feed') {
-    return DATA_FEEDS.find((f) => f.key === entry.field)?.label ?? entry.field
+    const feeds = catalog.feeds ?? DATA_FEEDS
+    const feed = feeds.find((f) => f.key === entry.field || f.envVar === entry.field)
+    return feed?.label ?? entry.field
   }
 
   const [event, channel] = entry.field.split('.')

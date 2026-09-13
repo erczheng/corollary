@@ -9,18 +9,36 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { BENCHMARK_HISTORY, sliceRange } from '../lib/mockData'
+import { sliceRange } from '../lib/mockData'
 import { type ChartRange, type PricePoint } from '../lib/types'
 import { rangeChange } from '../lib/chart'
-import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
+import {
+  formatDateOnly,
+  formatDateTimeET,
+  formatPct,
+  formatUsd,
+  signClass,
+} from '../lib/format'
 
 const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
 interface PerformanceChartProps {
   /** The series to plot. Passed in rather than read from a module constant
    * because Paper and Cash are different accounts with different balances
-   * — the chart follows the account toggle. */
+   * — the chart follows the account toggle. Phase 2: this is Alpaca's own
+   * equity curve, shaped by the Dashboard's `equityCurve`. */
   history: PricePoint[]
+  /** When Corollary first ran, as an ISO instant, or null if that is not
+   * recorded.
+   *
+   * The footer needs it to say whose history this is. **`pointsBeforeT0`
+   * from the same response is deliberately not used**: it counts points in
+   * the *server's* window, while this chart slices client-side and the
+   * Dashboard drops the pre-funding zero pad, so the number would be quoted
+   * against a different set of points than the one on screen. Comparing the
+   * first plotted date with t₀ answers the same question about whatever is
+   * actually drawn, in whichever range is selected. */
+  t0?: string | null
 }
 
 function toChartDate(iso: string): string {
@@ -39,9 +57,8 @@ function toIndex(active: unknown, length: number): number | null {
   return Number.isInteger(i) && i >= 0 && i < length ? i : null
 }
 
-export function PerformanceChart({ history }: PerformanceChartProps) {
+export function PerformanceChart({ history, t0 = null }: PerformanceChartProps) {
   const [range, setRange] = useState<ChartRange>('3M')
-  const [showBenchmark, setShowBenchmark] = useState(false)
   // Drag-to-measure: press on the chart and sweep to read the change over
   // that window. Deliberately transient — it clears on release rather than
   // becoming a mode you can leave the chart in and later misread.
@@ -50,16 +67,14 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
 
   const { portfolio, data } = useMemo(() => {
     const sliced = sliceRange(history, range)
-    const benchmark = sliceRange(BENCHMARK_HISTORY, range)
     return {
       portfolio: sliced,
-      data: sliced.map((p, i) => ({
+      data: sliced.map((p) => ({
         // Keyed by the ISO date, not the display label: "Aug 8" occurs
         // twice in a 1Y window, and a duplicated category value makes the
         // selection band ambiguous about which one it means.
         date: p.date,
         portfolio: p.value,
-        benchmark: benchmark[i]?.value,
       })),
     }
   }, [history, range])
@@ -111,15 +126,13 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
             </button>
           ))}
         </div>
-        <label className="flex items-center gap-2 text-label-md text-on-surface-variant">
-          <input
-            type="checkbox"
-            checked={showBenchmark}
-            onChange={(e) => setShowBenchmark(e.target.checked)}
-            className="accent-primary"
-          />
-          Compare to SPY
-        </label>
+        {/* "Compare to SPY" used to sit here, drawing `BENCHMARK_HISTORY` —
+            a seeded random walk based at $25,000 — against what is now the
+            account's real equity. Against a real curve that is an invented
+            line at the wrong scale, which is the thing PRD §8.5 rules out.
+            The honest version reads SPY from `useUnderlyings(['SPY'])` and
+            indexes it to the equity at the start of the window; it is a
+            feature, not a checkbox, and it is not in this phase. */}
       </div>
 
       {/* select-none unconditionally, not only while dragging: the browser
@@ -199,9 +212,9 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
                 }}
                 labelStyle={{ color: 'var(--on-surface-variant)' }}
                 labelFormatter={(d) => formatDateOnly(String(d))}
-                formatter={(value, name) => [
+                formatter={(value) => [
                   formatUsd(typeof value === 'number' ? value : Number(value)),
-                  name === 'portfolio' ? 'Portfolio' : 'SPY',
+                  'Portfolio',
                 ]}
               />
             )}
@@ -213,16 +226,6 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
               dot={false}
               isAnimationActive={false}
             />
-            {showBenchmark && (
-              <Line
-                type="monotone"
-                dataKey="benchmark"
-                stroke="var(--accent)"
-                strokeWidth={2}
-                dot={false}
-                isAnimationActive={false}
-              />
-            )}
             {selection && (
               <ReferenceArea
                 x1={selection.from.date}
@@ -237,10 +240,22 @@ export function PerformanceChart({ history }: PerformanceChartProps) {
         </ResponsiveContainer>
       </div>
       {portfolio.length > 0 && (
-        <p className="mt-6 text-caption text-on-surface-variant">
-          Since {formatDateOnly(history[0].date)} — Corollary's first run. No
-          pre-Corollary history is reconstructed. Drag across the chart to measure
-          a period.
+        /* Whose history this is, in words.
+         *
+         * This line used to read "Since <first point> — Corollary's first
+         * run", which was true of a fixture generated at Corollary's start
+         * and is **false** of Alpaca's curve: the first point is the
+         * *broker's*, and on a funded account most of it predates the engine
+         * entirely. Spec decision 6 marks t₀ for exactly this reason — the
+         * chart must not claim credit for manual trading. */
+        <p className="mt-6 max-w-prose text-caption text-on-surface-variant">
+          The broker's own equity curve, from {formatDateOnly(portfolio[0].date)}.{' '}
+          {t0 === null
+            ? 'Corollary’s first run is not recorded, so none of this is attributed to the engine.'
+            : portfolio[0].date < t0.slice(0, 10)
+              ? `Part of this window predates Corollary’s first run on ${formatDateTimeET(t0)} ET — it is the account’s history, not the engine’s record.`
+              : `Entirely since Corollary’s first run on ${formatDateTimeET(t0)} ET.`}{' '}
+          Nothing is reconstructed. Drag across the chart to measure a period.
         </p>
       )}
     </div>

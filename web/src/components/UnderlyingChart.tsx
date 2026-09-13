@@ -11,7 +11,8 @@ import {
 } from 'recharts'
 import { sliceRange } from '../lib/mockData'
 import { type ChartRange } from '../lib/types'
-import { useUIStore } from '../lib/store'
+import { useUnderlyings } from '../lib/queries'
+import { RequestFailed } from './RequestFailed'
 import { rangeChange } from '../lib/chart'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 
@@ -19,11 +20,17 @@ const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
 const AXIS_TICK = { fill: 'var(--on-surface-variant)', fontSize: 12 }
 
+/** Why 400 and not 90: at a quarter of history, 3M, YTD, 1Y and All all draw
+ * the same chart, and at a year 1Y and All still do. The server caps the
+ * request here anyway. */
+const HISTORY_DAYS = 400
+
 /** A stock's price over a window you choose.
  *
- * Reads the quote from the store rather than the fixture: the poll moves
- * it, and a chart on the frozen module constant would sit still under a row
- * that is changing.
+ * Reads its own quote and series from the server, scoped to the one symbol
+ * whose row is expanded — a chart is opened one at a time, and fetching 400
+ * sessions for twenty-six names to draw one of them is a request budget
+ * spent on nothing.
  *
  * It carries no strike and no contract. It sat in the option ticket first
  * and that was the wrong home — a chart is a thing you *browse*, and the
@@ -33,7 +40,8 @@ const AXIS_TICK = { fill: 'var(--on-surface-variant)', fontSize: 12 }
  */
 export function UnderlyingChart({ symbol }: { symbol: string }) {
   const [range, setRange] = useState<ChartRange>('3M')
-  const quote = useUIStore((s) => s.underlyings[symbol]) ?? null
+  const query = useUnderlyings([symbol], HISTORY_DAYS)
+  const quote = query.data?.find((u) => u.symbol === symbol) ?? null
 
   const points = useMemo(
     () => (quote ? sliceRange(quote.history, range) : []),
@@ -48,10 +56,23 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
     [points],
   )
 
+  if (query.isError) {
+    return <RequestFailed error={query.error} what={`the ${symbol} price history`} />
+  }
+
+  if (query.isPending) {
+    return (
+      <p role="status" className="text-caption text-on-surface-variant">
+        Reading {symbol}'s daily series…
+      </p>
+    )
+  }
+
   if (!quote) {
     return (
       <p className="text-caption text-on-surface-variant">
-        No quote for {symbol}. Phase 2 subscribes to the whole listed universe.
+        The server quoted no price for {symbol}, so there is no series to draw. A symbol with no
+        price is left out of the response rather than served as a row of zeroes.
       </p>
     )
   }
@@ -131,6 +152,10 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
             />
             {/* Yesterday's close, so the day's move is the distance from
                 this line rather than something to work out. */}
+            {/* Absent on a name with no prior session — the line is then
+                omitted rather than drawn at zero, which would compress the
+                whole axis to make room for a price that never happened. */}
+            {quote.previousClose !== null && (
             <ReferenceLine
               y={quote.previousClose}
               stroke="var(--outline)"
@@ -142,6 +167,7 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
                 fontSize: 12,
               }}
             />
+            )}
             <Line type="monotone" dataKey="value" stroke="var(--primary)" strokeWidth={2} dot={false} />
           </LineChart>
         </ResponsiveContainer>

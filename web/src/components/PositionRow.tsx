@@ -4,10 +4,9 @@ import { OrderTicket } from './OrderTicket'
 import { ChevronDownIcon } from './icons'
 import { useUIStore } from '../lib/store'
 import { formatStrategyName, formatPct, formatUsd, signClass } from '../lib/format'
-import { MARKET_TODAY } from '../lib/mockData'
 import { TIME_IN_FORCE_LABEL, type Position } from '../lib/types'
 import { daysToExpiry, expiryUrgency, isMultiLeg, type TicketMode } from '../lib/orders'
-import { formatExpiry } from '../lib/format'
+import { formatExpiry, marketToday } from '../lib/format'
 
 const CELL = 'px-3 py-1 text-right text-data-md text-on-surface'
 
@@ -138,6 +137,9 @@ interface PositionRowProps {
   onSelectMode: (mode: TicketMode) => void
   equity: number
   columnCount: number
+  /** Passed through to the ticket. See `OrderTicket`: set, the ticket
+   * estimates and cannot submit. */
+  submitUnavailableReason?: string
 }
 
 export function PositionRow({
@@ -148,6 +150,7 @@ export function PositionRow({
   onSelectMode,
   equity,
   columnCount,
+  submitUnavailableReason,
 }: PositionRowProps) {
   // Escape collapses the panel. Expanding a row is a mode you can end up
   // in by accident, and every other dismissible surface here — the
@@ -177,8 +180,8 @@ export function PositionRow({
   const openedBy = strategies.find((s) => s.id === position.openedByStrategyId)
   const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
   const underlying = useUIStore((s) => s.underlyings[position.symbol]) ?? null
-  const dte = daysToExpiry(position.expiry, MARKET_TODAY)
-  const urgency = expiryUrgency(position, MARKET_TODAY)
+  const dte = daysToExpiry(position.expiry, marketToday())
+  const urgency = expiryUrgency(position, marketToday())
 
   return (
     <>
@@ -272,7 +275,7 @@ export function PositionRow({
                 <span className="text-data-md text-on-surface">
                   {formatUsd(underlying?.price ?? position.underlying)}
                 </span>
-                {underlying && (
+                {underlying && underlying.change !== null && underlying.changePct !== null && (
                   <span className={`ml-2 text-data-md ${signClass(underlying.change)}`}>
                     {formatUsd(underlying.change, { signed: true })}{' '}
                     <span className="text-caption">
@@ -290,6 +293,7 @@ export function PositionRow({
                 onModeChange={onSelectMode}
                 equity={equity}
                 strategyName={strategyName}
+                submitUnavailableReason={submitUnavailableReason}
               />
             </div>
           </td>

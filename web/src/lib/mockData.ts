@@ -1282,7 +1282,11 @@ function buildChain(): OptionContract[] {
   for (const u of CHAIN_SPECS) {
     const next = mulberry32(u.seed)
     const spot = UNDERLYINGS[u.symbol].price
-    const underlyingChange = UNDERLYINGS[u.symbol].change
+    // `?? 0` is unreachable on a fixture -- `buildUnderlying` always computes
+    // a change -- and is here because the *wire* type allows null: a real
+    // snapshot carries no previous close for a name that had no prior
+    // session, and there is then no day move to scale a contract's by.
+    const underlyingChange = UNDERLYINGS[u.symbol].change ?? 0
     const inc = strikeIncrement(spot)
     const atm = Math.round(spot / inc) * inc
 
@@ -1434,6 +1438,10 @@ export const STOCKS: StockQuote[] = STOCK_SEEDS.map((s) => {
     change: quote.change,
     changePct: quote.changePct,
     volume: Math.round(s.avgVolume * relative),
+    // The fixtures are a session in progress -- MARKET_TODAY is the session,
+    // and the volume above is a day's worth of it so far.
+    volumeSession: 'in_progress' as const,
+    volumeDate: MARKET_TODAY,
     avgVolume: s.avgVolume,
     marketCap: s.marketCap,
   }

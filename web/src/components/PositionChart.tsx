@@ -148,7 +148,7 @@ export function PositionChart({ position }: { position: Position }) {
               />
               {/* Yesterday's close, so the day's move is the distance from
                   this line rather than something to work out. */}
-              {underlying && (
+              {underlying && underlying.previousClose !== null && (
                 <ReferenceLine
                   y={underlying.previousClose}
                   stroke="var(--outline)"
@@ -237,14 +237,24 @@ export function PositionChart({ position }: { position: Position }) {
             <dt className="text-on-surface-variant">Today</dt>
             {/* Sign carried textually as well as by colour, on both
                 figures — the rule that applies to every P&L here. */}
-            <dd className={`text-data-md ${signClass(underlying.change)}`}>
-              {formatUsd(underlying.change, { signed: true })}{' '}
-              <span className="text-caption">{formatPct(underlying.changePct, { signed: true })}</span>
+            <dd className={`text-data-md ${signClass(underlying.change ?? 0)}`}>
+              {underlying.change === null || underlying.changePct === null ? (
+                <span className="text-on-surface-variant">Not measured</span>
+              ) : (
+                <>
+                  {formatUsd(underlying.change, { signed: true })}{' '}
+                  <span className="text-caption">
+                    {formatPct(underlying.changePct, { signed: true })}
+                  </span>
+                </>
+              )}
             </dd>
           </div>
           <div>
             <dt className="text-on-surface-variant">Previous close</dt>
-            <dd className="text-data-md text-on-surface">{formatUsd(underlying.previousClose)}</dd>
+            <dd className="text-data-md text-on-surface">
+              {underlying.previousClose === null ? '—' : formatUsd(underlying.previousClose)}
+            </dd>
           </div>
           {/* The strikes as text, not only as lines on the chart. Where
               the stock sits relative to them is the question a spread

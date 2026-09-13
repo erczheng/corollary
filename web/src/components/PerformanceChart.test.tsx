@@ -16,8 +16,8 @@ describe('PerformanceChart', () => {
 
     // The series starts 2025-08-08. Rendering that date-only value in ET
     // used to print Aug 7.
-    expect(screen.getByText(/Since Aug 8, 2025/)).toBeInTheDocument()
-    expect(screen.queryByText(/Since Aug 7, 2025/)).not.toBeInTheDocument()
+    expect(screen.getByText(/from Aug 8, 2025/)).toBeInTheDocument()
+    expect(screen.queryByText(/from Aug 7, 2025/)).not.toBeInTheDocument()
   })
 
   it('offers the full set of ranges and defaults to 3M', () => {
@@ -39,5 +39,48 @@ describe('PerformanceChart', () => {
     render(<PerformanceChart history={history} />)
 
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  /** Phase 2 — the series is Alpaca's own equity curve, so the footer must
+   * not claim the first point as Corollary's start. Spec decision 6 marks
+   * t₀ precisely so the chart cannot take credit for manual trading. */
+  describe('whose history it is', () => {
+    it('names the stretch that predates Corollary when t₀ falls inside the window', () => {
+      render(<PerformanceChart history={history} t0="2025-08-12T14:00:00Z" />)
+
+      expect(screen.getByText(/predates Corollary’s first run/)).toBeInTheDocument()
+      expect(screen.queryByText(/Entirely since/)).not.toBeInTheDocument()
+    })
+
+    it('says the whole window is Corollary’s when t₀ is older than the first point', () => {
+      render(<PerformanceChart history={history} t0="2025-01-04T14:00:00Z" />)
+
+      expect(screen.getByText(/Entirely since Corollary’s first run/)).toBeInTheDocument()
+    })
+
+    it('admits t₀ is unrecorded rather than claiming the curve either way', () => {
+      render(<PerformanceChart history={history} t0={null} />)
+
+      expect(screen.getByText(/first run is not recorded/)).toBeInTheDocument()
+      expect(screen.queryByText(/predates/)).not.toBeInTheDocument()
+    })
+
+    it('no longer claims the first point as Corollary’s first run', () => {
+      render(<PerformanceChart history={history} />)
+
+      // The old wording — true of a fixture generated at Corollary's start,
+      // false of a broker curve that predates the engine entirely.
+      expect(screen.queryByText(/Since Aug 8, 2025 — Corollary/)).not.toBeInTheDocument()
+    })
+  })
+
+  it('offers no SPY overlay, because the only SPY series here was a fixture', () => {
+    render(<PerformanceChart history={history} />)
+
+    // `BENCHMARK_HISTORY` is a seeded random walk based at $25,000. Drawn
+    // against a real equity curve it is an invented line at the wrong
+    // scale — PRD §8.5.
+    expect(screen.queryByRole('checkbox', { name: /SPY/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Compare to SPY/)).not.toBeInTheDocument()
   })
 })

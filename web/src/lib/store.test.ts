@@ -303,7 +303,13 @@ describe('the price tick', () => {
       expect(after[symbol].history).toHaveLength(before[symbol].history.length)
       expect(after[symbol].history[after[symbol].history.length - 1].value).toBe(after[symbol].price)
       // The day is still measured from yesterday's close.
-      expect(after[symbol].change).toBeCloseTo(after[symbol].price - after[symbol].previousClose, 2)
+      // `as number` rather than a null check: the fixture always carries a
+      // previous close, and the wire type allows null because a real
+      // snapshot need not.
+      expect(after[symbol].change).toBeCloseTo(
+        after[symbol].price - (after[symbol].previousClose as number),
+        2,
+      )
     }
   })
 
@@ -561,7 +567,7 @@ describe('pollMarkets', () => {
   it('keeps the day change anchored to yesterday, not to the last poll', () => {
     useUIStore.getState().pollMarkets(2_000)
     for (const q of Object.values(useUIStore.getState().underlyings)) {
-      expect(q.change).toBeCloseTo(q.price - q.previousClose, 2)
+      expect(q.change).toBeCloseTo(q.price - (q.previousClose as number), 2)
     }
   })
 
@@ -580,8 +586,8 @@ describe('pollMarkets', () => {
             .sort((a, b) => a.strike - b.strike)
 
           for (let i = 1; i < ladder.length; i++) {
-            if (type === 'call') expect(ladder[i].last).toBeLessThan(ladder[i - 1].last)
-            else expect(ladder[i].last).toBeGreaterThan(ladder[i - 1].last)
+            if (type === 'call') expect(ladder[i].last).toBeLessThan(ladder[i - 1].last as number)
+            else expect(ladder[i].last).toBeGreaterThan(ladder[i - 1].last as number)
           }
         }
       }
@@ -592,9 +598,9 @@ describe('pollMarkets', () => {
     for (let i = 0; i < 20; i++) useUIStore.getState().pollMarkets(2_000)
     for (const c of useUIStore.getState().chain) {
       expect(c.bid).toBeGreaterThan(0)
-      expect(c.ask).toBeGreaterThan(c.bid)
-      expect(c.last).toBeGreaterThanOrEqual(c.bid)
-      expect(c.last).toBeLessThanOrEqual(c.ask)
+      expect(c.ask).toBeGreaterThan(c.bid as number)
+      expect(c.last).toBeGreaterThanOrEqual(c.bid as number)
+      expect(c.last).toBeLessThanOrEqual(c.ask as number)
     }
   })
 
@@ -763,7 +769,9 @@ describe('setRiskLimit', () => {
 
   it('logs nothing when the value did not actually change', () => {
     const before = useUIStore.getState().auditLog.length
-    const current = RISK_LIMITS.find((l) => l.key === 'max_daily_loss_pct')!.value
+    // `!` on the value as well as the row: `RiskLimit.value` is nullable on
+    // the wire (null = no ceiling configured), and this fixture always has one.
+    const current = RISK_LIMITS.find((l) => l.key === 'max_daily_loss_pct')!.value!
     useUIStore.getState().setRiskLimit('max_daily_loss_pct', current)
 
     expect(useUIStore.getState().auditLog).toHaveLength(before)

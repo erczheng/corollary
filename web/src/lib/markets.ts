@@ -6,10 +6,16 @@
  * None of these mutate their input. The chain and the stock universe are
  * single arrays that every view reads; an in-place `.sort()` would leave
  * the previous view's ordering behind in the data itself.
+ *
+ * **Every market figure here is nullable, and none of them is coerced.** A
+ * real chain has no bid on half its contracts, no previous close on a
+ * newly listed one, and no open interest at all on this data plan. A null
+ * sorts *last in both directions* and renders as an absence — the rule the
+ * fund `marketCap` column has always followed, now applied to the columns
+ * the live feed turned out to share it with.
  */
 
-import { OPTION_CHAIN } from './mockData'
-import { type OptionContract, type StockQuote, type UnderlyingQuote } from './types'
+import { type OptionContract, type StockQuote } from './types'
 
 export type SortDirection = 'ascending' | 'descending'
 
@@ -18,7 +24,7 @@ export type SortDirection = 'ascending' | 'descending'
  * zero, SPY ranks below the smallest company on the list and a column of
  * dollars states that a fund is worth nothing. Descending or ascending, a
  * row with no value belongs at the bottom either way. */
-function compareNullable(a: number | null, b: number | null, direction: SortDirection): number | null {
+function compareNullable(a: number | null, b: number | null, direction: SortDirection): number {
   if (a === null && b === null) return 0
   if (a === null) return 1
   if (b === null) return -1
@@ -33,12 +39,38 @@ function compare(a: number, b: number, direction: SortDirection): number {
 // Options chains
 // ---------------------------------------------------------------------- //
 
+/** Which solver produced a contract's implied volatility.
+ *
+ * Decision 10: Alpaca serves an IV on the indicative feed only where its
+ * own Black-Scholes solve succeeded, and Corollary derives the rest from
+ * the mid. A chain that silently mixed the two would be worse than either
+ * alone, so the number carries its provenance and the column says which.
+ *
+ * Deliberately **not** a field on `OptionContract`. The server sends
+ * `iv_source`, and `tests/api/test_schema_contract.py` lists it as an
+ * addition `types.ts` must not declare; declaring it fails that test. Read
+ * structurally instead, which is honest about where it comes from. */
+export type AnalyticsSource = 'vendor' | 'derived'
+
+export function ivSourceOf(contract: OptionContract): AnalyticsSource | null {
+  const raw = (contract as OptionContract & { ivSource?: unknown }).ivSource
+  return raw === 'vendor' || raw === 'derived' ? raw : null
+}
+
 /** `ladder` is the chain's own order — symbol, expiration, strike, calls
  * before puts — and it is not a column you can click. The rest are, and
  * they are exactly the quote columns: sorting by Type would group two
  * halves of the same ladder into blocks that no longer read as a chain,
  * and sorting by Strike across three expirations interleaves ladders that
- * do not exist. */
+ * do not exist.
+ *
+ * **`openInterest` is absent, and that is decision 15.** Open interest has
+ * no permissible free source on this plan, so the column is present but
+ * mostly empty and a sort on it would be a ranking over nulls — the
+ * invented-number failure PRD §8.5 exists to prevent. A ranking option
+ * that returns the list unsorted is worse than an absent one, the same
+ * reason the command palette omits Execute while halted rather than
+ * showing it disabled. It comes back when the data does. */
 export type ChainSortKey =
   | 'ladder'
   | 'last'
@@ -47,7 +79,6 @@ export type ChainSortKey =
   | 'bid'
   | 'ask'
   | 'volume'
-  | 'openInterest'
   | 'iv'
 
 export interface ChainSort {
@@ -69,33 +100,43 @@ export function sortChain(contracts: OptionContract[], sort: ChainSort): OptionC
   const rows = [...contracts]
 
   if (sort.key === 'ladder') {
-    // Symbol, then expiration, then strike, then right. Sorting by strike
-    // alone interleaves three expirations of the same underlying into one
-    // ladder that does not exist.
+    // Expiration, then strike, then right. Sorting by strike alone
+    // interleaves three expirations of the same underlying into one ladder
+    // that does not exist.
+    //
+    // **Not `symbol` first.** On the wire `symbol` is the *OCC contract*
+    // symbol -- `NVDA260914C00210000` -- not the underlying, and it encodes
+    // the right *before* the strike. Sorting on it first would group every
+    // call above every put and stop the ladder reading as a ladder. It
+    // stays only as a final tiebreak, where it is a stable identity.
     return rows.sort(
       (a, b) =>
-        a.symbol.localeCompare(b.symbol) ||
         a.expiration.localeCompare(b.expiration) ||
         a.strike - b.strike ||
-        RIGHT_ORDER[a.type] - RIGHT_ORDER[b.type],
+        RIGHT_ORDER[a.type] - RIGHT_ORDER[b.type] ||
+        a.symbol.localeCompare(b.symbol),
     )
   }
 
   const key = sort.key
   // Ties keep the ladder's order rather than whatever the array happened to
   // hold, so two contracts on the same volume don't swap places between
-  // renders.
+  // renders. Contracts with nothing in the column tie with each other and
+  // settle to the ladder at the bottom of the table.
   const ladder = sortChain(rows, CHAIN_LADDER_SORT)
-  return ladder.sort((a, b) => compare(a[key], b[key], sort.direction))
+  return ladder.sort((a, b) => compareNullable(a[key], b[key], sort.direction))
 }
 
 /** The named screens PRD.md §8.4 asks for, expressed as sorts. The
  * dropdown and the column headers drive one piece of state between them —
  * two independent sorts would let the header say one thing while the
- * dropdown claimed another. */
-export type ChainRank = 'strike' | 'volume' | 'gainers' | 'losers' | 'iv' | 'openInterest'
+ * dropdown claimed another.
+ *
+ * *"Highest open interest"* was one of these and is **removed** — see
+ * `ChainSortKey`. */
+export type ChainRank = 'strike' | 'volume' | 'gainers' | 'losers' | 'iv'
 
-export const CHAIN_RANKS: ChainRank[] = ['strike', 'volume', 'gainers', 'losers', 'iv', 'openInterest']
+export const CHAIN_RANKS: ChainRank[] = ['strike', 'volume', 'gainers', 'losers', 'iv']
 
 export const CHAIN_RANK_LABEL: Record<ChainRank, string> = {
   strike: 'Strike ladder',
@@ -103,7 +144,6 @@ export const CHAIN_RANK_LABEL: Record<ChainRank, string> = {
   gainers: 'Top gainers',
   losers: 'Top losers',
   iv: 'Highest IV',
-  openInterest: 'Highest open interest',
 }
 
 export const CHAIN_RANK_SORT: Record<ChainRank, ChainSort> = {
@@ -114,7 +154,6 @@ export const CHAIN_RANK_SORT: Record<ChainRank, ChainSort> = {
   // the gainers list reversed.
   losers: { key: 'changePct', direction: 'ascending' },
   iv: { key: 'iv', direction: 'descending' },
-  openInterest: { key: 'openInterest', direction: 'descending' },
 }
 
 /** The screen a sort corresponds to, or null if clicking a header has taken
@@ -127,9 +166,16 @@ export function chainRankFor(sort: ChainSort): ChainRank | null {
   return match ?? null
 }
 
-/** Every underlying with a listed chain, in the order the fixture defines
- * them. Derived rather than hardcoded — a second list would drift. */
-export const CHAIN_UNDERLYINGS: string[] = [...new Set(OPTION_CHAIN.map((c) => c.symbol))]
+/** The underlyings the chain combobox offers, from the quoted universe the
+ * server serves rather than a second list beside it.
+ *
+ * Phase 1 derived this from the fixture chain, which could answer "does
+ * this name have a chain" without asking. Live, that question costs a
+ * request per symbol, so it is not asked: every quoted name is offered and
+ * the chain's own empty state answers for the ones with nothing listed. */
+export function underlyingSymbols(stocks: StockQuote[]): string[] {
+  return [...new Set(stocks.map((s) => s.symbol))].sort((a, b) => a.localeCompare(b))
+}
 
 /** Minimum contract volume. PRD.md §8.4 lists volume as a *filter*
  * alongside the rankings, and it is the one control here that can empty the
@@ -138,17 +184,26 @@ export const CHAIN_UNDERLYINGS: string[] = [...new Set(OPTION_CHAIN.map((c) => c
  * they were tradeable. */
 export const MIN_VOLUME_STEPS = [0, 5_000, 20_000, 50_000]
 
+/** Volume, and nothing else.
+ *
+ * The underlying used to be filtered here, because Phase 1 held every
+ * chain in one fixture array and `OptionContract.symbol` was the
+ * underlying. Live, the chain is **fetched** one underlying at a time and
+ * `symbol` is the OCC contract symbol, so filtering on it again would
+ * compare `NVDA260914C00210000` against `NVDA` and empty the table. */
 export interface ChainFilter {
-  /** A symbol, or `null` for every underlying at once. */
-  underlying: string | null
   minVolume: number
 }
 
+/** A contract with **no** volume is not a contract with low volume, so it
+ * survives "Any volume" and fails every floor above it. Coercing the null
+ * to 0 would give the same answer, and would also be a claim that it did
+ * not trade; writing the branch out says which question is being asked. */
 export function filterChain(contracts: OptionContract[], filter: ChainFilter): OptionContract[] {
-  return contracts.filter(
-    (c) =>
-      (filter.underlying === null || c.symbol === filter.underlying) && c.volume >= filter.minVolume,
-  )
+  return contracts.filter((c) => {
+    if (filter.minVolume === 0) return true
+    return c.volume !== null && c.volume >= filter.minVolume
+  })
 }
 
 /** Substring match on the symbol, for the underlying search. Case
@@ -185,23 +240,34 @@ export interface StockSort {
  * question from "most active": raw volume finds the same mega caps every
  * session, because NVDA trades 200M shares on a quiet day. Relative volume
  * finds the name that is doing something unusual *for itself*, which is
- * the one worth looking at. */
-export function relativeVolume(s: StockQuote): number {
-  return s.avgVolume === 0 ? 0 : s.volume / s.avgVolume
+ * the one worth looking at.
+ *
+ * **Null rather than 0 when either side is missing**, and the denominator
+ * is the load-bearing one: a 0 average is a division by zero, so a symbol
+ * whose history could not be fetched would sort *first* on the screen
+ * built to find unusual activity. Both figures come from the same
+ * historical feed server-side, and that sameness is the field — an IEX
+ * numerator over a SIP denominator read 0.032 across 26 symbols where the
+ * same-feed figure is 0.816, and every name on the screen looked dead. */
+export function relativeVolume(s: StockQuote): number | null {
+  if (s.volume === null || s.avgVolume === null || s.avgVolume === 0) return null
+  return s.volume / s.avgVolume
 }
 
 export function sortStocks(stocks: StockQuote[], sort: StockSort): StockQuote[] {
   const rows = [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol))
 
-  if (sort.key === 'marketCap') {
-    return rows.sort((a, b) => compareNullable(a.marketCap, b.marketCap, sort.direction) ?? 0)
-  }
   if (sort.key === 'relVolume') {
-    return rows.sort((a, b) => compare(relativeVolume(a), relativeVolume(b), sort.direction))
+    return rows.sort((a, b) => compareNullable(relativeVolume(a), relativeVolume(b), sort.direction))
+  }
+  if (sort.key === 'price') {
+    // The one column that cannot be null: a symbol with no price is not
+    // served as a row at all, because there is nothing to draw.
+    return rows.sort((a, b) => compare(a.price, b.price, sort.direction))
   }
 
   const key = sort.key
-  return rows.sort((a, b) => compare(a[key], b[key], sort.direction))
+  return rows.sort((a, b) => compareNullable(a[key], b[key], sort.direction))
 }
 
 export type StockRank = 'active' | 'trending' | 'gainers' | 'losers' | 'marketCap'
@@ -231,23 +297,6 @@ export function stockRankFor(sort: StockSort): StockRank | null {
   return match ?? null
 }
 
-/** Re-quotes the universe from the live price map.
- *
- * Price, change and percent are not stored on the row — they belong to the
- * symbol, and the symbol has exactly one quote. A stock carrying its own
- * copy is how the Markets table and an Activity row end up disagreeing
- * about what AAPL costs. */
-export function liveStocks(
-  base: StockQuote[],
-  quotes: Record<string, UnderlyingQuote>,
-): StockQuote[] {
-  return base.map((s) => {
-    const q = quotes[s.symbol]
-    if (!q) return s
-    return { ...s, price: q.price, change: q.change, changePct: q.changePct }
-  })
-}
-
 /** Substring match over symbol and name, for the stock search. Both,
  * because half the reason to search a screener is that you know the company
  * and not the ticker — "reddit" should find RDDT. */
@@ -257,6 +306,46 @@ export function searchStocks(stocks: StockQuote[], query: string): StockQuote[] 
   return stocks.filter(
     (s) => s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q),
   )
+}
+
+// ---------------------------------------------------------------------- //
+// Which session a volume figure covers
+// ---------------------------------------------------------------------- //
+
+/** What the number in the Volume column actually counts.
+ *
+ * - `partial` — traded so far in a session that is still running.
+ * - `session` — a completed session, and the most recent one on the table.
+ * - `stale` — a completed session that is **not** the latest one anybody
+ *   here printed in. The symbol stopped printing and the column should say
+ *   so rather than quietly showing an old number as though it were today's.
+ * - `absent` — no daily bar in the window at all. Not a zero.
+ *
+ * The server resolves the session, and reading it back from
+ * `new Date()` would be reading a browser-local clock against New York
+ * boundaries. The one comparison made here is between two served dates. */
+export type VolumeBasis = 'partial' | 'session' | 'stale' | 'absent'
+
+/** The most recent session any served row printed in, as `YYYY-MM-DD`, or
+ * null if none did.
+ *
+ * Derived from the response rather than from the clock: ISO dates compare
+ * lexicographically, so this is a max over what the server said, and it
+ * stays correct on a weekend, a holiday, and at 09:31 when half the table
+ * has printed and half has not. */
+export function latestVolumeDate(stocks: StockQuote[]): string | null {
+  let latest: string | null = null
+  for (const s of stocks) {
+    if (s.volumeDate !== null && (latest === null || s.volumeDate > latest)) latest = s.volumeDate
+  }
+  return latest
+}
+
+export function volumeBasis(s: StockQuote, latestDate: string | null): VolumeBasis {
+  if (s.volume === null || s.volumeSession === null) return 'absent'
+  if (s.volumeSession === 'in_progress') return 'partial'
+  if (s.volumeDate !== null && latestDate !== null && s.volumeDate < latestDate) return 'stale'
+  return 'session'
 }
 
 export interface Moneyness {
@@ -273,7 +362,8 @@ export interface Moneyness {
  * The one fact an option ticket cannot omit: it decides what the contract
  * is worth at expiry. **A call is in the money above its strike and a put
  * is in the money below it** — inverted, a ticket would tell you a put was
- * worthless at exactly the moment it was worth the most. */
+ * worthless at exactly the moment it was worth the most. At the strike
+ * exactly it is *out* of the money, because intrinsic value is zero. */
 export function contractMoneyness(
   spot: number,
   strike: number,

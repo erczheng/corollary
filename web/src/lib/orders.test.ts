@@ -429,8 +429,10 @@ describe('fixtures are internally consistent', () => {
       expect(u.history[u.history.length - 1].value).toBe(u.price)
       // And measures the day from yesterday's close, not from the left
       // edge of a two-month chart.
-      expect(u.previousClose).toBe(u.history[u.history.length - 2].value)
-      expect(u.change).toBeCloseTo(u.price - u.previousClose, 2)
+      const previousClose = u.previousClose
+      expect(previousClose).not.toBeNull()
+      expect(previousClose).toBe(u.history[u.history.length - 2].value)
+      expect(u.change).toBeCloseTo(u.price - (previousClose as number), 2)
     }
   })
 

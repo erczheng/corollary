@@ -1,1040 +1,1054 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, within, fireEvent } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
+import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
-import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS, activityStats } from '../lib/mockData'
-import { daysToExpiry, expiryUrgency } from '../lib/orders'
-import { formatExpiry, formatPct, formatUsd } from '../lib/format'
+import { formatUsd, formatPct } from '../lib/format'
+import type {
+  AccountResponse,
+  ActivityItem,
+  ActivityStats,
+  Page,
+  Position,
+  WorkingOrder,
+} from '../lib/types'
+
+/** Activity reads five endpoints and holds no server state of its own.
+ * These payloads are the shapes the live paper account actually returned on
+ * 2026-09-12 — including `rejectionReason: null`, which is what the wire
+ * sends and what the type had to be widened to accept.
+ *
+ * Nothing here comes from `mockData.ts`. The page is a data-source swap, so
+ * a fixture imported from the Phase 1 file would prove the old rendering
+ * against the old data and nothing about the new path. */
+
+const PAGE_SIZE = 15
+
+/** Folded server-side over **every** realized trade (spec decision 11).
+ * Deliberately *unrelatable* to the rows in `LEDGER` below: the header
+ * cards must read this endpoint, and a page that re-derived them from the
+ * fifteen rows on screen would produce different numbers and fail. */
+const STATS: ActivityStats = {
+  avgWin: null,
+  avgWinPct: null,
+  avgLoss: -29.0,
+  avgLossPct: -27.1616,
+  lifetimePnl: -116.0,
+  wins: 0,
+  losses: 4,
+  notBooked: 0,
+  notBookedSymbols: [],
+}
+
+/** A book that has won and lost, so both averages render rather than one. */
+const STATS_BOTH: ActivityStats = {
+  ...STATS,
+  avgWin: 412.5,
+  avgWinPct: 33.25,
+  wins: 2,
+  lifetimePnl: 709.0,
+}
+
+/** The gap decision 14 exists for. `notBooked` is 0 on the live account
+ * today, so this is the state nobody can see without a fixture. */
+const STATS_GAP: ActivityStats = {
+  ...STATS_BOTH,
+  notBooked: 2,
+  notBookedSymbols: ['GME1261016C00003000', 'GME1261016C00005000'],
+}
+
+const FILL_LOSS: ActivityItem = {
+  id: '20260911000000000::2fd1270e',
+  time: '2026-09-12T01:15:24.157807Z',
+  contract: 'NVDA $240 Call Sep 11',
+  action: 'STC',
+  price: 0.0,
+  quantity: 1,
+  pnl: -2.0,
+  pnlPct: -100.0,
+  amount: null,
+  status: 'filled',
+  rejectionReason: null,
+}
+
+const FILL_WIN: ActivityItem = {
+  id: '20260910131125217::a9d576c2',
+  time: '2026-09-11T17:11:25.217000Z',
+  contract: 'AAPL $340 Call Dec 18',
+  action: 'BTO',
+  price: 12.55,
+  quantity: 1,
+  pnl: null,
+  pnlPct: null,
+  amount: null,
+  status: 'filled',
+  rejectionReason: null,
+}
+
+const REJECTED: ActivityItem = {
+  id: '20260910131100000::b1c2d3e4',
+  time: '2026-09-11T16:02:00.000000Z',
+  contract: 'TSLA $500 Call Oct 16',
+  action: 'BTO',
+  price: null,
+  quantity: 4,
+  pnl: null,
+  pnlPct: null,
+  amount: null,
+  status: 'rejected',
+  rejectionReason: 'max_risk_per_trade_pct — 9.4% of equity against a 7% ceiling',
+}
+
+const DEPOSIT: ActivityItem = {
+  id: '20260805000000000::16d48149',
+  time: '2026-08-05T03:48:40.594917Z',
+  contract: '—',
+  action: 'DEPOSIT',
+  price: null,
+  quantity: null,
+  pnl: null,
+  pnlPct: null,
+  amount: 25000,
+  status: 'filled',
+  rejectionReason: null,
+}
+
+const WITHDRAWAL: ActivityItem = {
+  ...DEPOSIT,
+  id: '20260806000000000::27e59250',
+  time: '2026-08-06T03:48:40.594917Z',
+  action: 'WITHDRAWAL',
+  amount: -1500,
+}
+
+const PENDING: ActivityItem = {
+  id: '20260912000000000::c0ffee01',
+  time: '2026-09-12T13:40:00.000000Z',
+  contract: 'AMD $470/$460 Put Credit Spread Jan 15',
+  action: 'STO',
+  price: 3.4,
+  quantity: 1,
+  pnl: null,
+  pnlPct: null,
+  amount: null,
+  status: 'pending',
+  rejectionReason: null,
+}
+
+const LEDGER = [FILL_LOSS, FILL_WIN, REJECTED, PENDING, DEPOSIT, WITHDRAWAL]
+
+const LONG_CALL: Position = {
+  id: 'AAPL261218C00340000',
+  symbol: 'AAPL',
+  contract: '$340 Call Dec 18',
+  last: 16.139,
+  underlying: 332.55,
+  costBasis: 1255.0,
+  value: 1595.0,
+  quantity: 1,
+  pnl: 340.0,
+  pnlPct: 27.0916,
+  bid: 16.059,
+  ask: 16.219,
+  direction: 'long',
+  legs: [{ symbol: 'AAPL261218C00340000', strike: 340.0, right: 'call', side: 'long', ratio: 1 }],
+  expiry: '2026-12-18',
+  strategyId: null,
+  openedByStrategyId: null,
+  managedExit: null,
+  attachedExit: null,
+  valueHistory: [{ date: '2026-09-11', value: 1635.0 }],
+}
+
+const SHORT_SPREAD: Position = {
+  id: '6dd8ab48-a705-464d-a92c-2543caa63989',
+  symbol: 'AMD',
+  contract: '$470/$460 Put Credit Spread Jan 15',
+  last: -4.16,
+  underlying: 516.115,
+  costBasis: -340.0,
+  value: -615.0,
+  quantity: 1,
+  pnl: -275.0,
+  pnlPct: -80.8824,
+  bid: -5.12,
+  ask: -3.2,
+  direction: 'short',
+  legs: [
+    { symbol: 'AMD270115P00470000', strike: 470.0, right: 'put', side: 'short', ratio: 1 },
+    { symbol: 'AMD270115P00460000', strike: 460.0, right: 'put', side: 'long', ratio: 1 },
+  ],
+  expiry: '2027-01-15',
+  strategyId: null,
+  openedByStrategyId: null,
+  managedExit: null,
+  attachedExit: null,
+  valueHistory: [{ date: '2026-09-11', value: -575.0 }],
+}
+
+const POSITIONS = [LONG_CALL, SHORT_SPREAD]
+
+const WORKING: WorkingOrder = {
+  id: 'wo-1',
+  positionId: LONG_CALL.id,
+  contractKey: null,
+  contract: 'AAPL $340 Call Dec 18',
+  side: 'STC',
+  orderType: 'limit',
+  quantity: 1,
+  limitPrice: 18.5,
+  stopPrice: null,
+  timeInForce: 'gtc',
+  placedAt: '2026-09-12T13:05:00.000000Z',
+  activityId: '20260912000000000::c0ffee01',
+}
+
+const PAPER = {
+  account: 'paper',
+  status: 'ACTIVE',
+  currency: 'USD',
+  cash: 53386.08,
+  equity: 99901.08,
+  lastEquity: 100116.08,
+  dayChange: -215.0,
+  balanceTrend: { changePct: -0.2148, comparedTo: 'vs previous close' },
+  buyingPower: 319786.72,
+  optionsBuyingPower: 71215.08,
+  longMarketValue: 54186.0,
+  shortMarketValue: -7671.0,
+  netPositionValue: 46515.0,
+  grossPositionValue: 61857.0,
+  derivedEquity: 99901.08,
+  equityReconciles: true,
+  equityDifference: 0,
+  margin: {
+    multiplier: 4,
+    marginClass: 'pdt',
+    label: 'Pattern day-trader margin account',
+    note: 'The broker reports a multiplier of 4.',
+  },
+  optionsApprovedLevel: 3,
+  optionsTradingLevel: 3,
+  tradingBlocked: false,
+  accountBlocked: false,
+  transfersBlocked: false,
+  cashAccountAvailable: false,
+  cashAccountUnavailableReason:
+    'Cash trading is unavailable: ALPACA_LIVE_API_KEY and ALPACA_LIVE_SECRET_KEY are not set.',
+  missingLiveCredentialEnvVars: ['ALPACA_LIVE_API_KEY', 'ALPACA_LIVE_SECRET_KEY'],
+} as unknown as AccountResponse
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response
+}
+
+/** The 409 `?account=cash` gets while the live keys are absent. */
+const UNAVAILABLE = jsonResponse(409, {
+  error: {
+    code: 'account_unavailable',
+    message:
+      'The cash account is not configured: ALPACA_LIVE_API_KEY and ALPACA_LIVE_SECRET_KEY are ' +
+      'both required and neither is set.',
+  },
+})
+
+/** A promise that never settles — the loading state, held open. */
+function pending(): Response {
+  return new Promise<never>(() => {}) as unknown as Response
+}
+
+function pageOf(items: ActivityItem[], page: number, total = items.length): Page<ActivityItem> {
+  return {
+    items,
+    total,
+    page,
+    pageSize: PAGE_SIZE,
+    hasMore: (page + 1) * PAGE_SIZE < total,
+  }
+}
+
+interface Answers {
+  stats?: ActivityStats | Response
+  positions?: Position[] | Response
+  working?: WorkingOrder[] | Response
+  account?: Response
+  /** Called with the parsed query of every `/api/activity` request, so a
+   * test can assert what went *out* rather than only what came back — which
+   * is the whole point of server-side search and paging. */
+  onActivity?: (params: URLSearchParams) => void
+  activity?: (params: URLSearchParams) => Response
+}
+
+function isResponse(value: unknown): value is Response {
+  return typeof value === 'object' && value !== null && 'json' in value
+}
+
+/** Answer by URL. Order matters — `/activity/stats` is checked before
+ * `/activity`, and `/positions/working` before `/positions`. */
+function stubFetch(answers: Answers = {}) {
+  const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
+    const url = String(input)
+    const params = new URLSearchParams(url.slice(url.indexOf('?') + 1))
+
+    if (url.includes('/activity/stats')) {
+      const stats = answers.stats ?? STATS
+      return Promise.resolve(isResponse(stats) ? stats : jsonResponse(200, stats))
+    }
+    if (url.includes('/activity')) {
+      answers.onActivity?.(params)
+      if (answers.activity) return Promise.resolve(answers.activity(params))
+      return Promise.resolve(jsonResponse(200, pageOf(LEDGER, Number(params.get('page') ?? 0))))
+    }
+    if (url.includes('/positions/working')) {
+      const working = answers.working ?? []
+      return Promise.resolve(isResponse(working) ? working : jsonResponse(200, working))
+    }
+    if (url.includes('/positions')) {
+      const positions = answers.positions ?? POSITIONS
+      return Promise.resolve(isResponse(positions) ? positions : jsonResponse(200, positions))
+    }
+    if (url.includes('/account')) {
+      if (url.includes('account=cash')) return Promise.resolve(answers.account ?? UNAVAILABLE)
+      return Promise.resolve(jsonResponse(200, PAPER))
+    }
+    return Promise.resolve(jsonResponse(200, {}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
 
 const initialState = useUIStore.getState()
 
-const PAPER = ACCOUNT_SNAPSHOTS.paper
-const CASH = ACCOUNT_SNAPSHOTS.cash
-
-/** Must match Activity.tsx's PAGE_SIZE. */
-const PAGE_SIZE = 15
-const pagesFor = (n: number) => Math.max(1, Math.ceil(n / PAGE_SIZE))
-
 beforeEach(() => {
-  // BrowserRouter reads window.location, and these tests navigate. Without
-  // this, a test that ran after a navigation starts on the wrong page.
-  window.history.pushState({}, '', '/')
-  // `lastTickAt` seeded to *now*, so the page is past "connecting" and
-  // rendering content rather than skeletons. It has to be now rather than
-  // a fixed date, because the pill goes stale on elapsed time and a
-  // hardcoded timestamp is permanently stale. Nothing has actually ticked
-  // — the tick interval is far longer than these tests take — so every
-  // fixture value is still the one the assertions expect.
-  useUIStore.setState({ ...initialState, lastTickAt: new Date().toISOString() }, true)
+  window.history.pushState({}, '', '/activity')
+  // Rule 5: every start is Paper. A leaked `cash` here would be a test
+  // ordering bug that reads as a data bug.
+  useUIStore.setState({ ...initialState, accountMode: 'paper' }, true)
+  queryClient.clear()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
+  queryClient.clear()
 })
 
 function section(heading: string): HTMLElement {
   return screen.getByRole('heading', { name: heading }).closest('section')!
 }
 
-function gotoActivity() {
+/** Render and wait for the ledger to land. Every row on the page is server
+ * state now, so there is nothing to assert before it does. */
+async function renderActivity() {
   render(<App />)
-  fireEvent.click(screen.getByRole('link', { name: 'Activity' }))
+  await screen.findByRole('heading', { name: 'Recent Activity' })
+  await screen.findByText(FILL_LOSS.contract)
 }
 
-/** Position rows only — not the header, and not the panel an expanded row
- * opens underneath itself, which is also a <tr>.
- *
- * Identified by the ⋯ menu rather than by the Close button: the ticket
- * inside the expanded panel has a "Close" mode button of its own, so that
- * would match the panel too. */
-function positionRows(): HTMLElement[] {
-  return within(section('Open Positions'))
+function ledgerRows(): HTMLElement[] {
+  return within(section('Recent Activity'))
     .getAllByRole('row')
-    .filter((r) => within(r).queryByRole('button', { name: /^More actions for/ }) !== null)
+    .slice(1)
 }
 
-function rowFor(contract: string): HTMLElement {
-  return positionRows().find((r) => r.textContent?.includes(contract))!
+function ledgerRow(text: string): HTMLElement {
+  return ledgerRows().find((r) => r.textContent?.includes(text))!
 }
 
-/** Close opens the ticket; it does not submit. Getting from a row to a
- * closed position is: Close → Review close → confirm. */
-function openTicket(contract: string, action = 'Close') {
-  fireEvent.click(within(rowFor(contract)).getByRole('button', { name: action }))
-}
-
-function closeWholePosition(contract: string) {
-  openTicket(contract)
-  fireEvent.click(screen.getByRole('button', { name: 'Review close' }))
-  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close position' }))
-}
-
-/** Activity is the account's full ledger, so cash movements belong here —
- * the Dashboard's Recent Executions is orders only (PRD.md §8.2). These
- * assertions used to live in the Dashboard suite; the rendering they cover
- * is unchanged, only where it is reachable. */
-describe('Cash movements in the ledger', () => {
-  it('shows the money moved on a deposit and a withdrawal, signed', () => {
-    gotoActivity()
-    const feed = within(within(section('Recent Activity')).getByRole('table'))
-
-    expect(feed.getByText('+$5,000.00')).toBeInTheDocument()
-    expect(feed.getByText('−$1,250.00')).toBeInTheDocument()
-  })
-
-  it('does not color a cash movement as if it were a gain or a loss', () => {
-    gotoActivity()
-    const deposit = within(within(section('Recent Activity')).getByRole('table')).getByText(
-      '+$5,000.00',
-    )
-
-    // A deposit is money moved, not money made — DESIGN.md keeps
-    // bullish/bearish for P&L.
-    expect(deposit.className).not.toMatch(/text-bullish|text-bearish/)
-  })
-
-  it('does not stretch its rows — that is the Dashboard panel, not this page', () => {
-    gotoActivity()
-    const table = within(section('Recent Activity')).getByRole('table')
-
-    expect(table.className).not.toMatch(/h-full/)
-  })
-
-  it('leaves the price column empty on a cash movement rather than showing zero', () => {
-    gotoActivity()
-    const depositRow = within(within(section('Recent Activity')).getByRole('table'))
-      .getByText('+$5,000.00')
-      .closest('tr')!
-
-    // A zero would read as a free fill; there was no fill at all.
-    expect(within(depositRow).getAllByText('—').length).toBeGreaterThan(0)
-  })
-})
+/* ------------------------------------------------------------------------
+ * Header cards — decision 11
+ * --------------------------------------------------------------------- */
 
 describe('Header stats', () => {
-  /** Three peer figures, so three cards — the same treatment the Dashboard
-   * gives its header stats. Each is its own labelled group, which is also
-   * what makes these assertions scopeable. */
-  it('stands each stat up as its own card', () => {
-    gotoActivity()
-
-    for (const label of ['Average win', 'Average loss', 'Lifetime P&L']) {
-      expect(screen.getByRole('group', { name: label })).toBeInTheDocument()
-    }
-  })
-
-  it('averages wins and losses separately, in dollars and percent', () => {
-    gotoActivity()
-    const stats = activityStats(PAPER.activity)
-
-    const win = within(screen.getByRole('group', { name: 'Average win' }))
-    expect(win.getByText(formatUsd(stats.avgWin!, { signed: true }))).toBeInTheDocument()
-    expect(win.getByText(formatPct(stats.avgWinPct!, { signed: true }))).toBeInTheDocument()
-
-    const loss = within(screen.getByRole('group', { name: 'Average loss' }))
-    expect(loss.getByText(formatUsd(stats.avgLoss!, { signed: true }))).toBeInTheDocument()
-    expect(loss.getByText(formatPct(stats.avgLossPct!, { signed: true }))).toBeInTheDocument()
-  })
-
-  it('sums lifetime P&L over realized trades only, excluding deposits', () => {
-    gotoActivity()
-    const stats = activityStats(PAPER.activity)
-
-    // The paper feed carries a +$5,000 deposit and a −$1,250 withdrawal.
-    // Neither is performance, so neither is in this number.
-    expect(stats.lifetimePnl).toBeLessThan(5_000)
-    expect(screen.getByText(formatUsd(stats.lifetimePnl, { signed: true }))).toBeInTheDocument()
-  })
-
-  it('colors a win bullish and a loss bearish, never error', () => {
-    gotoActivity()
-    const stats = activityStats(PAPER.activity)
-
-    const avgWin = screen.getByText(formatUsd(stats.avgWin!, { signed: true })).closest('p')!
-    const avgLoss = screen.getByText(formatUsd(stats.avgLoss!, { signed: true })).closest('p')!
-
-    expect(avgWin.className).toMatch(/text-bullish/)
-    expect(avgLoss.className).toMatch(/text-bearish/)
-    // A losing trade is not a system failure (CLAUDE.md, DESIGN.md).
-    expect(avgLoss.className).not.toMatch(/text-error/)
-  })
-
-  it('says how many trades each average is computed over', () => {
-    gotoActivity()
-    const stats = activityStats(PAPER.activity)
-
-    expect(screen.getByText(`over ${stats.wins} winning trades`)).toBeInTheDocument()
-    expect(screen.getByText(`over ${stats.losses} losing trades`)).toBeInTheDocument()
-  })
-})
-
-describe('Open Positions', () => {
-  it('renders one row per position in the active account, each with a Close', () => {
-    gotoActivity()
-
-    const rows = positionRows()
-    expect(rows).toHaveLength(PAPER.positions.length)
-    for (const row of rows) {
-      expect(within(row).getByRole('button', { name: 'Close' })).toBeInTheDocument()
-    }
-  })
-
-  it('opens the ticket rather than submitting — Close alone changes nothing', () => {
-    gotoActivity()
-
-    const target = PAPER.positions[0]
-    openTicket(target.contract)
-
-    // The whole point of Close-as-order-button: the irreversible thing is
-    // one confirm further along, not on the first click.
-    expect(positionRows()).toHaveLength(PAPER.positions.length)
-    expect(screen.getByRole('button', { name: 'Review close' })).toBeInTheDocument()
-  })
-
-  it('states bid, ask and estimated proceeds when closing a long', () => {
-    gotoActivity()
-
-    const long = PAPER.positions.find((p) => p.direction === 'long')!
-    openTicket(long.contract)
-
-    // A long is sold to close at the bid, and that pays you.
-    expect(screen.getByText('Sell to close (STC)')).toBeInTheDocument()
-    expect(screen.getByText('Estimated proceeds')).toBeInTheDocument()
-    expect(screen.getByText(`${formatUsd(long.bid)} / ${formatUsd(long.ask)}`)).toBeInTheDocument()
-    expect(screen.getByText(formatUsd(long.bid * long.quantity * 100))).toBeInTheDocument()
-  })
-
-  it('calls a short close a cost, not proceeds — it is a debit', () => {
-    gotoActivity()
-
-    const short = PAPER.positions.find((p) => p.direction === 'short')!
-    openTicket(short.contract)
-
-    expect(screen.getByText('Buy to close (BTC)')).toBeInTheDocument()
-    expect(screen.getByText('Estimated cost')).toBeInTheDocument()
-    expect(screen.queryByText('Estimated proceeds')).not.toBeInTheDocument()
-  })
-
-  it('closes only that position, and does not halt the engine', () => {
-    gotoActivity()
-
-    closeWholePosition(PAPER.positions[0].contract)
-
-    expect(positionRows()).toHaveLength(PAPER.positions.length - 1)
-    // Close is to Flatten what Flatten is to Halt (CLAUDE.md rule 7).
-    expect(useUIStore.getState().isHalted).toBe(false)
-  })
-
-  it('explains an empty book rather than showing a bare table', () => {
-    // Driven through the store rather than by closing four positions: a
-    // multi-leg position can only take a limit order, so closing one
-    // *works* an order rather than removing it, and the book cannot be
-    // emptied from this page at all. That is covered separately below.
-    useUIStore.setState({
-      openPositions: { paper: [], cash: [] },
-      workingOrders: { paper: [], cash: [] },
-    })
-    gotoActivity()
-
-    expect(within(section('Open Positions')).getByText(/No open positions in this account/)).toBeInTheDocument()
-  })
-
-  it('fills a market close immediately, and only works a limit one', () => {
-    gotoActivity()
-
-    const single = PAPER.positions.find((p) => p.legs.length === 1)!
-    closeWholePosition(single.contract)
-    // Market: gone from the book, and in the ledger as filled.
-    expect(positionRows().some((r) => r.textContent?.includes(single.contract))).toBe(false)
-
-    const spread = PAPER.positions.find((p) => p.legs.length > 1)!
-    closeWholePosition(spread.contract)
-    // Limit, because a spread accepts nothing else: still open, now with
-    // an order working against it.
-    expect(positionRows().some((r) => r.textContent?.includes(spread.contract))).toBe(true)
-    expect(useUIStore.getState().workingOrders.paper.some((o) => o.positionId === spread.id)).toBe(true)
-  })
-})
-
-describe('Expanding a position', () => {
-  const single = PAPER.positions.find((p) => p.legs.length === 1)!
-  const spread = PAPER.positions.find((p) => p.legs.length > 1)!
-
-  function expandRow(contract: string) {
-    fireEvent.click(within(rowFor(contract)).getByRole('button', { name: /^Details for/ }))
-  }
-
-  it('opens a chart and a ticket in place, without covering the table', () => {
-    gotoActivity()
-    expandRow(single.contract)
-
-    expect(screen.getByRole('group', { name: 'Chart view' })).toBeInTheDocument()
-    expect(screen.getByRole('group', { name: 'Ticket mode' })).toBeInTheDocument()
-    // Nothing is modal — the rest of the book is still on screen.
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
-    expect(positionRows()).toHaveLength(PAPER.positions.length)
-  })
-
-  it('keeps one row open at a time', () => {
-    gotoActivity()
-    expandRow(single.contract)
-    expandRow(spread.contract)
-
-    expect(screen.getAllByRole('group', { name: 'Ticket mode' })).toHaveLength(1)
-  })
-
-  it('collapses again on a second click', () => {
-    gotoActivity()
-    expandRow(single.contract)
-    expandRow(single.contract)
-
-    expect(screen.queryByRole('group', { name: 'Ticket mode' })).not.toBeInTheDocument()
-  })
-
-  it('offers four order types on a single-leg position and limit alone on a spread', () => {
-    gotoActivity()
-
-    expandRow(single.contract)
-    const singleTypes = within(screen.getByLabelText('Order type')).getAllByRole('option')
-    expect(singleTypes.map((o) => o.textContent)).toEqual(['Market', 'Limit', 'Stop', 'Stop-Limit'])
-
-    expandRow(spread.contract)
-    const spreadTypes = within(screen.getByLabelText('Order type')).getAllByRole('option')
-    expect(spreadTypes.map((o) => o.textContent)).toEqual(['Limit'])
-    // And says why, rather than silently offering less.
-    expect(screen.getByText(/limit orders only/i)).toBeInTheDocument()
-  })
-
-  it('reveals the stop field only for the order types that use one', () => {
-    gotoActivity()
-    expandRow(single.contract)
-
-    expect(screen.queryByLabelText('Stop price')).not.toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Order type'), { target: { value: 'stop_limit' } })
-    expect(screen.getByLabelText('Stop price')).toBeInTheDocument()
-    expect(screen.getByLabelText('Limit price')).toBeInTheDocument()
-  })
-
-  it('switches the chart between value and payoff', () => {
-    gotoActivity()
-    expandRow(single.contract)
-
-    const chart = within(screen.getByRole('group', { name: 'Chart view' }))
-    expect(chart.getByRole('button', { name: 'Value since entry' })).toHaveAttribute('aria-pressed', 'true')
-
-    fireEvent.click(chart.getByRole('button', { name: 'Payoff at expiry' }))
-    // The payoff view carries the three numbers you'd otherwise read off
-    // the curve by eye.
-    expect(screen.getByText('Max loss')).toBeInTheDocument()
-    expect(screen.getByText('Max profit')).toBeInTheDocument()
-  })
-
-  it('names the strategy managing the position, and the exits it applies', () => {
-    gotoActivity()
-    const managed = PAPER.positions.find((p) => p.strategyId !== null)!
-    expandRow(managed.contract)
-
-    expect(screen.getByText(/Managed by/)).toBeInTheDocument()
-    expect(screen.getByText(/target 50%, stop 200%, 2 DTE/)).toBeInTheDocument()
-  })
-
-  it('states the underlying price and its day, which no column shows', () => {
-    gotoActivity()
-    expandRow(single.contract)
-
-    // The Last column is the *contract's* mark — the price you close at.
-    // The stock's own price and day, which is what actually moved the
-    // position, appear nowhere else.
-    const quote = UNDERLYINGS[single.symbol]
-    expect(screen.getByText(`${single.symbol} underlying`)).toBeInTheDocument()
-    expect(screen.getByText(formatUsd(quote.price))).toBeInTheDocument()
-    expect(screen.getByText(new RegExp(`${formatPct(quote.changePct, { signed: true })} today`))).toBeInTheDocument()
-  })
-
-  it('charts the underlying, with previous close and every strike marked', () => {
-    gotoActivity()
-    expandRow(spread.contract)
-
-    const chart = within(screen.getByRole('group', { name: 'Chart view' }))
-    fireEvent.click(chart.getByRole('button', { name: 'Underlying' }))
-
-    const quote = UNDERLYINGS[spread.symbol]
-    expect(screen.getByText('Previous close')).toBeInTheDocument()
-    expect(screen.getByText(formatUsd(quote.previousClose))).toBeInTheDocument()
-    // Where the stock sits relative to the strikes is the question a
-    // credit spread actually raises.
-    const strikes = spread.legs
-      .map((l) => `${l.side === 'short' ? 'Short' : 'Long'} ${formatUsd(l.strike)}`)
-      .join(' · ')
-    expect(screen.getByText(strikes)).toBeInTheDocument()
-  })
-
-  it('says where an already-attached exit is held', () => {
-    gotoActivity()
-    const withExit = PAPER.positions.find((p) => p.attachedExit !== null)!
-    expandRow(withExit.contract)
-
-    // A broker-held exit survives Corollary being down; a Corollary-held
-    // one does not. The row is where that difference is visible.
-    expect(screen.getByText(/exit held at broker/)).toBeInTheDocument()
-  })
-})
-
-describe('Adding to a position', () => {
-  it('calls adding to a short a sell to open, not a buy', () => {
-    gotoActivity()
-    const short = PAPER.positions.find((p) => p.direction === 'short')!
-
-    fireEvent.click(within(rowFor(short.contract)).getByRole('button', { name: /^More actions for/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
-
-    // A button reading "Buy" here would name the opposite of the order.
-    expect(screen.getByText('Sell to open (STO)')).toBeInTheDocument()
-  })
-
-  it('grows the position and logs an opening fill with no P&L', () => {
-    gotoActivity()
-    const target = PAPER.positions[0]
-
-    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Review add' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Add to position' }))
-
-    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
-    expect(after.quantity).toBe(target.quantity + 1)
-    expect(useUIStore.getState().activity.paper[0].pnl).toBeNull()
-  })
-
-  it('shows the added risk as an estimate, never as an approval', () => {
-    gotoActivity()
-    const target = PAPER.positions[0]
-
-    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Add to position' }))
-
-    // CLAUDE.md rule 4 — the engine enforces, the client never approves.
-    expect(screen.getByText(/The risk manager decides; this is an estimate/)).toBeInTheDocument()
-  })
-})
-
-describe('Attaching an exit', () => {
-  const target = PAPER.positions.find((p) => p.strategyId !== null && p.legs.length === 1)!
-
-  function openExitTicket() {
-    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: /^More actions for/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Attach exit' }))
-  }
-
-  it('refuses a stop that is not clear of the take-profit', () => {
-    gotoActivity()
-    openExitTicket()
-
-    fireEvent.change(screen.getByLabelText('Take profit'), { target: { value: '3.00' } })
-    fireEvent.change(screen.getByLabelText('Stop'), { target: { value: '3.00' } })
-
-    // Alpaca rejects an OCO whose stop is not a cent clear of its base.
-    expect(screen.getByText(/at least \$0.01 below the take-profit/)).toBeInTheDocument()
-  })
-
-  it('attaches the exit and takes the position off its strategy', () => {
-    gotoActivity()
-    openExitTicket()
-
-    fireEvent.change(screen.getByLabelText('Take profit'), { target: { value: '3.00' } })
-    fireEvent.change(screen.getByLabelText('Stop'), { target: { value: '1.50' } })
-    fireEvent.click(
-      within(screen.getByRole('group', { name: 'Ticket mode' }).parentElement!)
-        .getAllByRole('button', { name: 'Attach exit' })
-        .at(-1)!,
-    )
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Attach exit' }))
-
-    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === target.id)!
-    expect(after.attachedExit).not.toBeNull()
-    // Manual replaces managed — one party responsible for closing it.
-    expect(after.strategyId).toBeNull()
-    expect(screen.getByText(/Manually managed/)).toBeInTheDocument()
-  })
-})
-
-/** Until this section existed the terminal had no concept of "an order I
- * placed that hasn't happened yet" — everything filled on click, which
- * made Activity a record of the past rather than the ledger of record it
- * claims to be. */
-describe('Working Orders', () => {
-  it('lists the orders that are placed and unfilled', () => {
-    gotoActivity()
-    const working = within(section('Working Orders'))
-
-    expect(working.getByText('TSLA $240 Put Nov 15')).toBeInTheDocument()
-    expect(working.getByText('STC')).toBeInTheDocument()
-    expect(working.getByText('1 working in Paper')).toBeInTheDocument()
-  })
-
-  it('shows an empty state on an account with none, pointing at where exits live', () => {
-    gotoActivity()
-    fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
-    fireEvent.click(
-      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
-    )
-
-    const working = within(section('Working Orders'))
-    expect(working.getByText(/No working orders/)).toBeInTheDocument()
-    // Attached exits are not duplicated in here, so the empty state has to
-    // say where they actually are or it reads as "you have no exits".
-    expect(working.getByText(/live on that position/)).toBeInTheDocument()
-  })
-
-  it('shows both prices on a stop-limit, which has two and they differ', () => {
-    useUIStore.setState({
-      workingOrders: {
-        paper: [
-          {
-            id: 'wo-sl',
-            positionId: 'pos-1',
-            contractKey: null,
-            contract: 'AAPL $230 Call Oct 17',
-            side: 'STC',
-            orderType: 'stop_limit',
-            quantity: 1,
-            limitPrice: 1.4,
-            stopPrice: 1.5,
-            timeInForce: 'gtc',
-            placedAt: '2026-08-07T15:00:00Z',
-            activityId: 'act-1',
-          },
-        ],
-        cash: [],
-      },
-    })
-    gotoActivity()
-
-    expect(within(section('Working Orders')).getByText('$1.50 → $1.40')).toBeInTheDocument()
-  })
-
-  it('cancels an order and flips its ledger row rather than adding a second', () => {
-    gotoActivity()
-    const before = useUIStore.getState().activity.paper.length
-
-    fireEvent.click(within(section('Working Orders')).getByRole('button', { name: 'Cancel' }))
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel order' }))
-
-    const s = useUIStore.getState()
-    expect(s.workingOrders.paper).toHaveLength(0)
-    // One order, one life, one row in the ledger.
-    expect(s.activity.paper).toHaveLength(before)
-    expect(s.activity.paper.find((a) => a.id === 'act-1')!.status).toBe('canceled')
-  })
-
-  it('says cancelling an order is not closing the trade', () => {
-    gotoActivity()
-    fireEvent.click(within(section('Working Orders')).getByRole('button', { name: 'Cancel' }))
-
+  it('reads the lifetime figures from the stats endpoint, not from the page on screen', async () => {
+    const fetchMock = stubFetch({ stats: STATS_BOTH })
+    await renderActivity()
+
+    // The rows on screen carry a single -2.00 of realized P&L. The cards
+    // show the server's fold over every trade, which is a different number
+    // — that is the assertion.
     expect(
-      within(screen.getByRole('alertdialog')).getByText(/position itself is untouched/),
-    ).toBeInTheDocument()
-  })
-
-  it('takes working orders with the position when it closes out', () => {
-    gotoActivity()
-    // wo-1 works against pos-2, which is single-leg and can close at market.
-    const target = PAPER.positions.find((p) => p.id === 'pos-2')!
-    closeWholePosition(target.contract)
-
-    // An order against a position that no longer exists can never fill.
-    expect(useUIStore.getState().workingOrders.paper.some((o) => o.positionId === 'pos-2')).toBe(false)
-  })
-})
-
-/** Loading here is a real condition rather than a timer: before the first
- * price arrives there is nothing current to show, which is exactly the
- * state Phase 2 is in while the opening snapshot is in flight. */
-describe('Loading states', () => {
-  function beforeFirstPrice() {
-    useUIStore.setState({ ...initialState, lastTickAt: null }, true)
-    gotoActivity()
-  }
-
-  it('shows skeletons rather than an empty book before the first price', () => {
-    beforeFirstPrice()
-
-    // A stream that hasn't connected and an account with nothing in it
-    // mean very different things at 9:31am, and a blank panel cannot tell
-    // them apart.
-    expect(screen.getByText('Loading open positions')).toBeInTheDocument()
-    expect(screen.getByText('Loading working orders')).toBeInTheDocument()
-    expect(screen.getByText('Loading activity')).toBeInTheDocument()
-    expect(screen.queryByText(/No open positions/)).not.toBeInTheDocument()
-  })
-
-  it('announces loading to a screen reader without reading out the bars', () => {
-    beforeFirstPrice()
-
-    const busy = screen.getAllByRole('status').filter((s) => s.getAttribute('aria-busy') === 'true')
-    expect(busy.length).toBeGreaterThan(0)
-  })
-
-  it('replaces the skeletons once a price has arrived', () => {
-    gotoActivity()
-
-    expect(screen.queryByText('Loading open positions')).not.toBeInTheDocument()
-    expect(positionRows()).toHaveLength(PAPER.positions.length)
-  })
-})
-
-describe('Live status', () => {
-  it('reads Connecting until the first price', () => {
-    useUIStore.setState({ ...initialState, lastTickAt: null }, true)
-    gotoActivity()
-
-    expect(screen.getByLabelText('Connecting to price stream')).toBeInTheDocument()
-  })
-
-  it('reports the time of the last price once streaming', () => {
-    gotoActivity()
-
-    // The question a positions screen has to answer continuously is "are
-    // these numbers current". A Refresh button answered it once.
-    expect(screen.getByLabelText(/^Live — last price /)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
-  })
-
-  it('stops claiming to be live once prices stop arriving', () => {
-    useUIStore.setState(
-      { ...initialState, lastTickAt: new Date(Date.now() - 60_000).toISOString() },
-      true,
-    )
-    gotoActivity()
-
-    // A badge reading "Live" beside a timestamp that stopped moving is a
-    // status indicator lying about the one thing it exists for.
-    expect(screen.getByLabelText(/^Stale — no price since /)).toBeInTheDocument()
-    expect(screen.queryByLabelText(/^Live /)).not.toBeInTheDocument()
-  })
-})
-
-describe('Expiry', () => {
-  it('counts down the days on every position', () => {
-    gotoActivity()
-
-    for (const p of PAPER.positions) {
-      const dte = daysToExpiry(p.expiry, MARKET_TODAY)
-      const cell = within(rowFor(p.contract)).getByTitle(`Expires ${formatExpiry(p.expiry)}`)
-      expect(cell).toHaveTextContent(dte < 0 ? 'Expired' : dte === 0 ? 'Today' : `${dte}d`)
-    }
-  })
-
-  /* All three render paths need a fixture behind them or two of them are
-   * branches nobody can ever see — the trap `pending` fell into before the
-   * Activity page existed. */
-  it('reaches the expiring-today and already-expired states', () => {
-    gotoActivity()
-
-    const today = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'today')!
-    const expired = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'expired')!
-
-    expect(within(rowFor(today.contract)).getByText('Today')).toBeInTheDocument()
-    expect(within(rowFor(expired.contract)).getByText('Expired')).toBeInTheDocument()
-  })
-
-  it('flags an expired position in caution, the same as one nearly there', () => {
-    gotoActivity()
-
-    const expired = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'expired')!
-    const cell = within(rowFor(expired.contract)).getByText('Expired').parentElement!
-    expect(cell.className).toMatch(/text-caution/)
-  })
-
-  it('flags a position near expiry in caution, never in error', () => {
-    gotoActivity()
-
-    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
-    const cell = within(rowFor(near.contract)).getByTitle(`Expires ${formatExpiry(near.expiry)}`)
-      .parentElement!
-
-    // Running out of time is a deadline, not a system failure.
-    expect(cell.className).toMatch(/text-caution/)
-    expect(cell.className).not.toMatch(/text-error/)
-  })
-
-  it('leaves a position with room to run unflagged', () => {
-    gotoActivity()
-
-    const far = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'normal')!
-    const cell = within(rowFor(far.contract)).getByTitle(`Expires ${formatExpiry(far.expiry)}`).parentElement!
-
-    expect(cell.className).not.toMatch(/text-caution/)
-  })
-})
-
-describe('The ticket knows the contract expires', () => {
-  it('warns that a GTC order cannot outlive the contract', () => {
-    gotoActivity()
-    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
-
-    fireEvent.click(within(rowFor(near.contract)).getByRole('button', { name: 'Close' }))
-    fireEvent.change(screen.getByLabelText('Time in force'), { target: { value: 'gtc' } })
-
-    // "Good til canceled" is the one phrase on the ticket that reads like
-    // a promise, and on a contract days from expiry it is a short one.
-    expect(screen.getByText(/cannot outlive it/)).toBeInTheDocument()
-  })
-
-  it('says nothing of the sort for a day order', () => {
-    gotoActivity()
-    const near = PAPER.positions.find((p) => expiryUrgency(p, MARKET_TODAY) === 'near')!
-
-    fireEvent.click(within(rowFor(near.contract)).getByRole('button', { name: 'Close' }))
-    expect(screen.queryByText(/cannot outlive it/)).not.toBeInTheDocument()
-  })
-
-  it('names the expiry in the confirm, the last place you look', () => {
-    gotoActivity()
-    const target = PAPER.positions[0]
-
-    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: 'Close' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Review close' }))
-
-    expect(
-      within(screen.getByRole('alertdialog')).getByText(
-        new RegExp(`expiring ${formatExpiry(target.expiry)}`),
+      await within(screen.getByRole('group', { name: 'Lifetime P&L' })).findByText(
+        formatUsd(STATS_BOTH.lifetimePnl, { signed: true }),
       ),
     ).toBeInTheDocument()
+
+    expect(
+      fetchMock.mock.calls.some((c) => String(c[0]).includes('/activity/stats')),
+    ).toBe(true)
+  })
+
+  it('averages wins and losses separately, in dollars and percent', async () => {
+    stubFetch({ stats: STATS_BOTH })
+    await renderActivity()
+
+    const win = screen.getByRole('group', { name: 'Average win' })
+    expect(within(win).getByText(formatUsd(STATS_BOTH.avgWin!, { signed: true }))).toBeInTheDocument()
+    expect(within(win).getByText(formatPct(STATS_BOTH.avgWinPct!, { signed: true }))).toBeInTheDocument()
+
+    const loss = screen.getByRole('group', { name: 'Average loss' })
+    expect(
+      within(loss).getByText(formatUsd(STATS_BOTH.avgLoss!, { signed: true })),
+    ).toBeInTheDocument()
+  })
+
+  /** An average over zero trades is unknown, not zero. $0.00 would claim a
+   * result that does not exist — and this is the live account's actual
+   * state today: four losses and no wins. */
+  it('shows an em dash rather than $0.00 where there is no trade of that kind', async () => {
+    stubFetch({ stats: STATS })
+    await renderActivity()
+
+    const win = screen.getByRole('group', { name: 'Average win' })
+    expect(within(win).getByText('—')).toBeInTheDocument()
+    expect(within(win).queryByText('+$0.00')).not.toBeInTheDocument()
+    expect(within(win).getByText('over 0 winning trades')).toBeInTheDocument()
+  })
+
+  /** A losing account is `bearish`, never `error`. A loss is not a system
+   * failure, and the split has to survive the data being real. */
+  it('colors a loss bearish and never error', async () => {
+    stubFetch({ stats: STATS })
+    await renderActivity()
+
+    const lifetime = screen.getByRole('group', { name: 'Lifetime P&L' })
+    const value = within(lifetime).getByText(formatUsd(STATS.lifetimePnl, { signed: true }))
+    expect(value.className).toContain('text-bearish')
+    expect(value.className).not.toContain('text-error')
+
+    const loss = screen.getByRole('group', { name: 'Average loss' })
+    expect(
+      within(loss).getByText(formatUsd(STATS.avgLoss!, { signed: true })).className,
+    ).toContain('text-bearish')
+  })
+
+  it('signs every figure textually as well as by color', async () => {
+    stubFetch({ stats: STATS_BOTH })
+    await renderActivity()
+
+    expect(screen.getByText(/^\+\$412\.50$/)).toBeInTheDocument()
+    expect(screen.getByText(/^−\$29\.00$/)).toBeInTheDocument()
+  })
+
+  it('shows skeletons while the fold is in flight, not an empty card', async () => {
+    stubFetch({ stats: pending() })
+    render(<App />)
+
+    expect(await screen.findByText('Loading average win')).toBeInTheDocument()
+    expect(screen.getByText('Loading lifetime P&L')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Lifetime P&L' })).not.toBeInTheDocument()
+  })
+
+  it('says the lifetime figures failed rather than showing a zero', async () => {
+    stubFetch({ stats: jsonResponse(500, { error: { code: 'boom', message: 'Ledger unreadable.' } }) })
+    render(<App />)
+
+    expect(await screen.findByText('Ledger unreadable.', {}, { timeout: 4000 })).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Lifetime P&L' })).not.toBeInTheDocument()
   })
 })
 
-describe('Keyboard', () => {
-  it('opens the confirm on Enter rather than placing the order outright', () => {
-    gotoActivity()
-    const target = PAPER.positions[0]
-    fireEvent.click(within(rowFor(target.contract)).getByRole('button', { name: 'Close' }))
+/* ------------------------------------------------------------------------
+ * The gap the header cards admit to — decision 14
+ * --------------------------------------------------------------------- */
 
-    fireEvent.submit(screen.getByLabelText('Quantity').closest('form')!)
+describe('Closings the lifetime figures are missing', () => {
+  it('names the count and the contracts beside the cards', async () => {
+    stubFetch({ stats: STATS_GAP })
+    await renderActivity()
 
-    // Enter reaches the dialog, not the broker. One keystroke should not
-    // be able to close a position.
-    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
-    expect(useUIStore.getState().openPositions.paper).toHaveLength(PAPER.positions.length)
-  })
-
-  it('collapses the expanded row on Escape', () => {
-    gotoActivity()
-    fireEvent.click(within(rowFor(PAPER.positions[0].contract)).getByRole('button', { name: /^Details for/ }))
-    expect(screen.getByRole('group', { name: 'Ticket mode' })).toBeInTheDocument()
-
-    fireEvent.keyDown(window, { key: 'Escape' })
-    expect(screen.queryByRole('group', { name: 'Ticket mode' })).not.toBeInTheDocument()
-  })
-
-  it('hands focus back to the menu button when the menu closes', () => {
-    gotoActivity()
-    const trigger = within(rowFor(PAPER.positions[0].contract)).getByRole('button', {
-      name: /^More actions for/,
+    const gap = await screen.findByRole('region', {
+      name: '2 closings are missing from the figures above',
     })
-
-    fireEvent.click(trigger)
-    fireEvent.keyDown(window, { key: 'Escape' })
-
-    // Otherwise focus lands on <body> and the next Tab restarts from the
-    // top of the document.
-    expect(document.activeElement).toBe(trigger)
+    expect(within(gap).getByText(/GME1261016C00003000, GME1261016C00005000/)).toBeInTheDocument()
   })
-})
 
-describe('Searching the ledger', () => {
-  function search(text: string) {
-    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
-      target: { value: text },
+  /** The cause is not stored by any Phase 2 table (decision 14 — it lands
+   * at step 8). A confident wrong reason on a money figure is worse than an
+   * admitted gap, so the panel says the count and stops. */
+  it('does not assert a reason it cannot evidence', async () => {
+    stubFetch({ stats: STATS_GAP })
+    await renderActivity()
+
+    const gap = screen.getByRole('region', {
+      name: '2 closings are missing from the figures above',
     })
-  }
-
-  it('narrows the feed to one symbol', () => {
-    gotoActivity()
-    search('AAPL')
-
-    const rows = within(section('Recent Activity')).getAllByRole('row').slice(1)
-    expect(rows.length).toBeGreaterThan(0)
-    for (const row of rows) expect(row.textContent).toContain('AAPL')
+    expect(within(gap).getByText(/reason is not recorded yet/)).toBeInTheDocument()
+    expect(gap.textContent).not.toMatch(/adjusted deliverable|assignment|exercise/i)
   })
 
-  it('combines with the status filter rather than replacing it', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
+  it('says nothing at all on a complete ledger', async () => {
+    stubFetch({ stats: STATS })
+    await renderActivity()
 
-    search('SPY')
-    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
-      target: { value: 'filled' },
-    })
-
-    for (const row of feed.getAllByRole('row').slice(1)) {
-      expect(row.textContent).toContain('SPY')
-    }
+    expect(screen.queryByText(/missing from the figures above/)).not.toBeInTheDocument()
   })
 
-  it('explains an empty result instead of looking like an empty account', () => {
-    gotoActivity()
-    search('NOTATICKER')
+  /** Singular has its own sentence: "1 closings" in a panel about money
+   * reads as a bug in the panel and invites doubt about the figure. */
+  it('reads as English for a single missing closing', async () => {
+    stubFetch({ stats: { ...STATS_GAP, notBooked: 1, notBookedSymbols: ['GME1261016C00003000'] } })
+    await renderActivity()
 
-    // "No activity in this account yet" would be a lie with 50 rows behind
-    // the search.
-    expect(within(section('Recent Activity')).getByText(/Nothing matching/)).toBeInTheDocument()
-  })
-
-  it('returns to the first page when the search changes', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
-
-    fireEvent.click(feed.getByRole('button', { name: 'Next' }))
-    expect(feed.getByText(/^Page 2 of/)).toBeInTheDocument()
-
-    search('S')
-    expect(feed.getByText(/^Page 1 of/)).toBeInTheDocument()
+    expect(
+      await screen.findByRole('region', { name: '1 closing is missing from the figures above' }),
+    ).toBeInTheDocument()
   })
 })
 
-describe('Reattaching to a strategy', () => {
-  it('names the strategy that opened the position, not the active one', () => {
-    gotoActivity()
-    const detached = PAPER.positions.find((p) => p.strategyId === null)!
-
-    fireEvent.click(within(rowFor(detached.contract)).getByRole('button', { name: /^More actions for/ }))
-
-    // Reattaching to whichever strategy happens to be active now would
-    // quietly move the position onto different exit rules.
-    expect(screen.getByRole('button', { name: /^Reattach to / })).toBeInTheDocument()
-  })
-
-  it('restores the opening strategy and clears the manual exit', () => {
-    gotoActivity()
-    const detached = PAPER.positions.find((p) => p.strategyId === null)!
-
-    fireEvent.click(within(rowFor(detached.contract)).getByRole('button', { name: /^More actions for/ }))
-    fireEvent.click(screen.getByRole('button', { name: /^Reattach to / }))
-
-    const after = useUIStore.getState().openPositions.paper.find((p) => p.id === detached.id)!
-    expect(after.strategyId).toBe(detached.openedByStrategyId)
-    expect(after.attachedExit).toBeNull()
-  })
-})
+/* ------------------------------------------------------------------------
+ * The ledger table
+ * --------------------------------------------------------------------- */
 
 describe('Recent Activity columns', () => {
-  it('runs Time, Asset, Action, P&L, Price, Qty, Status — in that order', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
+  it('runs Time, Asset, Action, P&L, Price, Qty, Status — in that order', async () => {
+    stubFetch()
+    await renderActivity()
 
-    expect(feed.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
-      'Time',
-      'Asset',
-      'Action',
-      'P&L',
-      'Price',
-      'Qty',
-      'Status',
-    ])
+    const headers = within(section('Recent Activity'))
+      .getAllByRole('columnheader')
+      .map((h) => h.textContent)
+    expect(headers).toEqual(['Time', 'Asset', 'Action', 'P&L', 'Price', 'Qty', 'Status'])
   })
 
-  it('keeps the Dashboard on its narrower summary columns', () => {
-    render(<App />)
-    const executions = within(section('Recent Executions'))
+  it('renders the status word, which the summary layout can only put on hover', async () => {
+    stubFetch()
+    await renderActivity()
 
-    // The half-width panel merges Asset/Action and has no Status column.
-    // Same component, same cell logic, different layout.
-    expect(executions.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
-      'Time',
-      'Asset / Action',
-      'Qty',
-      'Price',
-      'P&L',
-    ])
+    expect(within(ledgerRow(REJECTED.contract)).getByText('Rejected')).toBeInTheDocument()
   })
 
-  it('gives the action its own column rather than prefixing the contract', () => {
-    gotoActivity()
+  /** PRD §8.2 and rule 8: this is the page of record for a rejection, so
+   * the rule that rejected it is inline, not on hover. `error`, not
+   * `bearish` — a rule outcome, not a losing position. */
+  it('spells out the rejection rule inline, in error', async () => {
+    stubFetch()
+    await renderActivity()
 
-    const trade = PAPER.activity.find((a) => a.action === 'STC' && a.contract !== '—')!
-    const row = within(section('Recent Activity'))
-      .getAllByRole('row')
-      .find((r) => r.textContent?.includes(trade.contract))!
-    const cells = within(row).getAllByRole('cell')
-
-    // Asset holds the contract alone; Action stands on its own beside it.
-    expect(cells[1].textContent).toContain(trade.contract)
-    expect(cells[1].textContent).not.toContain('STC')
-    expect(cells[2].textContent).toBe('STC')
+    const reason = within(ledgerRow(REJECTED.contract)).getByText(REJECTED.rejectionReason!)
+    expect(reason.className).toContain('text-error')
+    expect(reason.className).not.toContain('text-bearish')
   })
 
-  it('renders the status word, which the summary layout can only put on hover', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
+  /** The wire sends `null`, not an absent key. A filled row must not grow
+   * an empty reason line out of it. */
+  it('shows no reason line where the server sent a null one', async () => {
+    stubFetch()
+    await renderActivity()
 
-    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
-      target: { value: 'pending' },
+    const row = ledgerRow(FILL_WIN.contract)
+    expect(row.querySelector('.text-error')).toBeNull()
+  })
+
+  it('signs a realized loss textually and paints it bearish', async () => {
+    stubFetch()
+    await renderActivity()
+
+    const pnl = within(ledgerRow(FILL_LOSS.contract)).getByText('−$2.00')
+    expect(pnl.className).toContain('text-bearish')
+    expect(pnl.className).not.toContain('text-error')
+  })
+
+  it('leaves P&L an em dash on an opening fill, which has realized nothing', async () => {
+    stubFetch()
+    await renderActivity()
+
+    expect(within(ledgerRow(FILL_WIN.contract)).getAllByText('—').length).toBeGreaterThan(0)
+  })
+})
+
+describe('Cash movements in the ledger', () => {
+  it('shows the money moved on a deposit and a withdrawal, signed', async () => {
+    stubFetch()
+    await renderActivity()
+
+    expect(within(ledgerRow('Deposit')).getByText('+$25,000.00')).toBeInTheDocument()
+    expect(within(ledgerRow('Withdrawal')).getByText('−$1,500.00')).toBeInTheDocument()
+  })
+
+  /** Money you moved in is not money the account made. Rendering it
+   * bullish green would read as a gain. */
+  it('does not color a cash movement as if it were a gain or a loss', async () => {
+    stubFetch()
+    await renderActivity()
+
+    const amount = within(ledgerRow('Deposit')).getByText('+$25,000.00')
+    expect(amount.className).toContain('text-on-surface')
+    expect(amount.className).not.toContain('bullish')
+  })
+
+  it('leaves the price column empty on a cash movement rather than showing zero', async () => {
+    stubFetch()
+    await renderActivity()
+
+    expect(within(ledgerRow('Deposit')).queryByText('$0.00')).not.toBeInTheDocument()
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * Search and filter are the server's, not this page's
+ * --------------------------------------------------------------------- */
+
+describe('Searching the ledger', () => {
+  it('sends the search to the server rather than filtering the page in hand', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({ onActivity: (p) => seen.push(p) })
+    await renderActivity()
+
+    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
+      target: { value: 'NVDA' },
     })
 
-    const rows = feed.getAllByRole('row').slice(1)
-    expect(rows.length).toBeGreaterThan(0)
-    for (const row of rows) {
-      const cells = within(row).getAllByRole('cell')
-      expect(cells[6].textContent).toBe('Pending')
-    }
+    await waitFor(() => {
+      expect(seen.some((p) => p.get('search') === 'NVDA')).toBe(true)
+    })
   })
 
-  it('colors a rejection error and a pending order caution, never bearish', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
+  /** AND, not OR. "Everything I did in AAPL that was rejected" is one
+   * question, and the server answers it as one. */
+  it('combines the search with the status filter in a single request', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({ onActivity: (p) => seen.push(p) })
+    await renderActivity()
 
-    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
+    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
+      target: { value: 'TSLA' },
+    })
+    fireEvent.change(screen.getByLabelText('Filter activity by status'), {
       target: { value: 'rejected' },
     })
 
-    const status = within(feed.getAllByRole('row')[1]).getAllByRole('cell')[6]
-    // A rejected order is a rule outcome, not a losing position.
-    expect(status.querySelector('span')!.className).toMatch(/text-error/)
-    expect(status.querySelector('span')!.className).not.toMatch(/text-bearish/)
+    await waitFor(() => {
+      expect(
+        seen.some((p) => p.get('search') === 'TSLA' && p.get('status') === 'rejected'),
+      ).toBe(true)
+    })
   })
 
-  it('shows an em dash for the asset on a cash movement, and names it in Action', () => {
-    gotoActivity()
+  it('omits the parameters entirely when the question is not being asked', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({ onActivity: (p) => seen.push(p) })
+    await renderActivity()
 
-    const deposit = PAPER.activity.find((a) => a.action === 'DEPOSIT')!
-    const feed = within(section('Recent Activity'))
-    const row = feed
-      .getAllByRole('row')
-      .find((r) => within(r).queryAllByRole('cell')[2]?.textContent === 'Deposit')!
-
-    const cells = within(row).getAllByRole('cell')
-    // A deposit has no contract and no fill price — em dashes, not zeros.
-    expect(cells[1].textContent).toBe('—')
-    expect(cells[4].textContent).toBe('—')
-    expect(cells[3].textContent).toBe(formatUsd(deposit.amount!, { signed: true }))
-  })
-})
-
-describe('Recent Activity', () => {
-  it('paginates the whole feed rather than scrolling it', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
-
-    expect(feed.getByText(`Page 1 of ${pagesFor(PAPER.activity.length)}`)).toBeInTheDocument()
-    // One page of rows on screen, not all 50-odd.
-    expect(feed.getAllByRole('row')).toHaveLength(PAGE_SIZE + 1)
+    expect(seen[0].has('search')).toBe(false)
+    expect(seen[0].has('status')).toBe(false)
   })
 
-  it('advances to the next page', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
+  it('explains an empty result instead of looking like an empty account', async () => {
+    stubFetch({
+      activity: (p) =>
+        p.get('search') === 'ZZZZ'
+          ? jsonResponse(200, pageOf([], 0, 0))
+          : jsonResponse(200, pageOf(LEDGER, 0)),
+    })
+    await renderActivity()
 
-    fireEvent.click(feed.getByRole('button', { name: 'Next' }))
-    expect(feed.getByText(`Page 2 of ${pagesFor(PAPER.activity.length)}`)).toBeInTheDocument()
-  })
-
-  it('returns to the first page when the filter changes', () => {
-    gotoActivity()
-    const feed = within(section('Recent Activity'))
-
-    fireEvent.click(feed.getByRole('button', { name: 'Next' }))
-    expect(feed.getByText(/^Page 2 of/)).toBeInTheDocument()
-
-    // Narrowing the filter while deep in the feed used to land on the last
-    // page of the new result set, which reads as "no results".
-    fireEvent.change(feed.getByRole('combobox', { name: 'Filter activity by status' }), {
-      target: { value: 'filled' },
+    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
+      target: { value: 'ZZZZ' },
     })
 
-    const filled = PAPER.activity.filter((a) => a.status === 'filled').length
-    expect(feed.getByText(`Page 1 of ${pagesFor(filled)}`)).toBeInTheDocument()
+    expect(await screen.findByText(/Nothing matching/)).toBeInTheDocument()
+    expect(screen.getByText(/clear it to see the rest of the ledger/)).toBeInTheDocument()
+  })
+
+  it('returns to the first page when the search changes', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({
+      onActivity: (p) => seen.push(p),
+      activity: () => jsonResponse(200, pageOf(LEDGER, 0, 40)),
+    })
+    await renderActivity()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(seen.some((p) => p.get('page') === '1')).toBe(true))
+
+    seen.length = 0
+    fireEvent.change(screen.getByLabelText('Search activity by symbol or contract'), {
+      target: { value: 'AAPL' },
+    })
+
+    await waitFor(() => {
+      expect(seen.some((p) => p.get('search') === 'AAPL' && p.get('page') === '0')).toBe(true)
+    })
+    // No searched request asked for a page other than the first. Narrowing
+    // while deep in the feed used to land on the last page of the new
+    // result set, which reads as "no results".
+    expect(
+      seen.filter((p) => p.get('search') === 'AAPL').every((p) => p.get('page') === '0'),
+    ).toBe(true)
   })
 })
 
-/** PRD.md §8.2 makes Activity the page of record for rejected orders, and
- * CLAUDE.md rule 8 says a rejection carries the rule that rejected it. A
- * reason reachable only by hovering is a reason that doesn't exist on a
- * screenshot, on a touch device, or to a keyboard. */
-describe('Rejection reasons', () => {
-  const reason = PAPER.activity.find((a) => a.status === 'rejected')!.rejectionReason!
+/* ------------------------------------------------------------------------
+ * Paging — the one-based control over a zero-based API
+ * --------------------------------------------------------------------- */
 
-  it('spells the rule out as visible text on Activity', () => {
-    gotoActivity()
+describe('Paging the ledger', () => {
+  it('asks the server for page 0 first and shows it as page 1', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({
+      onActivity: (p) => seen.push(p),
+      activity: () => jsonResponse(200, pageOf(LEDGER, 0, 40)),
+    })
+    await renderActivity()
 
-    expect(within(section('Recent Activity')).getByText(reason)).toBeInTheDocument()
+    expect(seen[0].get('page')).toBe('0')
+    expect(seen[0].get('pageSize')).toBe(String(PAGE_SIZE))
+    expect(screen.getByText('Page 1 of 3')).toBeInTheDocument()
   })
 
-  it('leaves it on hover on the Dashboard, which is only a summary', () => {
+  /** The trap this page exists to avoid: `usePagination` is one-based and
+   * slices an array in hand, the API is zero-based and slices server-side.
+   * Handing the control's number straight to the query skips page one. */
+  it('asks for page 1 when the reader asks for page 2', async () => {
+    const seen: URLSearchParams[] = []
+    stubFetch({
+      onActivity: (p) => seen.push(p),
+      activity: () => jsonResponse(200, pageOf(LEDGER, 0, 40)),
+    })
+    await renderActivity()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+
+    await waitFor(() => expect(seen.some((p) => p.get('page') === '1')).toBe(true))
+    expect(await screen.findByText('Page 2 of 3')).toBeInTheDocument()
+  })
+
+  /** The page count comes off `total`, which is every matching row — not
+   * off `items.length`, which is one page and would always say "Page 1 of
+   * 1" however deep the ledger went. */
+  it('counts the pages from the total, not from the rows on screen', async () => {
+    stubFetch({ activity: () => jsonResponse(200, pageOf(LEDGER, 0, 31)) })
+    await renderActivity()
+
+    expect(screen.getByText('Page 1 of 3')).toBeInTheDocument()
+  })
+
+  it('hides the pager when one page is the whole ledger', async () => {
+    stubFetch()
+    await renderActivity()
+
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * Loading, failure, and the book that cannot be read
+ * --------------------------------------------------------------------- */
+
+describe('Loading and failure', () => {
+  it('shows skeletons rather than an empty book while the ledger is in flight', async () => {
+    stubFetch({ activity: () => pending(), positions: pending() })
     render(<App />)
 
-    expect(within(section('Recent Executions')).queryByText(reason)).not.toBeInTheDocument()
+    expect(await screen.findByText('Loading activity')).toBeInTheDocument()
+    expect(screen.getByText('Loading open positions')).toBeInTheDocument()
+    expect(screen.queryByText(/Nothing in the Paper ledger/)).not.toBeInTheDocument()
+  })
+
+  /** A failed request is `error` — a system condition. An empty table would
+   * claim the account has never traded, which is the one thing a failed
+   * request cannot know. */
+  it('says the ledger request failed, in error, rather than showing no rows', async () => {
+    stubFetch({
+      activity: () =>
+        jsonResponse(503, { error: { code: 'upstream', message: 'The ledger is unavailable.' } }),
+    })
+    render(<App />)
+
+    const alert = await screen.findByText('The ledger is unavailable.', {}, { timeout: 4000 })
+    expect(alert.className).toContain('text-error')
+    expect(screen.queryByText(/Nothing in the Paper ledger/)).not.toBeInTheDocument()
+  })
+
+  it('says the engine did not answer when nothing answered at all', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))),
+    )
+    render(<App />)
+
+    expect(await screen.findAllByText(/did not answer/, {}, { timeout: 4000 })).not.toHaveLength(0)
+  })
+
+  /** Rule 5 and the 409: serving paper's ledger under the cash account's
+   * name would misreport which money moved. */
+  it('renders the cash 409 as a designed state naming what is missing', async () => {
+    stubFetch({
+      activity: () => UNAVAILABLE,
+      stats: UNAVAILABLE,
+      positions: UNAVAILABLE,
+      working: UNAVAILABLE,
+    })
+    useUIStore.setState({ accountMode: 'cash' })
+    render(<App />)
+
+    const banner = await screen.findByRole('region', { name: 'Cash is not configured' })
+    expect(within(banner).getByText(/ALPACA_LIVE_API_KEY, ALPACA_LIVE_SECRET_KEY/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Recent Activity' })).not.toBeInTheDocument()
+    expect(screen.queryByText('$0.00')).not.toBeInTheDocument()
+  })
+
+  it('never renders an empty ledger for a book it cannot read', async () => {
+    stubFetch({
+      activity: () => UNAVAILABLE,
+      stats: UNAVAILABLE,
+      positions: UNAVAILABLE,
+      working: UNAVAILABLE,
+    })
+    useUIStore.setState({ accountMode: 'cash' })
+    render(<App />)
+
+    await screen.findByRole('region', { name: 'Cash is not configured' })
+    expect(screen.queryByText(/has not traded/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Nothing in the Cash ledger/)).not.toBeInTheDocument()
   })
 })
 
-describe('The page is scoped to one account', () => {
-  /** Switches from the toggle on Activity's own title line, rather than
-   * going back to the Dashboard for it. Everything on this page is
-   * account-scoped, so the control that scopes it lives here too. */
-  function switchToCash() {
-    gotoActivity()
-    fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
-    fireEvent.click(
-      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
-    )
+describe('An empty ledger', () => {
+  /** An empty feed before the open means the day has not started. The same
+   * feed at 3pm means the day produced nothing. Different facts. */
+  it('says the market has not opened yet, before the open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-09-14T12:00:00Z')) // 08:00 ET
+    stubFetch({ activity: () => jsonResponse(200, pageOf([], 0, 0)) })
+    render(<App />)
+
+    expect(await screen.findByText(/market has not opened yet today/)).toBeInTheDocument()
+  })
+
+  it('says the book has not traded, once the session is under way', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-09-14T19:00:00Z')) // 15:00 ET
+    stubFetch({ activity: () => jsonResponse(200, pageOf([], 0, 0)) })
+    render(<App />)
+
+    expect(await screen.findByText(/has not traded rather than one whose day/)).toBeInTheDocument()
+  })
+
+  it('distinguishes an empty filter from an empty book', async () => {
+    stubFetch({
+      activity: (p) =>
+        p.get('status') === 'canceled'
+          ? jsonResponse(200, pageOf([], 0, 0))
+          : jsonResponse(200, pageOf(LEDGER, 0)),
+    })
+    await renderActivity()
+
+    fireEvent.change(screen.getByLabelText('Filter activity by status'), {
+      target: { value: 'canceled' },
+    })
+
+    expect(await screen.findByText(/No canceled activity in the Paper account/)).toBeInTheDocument()
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * Read time, not a Live pill
+ * --------------------------------------------------------------------- */
+
+describe('How current the figures are', () => {
+  /** `store.tick()` was the Phase 1 mock broker. This page is polled now,
+   * and a "Live" badge over refetched data claims more than is true. */
+  it('states the time the ledger was read, and claims nothing about streaming', async () => {
+    stubFetch()
+    await renderActivity()
+
+    const panel = section('Recent Activity')
+    expect(panel.textContent).toMatch(/Read \d{1,2}:\d{2}\s?(AM|PM) ET/)
+    expect(within(panel).queryByText('Live')).not.toBeInTheDocument()
+    expect(within(panel).queryByText('Connecting')).not.toBeInTheDocument()
+  })
+
+  it('refetches every panel on the page when refreshed', async () => {
+    const fetchMock = stubFetch()
+    await renderActivity()
+
+    const before = fetchMock.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh the ledger' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(before))
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * Positions and working orders
+ * --------------------------------------------------------------------- */
+
+describe('Open Positions', () => {
+  it('renders one row per position the broker reports', async () => {
+    stubFetch()
+    await renderActivity()
+
+    const panel = section('Open Positions')
+    expect(await within(panel).findByText(/\$340 Call Dec 18/)).toBeInTheDocument()
+    expect(within(panel).getByText(/\$470\/\$460 Put Credit Spread Jan 15/)).toBeInTheDocument()
+    expect(within(panel).getByText('2 open in Paper')).toBeInTheDocument()
+  })
+
+  it('signs unrealized P&L textually and paints a loser bearish', async () => {
+    stubFetch()
+    await renderActivity()
+
+    const panel = section('Open Positions')
+    expect(within(panel).getByText('+$340.00').className).toContain('text-bullish')
+    const loser = within(panel).getByText('−$275.00')
+    expect(loser.className).toContain('text-bearish')
+    expect(loser.className).not.toContain('text-error')
+  })
+
+  it('explains an empty book rather than showing a bare table', async () => {
+    stubFetch({ positions: [] })
+    await renderActivity()
+
+    expect(
+      within(section('Open Positions')).getByText(/No open positions in this account/),
+    ).toBeInTheDocument()
+  })
+
+  it('says positions failed to load rather than reporting none held', async () => {
+    stubFetch({
+      positions: jsonResponse(503, {
+        error: { code: 'upstream', message: 'Positions are unavailable.' },
+      }),
+    })
+    await renderActivity()
+
+    const panel = section('Open Positions')
+    expect(await within(panel).findByText('Positions are unavailable.')).toBeInTheDocument()
+    expect(within(panel).queryByText('0 open in Paper')).not.toBeInTheDocument()
+  })
+})
+
+describe('Working Orders', () => {
+  it('lists the orders resting at the broker', async () => {
+    stubFetch({ working: [WORKING] })
+    await renderActivity()
+
+    const panel = section('Working Orders')
+    expect(await within(panel).findByText(WORKING.contract)).toBeInTheDocument()
+    expect(within(panel).getByText('1 working in Paper')).toBeInTheDocument()
+  })
+
+  /** A cancel would be the first broker write in this codebase and would
+   * land before the risk manager exists. Disabled with the reason stated,
+   * never a button that silently does nothing. */
+  it('disables Cancel and says why, rather than pretending it works', async () => {
+    stubFetch({ working: [WORKING] })
+    await renderActivity()
+
+    const panel = section('Working Orders')
+    const cancel = await within(panel).findByRole('button', { name: 'Cancel' })
+    expect(cancel).toBeDisabled()
+    expect(within(panel).getByText(/not wired up in this phase/)).toBeInTheDocument()
+  })
+
+  it('shows an empty state on an account with none, pointing at where exits live', async () => {
+    stubFetch({ working: [] })
+    await renderActivity()
+
+    expect(
+      within(section('Working Orders')).getByText(/Exits attached to a position live/),
+    ).toBeInTheDocument()
+  })
+
+  it('says working orders failed to load rather than reporting none resting', async () => {
+    stubFetch({
+      working: jsonResponse(503, {
+        error: { code: 'upstream', message: 'Working orders are unavailable.' },
+      }),
+    })
+    await renderActivity()
+
+    const panel = section('Working Orders')
+    expect(await within(panel).findByText('Working orders are unavailable.')).toBeInTheDocument()
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * The ticket is an estimate surface in this phase
+ * --------------------------------------------------------------------- */
+
+describe('The order ticket, read-only', () => {
+  function expand() {
+    const row = within(section('Open Positions'))
+      .getAllByRole('row')
+      .find((r) => r.textContent?.includes('AAPL $340 Call Dec 18'))!
+    fireEvent.click(within(row).getByRole('button', { name: 'Close' }))
   }
 
-  it('carries the Paper/Cash toggle on the title line', () => {
-    gotoActivity()
+  it('still states bid, ask and the estimate, which are live', async () => {
+    stubFetch()
+    await renderActivity()
+    expand()
 
-    const titleRow = screen.getByRole('heading', { name: 'Activity', level: 1 }).parentElement!
-    expect(within(titleRow).getByRole('button', { name: 'Paper' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
+    expect(screen.getByText('Bid / ask')).toBeInTheDocument()
+    expect(
+      screen.getByText(`${formatUsd(LONG_CALL.bid)} / ${formatUsd(LONG_CALL.ask)}`),
+    ).toBeInTheDocument()
+  })
+
+  /** Phase 2 sends no order. The control is disabled with the reason in
+   * words rather than removed — a missing button does not say why it is
+   * missing, and the estimate beside it is still worth reading. */
+  it('cannot be submitted, and says why in words', async () => {
+    stubFetch()
+    await renderActivity()
+    expand()
+
+    const submit = screen.getByRole('button', { name: 'Review close' })
+    expect(submit).toBeDisabled()
+    expect(screen.getByText(/no order reaches the broker/)).toBeInTheDocument()
+  })
+
+  /** Enter in a form field submits the form, so the disabled button alone
+   * would still let the keyboard open a confirm for an order nothing can
+   * place. */
+  it('does not open the confirm on Enter either', async () => {
+    stubFetch()
+    await renderActivity()
+    expand()
+
+    const qty = screen.getByLabelText('Quantity')
+    fireEvent.submit(qty.closest('form')!)
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('never submits an order to the server', async () => {
+    const fetchMock = stubFetch()
+    await renderActivity()
+    expand()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review close' }))
+    expect(
+      fetchMock.mock.calls.every((c) => {
+        const init = c[1]
+        return init?.method === undefined || init.method === 'GET'
+      }),
+    ).toBe(true)
+  })
+})
+
+/* ------------------------------------------------------------------------
+ * Account scoping
+ * --------------------------------------------------------------------- */
+
+describe('Account scoping', () => {
+  it('asks every endpoint about the selected book', async () => {
+    const fetchMock = stubFetch()
+    await renderActivity()
+
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.includes('/activity?') && u.includes('account=paper'))).toBe(true)
+    expect(urls.some((u) => u.includes('/activity/stats') && u.includes('account=paper'))).toBe(true)
+    expect(urls.some((u) => u.includes('/positions?') && u.includes('account=paper'))).toBe(true)
+    expect(urls.some((u) => u.includes('/positions/working') && u.includes('account=paper'))).toBe(
+      true,
     )
-    expect(within(titleRow).getByRole('button', { name: 'Cash' })).toBeInTheDocument()
-  })
-
-  it('still demands the confirm dialog before Cash goes live', () => {
-    gotoActivity()
-
-    // CLAUDE.md rule 5 — entering Cash is never one click, wherever the
-    // switch happens to be rendered.
-    fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
-    expect(useUIStore.getState().accountMode).toBe('paper')
-
-    fireEvent.click(
-      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
-    )
-    expect(useUIStore.getState().accountMode).toBe('cash')
-  })
-
-  it('shows the cash book, and none of paper’s positions, once Cash is live', () => {
-    switchToCash()
-
-    const rows = positionRows()
-    expect(rows).toHaveLength(CASH.positions.length)
-
-    const text = rows.map((r) => r.textContent).join(' ')
-    for (const p of CASH.positions) expect(text).toContain(p.contract)
-    for (const p of PAPER.positions) expect(text).not.toContain(p.contract)
-  })
-
-  it('recomputes the header stats off the cash feed', () => {
-    switchToCash()
-
-    const cash = activityStats(CASH.activity)
-    const paper = activityStats(PAPER.activity)
-
-    expect(screen.getByText(formatUsd(cash.lifetimePnl, { signed: true }))).toBeInTheDocument()
-    expect(screen.queryByText(formatUsd(paper.lifetimePnl, { signed: true }))).not.toBeInTheDocument()
-  })
-
-  it('names the account in prose and in the header badge', () => {
-    switchToCash()
-
-    // The badge covers News, Markets, Research and the rest, which have no
-    // switch of their own (PRD.md §3). It stays on Activity so the answer
-    // to "whose money is this" is in the same place on every page.
-    expect(screen.getByLabelText('Account: Cash')).toBeInTheDocument()
-    expect(screen.getByText(/for your Cash account/)).toBeInTheDocument()
-  })
-
-  it('comes up in Paper on a cold start', () => {
-    gotoActivity()
-
-    expect(screen.getByLabelText('Account: Paper')).toBeInTheDocument()
-    expect(screen.getByText(/for your Paper account/)).toBeInTheDocument()
   })
 })

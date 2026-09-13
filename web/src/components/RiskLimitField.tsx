@@ -6,8 +6,9 @@ import type { RiskLimit } from '../lib/types'
 
 /** One editable risk ceiling.
  *
- * Three decisions worth stating, because each one is about not letting a
- * ceiling move by accident:
+ * Four decisions worth stating, because each one is about not letting a
+ * ceiling move by accident — or move on the strength of a number nobody
+ * checked:
  *
  * **Nothing commits on blur.** The value is held locally and a Save button
  * appears only once it differs and validates. Tabbing out of a field is not a
@@ -18,21 +19,37 @@ import type { RiskLimit } from '../lib/types'
  * asking twice for it teaches the habit of dismissing the dialog — which is
  * the habit that matters when the dialog is about a raise.
  *
- * **The confirm quotes dollars.** "7% → 10%" is not a consequence anyone can
- * feel. "$1,443 → $2,062 at risk on one position" is. DESIGN.md requires a
- * consequential confirm to state its consequence concretely.
+ * **The confirm quotes dollars, or says why it cannot.** "7% → 10%" is not a
+ * consequence anyone can feel. "$6,993 → $9,990 at risk on one position" is.
+ * But the dollars are a percentage *of real equity*, so when the balance is
+ * unreadable — the account is still loading, or Cash has no credentials — the
+ * dialog says so in words. A `$0.00` there would be a fabricated consequence
+ * on the one dialog whose entire job is to state a true one.
+ *
+ * **A null ceiling is rendered as an absence.** `value === null` means no
+ * ceiling is configured; the field starts empty and says so, rather than
+ * showing a 0 that reads as "nothing may be risked".
  */
 export function RiskLimitField({
   limit,
   equity,
+  equityNote,
+  pending = false,
   onCommit,
 }: {
   limit: RiskLimit
-  /** Account equity, used only to express a percentage ceiling in money. */
-  equity: number
+  /** Account equity, used only to express a percentage ceiling in money.
+   * **Null when the balance could not be read** — never a stand-in figure. */
+  equity: number | null
+  /** Why equity is null, in words, for the confirm. Ignored when equity is
+   * known. */
+  equityNote?: string
+  /** A write is in flight. The button stays visible and goes quiet, so a
+   * double-click cannot send the same raise twice. */
+  pending?: boolean
   onCommit: (value: number) => void
 }) {
-  const [raw, setRaw] = useState(String(limit.value))
+  const [raw, setRaw] = useState(limit.value === null ? '' : String(limit.value))
   const [confirming, setConfirming] = useState(false)
 
   const parsed = raw.trim() === '' ? Number.NaN : Number(raw)
@@ -45,7 +62,7 @@ export function RiskLimitField({
   const helpId = `${fieldId}-help`
 
   function save() {
-    if (!canSave) return
+    if (!canSave || pending) return
     // A raise loosens the ceiling. That is the direction worth stopping on.
     if (isRaise(limit, parsed)) {
       setConfirming(true)
@@ -90,9 +107,10 @@ export function RiskLimitField({
             <button
               type="button"
               onClick={save}
-              className="rounded bg-primary px-3 py-1 text-label-md text-on-primary"
+              disabled={pending}
+              className="rounded bg-primary px-3 py-1 text-label-md text-on-primary disabled:bg-neutral-container disabled:text-on-neutral-container"
             >
-              Save
+              {pending ? 'Saving…' : 'Save'}
             </button>
           ) : null}
         </div>
@@ -101,6 +119,11 @@ export function RiskLimitField({
       <p id={helpId} className="mt-1 max-w-prose text-caption text-on-surface-variant">
         {limit.help} Range {limit.min}–{limit.max}
         {limit.unit === '%' ? '%' : ''}.
+        {limit.value === null ? (
+          /* Stated, not filled in. An empty box with no sentence beside it
+             reads as a value that failed to load. */
+          <> No ceiling is currently configured for this limit.</>
+        ) : null}
       </p>
 
       {error ? (
@@ -115,11 +138,27 @@ export function RiskLimitField({
         consequence={
           limit.unit === '%' ? (
             <>
-              Raising this from {limit.value}% to {parsed}% takes the ceiling on one position from{' '}
-              <span className="text-data-md text-on-surface">{formatUsd(riskDollars(equity, limit.value))}</span>{' '}
-              to{' '}
-              <span className="text-data-md text-on-surface">{formatUsd(riskDollars(equity, parsed))}</span>{' '}
-              against current equity. The engine will permit larger losses from now on.
+              Raising this from {limit.value}% to {parsed}%{' '}
+              {equity === null ? (
+                <>
+                  widens what one position may lose. The dollar figure cannot be quoted:{' '}
+                  {equityNote ?? 'this account’s equity could not be read.'} The percentage is the
+                  whole of what is being approved here.
+                </>
+              ) : (
+                <>
+                  takes the ceiling on one position from{' '}
+                  <span className="text-data-md text-on-surface">
+                    {formatUsd(riskDollars(equity, limit.value ?? 0))}
+                  </span>{' '}
+                  to{' '}
+                  <span className="text-data-md text-on-surface">
+                    {formatUsd(riskDollars(equity, parsed))}
+                  </span>{' '}
+                  against current equity.
+                </>
+              )}{' '}
+              The engine will permit larger losses from now on.
             </>
           ) : (
             <>

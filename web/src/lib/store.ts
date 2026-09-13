@@ -564,22 +564,27 @@ function openedPosition(
   const { side, quantity, price, at, underlying } = opts
   const direction = side === 'BTO' ? 'long' : 'short'
   const costBasis = round2(price * quantity * CONTRACT_MULTIPLIER)
-  const value = round2(contract.last * quantity * CONTRACT_MULTIPLIER)
+  // A fixture contract always prints; a real one need not, and the wire
+  // type says so. The price that just filled is the only honest mark for a
+  // contract with no print and no quote of its own — it is the one number
+  // about this contract that was actually observed.
+  const mark = contract.last ?? price
+  const value = round2(mark * quantity * CONTRACT_MULTIPLIER)
   const pnl = round2(direction === 'long' ? value - costBasis : costBasis - value)
 
   return {
     id: `pos-open-${contractKey(contract)}-${at}`,
     symbol: contract.symbol,
     contract: contractLabel(contract),
-    last: contract.last,
+    last: mark,
     underlying,
     costBasis,
     value,
     quantity,
     pnl,
     pnlPct: costBasis === 0 ? 0 : round2((pnl / costBasis) * 100),
-    bid: contract.bid,
-    ask: contract.ask,
+    bid: contract.bid ?? mark,
+    ask: contract.ask ?? mark,
     direction,
     legs: [
       {
@@ -904,6 +909,10 @@ export const useUIStore = create<UIState>((set) => ({
       for (const symbol of streamed) {
         const quote = underlyings[symbol]
         if (!quote) continue
+        // No previous close is nothing to measure a move from. The row keeps
+        // the price it has rather than being re-marked against a number that
+        // was never there.
+        if (quote.previousClose === null) continue
         const move = (priceStream() - 0.5) * 2 * UNDERLYING_VOLATILITY_PER_SECOND * seconds
         const price = round2(quote.price * (1 + move))
         const change = round2(price - quote.previousClose)
@@ -1053,6 +1062,13 @@ export const useUIStore = create<UIState>((set) => ({
       // a screener.
       const underlyings: Record<string, UnderlyingQuote> = {}
       for (const [symbol, quote] of Object.entries(s.underlyings)) {
+        // Carried across untouched rather than dropped: a symbol with no
+        // previous close still has a price, and a missing row would empty it
+        // off the screener entirely.
+        if (quote.previousClose === null) {
+          underlyings[symbol] = quote
+          continue
+        }
         const move = (marketStream() - 0.5) * 2 * POLL_UNDERLYING_VOLATILITY_PER_SECOND * seconds
         const price = round2(quote.price * (1 + move))
         const change = round2(price - quote.previousClose)
@@ -1086,6 +1102,11 @@ export const useUIStore = create<UIState>((set) => ({
         const half = halfSpread(last, m, spec.liquidity)
         // Yesterday's settle does not move during the session, so the day's
         // change follows the price rather than being drawn again.
+        // The wire allows a contract with no settled close and none of its
+        // own volume; a fixture never has one. Re-marking against numbers
+        // that were never there would print a change measured from nothing,
+        // so such a row is left exactly as it is.
+        if (c.previousClose === null || c.volume === null) return c
         const change = round2(last - c.previousClose)
 
         return {
@@ -1115,6 +1136,9 @@ export const useUIStore = create<UIState>((set) => ({
         if (order.contractKey === null) return true
         const contract = byKey.get(order.contractKey)
         if (!contract) return true
+        // No print and no quote is not a price to fill against. The order
+        // keeps working rather than filling at a number nobody quoted.
+        if (contract.last === null) return true
         if (!orderWouldFill(order, contract.last)) return true
 
         filledIds.add(order.id)
@@ -1156,7 +1180,12 @@ export const useUIStore = create<UIState>((set) => ({
     set((s) => {
       const mode = s.accountMode
       const at = new Date().toISOString()
-      const { pricePerContract } = estimateOpen(contract, draft)
+      // An order has to be priced against a two-sided quote. The chain's
+      // Trade control is absent without one, and this is the same rule a
+      // level down — a market order with no ask has nothing to lift.
+      if (contract.bid === null || contract.ask === null) return s
+      const quote = { bid: contract.bid, ask: contract.ask }
+      const { pricePerContract } = estimateOpen(quote, draft)
       const name = `${contract.symbol} ${contractLabel(contract)}`
 
       // A market order fills. Anything else rests until the contract

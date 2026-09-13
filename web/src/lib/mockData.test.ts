@@ -4,13 +4,31 @@ import {
   BENCHMARK_HISTORY,
   CHAIN_EXPIRATIONS,
   MARKET_TODAY,
-  OPTION_CHAIN,
-  STOCKS,
+  OPTION_CHAIN as WIRE_CHAIN,
+  STOCKS as WIRE_STOCKS,
   STRATEGIES,
   UNDERLYINGS,
   activityStats,
 } from './mockData'
-import { ACTIVITY_STATUS_LABEL, type ActivityStatus } from './types'
+import {
+  ACTIVITY_STATUS_LABEL,
+  type ActivityStatus,
+  type OptionContract,
+  type StockQuote,
+} from './types'
+
+/** Every figure present.
+ *
+ * `OptionContract` and `StockQuote` are **wire** types, and on the wire a
+ * bid, a previous close, an open interest or a session volume can all be
+ * absent — half a real ladder has no bid at all. A *fixture* is complete by
+ * construction, which is what these tests are about, so they read the
+ * generated rows through this rather than null-checking a generator they
+ * are asserting is total. */
+type Complete<T> = { [K in keyof T]-?: NonNullable<T[K]> }
+
+const OPTION_CHAIN = WIRE_CHAIN as Complete<OptionContract>[]
+const STOCKS = WIRE_STOCKS as Complete<StockQuote>[]
 
 /** The fixtures are generated from a seeded PRNG so screenshots and tests
  * don't flake between runs (CLAUDE.md, mockData.ts). "Seeded" only holds if
@@ -294,7 +312,7 @@ describe('the option chain is pinned and internally consistent', () => {
       const rows = OPTION_CHAIN.filter((c) => c.symbol === symbol && c.expiration === '2026-08-21')
       const calls = rows.filter((c) => c.type === 'call')
       const puts = rows.filter((c) => c.type === 'put')
-      const up = UNDERLYINGS[symbol].change > 0
+      const up = (UNDERLYINGS[symbol].change as number) > 0
 
       expect(calls.every((c) => (up ? c.change > 0 : c.change < 0))).toBe(true)
       expect(puts.every((c) => (up ? c.change < 0 : c.change > 0))).toBe(true)

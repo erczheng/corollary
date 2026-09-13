@@ -70,6 +70,16 @@ describe('isRaise', () => {
     expect(isRaise(l, 5)).toBe(false)
     expect(isRaise(l, 7)).toBe(false)
   })
+
+  /** `value: null` means no ceiling is configured. There is nothing to raise
+   * *from*, and a confirm would have to quote a previous figure nobody set —
+   * the `?? 7` mistake wearing a dialog. A bare `next > null` would coerce to
+   * zero and call every first ceiling a raise. */
+  it('is false against an unconfigured ceiling, whatever the new value', () => {
+    const l: RiskLimit = { ...limit('max_risk_per_trade_pct'), value: null }
+    expect(isRaise(l, 25)).toBe(false)
+    expect(isRaise(l, 1)).toBe(false)
+  })
 })
 
 describe('riskDollars', () => {
@@ -134,6 +144,32 @@ describe('auditFieldLabel', () => {
     expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'feed', field: 'stockHistorical' })).toBe(
       'Equity bars (historical)',
     )
+  })
+
+  /** The engine keys a feed audit row by its **env var**, not by the
+   * camelCase key the feed list uses (`settings.py` writes
+   * `field=meta.env_var`). Matching on the key alone printed
+   * `ALPACA_STOCK_FEED_HISTORICAL` in a column that promises readable
+   * settings. Both are true names for the same row. */
+  it('resolves a feed row the engine keyed by its env var', () => {
+    expect(
+      auditFieldLabel({
+        ...AUDIT_LOG[0],
+        category: 'feed',
+        field: 'ALPACA_STOCK_FEED_HISTORICAL',
+      }),
+    ).toBe('Equity bars (historical)')
+  })
+
+  /** Resolved against what the server served, not against the fixture, so a
+   * label the engine renames does not silently keep the old wording. */
+  it('prefers the catalogue it is given over the fixtures', () => {
+    const limits = [{ ...limit('max_risk_per_trade_pct'), label: 'Per-trade ceiling' }]
+    expect(
+      auditFieldLabel({ ...AUDIT_LOG[0], category: 'risk', field: 'max_risk_per_trade_pct' }, {
+        limits,
+      }),
+    ).toBe('Per-trade ceiling')
   })
 
   it('resolves a notification route to its event and channel', () => {

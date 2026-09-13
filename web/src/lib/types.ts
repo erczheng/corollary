@@ -105,7 +105,13 @@ export interface ActivityItem {
    * account made, and summing the two would overstate performance. */
   amount: number | null
   status: ActivityStatus
-  rejectionReason?: string
+  /** Why the order was refused, in the rule's own words. **The wire sends
+   * `null`, not an absent key** — confirmed against `/api/activity` and
+   * `/api/account/transfers` — so this is `string | null` as well as
+   * optional. Narrowed to `?: string` a null read as "present", and every
+   * `rejectionReason &&` guard downstream silently did the right thing for
+   * the wrong reason. */
+  rejectionReason?: string | null
 }
 
 export interface ActivityStats {
@@ -239,11 +245,19 @@ export interface Position {
   expiry: string
   /** Which strategy manages this position, or null once detached. */
   strategyId: string | null
-  /** Which strategy opened it. Never cleared, so detaching is reversible:
-   * without this, reattaching could only guess, and the obvious guess —
-   * whichever strategy happens to be active now — is wrong whenever you've
-   * switched strategies since the position was opened. */
-  openedByStrategyId: string
+  /** Which strategy opened it, or null where nothing here opened it.
+   *
+   * Never cleared once set, so detaching is reversible: without this,
+   * reattaching could only guess, and the obvious guess — whichever
+   * strategy happens to be active now — is wrong whenever you've switched
+   * strategies since the position was opened.
+   *
+   * **Null on every live position**, and the server says so: a broker
+   * position Corollary did not open has no strategy behind it, and
+   * `PositionOut.opened_by_strategy_id` is `str | None` rather than carry a
+   * made-up id that resolves to nothing. Widened here to match, which the
+   * server schema explicitly asked the frontend dispatch to do. */
+  openedByStrategyId: string | null
   managedExit: ManagedExit | null
   attachedExit: AttachedExit | null
   /** Position value over the life of the position. Starts at `costBasis`
@@ -256,10 +270,17 @@ export interface UnderlyingQuote {
   price: number
   /** Yesterday's close. The daily change is measured from here, not from
    * the first point of the series — a 60-session chart's left edge is two
-   * months ago and "today" measured against it is not today. */
-  previousClose: number
-  change: number
-  changePct: number
+   * months ago and "today" measured against it is not today.
+   *
+   * **Null when the feed carried no prior daily bar** — a newly listed name,
+   * or one that did not trade the previous session. Anchoring a change to a
+   * close nobody measured invents the entire move, so this stays null and
+   * the chart's readout says so instead. */
+  previousClose: number | null
+  /** Null exactly where `previousClose` is: with nothing to measure the move
+   * from there is no move, and a 0.00 would claim the price was unchanged. */
+  change: number | null
+  changePct: number | null
   history: PricePoint[]
 }
 
@@ -462,19 +483,41 @@ export interface OptionContract {
    * previous day. */
   expiration: string
   type: 'call' | 'put'
-  last: number
+  /** The last print, else the session's close, else the quote mid. **Null on
+   * a contract that has never traded and has no quote** — 26 of 100 on the
+   * recorded NVDA page. Not guaranteed to sit inside `[bid, ask]`: a print is
+   * a fact about the past and a spread is a fact about now. (A *position's*
+   * `last` is a different number with a different invariant.) */
+  last: number | null
   /** Yesterday's settle. Carried rather than derived so that `change` stays
    * anchored while `last` moves: a poll that re-marks the contract updates
    * the price and the change follows from this, instead of the two drifting
    * apart into a percentage measured against nothing. */
-  previousClose: number
-  change: number
-  changePct: number
-  bid: number
-  ask: number
-  volume: number
-  openInterest: number
-  iv: number
+  previousClose: number | null
+  change: number | null
+  changePct: number | null
+  /** **Null is not a zero bid.** Alpaca documents `bp: 0` as *"the security
+   * has no active bid"*, and it is 49 of 100 contracts on a real NVDA page.
+   * A mid taken from an invented bid is half the ask, and that mid is the
+   * input to a derived IV — an invented number under the word IV. */
+  bid: number | null
+  ask: number | null
+  /** Contracts traded this session. Null before the first print. */
+  volume: number | null
+  /** **Null means unavailable, and 0 means nobody holds one** — two
+   * different facts, so the column renders them differently and never as a
+   * blank. Decision 15: OPRA is paywalled on Basic and the one free
+   * publisher forbids automated retrieval, so this arrives only where the
+   * vendor happened to supply it. The *"highest open interest"* screen is
+   * removed rather than ranking on nulls. */
+  openInterest: number | null
+  /** Implied volatility, vendor-solved where Alpaca's own Black-Scholes
+   * succeeded and derived locally where it did not. Null where neither
+   * worked. Which of the two a number came from arrives as `ivSource`,
+   * which this interface deliberately does **not** declare — it is a
+   * documented server-side addition (`tests/api/test_schema_contract.py`),
+   * read structurally by `ivSourceOf` in `markets.ts`. */
+  iv: number | null
 }
 
 export interface ChainSpec {
@@ -487,13 +530,40 @@ export interface ChainSpec {
   seed: number
 }
 
+/** Whether the session a figure was measured over had finished.
+ *
+ * The Volume column means two things and has to say which: during a session
+ * it is *traded so far today*, and outside one it is *traded last session* --
+ * because a blank column at the weekend answers nobody. A reader who cannot
+ * tell them apart compares a partial day against a full one and concludes a
+ * stock is quiet when it is mid-morning.
+ *
+ * The server decides this, from the market calendar. Do not re-derive it from
+ * the clock here: `new Date()` is browser-local and every session boundary in
+ * this app is a New York one, half-days included. */
+export type SessionState = 'in_progress' | 'completed'
+
 export interface StockQuote {
   symbol: string
   name: string
   price: number
-  change: number
-  changePct: number
-  volume: number
+  /** Null where there is no previous daily bar to measure from. Never 0 —
+   * unchanged and unknown are different facts in a column of dollars. */
+  change: number | null
+  changePct: number | null
+  /** Shares traded over the session named by `volumeSession` and
+   * `volumeDate`. **Null, not 0**: a zero claims the symbol did not trade. */
+  volume: number | null
+  /** Which of the two things `volume` means. Null exactly when `volume` is,
+   * which is a symbol with no daily bar anywhere in the window. */
+  volumeSession: SessionState | null
+  /** The trading date `volume` covers, so the column can name the day rather
+   * than say "last session". ISO date, parsed as UTC midnight like every
+   * other date-only value here — see `formatExpiry`.
+   *
+   * Per row rather than per table: in the first minutes of a session one
+   * symbol can have today's bar while another has not printed yet. */
+  volumeDate: string | null
   /** Average daily share volume. Carried per name rather than drawn from
    * one range, because a uniform draw made COST as busy as NVDA and turned
    * "most active" into a reshuffle of the same list.
@@ -501,7 +571,7 @@ export interface StockQuote {
    * It is also the denominator of relative volume, which is what "trending
    * now" actually means: 4x its usual volume is a stock something is
    * happening to, where raw volume only ever finds the same mega caps. */
-  avgVolume: number
+  avgVolume: number | null
   /** Billions of dollars, or **null for a fund**. An ETF has no market
    * capitalisation. Rendering that as 0 would sort SPY below every real
    * company and read as a fund worth nothing, so the column shows an em
@@ -682,7 +752,20 @@ export type RiskLimitKey =
 export interface RiskLimit {
   key: RiskLimitKey
   label: string
-  value: number
+  /** The configured ceiling, or **null when no ceiling is configured**.
+   *
+   * Nullable because the server declares it nullable (`JsonMoney | None` in
+   * `schemas.py`), and the nullability is the point rather than an
+   * oversight. Null is not zero, not the shipped default, and not an omitted
+   * row — the key is still served, because a page cannot say "no ceiling
+   * configured" about a row it never received.
+   *
+   * Never substitute a number for it. The two order tickets once did this
+   * lookup themselves with different fallbacks, `?? 7` in one and `?? 0` in
+   * the other, so one reported a ceiling nobody had set and the other
+   * reported every trade as over-limit. `riskLimitFor` returns
+   * `number | null` for the same reason. */
+  value: number | null
   unit: '%' | 'count'
   min: number
   max: number

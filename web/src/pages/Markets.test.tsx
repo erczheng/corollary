@@ -1,19 +1,204 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, within, fireEvent, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen, within, fireEvent } from '@testing-library/react'
 import App from '../App'
+import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
-import { STOCKS, sliceRange } from '../lib/mockData'
-import { CHAIN_UNDERLYINGS, MIN_VOLUME_STEPS, filterChain, relativeVolume } from '../lib/markets'
-import { formatExpiry, formatInteger } from '../lib/format'
+import type { AccountResponse, OptionContract, RiskLimit, StockQuote } from '../lib/types'
+
+/** Markets reads three market endpoints and the account, and writes none of
+ * them. Every payload below is the shape
+ * `http://127.0.0.1:5173/api/markets/*` actually answers with — including
+ * the nulls, which are the point: a live chain has no bid on roughly half
+ * its contracts, a fund has no market capitalisation, and open interest is
+ * absent wherever the vendor did not carry it (decision 15).
+ */
+const STOCKS: StockQuote[] = [
+  {
+    symbol: 'NVDA',
+    name: 'NVIDIA Corp.',
+    price: 218.17,
+    change: -0.2,
+    changePct: -0.09,
+    // Still running: this is what has traded so far today.
+    volume: 120_000_000,
+    volumeSession: 'in_progress',
+    volumeDate: '2026-09-11',
+    avgVolume: 126_161_848,
+    marketCap: 5_300,
+  },
+  {
+    symbol: 'SPY',
+    name: 'SPDR S&P 500 ETF Trust',
+    price: 764.285,
+    change: 6.415,
+    changePct: 0.85,
+    // A finished session, and the most recent one on the table.
+    volume: 40_000_000,
+    volumeSession: 'completed',
+    volumeDate: '2026-09-11',
+    avgVolume: 40_407_880,
+    // A fund has none. Never 0.
+    marketCap: null,
+  },
+  {
+    symbol: 'RDDT',
+    name: 'Reddit Inc.',
+    price: 200,
+    // No prior daily bar: there is no move to state.
+    change: null,
+    changePct: null,
+    // Completed, but a week behind everyone else — this symbol stopped
+    // printing and the column has to say so.
+    volume: 5_000_000,
+    volumeSession: 'completed',
+    volumeDate: '2026-09-04',
+    avgVolume: 10_000_000,
+    marketCap: 35,
+  },
+  {
+    symbol: 'ZZZ',
+    name: 'Quiet Holdings',
+    price: 5,
+    change: 1,
+    changePct: 2,
+    // No daily bar anywhere in the window. Not a zero.
+    volume: null,
+    volumeSession: null,
+    volumeDate: null,
+    avgVolume: null,
+    marketCap: 1,
+  },
+]
+
+const CHAIN: OptionContract[] = [
+  {
+    symbol: 'NVDA260914C00210000',
+    strike: 210,
+    expiration: '2026-09-14',
+    type: 'call',
+    last: 8.38,
+    previousClose: 8.95,
+    change: -0.57,
+    changePct: -6.37,
+    bid: 8.15,
+    ask: 8.44,
+    volume: 1_741,
+    openInterest: 663,
+    iv: 0.326944,
+    // Served, and deliberately not declared in types.ts.
+    ivSource: 'derived',
+  } as OptionContract,
+  {
+    symbol: 'NVDA260914C00215000',
+    strike: 215,
+    expiration: '2026-09-14',
+    type: 'call',
+    last: 3.8,
+    previousClose: 4.85,
+    change: -1.05,
+    changePct: -21.65,
+    bid: 3.68,
+    ask: 3.8,
+    volume: 1_485,
+    // A real zero: nobody holds this contract. Different from absent.
+    openInterest: 0,
+    iv: 0.2443,
+    ivSource: 'vendor',
+  } as OptionContract,
+  {
+    symbol: 'NVDA260914P00220000',
+    strike: 220,
+    expiration: '2026-09-14',
+    type: 'put',
+    // Never traded, never quoted. Half a real ladder looks like this.
+    last: null,
+    previousClose: null,
+    change: null,
+    changePct: null,
+    bid: null,
+    ask: null,
+    volume: null,
+    openInterest: null,
+    iv: null,
+  },
+]
+
+const ACCOUNT: AccountResponse = {
+  mode: 'paper',
+  equity: 99_901.08,
+  cash: 61_119.36,
+  buyingPower: 61_119.36,
+  positionsValue: 38_781.72,
+  dayPnl: 12.5,
+  dayPnlPct: 0.01,
+  cashAccountUnavailableReason: null,
+  missingLiveCredentialEnvVars: [],
+} as unknown as AccountResponse
+
+const LIMITS: RiskLimit[] = [
+  {
+    key: 'max_risk_per_trade_pct',
+    label: 'Max risk per trade',
+    value: 7,
+    unit: '%',
+    min: 1,
+    max: 25,
+    help: 'Ceiling on what one position may lose, as a share of account equity.',
+  } as RiskLimit,
+]
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response
+}
+
+interface Overrides {
+  stocks?: Response
+  chain?: Response
+  account?: Response
+}
+
+let chainCalls: string[] = []
+
+function serve(overrides: Overrides = {}) {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = String(input)
+
+    if (url.includes('/markets/stocks')) {
+      return Promise.resolve(overrides.stocks ?? jsonResponse(200, STOCKS))
+    }
+    if (url.includes('/markets/chain/')) {
+      chainCalls.push(url)
+      return Promise.resolve(overrides.chain ?? jsonResponse(200, CHAIN))
+    }
+    if (url.includes('/markets/underlyings')) {
+      return Promise.resolve(jsonResponse(200, []))
+    }
+    if (url.includes('/settings/limits')) {
+      return Promise.resolve(jsonResponse(200, LIMITS))
+    }
+    if (url.includes('/account')) {
+      return Promise.resolve(overrides.account ?? jsonResponse(200, ACCOUNT))
+    }
+    // Nothing else on this page fetches. A 200 with an empty body keeps an
+    // unexpected call from reading as the failure under test.
+    return Promise.resolve(jsonResponse(200, {}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
 
 const initialState = useUIStore.getState()
 
 beforeEach(() => {
-  // BrowserRouter reads window.location. Same guard the other page tests
-  // carry: without it a test that runs after a navigation starts on the
-  // wrong page.
   window.history.pushState({}, '', '/markets')
-  useUIStore.setState({ ...initialState }, true)
+  // Rule 5: every start is Paper.
+  useUIStore.setState({ ...initialState, accountMode: 'paper' }, true)
+  queryClient.clear()
+  chainCalls = []
 })
 
 /** Each section is a named landmark, so the two tables can be told apart —
@@ -23,636 +208,256 @@ function section(name: string): HTMLElement {
   return screen.getByRole('region', { name })
 }
 
-function chainTable(): HTMLElement {
-  return within(section('Options chains')).getByRole('table')
-}
-
 function stockTable(): HTMLElement {
   return within(section('Stocks & ETFs')).getByRole('table')
 }
 
+function chainTable(): HTMLElement {
+  return within(section('Options chains')).getByRole('table')
+}
+
 function bodyRows(table: HTMLElement): HTMLElement[] {
-  // The expanded ticket is its own row with one full-width cell, so it is
-  // not a data row and would otherwise skew every index below.
   return within(table)
     .getAllByRole('row')
     .slice(1)
     .filter((r) => within(r).queryAllByRole('cell').length > 1)
 }
 
-function cells(table: HTMLElement, row = 0): HTMLElement[] {
-  return within(bodyRows(table)[row]).getAllByRole('cell')
+function rowFor(table: HTMLElement, symbol: string): HTMLElement {
+  const row = bodyRows(table).find((r) => within(r).queryAllByRole('cell')[0].textContent === symbol)
+  if (!row) throw new Error(`no row for ${symbol}`)
+  return row
 }
 
-function column(table: HTMLElement, index: number): string[] {
-  return bodyRows(table).map((r) => within(r).getAllByRole('cell')[index].textContent ?? '')
+function cellText(row: HTMLElement, index: number): string {
+  return within(row).getAllByRole('cell')[index].textContent ?? ''
 }
 
-function numbers(table: HTMLElement, index: number): number[] {
-  return column(table, index).map((t) => Number(t.replace(/[$,×%+]/g, '').replace('−', '-')))
+async function openChain(symbol: string) {
+  const box = within(section('Options chains')).getByLabelText('Search underlying')
+  fireEvent.focus(box)
+  fireEvent.change(box, { target: { value: symbol } })
+  // mouseDown, not Enter: the listbox commits before the input loses focus,
+  // which is what keeps a click from being eaten by the outside-click close.
+  fireEvent.mouseDown(await screen.findByRole('option', { name: symbol }))
+  return within(await screen.findByRole('region', { name: 'Options chains' })).findByRole('table')
 }
 
-function searchBox(): HTMLElement {
-  return screen.getByRole('combobox', { name: 'Search underlying' })
-}
-
-describe('the Markets page renders both halves, live', () => {
-  it('shows the chain and the stock universe', () => {
+describe('the stock table reads the served universe', () => {
+  it('renders one row per served symbol', async () => {
+    serve()
     render(<App />)
 
-    expect(screen.getByRole('heading', { name: 'Markets' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Options chains' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Stocks & ETFs' })).toBeInTheDocument()
+    await screen.findByText('NVIDIA Corp.')
+    expect(bodyRows(stockTable())).toHaveLength(STOCKS.length)
   })
 
-  it('takes its first snapshot on mount rather than showing skeletons for two seconds', () => {
+  it('says which session the volume column is counting, per row', async () => {
+    serve()
     render(<App />)
+    await screen.findByText('NVIDIA Corp.')
 
-    // Loading is a real condition — but a page that sat blank for a full
-    // poll interval on every visit would be reporting a connection problem
-    // it does not have.
-    expect(useUIStore.getState().lastPollAt).not.toBeNull()
-    expect(bodyRows(chainTable())).toHaveLength(15)
+    // A column that silently means either "traded so far this morning" or
+    // "all of last Thursday" makes a busy stock read as quiet.
+    expect(cellText(rowFor(stockTable(), 'NVDA'), 5)).toContain('so far')
+    expect(cellText(rowFor(stockTable(), 'SPY'), 5)).toContain('full session')
   })
 
-  it('says it is live once prices are arriving', () => {
+  it('dates a completed session that is not the latest one on the table', async () => {
+    serve()
     render(<App />)
-    expect(screen.getByRole('status')).toHaveAccessibleName(/^Live/)
+    await screen.findByText('Reddit Inc.')
+
+    // Sep 4 against a table whose latest print is Sep 11: visibly stale
+    // rather than quietly old. The date formats in UTC — in ET a bare
+    // YYYY-MM-DD renders as the day before.
+    expect(cellText(rowFor(stockTable(), 'RDDT'), 5)).toContain('Sep 4')
   })
 
-  it('moves the chain and the stocks when a snapshot lands', () => {
+  it('renders an absent volume as an absence, never as a zero', async () => {
+    serve()
     render(<App />)
+    await screen.findByText('Quiet Holdings')
 
-    const before = column(chainTable(), 4)
-    const stocksBefore = column(stockTable(), 2)
-
-    act(() => {
-      useUIStore.getState().pollMarkets(2_000)
-    })
-
-    expect(column(chainTable(), 4)).not.toEqual(before)
-    expect(column(stockTable(), 2)).not.toEqual(stocksBefore)
+    const volume = cellText(rowFor(stockTable(), 'ZZZ'), 5)
+    expect(volume).toContain('—')
+    expect(volume).not.toMatch(/\b0\b/)
+    // And no relative volume either: there is no numerator, and the
+    // denominator is missing too.
+    expect(cellText(rowFor(stockTable(), 'ZZZ'), 6)).toContain('—')
   })
 
-  it('opens scoped to one underlying rather than the whole board', () => {
+  it('renders an absent change as an absence rather than a flat day', async () => {
+    serve()
     render(<App />)
+    await screen.findByText('Reddit Inc.')
 
-    for (const symbol of column(chainTable(), 0)) {
-      expect(symbol).toBe(CHAIN_UNDERLYINGS[0])
-    }
-  })
-})
-
-describe('the underlying search', () => {
-  it('filters the list as you type and commits on Enter', () => {
-    render(<App />)
-
-    fireEvent.change(searchBox(), { target: { value: 'qq' } })
-    expect(within(screen.getByRole('listbox')).getAllByRole('option').map((o) => o.textContent)).toEqual(
-      ['QQQ'],
-    )
-
-    fireEvent.keyDown(searchBox(), { key: 'Enter' })
-
-    for (const symbol of column(chainTable(), 0)) expect(symbol).toBe('QQQ')
+    // No previous close is nothing to measure from. `+$0.00` would claim
+    // the price was unchanged.
+    expect(cellText(rowFor(stockTable(), 'RDDT'), 3)).toContain('—')
+    expect(cellText(rowFor(stockTable(), 'RDDT'), 4)).toContain('—')
   })
 
-  it('commits on click', () => {
+  it('sorts a fund with no market cap last in both directions', async () => {
+    serve()
     render(<App />)
-
-    fireEvent.change(searchBox(), { target: { value: 'msf' } })
-    fireEvent.mouseDown(within(screen.getByRole('listbox')).getByRole('option', { name: 'MSFT' }))
-
-    for (const symbol of column(chainTable(), 0)) expect(symbol).toBe('MSFT')
-  })
-
-  it('walks the list with the arrow keys', () => {
-    render(<App />)
-
-    fireEvent.focus(searchBox())
-    // Opens on "All underlyings"; one step down is the first symbol.
-    fireEvent.keyDown(searchBox(), { key: 'ArrowDown' })
-    fireEvent.keyDown(searchBox(), { key: 'Enter' })
-
-    expect(new Set(column(chainTable(), 0)).size).toBeGreaterThanOrEqual(1)
-  })
-
-  it('finds nothing for a symbol that is not listed, rather than a near match', () => {
-    render(<App />)
-
-    // "APPL" is the classic typo. Silently matching AAPL would filter the
-    // chain to a symbol nobody asked for.
-    fireEvent.change(searchBox(), { target: { value: 'APPL' } })
-
-    // Scoped to the listbox: every native <select> on the page also
-    // publishes options, and there are three of them.
-    expect(within(screen.getByRole('listbox')).queryAllByRole('option')).toHaveLength(0)
-    expect(screen.getByText(/No listed chain matches/)).toBeInTheDocument()
-  })
-
-  it('can go back to every underlying at once', () => {
-    render(<App />)
-
-    fireEvent.focus(searchBox())
-    fireEvent.mouseDown(
-      within(screen.getByRole('listbox')).getByRole('option', { name: 'All underlyings' }),
-    )
-
-    expect(within(section('Options chains')).getByText(/180 of 180 contracts/)).toBeInTheDocument()
-  })
-})
-
-describe('sorting by clicking a column', () => {
-  it('sorts the chain descending on the first click and flips on the second', () => {
-    render(<App />)
-
-    const volume = () => within(chainTable()).getByRole('button', { name: /Volume/ })
-
-    fireEvent.click(volume())
-    const down = numbers(chainTable(), 9)
-    expect(down).toEqual([...down].sort((a, b) => b - a))
-
-    fireEvent.click(volume())
-    const up = numbers(chainTable(), 9)
-    expect(up).toEqual([...up].sort((a, b) => a - b))
-  })
-
-  it('announces the direction it actually sorted in', () => {
-    render(<App />)
-
-    const header = () => within(chainTable()).getByRole('columnheader', { name: /Volume/ })
-
-    fireEvent.click(within(chainTable()).getByRole('button', { name: /Volume/ }))
-    expect(header()).toHaveAttribute('aria-sort', 'descending')
-
-    fireEvent.click(within(chainTable()).getByRole('button', { name: /Volume/ }))
-    expect(header()).toHaveAttribute('aria-sort', 'ascending')
-  })
-
-  it('leaves the identity columns unclickable', () => {
-    render(<App />)
-
-    // Sorting by Type splits a ladder into two blocks that no longer read
-    // as a chain, and Strike across three expirations interleaves ladders
-    // that do not exist.
-    for (const name of ['Symbol', 'Exp', 'Type', 'Strike']) {
-      expect(within(chainTable()).queryByRole('button', { name })).not.toBeInTheDocument()
-    }
-  })
-
-  it('sorts the stock table too, market cap included', () => {
-    render(<App />)
-
-    const button = () => within(stockTable()).getByRole('button', { name: /Market cap/ })
-
-    fireEvent.click(button())
-    expect(within(stockTable()).getByRole('columnheader', { name: /Market cap/ })).toHaveAttribute(
-      'aria-sort',
-      'descending',
-    )
-
-    // Ascending is the case that catches a null coerced to zero — it would
-    // sort a fund to the top.
-    fireEvent.click(button())
-    expect(cells(stockTable())[7].textContent).not.toBe('—')
-  })
-
-  it('says the sort is custom once a header has left the named screens', () => {
-    render(<App />)
-
-    const rank = screen.getByLabelText('Rank chain by') as HTMLSelectElement
-    expect(rank.value).toBe('strike')
-
-    fireEvent.click(within(chainTable()).getByRole('button', { name: /^Bid/ }))
-
-    // Leaving "Strike ladder" selected would have the dropdown claiming a
-    // ranking the table is no longer in.
-    expect(rank.value).toBe('custom')
-  })
-
-  it('lights the matching preset back up when a click lands on one', () => {
-    render(<App />)
-    const rank = () => screen.getByLabelText('Rank chain by') as HTMLSelectElement
-
-    // One click on Change % is exactly the "Top gainers" screen; a second
-    // is "Top losers".
-    fireEvent.click(within(chainTable()).getByRole('button', { name: /Change %/ }))
-    expect(rank().value).toBe('gainers')
-
-    fireEvent.click(within(chainTable()).getByRole('button', { name: /Change %/ }))
-    expect(rank().value).toBe('losers')
-  })
-})
-
-describe('trending now', () => {
-  it('offers trending and no longer offers new listings', () => {
-    render(<App />)
-
-    const rank = screen.getByLabelText('Rank stocks by')
-    expect(within(rank).getByText('Trending now')).toBeInTheDocument()
-    expect(within(rank).queryByText('New listings')).not.toBeInTheDocument()
-  })
-
-  it('ranks by relative volume, which is a different table from most active', () => {
-    render(<App />)
-
-    fireEvent.change(screen.getByLabelText('Rank stocks by'), { target: { value: 'trending' } })
-    const trending = cells(stockTable())[0].textContent
-
-    fireEvent.change(screen.getByLabelText('Rank stocks by'), { target: { value: 'active' } })
-    const active = cells(stockTable())[0].textContent
-
-    // Raw volume finds the same mega caps every session; relative volume
-    // finds the name having an unusual day.
-    expect(trending).not.toBe(active)
-    expect(trending).toBe([...STOCKS].sort((a, b) => relativeVolume(b) - relativeVolume(a))[0].symbol)
-  })
-
-  it('shows the multiple in its own column, and has dropped the listing date', () => {
-    render(<App />)
-
-    expect(within(stockTable()).getByRole('columnheader', { name: /Rel vol/ })).toBeInTheDocument()
-    expect(
-      within(stockTable()).queryByRole('columnheader', { name: /Listed/ }),
-    ).not.toBeInTheDocument()
-    expect(cells(stockTable())[6].textContent).toMatch(/^\d+\.\d{2}×$/)
-  })
-})
-
-describe('trading a contract from the chain', () => {
-  function openTicket(): void {
-    fireEvent.click(within(chainTable()).getAllByRole('button', { name: /^Trade/ })[0])
-  }
-
-  it('expands a ticket under the row it belongs to', () => {
-    render(<App />)
-    openTicket()
-
-    // The side selector and the submit are separate controls with
-    // separate names — one chooses, one places.
-    expect(screen.getByRole('button', { name: 'Buy to open (BTO)' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sell to open (STO)' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Review buy to open' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Contracts')).toBeInTheDocument()
-  })
-
-  it('states a cost for a buy and a credit for a sell', () => {
-    render(<App />)
-    openTicket()
-
-    expect(screen.getByText('Estimated cost')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Sell to open (STO)' }))
-    expect(screen.getByText('Estimated credit')).toBeInTheDocument()
-  })
-
-  it('refuses to quote a maximum loss on a short', () => {
-    render(<App />)
-    openTicket()
-    fireEvent.click(screen.getByRole('button', { name: 'Sell to open (STO)' }))
-
-    // A confident wrong number under the word "risk" is worse than an
-    // honest absence — the engine sizes this against a ±2σ stress loss.
-    expect(screen.getByText('Undefined')).toBeInTheDocument()
-    expect(screen.getByText(/undefined-risk position/)).toBeInTheDocument()
-  })
-
-  it('opens a position after a confirm that names the consequence', () => {
-    render(<App />)
-    openTicket()
-
-    fireEvent.change(screen.getByLabelText('Order type'), { target: { value: 'market' } })
-
-    const before = useUIStore.getState().openPositions.paper.length
-    fireEvent.click(screen.getByRole('button', { name: 'Review buy to open' }))
-
-    const dialog = screen.getByRole('alertdialog')
-    expect(dialog).toHaveTextContent(/Buying 1 contract/)
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Buy to open (BTO)' }))
-
-    expect(useUIStore.getState().openPositions.paper).toHaveLength(before + 1)
-    // And the ticket closes behind it, rather than sitting open over a
-    // position that now exists.
-    expect(screen.queryByLabelText('Contracts')).not.toBeInTheDocument()
-  })
-
-  it('will not let a halted engine open a new position', () => {
-    render(<App />)
-    act(() => {
-      useUIStore.getState().halt()
-    })
-    openTicket()
-
-    // Halt stops new entries. That is the one thing halt is for.
-    expect(screen.getByRole('button', { name: 'Review buy to open' })).toBeDisabled()
-    expect(screen.getByText(/Trading is halted/)).toBeInTheDocument()
-  })
-})
-
-describe('the chain filters', () => {
-  it('reaches the designed empty state at the top volume floor', () => {
-    render(<App />)
-
-    const floor = MIN_VOLUME_STEPS[MIN_VOLUME_STEPS.length - 1]
-    const chain = useUIStore.getState().chain
-    const thin = CHAIN_UNDERLYINGS.find(
-      (s) => filterChain(chain, { underlying: s, minVolume: floor }).length === 0,
-    )!
-
-    fireEvent.change(searchBox(), { target: { value: thin } })
-    fireEvent.keyDown(searchBox(), { key: 'Enter' })
-    fireEvent.change(screen.getByLabelText('Filter chain by minimum volume'), {
-      target: { value: String(floor) },
-    })
-
-    const region = section('Options chains')
-    expect(within(region).queryAllByRole('table')).toHaveLength(0)
-    expect(within(region).getByText(new RegExp(`Nothing in ${thin}`))).toHaveTextContent(
-      formatInteger(floor),
-    )
-  })
-})
-
-describe('the stock table cells', () => {
-  it('signs change and change % textually, not by colour alone', () => {
-    render(<App />)
-
-    for (const row of bodyRows(stockTable())) {
-      const c = within(row).getAllByRole('cell')
-      expect(c[3].textContent).toMatch(/^[+−]\$/)
-      expect(c[4].textContent).toMatch(/^[+−][\d.]+%$/)
-    }
-  })
-
-  it('shows an em dash for a fund rather than a market cap of zero', () => {
-    render(<App />)
+    await screen.findByText('SPDR S&P 500 ETF Trust')
 
     fireEvent.change(screen.getByLabelText('Rank stocks by'), { target: { value: 'marketCap' } })
+    expect(cellText(bodyRows(stockTable())[bodyRows(stockTable()).length - 1], 0)).toBe('SPY')
 
-    const funds = STOCKS.filter((s) => s.marketCap === null).map((s) => s.symbol)
-    for (const row of bodyRows(stockTable())) {
-      const c = within(row).getAllByRole('cell')
-      if (funds.includes(c[0].textContent ?? '')) {
-        expect(c[7]).toHaveTextContent('—')
-        expect(c[7]).not.toHaveTextContent('$0')
-      }
-    }
-  })
-
-  it('quotes the same price the rest of the app has for that stock', () => {
-    render(<App />)
-
-    // One price per symbol. A stock carrying its own copy is how the
-    // Markets table and an Activity row end up disagreeing about AAPL.
-    const quotes = useUIStore.getState().underlyings
-    for (const row of bodyRows(stockTable())) {
-      const c = within(row).getAllByRole('cell')
-      const symbol = c[0].textContent ?? ''
-      const shown = Number((c[2].textContent ?? '').replace(/[$,]/g, ''))
-      expect(shown).toBeCloseTo(quotes[symbol].price, 2)
-    }
+    // Ascending too: coerced to zero, a fund would sort to the *top* and a
+    // column of dollars would state that SPY is worth nothing.
+    fireEvent.click(within(chainOrStockHeader('Market cap')).getByRole('button'))
+    expect(cellText(bodyRows(stockTable())[bodyRows(stockTable()).length - 1], 0)).toBe('SPY')
   })
 })
 
-describe('pagination', () => {
-  it('pages the chain without leaving the underlying', () => {
-    render(<App />)
-
-    const region = section('Options chains')
-    const first = cells(chainTable())[0].textContent
-    expect(bodyRows(chainTable())).toHaveLength(15)
-
-    fireEvent.click(within(region).getByRole('button', { name: 'Next' }))
-
-    expect(cells(chainTable())[0].textContent).toBe(first)
-    expect(within(region).getByText(/Page 2 of/)).toBeInTheDocument()
-  })
-
-  it('returns to page one when a filter narrows the result set', () => {
-    render(<App />)
-
-    const region = section('Options chains')
-    fireEvent.click(within(region).getByRole('button', { name: 'Next' }))
-    expect(within(region).getByText(/Page 2 of/)).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText('Filter chain by minimum volume'), {
-      target: { value: String(MIN_VOLUME_STEPS[1]) },
-    })
-
-    expect(within(region).getByText(/Page 1 of/)).toBeInTheDocument()
-  })
-})
-
-/** The sentence is broken across spans — the price takes tabular figures —
- * so it needs a matcher that reads the paragraph rather than a text node. */
-function moneynessLine(): HTMLElement {
-  return screen.getByText(
-    (_, el) => el?.tagName === 'P' && /is (in|out of) the money against/.test(el.textContent ?? ''),
-  )
+function chainOrStockHeader(label: string): HTMLElement {
+  return within(stockTable())
+    .getAllByRole('columnheader')
+    .find((h) => h.textContent?.trim().startsWith(label)) as HTMLElement
 }
 
-describe('the ticket states where spot sits against the strike', () => {
-  function openTicket(): void {
-    fireEvent.click(within(chainTable()).getAllByRole('button', { name: /^Trade/ })[0])
-  }
-
-  it('says it in words, and shows no chart', () => {
+describe('the chain is fetched for one underlying at a time', () => {
+  it('asks for nothing until an underlying is chosen', async () => {
+    serve()
     render(<App />)
-    openTicket()
+    await screen.findByText('NVIDIA Corp.')
 
-    // The chart moved to the stock table; the ticket keeps the one fact it
-    // could not do without, because otherwise the underlying's price is not
-    // on screen anywhere near the order you are about to place.
-    expect(moneynessLine()).toBeInTheDocument()
-    expect(screen.queryByRole('group', { name: 'Chart range' })).not.toBeInTheDocument()
+    // `useChain(null)` stays disabled: three vendor operations hang off
+    // this call, so a chain nobody asked about is not free.
+    expect(chainCalls).toHaveLength(0)
+    expect(await screen.findByText(/Pick an underlying to read its chain/)).toBeTruthy()
   })
 
-  it('gets the direction right on a call and on a put', () => {
+  it('fetches the chosen chain and renders its ladder', async () => {
+    serve()
     render(<App />)
+    await screen.findByText('NVIDIA Corp.')
 
-    const chain = useUIStore.getState().chain
-    const spot = useUIStore.getState().underlyings[CHAIN_UNDERLYINGS[0]].price
+    await openChain('NVDA')
+    await screen.findByText('NVDA260914C00210000')
+    expect(chainCalls.some((u) => u.includes('/markets/chain/NVDA'))).toBe(true)
+  })
+})
 
-    // A call is in the money above its strike and a put below it. Inverted,
-    // the ticket would call a put worthless at exactly the moment it was
-    // worth the most.
-    for (const right of ['call', 'put'] as const) {
-      const target = chain.find(
-        (c) => c.symbol === CHAIN_UNDERLYINGS[0] && c.type === right && c.strike < spot,
-      )!
-      // Named in full, expiry included: the same $410 call is listed on
-      // three expirations, so a strike and a right do not identify a row.
-      const label = `Trade ${target.symbol} ${target.strike} ${right} ${formatExpiry(
-        target.expiration,
-      )}`
-      fireEvent.click(within(chainTable()).getByRole('button', { name: label }))
+describe('open interest, per decision 15', () => {
+  it('prints a real zero and an absence differently', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    await openChain('NVDA')
+    await screen.findByText('NVDA260914C00210000')
 
-      expect(moneynessLine().textContent).toMatch(
-        right === 'call' ? /is in the money/ : /is out of the money/,
-      )
-    }
+    const rows = bodyRows(chainTable())
+    // Open interest of zero is a real fact: nobody holds the contract.
+    expect(cellText(rows[1], 10).trim()).toBe('0')
+    // Absent is a different fact, and never a blank cell that reads as zero.
+    expect(cellText(rows[2], 10)).toContain('—')
+    expect(cellText(rows[0], 10).trim()).toBe('663')
   })
 
-  it('follows the poll rather than quoting a frozen price', () => {
+  it('has removed the "highest open interest" screen', async () => {
+    serve()
     render(<App />)
-    openTicket()
+    await screen.findByText('NVIDIA Corp.')
 
-    const before = moneynessLine().textContent
-    act(() => {
-      useUIStore.getState().pollMarkets(2_000)
+    const rank = screen.getByLabelText('Rank chain by')
+    const options = within(rank).getAllByRole('option').map((o) => o.textContent)
+    // A ranking option that returns the list unsorted is worse than an
+    // absent one.
+    expect(options).not.toContain('Highest open interest')
+    expect(options).toContain('Highest IV')
+  })
+
+  it('has stopped the OI header being a sort trigger', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    await openChain('NVDA')
+    await screen.findByText('NVDA260914C00210000')
+
+    const header = within(chainTable())
+      .getAllByRole('columnheader')
+      .find((h) => h.textContent?.trim().startsWith('OI')) as HTMLElement
+    // Leaving it clickable would restore the removed ranking by another
+    // route, over a column that is mostly null.
+    expect(within(header).queryByRole('button')).toBeNull()
+    expect(within(chainTable()).getByRole('button', { name: /Volume/ })).toBeTruthy()
+  })
+})
+
+describe('a derived implied volatility is not a measured one', () => {
+  it('marks the derived rows and says what the mark means', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    await openChain('NVDA')
+    await screen.findByText('NVDA260914C00210000')
+
+    // Decision 10: IV is derived locally wherever Alpaca's own solve
+    // returned nothing, and a chain silently mixing the two is worse than
+    // either alone.
+    expect(cellText(bodyRows(chainTable())[0], 11)).toContain('*')
+    expect(cellText(bodyRows(chainTable())[1], 11)).not.toContain('*')
+    expect(screen.getByText(/derived locally from the contract/)).toBeTruthy()
+  })
+})
+
+describe('a contract with no quote cannot be traded from the row', () => {
+  it('omits the Trade control rather than offering one that cannot price', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    await openChain('NVDA')
+    await screen.findByText('NVDA260914P00220000')
+
+    const put = bodyRows(chainTable())[2]
+    // Buying lifts the ask and selling hits the bid; with neither there is
+    // nothing to price an order against.
+    expect(within(put).queryByRole('button', { name: /Trade/ })).toBeNull()
+    expect(cellText(put, 12)).toContain('No quote')
+
+    const call = bodyRows(chainTable())[0]
+    expect(within(call).getByRole('button', { name: /Trade/ })).toBeTruthy()
+  })
+})
+
+describe('a book that is not configured', () => {
+  it('says so without blanking a page that does not depend on it', async () => {
+    serve({
+      account: jsonResponse(409, {
+        error: {
+          code: 'account_unavailable',
+          message:
+            'Cash trading is unavailable: ALPACA_LIVE_API_KEY and ALPACA_LIVE_SECRET_KEY are not set.',
+        },
+      }),
     })
-    expect(moneynessLine().textContent).not.toBe(before)
+    useUIStore.setState({ accountMode: 'cash' })
+    render(<App />)
+
+    expect(await screen.findByText(/ALPACA_LIVE_API_KEY/)).toBeTruthy()
+    // Prices and chains are the same for both books, so they stay on screen.
+    expect(await screen.findByText('NVIDIA Corp.')).toBeTruthy()
   })
 })
 
-describe('the chart in the stock table', () => {
-  function openChart(row = 0): void {
-    fireEvent.click(within(stockTable()).getAllByRole('button', { name: /chart$/i })[row])
-  }
-
-  it('expands a row into its chart', () => {
-    render(<App />)
-
-    expect(screen.queryByRole('group', { name: 'Chart range' })).not.toBeInTheDocument()
-    openChart()
-    expect(screen.getByRole('group', { name: 'Chart range' })).toBeInTheDocument()
-  })
-
-  it('offers every range, and they are not all the same chart', () => {
-    render(<App />)
-    openChart()
-
-    const group = screen.getByRole('group', { name: 'Chart range' })
-    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual([
-      '1D',
-      '1W',
-      '1M',
-      '3M',
-      'YTD',
-      '1Y',
-      'All',
-    ])
-
-    // The quote carries thirteen months of closes precisely so these
-    // differ. At a quarter, 3M / YTD / 1Y / All redrew an identical chart —
-    // four buttons pretending to be a control.
-    const quote = useUIStore.getState().underlyings[CHAIN_UNDERLYINGS[0]]
-    const lengths = new Set(
-      (['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All'] as const).map(
-        (r) => sliceRange(quote.history, r).length,
-      ),
-    )
-    expect(lengths.size).toBe(7)
-  })
-
-  it('reports the move over the window on screen, not over the day', () => {
-    render(<App />)
-    openChart()
-
-    const group = screen.getByRole('group', { name: 'Chart range' })
-    expect(screen.getByText(/over 3M/)).toBeInTheDocument()
-
-    fireEvent.click(within(group).getByRole('button', { name: '1W' }))
-
-    // A range control that redraws the axis but leaves a daily figure
-    // beside it is reporting on a chart nobody is looking at.
-    expect(screen.getByText(/over 1W/)).toBeInTheDocument()
-    expect(screen.queryByText(/over 3M/)).not.toBeInTheDocument()
-  })
-
-  it('marks the range that is showing, for a screen reader too', () => {
-    render(<App />)
-    openChart()
-
-    const group = screen.getByRole('group', { name: 'Chart range' })
-    expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'true')
-
-    fireEvent.click(within(group).getByRole('button', { name: '1M' }))
-    expect(within(group).getByRole('button', { name: '1M' })).toHaveAttribute('aria-pressed', 'true')
-    expect(within(group).getByRole('button', { name: '3M' })).toHaveAttribute('aria-pressed', 'false')
-  })
-
-  it('opens one row at a time', () => {
-    render(<App />)
-    openChart(0)
-    openChart(1)
-
-    // An accordion keeps the page short and makes the target of the chart
-    // unambiguous — two charts open is two answers to one question.
-    expect(screen.getAllByRole('group', { name: 'Chart range' })).toHaveLength(1)
-  })
-})
-
-describe('the view-chain cross-link', () => {
-  function openChartFor(symbol: string): void {
-    fireEvent.change(screen.getByLabelText('Search stocks by symbol or name'), {
-      target: { value: symbol },
+describe('a request that fails', () => {
+  it('reports the stock universe failing as a system condition', async () => {
+    serve({
+      stocks: jsonResponse(503, {
+        error: { code: 'upstream', message: 'The market data provider did not answer.' },
+      }),
     })
-    fireEvent.click(within(stockTable()).getAllByRole('button', { name: /chart$/i })[0])
-  }
-
-  it('points the chain at the symbol it names', () => {
-    render(<App />)
-    openChartFor('MSFT')
-
-    fireEvent.click(screen.getByRole('button', { name: 'View MSFT chain →' }))
-
-    for (const symbol of column(chainTable(), 0)) expect(symbol).toBe('MSFT')
-  })
-
-  it('is absent where no chain is listed, and says why', () => {
     render(<App />)
 
-    // Twenty of the twenty-six names have no chain. A button that lands you
-    // on an empty one is worse than no button — its absence is itself the
-    // answer to "can I trade options on this".
-    const noChain = STOCKS.find((s) => !CHAIN_UNDERLYINGS.includes(s.symbol))!
-    openChartFor(noChain.symbol)
-
-    expect(screen.queryByRole('button', { name: /View .* chain/ })).not.toBeInTheDocument()
-    expect(screen.getByText(new RegExp(`No listed chain for ${noChain.symbol}`))).toBeInTheDocument()
-  })
-})
-
-describe('the stock search', () => {
-  function searchStocksBox(): HTMLElement {
-    return screen.getByLabelText('Search stocks by symbol or name')
-  }
-
-  it('matches a ticker', () => {
-    render(<App />)
-
-    fireEvent.change(searchStocksBox(), { target: { value: 'nvd' } })
-    expect(column(stockTable(), 0)).toEqual(['NVDA'])
-  })
-
-  it('matches a company name too', () => {
-    render(<App />)
-
-    // Half the reason to search a screener is that you know the company and
-    // not the ticker.
-    fireEvent.change(searchStocksBox(), { target: { value: 'reddit' } })
-    expect(column(stockTable(), 0)).toEqual(['RDDT'])
-  })
-
-  it('reaches a designed empty state, which says what the search covers', () => {
-    render(<App />)
-
-    fireEvent.change(searchStocksBox(), { target: { value: 'zzzz' } })
-
-    const region = section('Stocks & ETFs')
-    expect(within(region).queryAllByRole('table')).toHaveLength(0)
-    expect(within(region).getByText(/Nothing in the universe matches/)).toBeInTheDocument()
-  })
-
-  it('returns to page one when the search narrows the table', () => {
-    render(<App />)
-
-    const region = section('Stocks & ETFs')
-    fireEvent.click(within(region).getByRole('button', { name: 'Next' }))
-    expect(within(region).getByText(/Page 2 of/)).toBeInTheDocument()
-
-    fireEvent.change(searchStocksBox(), { target: { value: 'a' } })
-    expect(within(region).queryByText(/Page 2 of/)).not.toBeInTheDocument()
+    // `error`, not `bearish`: a failed fetch is not a losing position.
+    // A 5xx is worth one more attempt (`shouldRetry`), so the error state
+    // is a retry-delay away rather than immediate.
+    const alert = await screen.findByRole('alert', {}, { timeout: 4_000 })
+    expect(alert.textContent).toContain('The market data provider did not answer.')
+    expect(alert.className).toContain('text-error')
   })
 })
