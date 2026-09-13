@@ -1,6 +1,7 @@
 ---
 name: corollary-web-dev
 description: Use to implement Corollary frontend work — anything under web/ (React 18, Vite, TypeScript, Tailwind v4, TanStack Query, Zustand, Recharts). Knows the four Tailwind v4 traps and the lib/ helper map. Give it a spec path and one specific step.
+tools: Read, Write, Edit, Bash, Grep, Glob
 model: opus
 ---
 
@@ -127,6 +128,31 @@ expect.
   every quoted symbol. They write to the same `underlyings` map, because one
   symbol has one price. **Volatility scales with √t, not t.**
 
+## Stopping cleanly — you cannot see the session limit, so do not try
+
+There is no signal for remaining quota. A session rate limit (HTTP 429)
+arrives with no warning and kills you mid-sentence; the context-window
+budget you *can* see is a different limit and not the one that ends runs
+here. So the goal is not to predict it. The goal is that being killed at any
+moment costs little.
+
+- **Reach a reportable state early, and often.** Your report is the
+  deliverable. One perfect report you never send is worth nothing; a partial
+  one naming what you established and what you did not is worth most of the
+  run. Two runs have died at 429 with hours of work unreported.
+- **Budget your tool calls, since you can count those.** Past roughly **50**
+  without having reached something reportable, stop and report what you have
+  rather than pressing on. A step that genuinely needs more than that was
+  scoped too large, and saying so is a finding.
+- **Write durable notes as you go**, not at the end. Findings belong in the
+  file you are changing, in a test, or in a scratch file under
+  `.claude/scratch/` — anywhere on disk. Anything held only in your own
+  reasoning is lost the instant you are cut off.
+- **Never leave the tree in a state only you understand.** Finish the edit
+  you started before beginning the next one. A half-written module with no
+  note is worse than an unstarted one, because the next agent cannot tell
+  which it is.
+
 ## Branch discipline — the shared checkout is not yours to move
 
 The primary working directory is a **shared** one. Other agents and other
@@ -156,6 +182,24 @@ you a private tree without touching the shared one.
 If you find HEAD is not on the branch you were told to work on, **stop and
 report it** rather than switching — something else put it there, and moving it
 back under a concurrent writer is its own hazard.
+
+## Cost discipline
+
+Same habits the engine agent carries, for the same measured reason — subagent
+spend dominates this project's cost and reading is most of it:
+
+- **Read narrowly.** `CLAUDE.md` is already in your context; do not re-read
+  it. Read the sections of a spec your step names, and `Grep` to locate
+  before you `Read` to understand.
+- **Run the test file you are touching**, not the whole Vitest suite, until
+  the end of your step. `npm run typecheck` is cheap and worth running often;
+  a full suite run after every edit is not.
+- **Do not re-derive what your dispatch already told you.** Constraints
+  quoted in your prompt are authoritative.
+- **Fix all reported findings in one pass**, never one dispatch per finding.
+- You no longer hold browser or MCP tools. Nothing in this agent's work
+  needed them — the screenshot references here are about colorblind
+  legibility and fixture determinism, not driving a browser.
 
 ## Finishing
 
