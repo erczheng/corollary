@@ -64,6 +64,12 @@ RECORDED_TRADING_DATE = date(2026, 9, 10)
 #: progress and the nine before it as the average.
 AUGUST_14 = datetime(2026, 8, 14, 19, 10, tzinfo=timezone.utc)
 
+#: Noon in New York on the Saturday after it. The weekend case the Volume
+#: column exists to survive: NYSE has no session on the 15th, so there is no
+#: bar for today and the last completed session is Friday's -- the fixture's
+#: final bar.
+AUGUST_15 = datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc)
+
 
 def fixture(name: str) -> Any:
     """A recorded body, parsed the way the provider parses it."""
@@ -266,23 +272,119 @@ def test_relative_volume_is_a_plausible_multiple_rather_than_a_routing_share(
         assert Decimal("0.25") < relative < Decimal(4), row
 
 
-def test_a_session_with_no_bar_yet_has_no_volume_rather_than_zero(
+def test_a_symbol_with_no_bar_at_all_has_no_volume_rather_than_zero(
     make_market_client: MarketClient,
 ) -> None:
-    """Null survives the feed change, and it now covers one more case.
+    """Null is now narrower, and it is still null.
 
-    The recording's bars stop on 14 August and this client is asked on 10
-    September, which stands in for the two states that really produce it:
-    before the session's first print, and inside the historical feed's
-    15-minute embargo, where the partial daily bar is not servable yet. A
-    zero would claim the market opened and nothing traded.
+    Since a closed market falls back to the last completed session, the two
+    states that used to produce a null -- before the session's first print,
+    and inside the historical feed's 15-minute embargo -- now produce
+    yesterday's figure, labelled as yesterday's. What survives is the case
+    with no bar anywhere in the window: ``stock_bars_daily`` carries NVDA and
+    SPY and not AAPL, and a zero there would claim a symbol did not trade.
+
+    The label goes null with the number. A session state beside an absent
+    volume would be a claim about a measurement that was never made.
     """
     client, _ = make_market_client(market_data_routes())
 
+    table = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA,AAPL"))
+
+    assert table["AAPL"]["volume"] is None
+    assert table["AAPL"]["volumeSession"] is None
+    assert table["AAPL"]["volumeDate"] is None
+    assert table["NVDA"]["volume"] is not None
+
+
+def test_a_closed_market_shows_the_last_completed_session(
+    make_market_client: MarketClient,
+) -> None:
+    """The weekend case, asked for by name.
+
+    Asked at noon on Saturday the 15th there is no bar for today and never
+    will be, so a column keyed strictly on *today* is blank for every symbol
+    on the page. The last completed session is equally honest and answers the
+    question the trader actually has, so that is what is served -- and it
+    arrives stamped with the session it covers rather than left to the
+    client's clock to work out.
+    """
+    client, _ = make_market_client(market_data_routes(), now=AUGUST_15)
+    friday = fixture("stock_bars_daily")["bars"]["NVDA"][-1]
+
     row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
 
-    assert row["volume"] is None
-    assert row["avgVolume"] is not None
+    assert row["volume"] == int(friday["v"])
+    assert row["volumeSession"] == "completed"
+    assert row["volumeDate"] == "2026-08-14"
+
+
+def test_the_same_session_reads_partial_during_it_and_final_after_it(
+    make_market_client: MarketClient,
+) -> None:
+    """Why the column carries a state as well as a number.
+
+    Both clients report 14 August and only one of them is a whole day: at
+    15:10 on the Friday the figure is the session so far, and by Saturday it
+    is the session. A reader who cannot tell the two apart compares a partial
+    day against a full one and concludes a stock is quiet when it is
+    mid-morning.
+    """
+    during, _ = make_market_client(market_data_routes(), now=AUGUST_14)
+    after, _ = make_market_client(market_data_routes(), now=AUGUST_15)
+
+    live = by_symbol(rows(during, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+    closed = by_symbol(rows(after, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert (live["volumeDate"], live["volumeSession"]) == (
+        "2026-08-14",
+        "in_progress",
+    )
+    assert (closed["volumeDate"], closed["volumeSession"]) == (
+        "2026-08-14",
+        "completed",
+    )
+    assert live["volume"] == closed["volume"]
+
+
+def test_the_average_excludes_the_session_the_volume_came_from(
+    make_market_client: MarketClient,
+) -> None:
+    """Self-inclusion biases every ratio toward 1, which masks the outlier.
+
+    During a session the denominator excludes today because today is partial.
+    The fallback moves the numerator back a day, so the denominator has to
+    move with it: averaging Friday against a window that contains Friday
+    pulls the ratio toward 1 exactly when the number is meant to show a
+    session standing out. The fixture makes the two answers different --
+    nine sessions against ten.
+    """
+    volumes = [int(bar["v"]) for bar in fixture("stock_bars_daily")["bars"]["NVDA"]]
+    before = volumes[:-1]
+    client, _ = make_market_client(market_data_routes(), now=AUGUST_15)
+
+    row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert row["volume"] == volumes[-1]
+    assert row["avgVolume"] == sum(before) // len(before)
+    assert row["avgVolume"] != sum(volumes) // len(volumes)
+
+
+def test_the_closed_market_fallback_costs_no_extra_request(
+    make_market_client: MarketClient,
+) -> None:
+    """The last session comes out of the series already fetched for the average.
+
+    Two bars windows before this change and two after: the 90-day series and
+    today's. The fallback reads the last entry of the series it already has,
+    which is also what makes the numerator and the denominator provably one
+    measurement -- in this case one *response*.
+    """
+    client, transport = make_market_client(market_data_routes(), now=AUGUST_15)
+
+    rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert transport.count_for("/v2/stocks/bars") == 2
 
 
 def test_the_daily_series_is_fetched_once_per_trading_date(
@@ -398,6 +500,100 @@ async def test_todays_volume_does_not_survive_the_session_boundary() -> None:
     )
 
     assert (friday["NVDA"], monday["NVDA"]) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_figure_read_after_its_session_finished_outlives_the_ttl() -> None:
+    """A finished session's volume cannot move, so nothing re-reads it.
+
+    The TTL exists because today's volume climbs all session. Once the
+    session is over -- and on a Saturday it is over before the page is even
+    opened -- the same 60-second expiry spends a request a minute to be told
+    the same integer until midnight.
+
+    The predicate is asked about the instant the entry was **read**, not the
+    instant of the question. An entry fetched at 15:59 holds a figure missing
+    the last minutes of the session; judging it by the clock at 16:20 would
+    freeze that short number in place and call it the close.
+    """
+    cache: markets_routes.IntradayCache[int | None] = markets_routes.IntradayCache(
+        timedelta(seconds=60)
+    )
+    calls: list[tuple[str, ...]] = []
+    fetch = await _counting_fetch(calls)
+    today = date(2026, 8, 14)
+    at = datetime(2026, 8, 14, 19, 0, tzinfo=timezone.utc)
+    settled_at = at + timedelta(minutes=5)
+
+    def settled(read_at: datetime) -> bool:
+        return read_at >= settled_at
+
+    async def read(offset: timedelta) -> int | None:
+        return (
+            await cache.resolve(
+                ("NVDA",),
+                today=today,
+                now=at + offset,
+                fetch=fetch,
+                settled=settled,
+            )
+        )["NVDA"]
+
+    during = await read(timedelta(0))
+    reread = await read(timedelta(minutes=10))
+    held = await read(timedelta(hours=1))
+    still_held = await read(timedelta(hours=6))
+
+    assert (during, reread, held, still_held) == (1, 2, 2, 2)
+    assert len(calls) == 2
+
+
+def test_a_session_is_in_progress_until_its_own_close_plus_the_embargo() -> None:
+    """The label comes from the market calendar, never from 16:00.
+
+    14 August 2026 is an ordinary session closing at 16:00 ET, and its daily
+    bar is still short of the close for fifteen minutes afterwards -- the
+    historical feed serves up to fifteen minutes ago, so a bar read at 16:05
+    is missing the last of the day it claims to cover.
+    """
+    close = datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc)
+    session = date(2026, 8, 14)
+
+    assert markets_routes._session_state(session, now=close) == "in_progress"
+    assert (
+        markets_routes._session_state(session, now=close + timedelta(minutes=5))
+        == "in_progress"
+    )
+    assert (
+        markets_routes._session_state(session, now=close + timedelta(minutes=15))
+        == "completed"
+    )
+
+
+def test_a_half_day_finishes_three_hours_before_a_hardcoded_close_would() -> None:
+    """Half-days are real, and they are not distributed randomly.
+
+    NYSE closes at 13:00 ET on the Friday after Thanksgiving. Measured
+    against a hardcoded 16:00 the column would call that session "in
+    progress" for three hours after it ended, and keep re-reading a figure
+    that had stopped moving.
+    """
+    black_friday = date(2026, 11, 27)
+    one_twenty = datetime(2026, 11, 27, 18, 20, tzinfo=timezone.utc)
+
+    assert markets_routes._session_state(black_friday, now=one_twenty) == "completed"
+    assert (
+        markets_routes._session_state(black_friday, now=one_twenty - timedelta(hours=2))
+        == "in_progress"
+    )
+
+
+def test_a_day_with_no_session_has_no_session_in_progress() -> None:
+    """Saturday, which is what makes the weekend figure settle on first read."""
+    saturday = date(2026, 8, 15)
+    noon = datetime(2026, 8, 15, 16, 0, tzinfo=timezone.utc)
+
+    assert markets_routes._session_state(saturday, now=noon) == "completed"
 
 
 def test_market_cap_is_absent_because_it_is_not_alpacas_to_give(

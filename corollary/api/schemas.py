@@ -93,6 +93,7 @@ __all__ = [
     "PricePoint",
     "RiskLimit",
     "RiskLimitKey",
+    "SessionState",
     "StockQuote",
     "TimeInForce",
     "Trend",
@@ -276,6 +277,20 @@ wire contract stays readable in one file, and
 ``unknown`` is a member on purpose: an unexpected multiplier must not be
 silently read as one of the other three, because a wrong margin class is a
 wrong sizing ceiling.
+"""
+
+SessionState: TypeAlias = Literal["in_progress", "completed"]
+"""Whether a trading session had finished when a figure was measured over it.
+
+The Volume column means two things and has to say which. During a session it
+is *traded so far today*; outside one it is *traded last session*, because a
+blank column at the weekend answers nobody -- and a reader who cannot tell
+them apart compares a partial day against a full one and concludes a stock is
+quiet when it is mid-morning.
+
+``completed`` is decided by the **market calendar**, not by a clock reading of
+16:00: NYSE closes at 13:00 ET on the Friday after Thanksgiving and on a
+handful of other half-days, and it does not open at all on ~115 days a year.
 """
 
 AnalyticsSource: TypeAlias = Literal["vendor", "derived"]
@@ -829,11 +844,26 @@ class StockQuote(ApiModel):
     #: put NVDA at 0.018 and SPY at 0.023 on the recorded fixtures -- measured
     #: numbers, and every name on the screen read as near-dead.
     #:
-    #: **Nullable**: before the session's first print there is no daily bar at
-    #: all, and for the first fifteen minutes of a session the historical
-    #: feed's embargo means there is none it may serve. A zero would claim the
-    #: market opened and nothing traded.
+    #: **Nullable, and much less often than it was**: a market that is closed
+    #: -- a weekend, a holiday, the hours either side of a session -- serves
+    #: the last completed session rather than nothing, so what remains null is
+    #: a symbol with no daily bar anywhere in the window. A zero would claim
+    #: the symbol did not trade.
     volume: int | None
+    #: Which of the two things :attr:`volume` means, so the column can be
+    #: labelled without the client re-deriving the session from its own clock
+    #: -- which is a browser-local clock, where every session boundary in this
+    #: app is a New York one.
+    #:
+    #: Null exactly when :attr:`volume` is null: a session state beside an
+    #: absent measurement is a claim about something nobody measured.
+    volume_session: SessionState | None
+    #: The trading date :attr:`volume` covers, so the column can name the day
+    #: rather than say "last session". Per row rather than per response: in
+    #: the first minutes of a session one symbol can have today's bar while
+    #: another has not printed yet, and they are then reporting different
+    #: days.
+    volume_date: CalendarDate | None
     #: The denominator of relative volume, which is what "trending" means --
     #: a different question from "most active", where raw volume finds the
     #: same mega caps every session. Completed sessions only, from the same

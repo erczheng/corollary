@@ -69,6 +69,24 @@ feed's fifteen-minute embargo, so re-reading it every 2s would buy nothing.
 :class:`IntradayCache` holds it for :data:`SESSION_VOLUME_TTL`, and
 :func:`_fetch_session_volumes` carries the measurement.
 
+That TTL stops applying the moment the figure stops moving. The market is
+shut more than it is open -- two days in seven, plus nine holidays and the
+hours either side of every bell -- and a closed market's volume is final, so
+holding it for the trading date instead turns a request a minute into a
+request a day. Which of the two a given moment is in comes from the market
+calendar, in :func:`_session_state`, and never from a clock reading of 16:00:
+NYSE closes at 13:00 ET on the Friday after Thanksgiving.
+
+The same closure is why the daily series is cached as a *series* rather than
+as the average it folds down to. Outside a session there is no bar for today,
+and a Volume column keyed strictly on today is blank for every symbol on the
+page -- honest, and useless on a Saturday. The last completed session is
+equally honest and more use, and it is already in hand as the last entry of
+that series, so the fallback costs no request at all. Both halves of the
+ratio then come out of one response, which is the strongest form of the
+same-feed rule there is. :func:`_volume_reading` assembles it, and keeps the
+session that supplied the numerator out of its own denominator.
+
 Two shapes of the response that are choices rather than defaults
 ----------------------------------------------------------------
 
@@ -120,9 +138,11 @@ from corollary.api.schemas import (
     OptionContract,
     OptionRight,
     PricePoint,
+    SessionState,
     StockQuote,
     UnderlyingQuote,
 )
+from corollary.calendars import nyse_session_close
 from corollary.data.providers.interface import (
     AnalyticsSource as ProviderAnalyticsSource,
 )
@@ -249,7 +269,20 @@ AVG_VOLUME_SESSIONS: Final = 30
 #: daily bar cannot move faster than that. Re-reading it on every 2s poll
 #: would spend 30 requests a minute against ``data.alpaca.markets``'s 200 to
 #: return the same integer.
+#:
+#: It expires only while the figure can still move. Once the session it
+#: covers has finished -- and on a Saturday it finished before the page was
+#: opened -- the entry is held for the trading date instead; see
+#: :func:`_session_state` and :class:`IntradayCache`.
 SESSION_VOLUME_TTL: Final = timedelta(seconds=60)
+
+#: How long after a session's close its daily bar covers the whole session.
+#:
+#: The historical feed serves up to fifteen minutes ago, so a bar read at
+#: 16:05 ET is short of the close it appears to report. Fifteen minutes is
+#: therefore both when the figure stops moving and when it becomes worth
+#: calling final.
+SESSION_SETTLES_AFTER: Final = timedelta(minutes=15)
 
 #: Calendar days fetched to find those sessions. Wide enough to cover
 #: weekends and a holiday run without asking a calendar: the bars that come
@@ -288,6 +321,20 @@ _ANALYTICS_SOURCE: Final[Mapping[ProviderAnalyticsSource, AnalyticsSource]] = {
     ProviderAnalyticsSource.VENDOR: "vendor",
     ProviderAnalyticsSource.DERIVED: "derived",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class SessionVolume:
+    """One session's share volume, carrying the session it covers.
+
+    The date travels with the number because the number alone cannot say
+    which of the two things the Volume column means. It is also what keeps
+    the average honest when the market is closed: the session that supplied
+    the numerator has to be the one session the denominator leaves out.
+    """
+
+    session: date
+    volume: int
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +406,25 @@ class IntradayCache(Generic[ValueT]):
     volume is the same error the session key exists to prevent, arriving a day
     late.
 
+    ``settled`` is the other half of "a bounded slice". It is asked about the
+    instant an entry was **read**, and answering ``True`` means nothing that
+    happens before the date rolls can change what was read -- so the entry
+    keeps its value and the TTL stops applying to it. Today's volume settles
+    when today's session finishes, which on a weekend or a holiday is before
+    the first poll of the day; without it a closed market spends a request a
+    minute to be told the same integer until midnight.
+
+    **Asked about the read, not about the question.** An entry read at 15:59
+    holds a figure short of the close; judging it by the clock at 16:20 would
+    freeze that short number in place and call it the day's volume. So the
+    entry read before the session settled expires normally, and its
+    replacement -- read after -- is the one that is held.
+
+    Expiry is per entry rather than per cache for the same reason the value
+    is: two symbols fetched a minute apart have two different ages, and
+    dropping the newer one with the older costs a request to re-read what was
+    already current.
+
     ``fetch`` and the lock behave exactly as :class:`SessionCache`'s do: it
     must answer for every symbol handed to it, a cached absence is an answer,
     and the second of two concurrent polls waits rather than re-asking.
@@ -367,8 +433,8 @@ class IntradayCache(Generic[ValueT]):
     def __init__(self, ttl: timedelta) -> None:
         self._ttl = ttl
         self._day: date | None = None
-        self._fetched_at: datetime | None = None
         self._values: dict[str, ValueT] = {}
+        self._read_at: dict[str, datetime] = {}
         self._lock = asyncio.Lock()
 
     async def resolve(
@@ -378,25 +444,38 @@ class IntradayCache(Generic[ValueT]):
         today: date,
         now: datetime,
         fetch: FetchMany[ValueT],
+        settled: Callable[[datetime], bool] | None = None,
     ) -> dict[str, ValueT]:
         async with self._lock:
-            expired = (
-                self._fetched_at is None or now - self._fetched_at >= self._ttl
-            )
-            if self._day != today or expired:
+            if self._day != today:
                 self._values.clear()
+                self._read_at.clear()
                 self._day = today
-                self._fetched_at = now
+            else:
+                self._drop_expired(now=now, settled=settled)
             missing = tuple(
                 symbol for symbol in symbols if symbol not in self._values
             )
             if missing:
-                self._values.update(await fetch(missing))
+                fetched = await fetch(missing)
+                self._values.update(fetched)
+                for symbol in fetched:
+                    self._read_at[symbol] = now
             return {
                 symbol: self._values[symbol]
                 for symbol in symbols
                 if symbol in self._values
             }
+
+    def _drop_expired(
+        self, *, now: datetime, settled: Callable[[datetime], bool] | None
+    ) -> None:
+        for symbol, read_at in list(self._read_at.items()):
+            if settled is not None and settled(read_at):
+                continue
+            if now - read_at >= self._ttl:
+                self._values.pop(symbol, None)
+                self._read_at.pop(symbol, None)
 
 
 class MarketCaches:
@@ -411,7 +490,7 @@ class MarketCaches:
 
     def __init__(self, *, now: Callable[[], datetime] | None = None) -> None:
         self.now: Callable[[], datetime] = now if now is not None else _utc_now
-        self.average_volume: SessionCache[int | None] = SessionCache()
+        self.daily_volume: SessionCache[tuple[SessionVolume, ...]] = SessionCache()
         self.session_volume: IntradayCache[int | None] = IntradayCache(
             SESSION_VOLUME_TTL
         )
@@ -599,6 +678,38 @@ def _session_date(bar: Bar) -> date:
     return bar.at.astimezone(EASTERN).date()
 
 
+def _session_state(day: date, *, now: datetime) -> SessionState:
+    """Whether ``day``'s own volume can still move, per the market calendar.
+
+    One function, two uses, and they are the same question asked twice:
+
+    * **The label.** ``volume`` means *traded so far today* during a session
+      and *traded last session* outside one, and a column that can mean two
+      things has to say which -- otherwise a partial day is compared against
+      a full one and a stock reads as quiet at ten in the morning.
+    * **The cache.** :data:`SESSION_VOLUME_TTL` exists because the figure
+      climbs all session. A figure that has stopped climbing does not need
+      re-reading a minute later, for the rest of the day.
+
+    The close comes from the calendar, never from a hardcoded 16:00. NYSE
+    closes at **13:00 ET** on the Friday after Thanksgiving and on a handful
+    of other half-days, which sit in the busiest weekly-expiry season of the
+    year; measured against 16:00 the column would call those sessions "in
+    progress" for three hours after they ended. ``None`` from the calendar is
+    a day with no session at all -- a weekend, a holiday, or a date outside
+    the published schedule -- and on every one of those nothing is in
+    progress.
+
+    :data:`SESSION_SETTLES_AFTER` is added because the bar lags the tape: for
+    fifteen minutes after the close the historical feed still serves a bar
+    that is short of it.
+    """
+    close = nyse_session_close(day)
+    if close is None:
+        return "completed"
+    return "completed" if now >= close + SESSION_SETTLES_AFTER else "in_progress"
+
+
 # --------------------------------------------------------------------------
 # The daily series, fetched once a session
 # --------------------------------------------------------------------------
@@ -615,14 +726,24 @@ def _completed_sessions(bars: Sequence[Bar], *, today: date) -> list[Bar]:
     return [bar for bar in bars if _session_date(bar) < today]
 
 
-async def _fetch_average_volumes(
+async def _fetch_daily_volumes(
     provider: MarketDataProvider, symbols: tuple[str, ...], *, today: date
-) -> Mapping[str, int | None]:
-    """One bars request for every symbol at once, then a fold per symbol.
+) -> Mapping[str, tuple[SessionVolume, ...]]:
+    """Completed sessions per symbol, oldest first, with their dates.
 
-    ``None`` for a symbol with no bars in the window. Never 0: zero is the
-    denominator of relative volume, and a data gap that divides by zero would
-    rank first on the screen built to find unusual activity.
+    The series rather than the average it folds down to, for one reason: when
+    the market is closed the **last entry is the numerator** of relative
+    volume and the entries before it are the denominator. Folding here would
+    throw away the one figure the closed-market case needs, and re-fetching it
+    separately would put the two halves of a ratio in two responses -- which
+    is the shape the same-feed rule exists to prevent.
+
+    An empty tuple for a symbol with no bars in the window; the average is
+    ``None`` downstream and never 0, because zero is a denominator that would
+    divide and rank first on the screen built to find unusual activity.
+
+    Trimmed to one more session than the average spans: thirty for the
+    denominator plus the one that may have to serve as the numerator.
     """
     start = datetime.combine(
         today - timedelta(days=AVG_VOLUME_LOOKBACK_DAYS),
@@ -632,15 +753,13 @@ async def _fetch_average_volumes(
     bars = await provider.stock_bars(
         symbols, timeframe=BarTimeframe.DAY, start=start
     )
-    averages: dict[str, int | None] = {}
-    for symbol in symbols:
-        window = _completed_sessions(bars.get(symbol, []), today=today)[
-            -AVG_VOLUME_SESSIONS:
-        ]
-        averages[symbol] = (
-            sum(bar.volume for bar in window) // len(window) if window else None
-        )
-    return averages
+    return {
+        symbol: tuple(
+            SessionVolume(session=_session_date(bar), volume=bar.volume)
+            for bar in _completed_sessions(bars.get(symbol, []), today=today)
+        )[-(AVG_VOLUME_SESSIONS + 1) :]
+        for symbol in symbols
+    }
 
 
 async def _fetch_session_volumes(
@@ -649,7 +768,7 @@ async def _fetch_session_volumes(
     """Today's volume so far -- **from the same feed as the average**.
 
     This is the numerator of relative volume and
-    :func:`_fetch_average_volumes` is the denominator, and the only thing that
+    :func:`_fetch_daily_volumes` supplies the denominator; the only thing that
     makes their ratio mean anything is that both are measured the same way.
     They are: both are ``stock_bars``, which the provider always serves from
     the historical feed.
@@ -665,8 +784,13 @@ async def _fetch_session_volumes(
     Today's bar is reachable on the historical feed because the request's
     ``end`` resolves to fifteen minutes ago, which is old enough for any feed
     the plan carries. The cost is that the first fifteen minutes of a session
-    have no servable bar yet, and that is served as ``None``: unknown, never
-    0, which would claim the market opened and nothing traded.
+    have no servable bar yet -- and outside a session there is no bar at all,
+    which used to empty the whole column every weekend.
+
+    ``None`` here no longer means the column is blank. It means *this* session
+    has nothing to report yet, and :func:`_volume_reading` then falls back to
+    the last completed session out of the series already fetched for the
+    average. What it never means is zero.
     """
     start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     bars = await provider.stock_bars(
@@ -679,6 +803,80 @@ async def _fetch_session_volumes(
         ]
         volumes[symbol] = session[-1].volume if session else None
     return volumes
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeReading:
+    """The Volume column for one symbol: the figure, and which session it is.
+
+    Assembled in one place because the four values are one decision. Split
+    across the response builder they drift: a numerator taken from one
+    session against a denominator that includes it is biased toward 1, which
+    is precisely the reading the ratio exists to make visible.
+    """
+
+    volume: int | None
+    session: date | None
+    state: SessionState | None
+    average: int | None
+
+
+#: Nothing measured. A symbol with no daily bar anywhere in the window gets
+#: this, and every field of it is null rather than 0 -- a zero volume claims
+#: the symbol did not trade, and a zero average divides.
+NO_VOLUME: Final = VolumeReading(volume=None, session=None, state=None, average=None)
+
+
+def _volume_reading(
+    completed: Sequence[SessionVolume],
+    *,
+    today_volume: int | None,
+    today: date,
+    now: datetime,
+) -> VolumeReading:
+    """Relative volume's two halves, and the session the numerator covers.
+
+    **The market is not always open, and the column still has to say
+    something.** During a session the numerator is today's partial bar and
+    the denominator is the completed sessions before it. Outside one -- a
+    weekend, a holiday, the hours either side of the bell, the first fifteen
+    minutes before the feed will serve today's bar -- there is no bar for
+    today, and a column keyed strictly on today reads blank for every symbol
+    on the page. The last completed session is equally honest and answers the
+    question the reader actually has, so that is what is served, labelled
+    with the session it covers.
+
+    **The denominator never contains the numerator.** Self-inclusion pulls
+    every ratio toward 1 and so quietly masks exactly the outlier the ratio
+    is for. During a session that falls out of ``completed`` excluding today;
+    when the numerator moves back a day, the denominator has to move with it,
+    which is the ``[:-1]`` below.
+
+    Both halves come out of ``stock_bars`` -- in the closed-market case out of
+    the same *response* -- so the feed they were measured on is the same feed
+    by construction.
+    """
+    if today_volume is not None:
+        measured, session, window = today_volume, today, completed
+    elif completed:
+        measured, session, window = (
+            completed[-1].volume,
+            completed[-1].session,
+            completed[:-1],
+        )
+    else:
+        return NO_VOLUME
+    average = window[-AVG_VOLUME_SESSIONS:]
+    return VolumeReading(
+        volume=measured,
+        session=session,
+        state=_session_state(session, now=now),
+        average=(
+            sum(entry.volume for entry in average) // len(average)
+            if average
+            else None
+        ),
+    )
 
 
 async def _fetch_histories(
@@ -754,25 +952,38 @@ async def stocks(
     moves through the session where the average does not; see
     :class:`IntradayCache` and :func:`_fetch_session_volumes`.
 
+    **When the market is closed the column shows the last completed session**,
+    labelled as such -- ``volumeSession`` and ``volumeDate`` say which of the
+    two things the number is, so the page can title the column without
+    re-deriving a New York session boundary from a browser clock. See
+    :func:`_volume_reading`, which also keeps that session out of its own
+    average.
+
     Every column that can be absent is served as ``null``: no previous close
-    means no change, no daily bar means no session volume, no bars at all
-    means no average. The one absence handled by omission instead is a symbol
-    with no price at all -- it is dropped and logged.
+    means no change, no daily bar anywhere in the window means no volume and
+    no session to name, fewer than two sessions means no average. The one
+    absence handled by omission instead is a symbol with no price at all --
+    it is dropped and logged.
     """
     requested = _requested_symbols(symbols, default=UNIVERSE_SYMBOLS)
     today = caches.today()
+    now = caches.now()
 
     snapshots = await provider.stock_snapshots(requested)
-    averages = await caches.average_volume.resolve(
+    daily = await caches.daily_volume.resolve(
         requested,
         today=today,
-        fetch=lambda missing: _fetch_average_volumes(provider, missing, today=today),
+        fetch=lambda missing: _fetch_daily_volumes(provider, missing, today=today),
     )
     volumes = await caches.session_volume.resolve(
         requested,
         today=today,
-        now=caches.now(),
+        now=now,
         fetch=lambda missing: _fetch_session_volumes(provider, missing, today=today),
+        # Today's figure climbs all session and then stops. Past the close it
+        # is re-read once and held, so a closed market costs one request a day
+        # rather than one a minute.
+        settled=lambda read_at: _session_state(today, now=read_at) == "completed",
     )
 
     table: list[StockQuote] = []
@@ -784,6 +995,15 @@ async def stocks(
             unpriced.append(symbol)
             continue
         previous = snapshot.previous_close
+        # Both halves of relative volume, from one feed. Never the snapshot's
+        # daily bar, which is IEX on this plan while the series is SIP -- see
+        # `_fetch_session_volumes`.
+        measured = _volume_reading(
+            daily.get(symbol, ()),
+            today_volume=volumes.get(symbol),
+            today=today,
+            now=now,
+        )
         table.append(
             StockQuote(
                 symbol=symbol,
@@ -791,11 +1011,10 @@ async def stocks(
                 price=price,
                 change=_change(price, previous),
                 change_pct=_change_pct(price, previous),
-                # Both halves of relative volume, from one feed. Never the
-                # snapshot's daily bar, which is IEX on this plan while the
-                # average below is SIP -- see `_fetch_session_volumes`.
-                volume=volumes.get(symbol),
-                avg_volume=averages.get(symbol),
+                volume=measured.volume,
+                volume_session=measured.state,
+                volume_date=measured.session,
+                avg_volume=measured.average,
                 # Finnhub, step 9. Null for a fund is the truth; null for a
                 # company is "not fetched yet", and both are better than a
                 # number nobody computed.

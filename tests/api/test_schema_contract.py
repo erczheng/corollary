@@ -71,6 +71,7 @@ MIRRORED_UNIONS: Mapping[str, object] = {
     "AuditCategory": schemas.AuditCategory,
     "NotificationEvent": schemas.NotificationEvent,
     "FeedKey": schemas.FeedKey,
+    "SessionState": schemas.SessionState,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
