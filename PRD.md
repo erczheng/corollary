@@ -477,9 +477,16 @@ An eighth route catches everything else. Without it an unknown URL rendered the 
 
 **Phase 4 — Strategy runtime.** Declarative schema, indicator whitelist, strategy editor, intent/arbiter layer with one strategy.
 
+**Carried forward from Phase 2 — two things that are harmless now and stop being harmless here.** Both were found while migrating the pages onto live data, and both are safe today for the same reason: the recommendation stack reaches no order path. Phase 4 is where that stops being true, so they are listed against this phase rather than left to be rediscovered.
+
+- **Research reads a different halt from every other page.** `Research.tsx` takes `isHalted` from the Zustand fixture store; the Dashboard, the command palette and the order tickets all read `GET /api/engine/state`. So Research can show a halted engine as running. It is bounded while its Execute button is fixture-backed and unbounded the moment it submits anything, which is this phase. The fix is a hook swap to `useEngineState()`. It was deliberately deferred in Phase 2 — the page is rewritten here anyway — but the halt source must not survive the rewrite. **Two halts in one application is the exact divergence that produced four Phase 2 bugs**: a Flatten that confirmed and closed nothing, a Close that did the same on a real position, Halt/Resume writing a flag nothing read, and order tickets quoting risk ceilings Settings no longer wrote.
+- **Three surfaces say "Submits to the risk manager" and none of them submits.** Research's confirm, the command palette's hint and the Dashboard panel all promise it; Phase 2 has no endpoint behind any of them. It is *consistent*, so it is not the silent-no-op class that the four bugs above were — but it becomes a true sentence only when `RiskManager.approve()` exists in Phase 6, and it is claimed from here. Change all three together or none: a per-surface fix leaves two surfaces making a promise the third has withdrawn.
+
 **Phase 5 — Backtesting.** Parquet bulk download, DuckDB queries, spread model, walk-forward harness, promotion gate.
 
 **Phase 6 — Execution.** Risk manager, manual execution from Recommended Trades, then auto with all limits enforced. Paper only.
+
+**Carried forward from Phase 2 — the fixture store outlived its readers.** Once all six pages moved to the API, most of `store.ts` became inert: `store.flatten()` has zero production callers, `store.tick()` drives nothing, and `isHalted` is read only by Research. It was left in place deliberately rather than pruned, and the reason is worth stating because it is the opposite of the usual instinct — **`flatten()`'s test is where rule 7's halt-versus-flatten distinction is actually written down**, so deleting the function would take the explanation with it. This phase builds the real order path and is the point at which what the store is still for can be answered rather than guessed. Whatever is removed, the rule-7 distinction keeps a test that exercises something live.
 
 **Phase 7 — Live.** Cash trading enabled after a sustained paper period. Small size. Every limit tested deliberately before it matters.
 
