@@ -349,6 +349,13 @@ PLACEHOLDER_IDENTIFIERS = frozenset(
         "WIREnotarealsecretWIREnotarealsecret0000",
         "PKWIREWIREWIREWIRE",
         "PA7WIREFAKE0",
+        # tests/api/test_account_routes.py: the transfers route drops a cash
+        # activity it cannot render and logs the row's ``description``, which
+        # is where this vendor puts an account number in prose. Distinct from
+        # every value above for the same reason they are distinct from each
+        # other -- a test that passed only because somebody else's constant
+        # happened to be redacted would prove nothing about this route.
+        "PAEXAMPLE000",
     }
 )
 
