@@ -314,6 +314,69 @@ Three ways to get validation data:
   header cards marked unavailable. Contradicts decision 4 and lowers the
   bar of *"you'd open it in the morning and learn something true."*
 
+### 4. An exercised adjusted contract has no bookable P&L — RESOLVED: refuse
+
+**Opened 2026-09-11**, during step 5's audit. The matcher shipped with a real
+bug: it correctly refused to state a *share count* for an adjusted contract —
+a `GME1` does not deliver 100 shares — and then used that same multiplier to
+state a *dollar P&L*, booking a phantom **+$1,200 realized gain** with no
+rejection anywhere. Reproduced before it was fixed.
+
+The fix is a refusal: an adjusted root reaching an `OPEXC` or `OPASN` branch is
+rejected and logged rather than booked. Deriving the ratio from `deliverables`,
+`size`, or an assumed split factor was **explicitly forbidden**, because each
+is a guess about money and rule 4 exists to stop exactly that.
+
+What has no answer yet is what the *correct* number is. Refusing means those
+trades never reach realized P&L at all — a gap in lifetime figures rather than
+a wrong value in them, which is the right trade tonight and not obviously the
+right one forever. The scanner already filters adjusted contracts out of the
+universe, so Corollary will never *open* one; this only bites on a contract
+adjusted **while held**, which is rare and exactly when the numbers matter
+most.
+
+**Resolved 2026-09-12: refuse and report, permanently enough to build on.** The
+deliverable data was examined before deciding. A real `GME1` contract delivers
+**100 GME shares plus 10 GME.WS warrants**, split `allocation_percentage`
+95/5, while `multiplier` and `size` both report `100`:
+
+```
+GME1261016C00003000   root: GME1   underlying: GME   multiplier: 100   size: 100
+  { symbol: "GME",    amount: "100", allocation_percentage: "95", type: "equity" }
+  { symbol: "GME.WS", amount: "10",  allocation_percentage: "5",  type: "equity" }
+```
+
+Computing from that was rejected for five reasons, in order of weight:
+
+1. **It stops being a display question at Phase 6.** `max_daily_loss_pct` is
+   enforced against realized P&L, so a phantom gain — the exact +$1,200 bug
+   found here — offsets real losses and **suppresses a halt that should have
+   fired**. A missing trade makes the halt fire early, which is the safe
+   direction. This is rule 4 failing open versus failing closed.
+2. **Nothing validates the result.** The ledger exists because Alpaca
+   publishes no P&L, so bad deliverable arithmetic has no second source to
+   catch it. Silent, inside a figure labelled lifetime P&L.
+3. **The warrant leg has no dependable mark**, least of all a historical one
+   at exercise time. Valuing it also drags equity-and-warrant pricing into a
+   phase that deliberately excludes it — the matcher *names* delivered shares
+   rather than tracking them.
+4. **`allocation_percentage` is an accounting convention, not a P&L
+   instruction.** Nothing in the API says what it is for, and treating 95/5 as
+   a strike split is a guess wearing a number's clothing.
+5. **It cannot be tested.** No adjusted contract has ever been held here, and
+   waiting for a corporate action on a live position could take years — the
+   same untestability that made the option-event path a risk, minus the luck
+   that resolved it.
+
+Refusing keeps the raw `fill` and activity rows either way, so the decision is
+reversible in the direction that matters: history can be recomputed once there
+is one real case to model against. Booking a wrong number is only reversible
+once somebody notices, which is the failure this refuses to risk.
+
+The Activity page states the gap rather than hiding it — *"N trades not
+booked — adjusted deliverable"* beside the header cards, in §8.5's words. A
+known-incomplete figure, never a quietly wrong one.
+
 ### 3. Paper is a 4× PDT margin account, and the PRD says 2×
 
 Not a question so much as a correction that needs making somewhere. PRD
@@ -331,7 +394,7 @@ options trader on both, and is the right thing to size against on both.
 
 ## Decisions
 
-Twelve decisions, taken 2026-09-09/10/11. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
+Thirteen decisions, taken 2026-09-09 through 2026-09-12. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
 
 ### 1. One process
 
@@ -502,6 +565,54 @@ incremented.
 Rejected: a trailing-12-month window with the period named in the card
 (honest, but discards the truest number on the page), and maintained running
 totals (fastest, unreconcilable).
+
+### 13. The ingestion cursor is never `MAX(activity_id)`
+
+Taken 2026-09-12, after reading the recorded ids rather than reasoning about
+them. The shape is uniform — a 17-character prefix, `::`, a UUID — which is
+exactly what makes the trap convincing:
+
+```
+FILL   20260910131125217::a9d576c2-…     real time, 13:11:25.217
+FEE    20260910000000000::a2a0c406-…     zeroed
+JNLC   20260805000000000::4b47d1d0-…     zeroed
+```
+
+**Non-trade rows carry a date-only id with the time zeroed out.** Within any
+one day, every `FEE`, every journal — **and every `OPEXP`, `OPEXC` and
+`OPASN`** — therefore sorts *before* every fill of that day.
+
+Ingestion is idempotent on `activity_id` and resumes from the newest row it
+holds. Take that cursor as `MAX(activity_id)` and it lands on the day's last
+**fill**, with that same day's expiry and assignment rows sitting *below* it.
+The next pull asks for everything newer and **never sees them again** — not
+late, not duplicated, gone. Missing rows become missing realized trades become
+a wrong lifetime P&L, with nothing anywhere saying so.
+
+So the cursor is **`since_id`, the vendor's own page token** — the id of the
+last activity in the page just pulled, not a `MAX` over anything. Alpaca
+defines its own pagination order and that token is authoritative within it,
+which is stronger than any column this end could sort on. Step 7's ingestion
+reached this independently, from the same recording, before the decision was
+written down; what follows is the guard, not the fix.
+
+Rejected on the way: `transaction_time` as the ordering column, and an
+explicit integer ingest sequence. The first fails because non-trade rows carry
+`date` rather than `transaction_time` — the column that would do the ordering
+is unpopulated on exactly the rows most likely to be skipped. The second works
+but invents local state to replace a token the vendor already supplies
+correctly.
+
+`activity_id` additionally takes the same SQL guard `Money` already carries:
+ordering, comparison and aggregation **raise** rather than answering. **No
+carve-out for `MAX`** — an earlier draft proposed one on the grounds that it
+is a legitimate resume cursor, and it is precisely the opposite. The guard
+costs a few lines of Python where one line of SQL would have fitted, and buys
+a resume point that cannot silently skip.
+
+Rejected: sorting on `transaction_time` in SQL instead. Non-trade rows carry
+`date` rather than `transaction_time`, so the column that would do the
+ordering is not populated on the rows most likely to be skipped.
 
 ### 12. Finnhub stays, reaffirmed 2026-09-11
 
@@ -814,7 +925,7 @@ News page owns it.
 4. `BrokerAccount` + `AlpacaBroker` read surface.
 5. Fill ingestion, FIFO matcher, `realized_trade`.
 6. Multi-leg grouping.
-7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets.
+7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
 8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`.
 9. Finnhub market cap; fixture markers.
 10. Doc amendments.
