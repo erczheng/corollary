@@ -1,27 +1,121 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, within, fireEvent, act } from '@testing-library/react'
 import App from '../App'
+import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
 import { RECOMMENDATIONS, recommendationTitle } from '../lib/mockData'
+import type { EngineStateResponse } from '../lib/types'
 import { filterCommands, type Command } from './CommandPalette'
 
+const RUNNING: EngineStateResponse = {
+  halted: false,
+  haltedReason: null,
+  haltedAt: null,
+  t0: '2026-09-12T19:14:37.242679Z',
+}
+
+const HALTED: EngineStateResponse = { ...RUNNING, halted: true }
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response
+}
+
+const WRITE_FAILED = jsonResponse(503, {
+  error: { code: 'engine_unavailable', message: 'The engine is not reachable.' },
+})
+
+/** Answers the engine endpoints and refuses everything else.
+ *
+ * The palette is mounted on every page, so `GET /api/engine/state` is its
+ * own read now — which command of the Halt/Resume pair to offer is a question
+ * only the engine can answer. Everything else this file renders belongs to
+ * the page underneath, which these tests make no claim about; refusing those
+ * reads keeps a palette assertion from depending on page data.
+ */
+function stubFetch(engine: EngineStateResponse = RUNNING, writeAnswer?: Response) {
+  let state = engine
+
+  // `_init` is declared but read off `mock.calls` by `writes()` instead —
+  // dropping the parameter would narrow the recorded call tuple to one
+  // element and throw the POST bodies away.
+  const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
+    const url = String(input)
+
+    if (url.includes('/engine/halt') || url.includes('/engine/resume')) {
+      if (writeAnswer) return Promise.resolve(writeAnswer)
+      state = url.includes('/engine/halt') ? { ...HALTED, haltedAt: '2026-09-13T14:00:00Z' } : RUNNING
+      return Promise.resolve(jsonResponse(200, state))
+    }
+    if (url.includes('/engine/state')) return Promise.resolve(jsonResponse(200, state))
+
+    return Promise.resolve(
+      jsonResponse(503, {
+        error: { code: 'not_stubbed', message: 'Not stubbed — this file tests the palette.' },
+      }),
+    )
+  })
+
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+/** Every POST the palette sent, with its parsed body. Flatten's whole test is
+ * that this stays empty. */
+function writes(fetchMock: ReturnType<typeof stubFetch>) {
+  return fetchMock.mock.calls
+    .filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')
+    .map(([url, init]) => ({
+      url: String(url),
+      body: (init as RequestInit).body === undefined
+        ? undefined
+        : (JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>),
+    }))
+}
+
 const initialState = useUIStore.getState()
+let fetchMock: ReturnType<typeof stubFetch>
 
 beforeEach(() => {
   window.history.pushState({}, '', '/')
   useUIStore.setState({ ...initialState }, true)
+  queryClient.clear()
+  fetchMock = stubFetch()
 })
 
-function openPalette(): HTMLElement {
+afterEach(() => {
+  vi.unstubAllGlobals()
+  queryClient.clear()
+})
+
+/** Render, open, and wait for the engine read to land.
+ *
+ * The palette offers neither Halt nor Resume until it knows which one is
+ * true — guessing would mean offering Halt to an already-halted engine and
+ * overwriting the reason it recorded — so a list asserted before the read
+ * answers is a list with a command missing from it. */
+async function openPalette(): Promise<HTMLElement> {
   render(<App />)
   act(() => useUIStore.getState().openPalette())
-  return screen.getByRole('dialog', { name: 'Command palette' })
+  const palette = screen.getByRole('dialog', { name: 'Command palette' })
+  await within(palette).findByRole('option', { name: /trading/ })
+  return palette
 }
 
 /** Scoped by its label: a native `<select>` also carries role `combobox`, and
  * the Dashboard has a strategy dropdown, so a bare role query matches two. */
 function input(): HTMLElement {
   return screen.getByRole('combobox', { name: 'Run a command' })
+}
+
+/** Type a query and run the highlighted result, which is what a hurried
+ * Ctrl+K actually is. */
+function runCommand(query: string) {
+  fireEvent.change(input(), { target: { value: query } })
+  fireEvent.keyDown(input(), { key: 'Enter' })
 }
 
 const command = (label: string, group = 'Pages'): Command => ({
@@ -72,16 +166,16 @@ describe('opening the palette', () => {
     expect(screen.getByRole('dialog', { name: 'Command palette' })).toBeInTheDocument()
   })
 
-  it('closes on Escape', () => {
-    openPalette()
+  it('closes on Escape', async () => {
+    await openPalette()
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: 'Command palette' })).not.toBeInTheDocument()
   })
 
   /** Reopening onto the last query and the last highlighted row is how Enter
    * runs something you never read. */
-  it('opens fresh rather than restoring the last query', () => {
-    openPalette()
+  it('opens fresh rather than restoring the last query', async () => {
+    await openPalette()
     fireEvent.change(input(), { target: { value: 'flatten' } })
 
     act(() => useUIStore.getState().closePalette())
@@ -92,33 +186,45 @@ describe('opening the palette', () => {
 })
 
 describe('the command list', () => {
-  it('offers every page', () => {
-    const palette = openPalette()
+  it('offers every page', async () => {
+    const palette = await openPalette()
     for (const page of ['Dashboard', 'Activity', 'News', 'Markets', 'Research', 'Account', 'Settings']) {
       expect(within(palette).getByRole('option', { name: new RegExp(`Go to ${page}`) })).toBeInTheDocument()
     }
   })
 
-  it('offers the engine controls, keeping Halt and Flatten separate', () => {
-    const palette = openPalette()
+  it('offers the engine controls, keeping Halt and Flatten separate', async () => {
+    const palette = await openPalette()
     expect(within(palette).getByRole('option', { name: /Halt trading/ })).toBeInTheDocument()
     expect(within(palette).getByRole('option', { name: /Flatten all positions/ })).toBeInTheDocument()
   })
 
-  it('offers Resume instead of Halt once halted', () => {
-    render(<App />)
-    act(() => {
-      useUIStore.getState().halt()
-      useUIStore.getState().openPalette()
-    })
+  it('offers Resume instead of Halt once the engine reports halted', async () => {
+    fetchMock = stubFetch(HALTED)
+    const palette = await openPalette()
 
-    const palette = screen.getByRole('dialog', { name: 'Command palette' })
     expect(within(palette).getByRole('option', { name: /Resume trading/ })).toBeInTheDocument()
     expect(within(palette).queryByRole('option', { name: /Halt trading/ })).not.toBeInTheDocument()
   })
 
-  it('offers to execute a named recommendation', () => {
-    const palette = openPalette()
+  /** Server state, not the store's. The Dashboard's pill reads the API, and a
+   * palette that read the Phase 1 flag would offer Halt to an engine already
+   * halted by the dead-man's switch — overwriting the reason it recorded. */
+  it('reads the halt from the engine, not from the fixture store', async () => {
+    fetchMock = stubFetch(HALTED)
+    render(<App />)
+    act(() => {
+      // The store says running. The engine says halted. The engine wins.
+      useUIStore.getState().resume()
+      useUIStore.getState().openPalette()
+    })
+
+    const palette = screen.getByRole('dialog', { name: 'Command palette' })
+    expect(await within(palette).findByRole('option', { name: /Resume trading/ })).toBeInTheDocument()
+  })
+
+  it('offers to execute a named recommendation', async () => {
+    const palette = await openPalette()
     const title = recommendationTitle(RECOMMENDATIONS[0])
     // Matched on text rather than a regex: the title contains `$` and `/`,
     // which are regex metacharacters, and escaping them here would be testing
@@ -132,29 +238,21 @@ describe('the command list', () => {
   })
 
   /** Acting on a candidate you cannot see is acting on a stale list. */
-  it('drops a dismissed recommendation from the list', () => {
-    render(<App />)
+  it('drops a dismissed recommendation from the list', async () => {
     const target = RECOMMENDATIONS[0]
-    act(() => {
-      useUIStore.getState().dismissRecommendation(target.id)
-      useUIStore.getState().openPalette()
-    })
+    act(() => useUIStore.getState().dismissRecommendation(target.id))
+    const palette = await openPalette()
 
-    const palette = screen.getByRole('dialog', { name: 'Command palette' })
     expect(
       within(palette).queryByRole('option', { name: new RegExp(`Execute ${target.symbol}`) }),
     ).not.toBeInTheDocument()
   })
 
-  it('stops offering Execute once a recommendation has been executed', () => {
-    render(<App />)
+  it('stops offering Execute once a recommendation has been executed', async () => {
     const target = RECOMMENDATIONS[0]
-    act(() => {
-      useUIStore.getState().executeRecommendation(target.id)
-      useUIStore.getState().openPalette()
-    })
+    act(() => useUIStore.getState().executeRecommendation(target.id))
+    const palette = await openPalette()
 
-    const palette = screen.getByRole('dialog', { name: 'Command palette' })
     expect(
       within(palette).queryByRole('option', { name: new RegExp(`Execute ${target.symbol}`) }),
     ).not.toBeInTheDocument()
@@ -166,8 +264,8 @@ describe('the command list', () => {
 })
 
 describe('filtering and keyboard navigation', () => {
-  it('narrows the list as you type', () => {
-    const palette = openPalette()
+  it('narrows the list as you type', async () => {
+    const palette = await openPalette()
     fireEvent.change(input(), { target: { value: 'go to set' } })
 
     const options = within(palette).getAllByRole('option')
@@ -175,14 +273,14 @@ describe('filtering and keyboard navigation', () => {
     expect(options[0].textContent).toContain('Go to Settings')
   })
 
-  it('says so when nothing matches', () => {
-    openPalette()
+  it('says so when nothing matches', async () => {
+    await openPalette()
     fireEvent.change(input(), { target: { value: 'zzzz' } })
     expect(screen.getByText(/No command matches/)).toBeInTheDocument()
   })
 
-  it('selects the first result by default and moves with the arrows', () => {
-    const palette = openPalette()
+  it('selects the first result by default and moves with the arrows', async () => {
+    const palette = await openPalette()
     const options = () => within(palette).getAllByRole('option')
 
     expect(options()[0]).toHaveAttribute('aria-selected', 'true')
@@ -194,8 +292,8 @@ describe('filtering and keyboard navigation', () => {
     expect(options()[0]).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('does not move past either end of the list', () => {
-    const palette = openPalette()
+  it('does not move past either end of the list', async () => {
+    const palette = await openPalette()
     const options = () => within(palette).getAllByRole('option')
 
     fireEvent.keyDown(input(), { key: 'ArrowUp' })
@@ -208,17 +306,16 @@ describe('filtering and keyboard navigation', () => {
     expect(all[all.length - 1]).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('runs the highlighted command on Enter and closes', () => {
-    openPalette()
-    fireEvent.change(input(), { target: { value: 'go to settings' } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
+  it('runs the highlighted command on Enter and closes', async () => {
+    await openPalette()
+    runCommand('go to settings')
 
     expect(screen.queryByRole('dialog', { name: 'Command palette' })).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
   })
 
-  it('runs a command on click', () => {
-    const palette = openPalette()
+  it('runs a command on click', async () => {
+    const palette = await openPalette()
     fireEvent.click(within(palette).getByRole('option', { name: /Go to Markets/ }))
 
     expect(screen.getByRole('heading', { name: 'Markets', level: 1 })).toBeInTheDocument()
@@ -226,70 +323,136 @@ describe('filtering and keyboard navigation', () => {
 })
 
 describe('engine commands', () => {
-  it('halts from the palette', () => {
-    openPalette()
-    fireEvent.change(input(), { target: { value: 'halt' } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
+  /** Halt is a real write in this phase, and rule 8 wants the reason with it:
+   * "Halted by hand" and "the dead-man's switch fired" are different answers
+   * to the same question, and only the recorded reason tells them apart. */
+  it('halts through the engine, with a recorded reason', async () => {
+    await openPalette()
+    runCommand('halt')
 
-    expect(useUIStore.getState().isHalted).toBe(true)
+    await screen.findByRole('alertdialog')
+    expect(writes(fetchMock)).toEqual([
+      { url: '/api/engine/halt', body: { reason: 'Halted by hand from the command palette' } },
+    ])
   })
 
-  it('resumes from the palette', () => {
-    render(<App />)
-    act(() => {
-      useUIStore.getState().halt()
-      useUIStore.getState().openPalette()
-    })
+  /** The palette closes before the request settles, so without this a halt
+   * taken from any page but the Dashboard would report nothing at all — and
+   * a halt you believe you took is the state rule 9 exists to keep visible. */
+  it('states the outcome of a halt, and that nothing was closed', async () => {
+    await openPalette()
+    runCommand('halt')
 
-    fireEvent.change(input(), { target: { value: 'resume' } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
-
-    expect(useUIStore.getState().isHalted).toBe(false)
+    const notice = await screen.findByRole('alertdialog')
+    expect(notice.textContent).toMatch(/Engine halted/)
+    expect(notice.textContent).toMatch(/nothing was closed/)
   })
 
-  /** The one that matters. Flatten is reachable by typing three letters and
-   * pressing Enter, which makes it the easiest destructive action in the app to
-   * fire by accident. */
-  it('asks before flattening, and does not flatten until confirmed', () => {
-    const before = useUIStore.getState().openPositions.paper.length
-    expect(before).toBeGreaterThan(0)
+  it('resumes through the engine — an explicit human action, per rule 9', async () => {
+    fetchMock = stubFetch(HALTED)
+    await openPalette()
+    runCommand('resume')
 
-    openPalette()
-    fireEvent.change(input(), { target: { value: 'flatten' } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
-
-    const dialog = screen.getByRole('alertdialog')
-    expect(dialog.textContent).toMatch(/cannot be undone/)
-    expect(useUIStore.getState().openPositions.paper).toHaveLength(before)
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Flatten and halt' }))
-
-    expect(useUIStore.getState().openPositions.paper).toHaveLength(0)
-    expect(useUIStore.getState().isHalted).toBe(true)
+    const notice = await screen.findByRole('alertdialog')
+    expect(notice.textContent).toMatch(/Engine resumed/)
+    expect(writes(fetchMock).map((w) => w.url)).toEqual(['/api/engine/resume'])
   })
 
-  it('leaves the book alone when the flatten confirm is cancelled', () => {
-    const before = useUIStore.getState().openPositions.paper.length
+  /** A write that failed has to say so. It is `error` — a fault, not a
+   * limitation — and it names the state the engine is *not* in, because
+   * believing you halted is the whole hazard. */
+  it('reports a failed halt rather than reporting nothing', async () => {
+    fetchMock = stubFetch(RUNNING, WRITE_FAILED)
+    await openPalette()
+    runCommand('halt')
 
-    openPalette()
-    fireEvent.change(input(), { target: { value: 'flatten' } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
-    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
-
-    expect(useUIStore.getState().openPositions.paper).toHaveLength(before)
-    expect(useUIStore.getState().isHalted).toBe(false)
+    const notice = await screen.findByRole('alertdialog')
+    expect(notice.textContent).toMatch(/Halt request failed/)
+    expect(notice.textContent).toMatch(/The engine is not reachable\./)
+    expect(notice.textContent).toMatch(/still running/)
+    expect(within(notice).getByRole('heading')).toHaveClass('text-error')
   })
 
-  it('executes a recommendation from the palette', () => {
+  it('executes a recommendation from the palette', async () => {
     const target = RECOMMENDATIONS[0]
-    openPalette()
-    fireEvent.change(input(), { target: { value: `execute ${target.symbol}` } })
-    fireEvent.keyDown(input(), { key: 'Enter' })
+    await openPalette()
+    runCommand(`execute ${target.symbol}`)
 
     expect(useUIStore.getState().dispositions[target.id]).toBe('executed')
   })
 })
 
+/** The one that matters.
+ *
+ * Flatten used to call `store.flatten()` — which empties a fixture book that
+ * no page renders any more. The confirm said "this cannot be undone", you
+ * accepted it, and not one real position moved. A destructive command that
+ * reports success and does nothing is worse than one that errors, because the
+ * dialog tells you it worked.
+ */
+describe('flatten, which this phase cannot do', () => {
+  it('stays in the list, so the control is still findable', async () => {
+    const palette = await openPalette()
+    const option = within(palette).getByRole('option', { name: /Flatten all positions/ })
+
+    // The row says it before you press Enter. Omitting the command instead
+    // would answer "No command matches “flatten”", which is the one reply
+    // that leaves you looking for another route to it.
+    expect(option.textContent).toMatch(/Unavailable until Phase 6/)
+  })
+
+  it('sends nothing and states that nothing was closed', async () => {
+    await openPalette()
+    runCommand('flatten')
+
+    const notice = await screen.findByRole('alertdialog')
+    expect(notice.textContent).toMatch(/nothing was closed/i)
+    expect(notice.textContent).toMatch(/Phase 6/)
+    expect(notice.textContent).toMatch(/still open/)
+    // No order, no halt, no write of any kind.
+    expect(writes(fetchMock)).toEqual([])
+  })
+
+  /** A capability this phase does not have is `caution`, never `error`:
+   * nothing is broken. `bearish` is a loss and `error` is a fault. */
+  it('reads as a limitation, not a fault', async () => {
+    await openPalette()
+    runCommand('flatten')
+
+    const notice = await screen.findByRole('alertdialog')
+    expect(within(notice).getByRole('heading')).toHaveClass('text-caution')
+  })
+
+  /** The structural pin, kept from the confirm this notice replaces.
+   *
+   * `if (!open) return null` used to sit above the palette's return, so
+   * running Flatten — whose first act is to close the palette — unmounted the
+   * dialog in the same tick it was asked for, and the most destructive
+   * command in the list had no guard behind it at all. The dialog's contents
+   * changed; the hazard did not. It must still outlive the palette. */
+  it('shows its dialog even though the palette closes in the same tick', async () => {
+    await openPalette()
+    runCommand('flatten')
+
+    expect(screen.queryByRole('dialog', { name: 'Command palette' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
+  })
+
+  it('dismisses on Escape and on the button', async () => {
+    await openPalette()
+    runCommand('flatten')
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+
+    act(() => useUIStore.getState().openPalette())
+    runCommand('flatten')
+    const notice = await screen.findByRole('alertdialog')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Dismiss' }))
+
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+})
 
 /** Two actions, not three. `Queue` was removed, so accepting a candidate
  * means submitting it and nothing else. */
@@ -297,16 +460,16 @@ describe('recommendation actions', () => {
   const first = RECOMMENDATIONS[0]
   const title = recommendationTitle(first)
 
-  it('offers Execute and Dismiss, and no Queue', () => {
-    const dialog = openPalette()
+  it('offers Execute and Dismiss, and no Queue', async () => {
+    const dialog = await openPalette()
 
     expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
     expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
     expect(within(dialog).queryByText(`Queue ${title}`)).not.toBeInTheDocument()
   })
 
-  it('Execute records the submission', () => {
-    const dialog = openPalette()
+  it('Execute records the submission', async () => {
+    const dialog = await openPalette()
     fireEvent.click(within(dialog).getByText(`Execute ${title}`))
 
     expect(useUIStore.getState().dispositions[first.id]).toBe('executed')
@@ -314,26 +477,35 @@ describe('recommendation actions', () => {
 
   /** Halting stops new entries (CLAUDE.md rule 7). A surface that still
    * offers to open one is the surface it happens on by accident. */
-  describe('while the engine is halted', () => {
-    it('withdraws Execute', () => {
+  describe('while trading is halted', () => {
+    it('withdraws Execute on the fixture halt the Research page reads', async () => {
       act(() => useUIStore.getState().halt())
-      const dialog = openPalette()
+      const dialog = await openPalette()
+
+      expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
+    })
+
+    /** Either halt withdraws it — the gate is only ever more conservative,
+     * so halting from this very palette stops the Execute rows under it. */
+    it('withdraws Execute on the engine halt as well', async () => {
+      fetchMock = stubFetch(HALTED)
+      const dialog = await openPalette()
 
       expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
     })
 
     /** Waving off a candidate opens nothing, so it is never gated. */
-    it('keeps Dismiss available', () => {
+    it('keeps Dismiss available', async () => {
       act(() => useUIStore.getState().halt())
-      const dialog = openPalette()
+      const dialog = await openPalette()
 
       expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
     })
 
-    it('brings Execute back on resume', () => {
+    it('brings Execute back on resume', async () => {
       act(() => useUIStore.getState().halt())
       act(() => useUIStore.getState().resume())
-      const dialog = openPalette()
+      const dialog = await openPalette()
 
       expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
     })
