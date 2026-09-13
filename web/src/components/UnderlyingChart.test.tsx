@@ -149,6 +149,48 @@ describe('UnderlyingChart', () => {
     expect(screen.getByRole('button', { name: '3M' })).toBeInTheDocument()
   })
 
+  /** `1D` on a Saturday draws Friday. That is the right data — there is no
+   * session today — but the control says `1D`, so the chart has to name the
+   * day it is actually showing. The test is the newest point against
+   * today's ET date, the same one the Markets volume column makes. */
+  describe('which session is on screen', () => {
+    it('names the day a daily series ends on', async () => {
+      // Eleven closes ending 2026-09-11, a Friday.
+      stubUnderlyings(() => jsonResponse(200, [quote({ history: closes(11) })]))
+      renderChart()
+
+      expect(await screen.findByText(/Last market day/)).toHaveTextContent('Fri, Sep 11')
+    })
+
+    it('names it from the ET day an intraday bar fell on', async () => {
+      // 78 five-minute bars is one 09:30–16:00 session, ending 19:55Z —
+      // 3:55 PM ET on the 11th.
+      stubUnderlyings((period) =>
+        jsonResponse(
+          200,
+          period === '1D' ? [quote({ intraday: bars(78) })] : [quote({ history: closes(11) })],
+        ),
+      )
+      renderChart()
+      await screen.findByText(/over 3M/)
+
+      fireEvent.click(screen.getByRole('button', { name: '1D' }))
+
+      expect(await screen.findByText(/over 1D/)).toBeInTheDocument()
+      expect(screen.getByText(/Last market day/)).toHaveTextContent('Fri, Sep 11')
+    })
+
+    it('leaves the no-session state its own wording', async () => {
+      // Both series fields empty — `1D` asked on a Sunday. A day label on
+      // top of that would name a session that is not drawn.
+      stubUnderlyings(() => jsonResponse(200, [quote()]))
+      renderChart()
+
+      expect(await screen.findByText(/No session for NVDA in this window/)).toBeInTheDocument()
+      expect(screen.queryByText(/Last market day/)).not.toBeInTheDocument()
+    })
+  })
+
   it('names the window it is reading while the first one is in flight', async () => {
     stubUnderlyings(() => new Promise<never>(() => {}) as unknown as Response)
     renderChart()

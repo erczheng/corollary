@@ -15,13 +15,14 @@ import { RequestFailed } from './RequestFailed'
 import {
   formatSeriesKey,
   isInvalidSeriesWindow,
+  latestSession,
   quoteSeries,
   seriesChange,
   seriesSpansDays,
   windowForRange,
   type ChartSeries,
 } from '../lib/api'
-import { formatPct, formatUsd, signClass } from '../lib/format'
+import { formatPct, formatSessionDay, formatUsd, signClass } from '../lib/format'
 
 const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
@@ -78,6 +79,21 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
     () => seriesChange(points, 0, points.length - 1),
     [points],
   )
+
+  // Which day the series ends on, named only when that day is not today's.
+  // `1D` on a Saturday draws Friday: the right data — there is no session
+  // today — but a control reading `1D` over it reads as today. The test is
+  // the newest point against today's ET date, never a market calendar and
+  // never a bare `new Date()`, whose day is the browser's.
+  //
+  // Withheld on the same terms as the change readout beside it: while the
+  // previous window is still drawn, and wherever there is no line, since
+  // the no-session and single-bar states already say more than this would.
+  const session = latestSession(series)
+  const sessionLead =
+    stale || query.isPending || query.isError || points.length < 2
+      ? null
+      : (session?.lead ?? null)
 
   // One ET day of five-minute bars needs no date on every tick; a week of
   // them does, or `3:45 PM` appears four times meaning four different days.
@@ -137,6 +153,15 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
           )}
         </p>
       </div>
+
+      {/* Informational, so `on-surface-variant` and not `caution` — an
+          earlier session is not a fault and not a loss. The day itself is
+          mono and tabular like every other figure on the page. */}
+      {sessionLead !== null && session !== null && (
+        <p className="mb-2 text-caption text-on-surface-variant">
+          {sessionLead} — <span className="text-data-sm">{formatSessionDay(session.date)}</span>
+        </p>
+      )}
 
       <ChartBody
         symbol={symbol}

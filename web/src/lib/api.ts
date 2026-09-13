@@ -439,6 +439,72 @@ export function seriesSpansDays(points: readonly SeriesPoint[]): boolean {
   return formatDateET(points[0].key) !== formatDateET(points[points.length - 1].key)
 }
 
+/** Which session the newest point on screen belongs to, and whether that
+ * session is today's.
+ *
+ * `1D` on a Saturday draws Friday, and that is the right data — there is no
+ * session today and an empty chart would be worse — but a control reading
+ * `1D` over it reads as *today*. This is what lets a chart name the day it
+ * is actually showing.
+ *
+ * **The series answers "is this today", not a market calendar.** If the
+ * newest point is not today's ET date then an earlier session is on screen,
+ * whatever the reason: weekend, holiday, half-day, or a symbol that stopped
+ * printing. The Markets volume column makes the same test with
+ * `volumeSession` / `volumeDate`, and asking a calendar instead would give a
+ * second answer that could disagree with the data.
+ *
+ * The two resolutions take the two **opposite** timestamp rules. A `daily`
+ * key *is* a calendar date and is already in the shape this compares. An
+ * `intraday` key is an **instant**, and the day it belongs to is the day it
+ * fell on in New York — which is exactly what `marketToday` resolves for any
+ * instant. Its UTC date would roll over to tomorrow for anything stamped
+ * after 20:00 ET.
+ *
+ * `today` is injectable so this is testable without a clock; it defaults to
+ * the real market date and never to a bare `new Date()`, whose day is the
+ * browser's rather than New York's. */
+export interface SeriesSession {
+  /** The newest point's market date, `YYYY-MM-DD` — the shape every
+   * date-only value in this app compares in, and the shape
+   * `format.ts#formatSessionDay` renders. */
+  date: string
+  /** True when that is today in New York: a session in progress, or one
+   * that closed a few hours ago. Either way it is not a *previous* day. */
+  isToday: boolean
+  /** How to introduce `date` in words, or **null on today's session**,
+   * which needs no introduction — the chart reads as today because it is
+   * today. Deciding it here rather than in each chart is what stops one of
+   * them captioning a live session "last market day". */
+  lead: string | null
+}
+
+export function latestSession(
+  series: ChartSeries,
+  today: string = marketToday(),
+): SeriesSession | null {
+  const { resolution, points } = series
+  const newest = points[points.length - 1]
+  // Both series fields empty: no session in the window at all. That state
+  // has its own wording, which says more than a day label would.
+  if (resolution === null || newest === undefined) return null
+
+  let date: string
+  if (resolution === 'daily') {
+    date = newest.key.slice(0, 10)
+  } else {
+    const at = new Date(newest.key)
+    // Fails closed rather than throwing: Intl raises RangeError on an
+    // invalid Date, and an unparseable key should cost the label, not the
+    // chart it sits above.
+    if (Number.isNaN(at.getTime())) return null
+    date = marketToday(at)
+  }
+
+  const isToday = date === today
+  return { date, isToday, lead: isToday ? null : 'Last market day' }
+}
+
 export interface SeriesChange {
   from: SeriesPoint
   to: SeriesPoint

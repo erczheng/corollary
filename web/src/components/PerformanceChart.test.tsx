@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { PerformanceChart } from './PerformanceChart'
 import { ApiError, type ChartSeries } from '../lib/api'
+import { marketToday } from '../lib/format'
 
 const daily: ChartSeries = {
   resolution: 'daily',
@@ -191,6 +192,95 @@ describe('PerformanceChart', () => {
       // The old wording — true of a fixture generated at Corollary's start,
       // false of a broker curve that predates the engine entirely.
       expect(screen.queryByText(/Since Aug 8, 2025 — Corollary/)).not.toBeInTheDocument()
+    })
+  })
+
+  /** `1D` on a Saturday draws Friday, which is the right data — there is no
+   * session today and an empty chart would be worse. The control still says
+   * `1D`, so without this the panel reads as today. */
+  describe('which session is on screen', () => {
+    it('names the day the curve ends on when that day is not today', () => {
+      renderChart()
+
+      expect(screen.getByText(/Last market day/)).toHaveTextContent('Wed, Aug 13')
+    })
+
+    it('dates a daily point from its own calendar date, not a day early', () => {
+      renderChart()
+
+      // 2025-08-13 through an ET formatter is Aug 12: a Wednesday session
+      // labelled Tuesday.
+      expect(screen.queryByText(/Tue, Aug 12/)).not.toBeInTheDocument()
+    })
+
+    it('dates an intraday session by the ET day it fell on, not its UTC one', () => {
+      // 00:05Z on the 14th is 8:05 PM ET on the 13th — one ET evening, two
+      // UTC dates. Sliced off the instant, the label would claim Aug 14.
+      renderChart({
+        range: '1D',
+        series: {
+          resolution: 'intraday',
+          points: [intraday.points[0], { key: '2025-08-14T00:05:00Z', value: 26_140 }],
+        },
+      })
+
+      expect(screen.getByText(/Last market day/)).toHaveTextContent('Wed, Aug 13')
+      expect(screen.queryByText(/Thu, Aug 14/)).not.toBeInTheDocument()
+    })
+
+    it('says nothing about a last market day while the session on screen is today’s', () => {
+      // A session in progress is not the last market day. Built from
+      // `marketToday` so it holds whenever the suite runs.
+      renderChart({
+        series: {
+          resolution: 'daily',
+          points: [
+            { key: '2025-08-08', value: 25_000 },
+            { key: marketToday(), value: 25_400 },
+          ],
+        },
+      })
+
+      expect(screen.queryByText(/Last market day/)).not.toBeInTheDocument()
+    })
+
+    it('waits for the window it names rather than labelling the previous one', () => {
+      renderChart({ range: '1W', stale: true })
+
+      expect(screen.queryByText(/Last market day/)).not.toBeInTheDocument()
+    })
+
+    it('leaves the no-session state its own wording', () => {
+      renderChart({ range: '1D', series: { resolution: null, points: [] } })
+
+      expect(screen.getByText(/No equity history for Paper in this window/)).toBeInTheDocument()
+      expect(screen.queryByText(/Last market day/)).not.toBeInTheDocument()
+    })
+
+    it('adds no day label to a window the server refused', () => {
+      renderChart({
+        isError: true,
+        error: new ApiError({
+          status: 422,
+          code: 'invalid_series_window',
+          message: 'Ask for 1W at 5Min instead, or shorten the period.',
+          url: '/api/account/history',
+        }),
+        series: daily,
+      })
+
+      expect(screen.queryByText(/Last market day/)).not.toBeInTheDocument()
+    })
+
+    /** Explicitly out of scope, and recorded so it is not "fixed" back in:
+     * the header's Total Balance can sit below this curve's last point —
+     * options settling after the close — and both figures are right. The
+     * owner declined a line explaining that; it would be noise on every day
+     * it does not happen. */
+    it('explains nothing about the header balance', () => {
+      renderChart()
+
+      expect(screen.queryByText(/settle/i)).not.toBeInTheDocument()
     })
   })
 

@@ -12,6 +12,7 @@ import {
 import { type ChartRange } from '../lib/types'
 import {
   formatSeriesKey,
+  latestSession,
   seriesChange,
   seriesSpansDays,
   type ChartSeries,
@@ -19,7 +20,7 @@ import {
 } from '../lib/api'
 import { RequestFailed } from './RequestFailed'
 import { TableSkeleton } from './Skeleton'
-import { formatDateTimeET, formatPct, formatUsd, signClass } from '../lib/format'
+import { formatDateTimeET, formatPct, formatSessionDay, formatUsd, signClass } from '../lib/format'
 
 const RANGES: ChartRange[] = ['1D', '1W', '1M', '3M', 'YTD', '1Y', 'All']
 
@@ -129,6 +130,22 @@ export function PerformanceChart({
       ? `${formatSeriesKey('intraday', key)} ET`
       : formatSeriesKey('daily', key)
 
+  // Which day the newest point on screen belongs to. `1D` on a Saturday
+  // draws Friday — the right data, since there is no session today — but
+  // the control says `1D` and nothing else on the panel says *which* day,
+  // so it reads as today. `latestSession` compares the newest point against
+  // today's ET date and returns no lead when the two match: a session in
+  // progress is not the last market day, and captioning a live chart that
+  // way would be a plain falsehood.
+  //
+  // Withheld while `stale` — what is drawn is still the previous window,
+  // and a line naming a day has to wait for the window it names. Withheld
+  // below two points too: the empty and single-point states have their own
+  // wording, which says more than this would.
+  const session = latestSession(series)
+  const sessionLead =
+    stale || isPending || isError || points.length < 2 ? null : (session?.lead ?? null)
+
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -162,6 +179,22 @@ export function PerformanceChart({
             indexes it to the equity at the start of the window; it is a
             feature, not a checkbox, and it is not in this phase. */}
       </div>
+
+      {/* The session the curve ends on, named — and named only when it is
+          not today's. The day is mono and tabular like every other figure;
+          the phrase around it is not a status and not a warning, so it is
+          plain informational text at `on-surface-variant`, which clears the
+          contrast floor that `outline` and `outline-warm` do not.
+
+          Deliberately *just* the day. The header's Total Balance can differ
+          from this curve's last point — options settle after the close —
+          and both figures are correct; explaining that here would be noise
+          on every day it does not happen. */}
+      {sessionLead !== null && session !== null && (
+        <p className="mt-3 text-caption text-on-surface-variant">
+          {sessionLead} — <span className="text-data-sm">{formatSessionDay(session.date)}</span>
+        </p>
+      )}
 
       {/* Every state below keeps the range control above it mounted. An
           error or an empty window that replaced the whole panel would leave

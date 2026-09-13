@@ -145,6 +145,30 @@ export function formatDateOnly(isoDate: string): string {
   return DATE_ONLY.format(new Date(`${isoDate}T00:00:00Z`))
 }
 
+const SESSION_DAY = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+})
+
+/** A trading session's day, named — "Fri, Sep 11".
+ *
+ * Same UTC rule as formatDateOnly and formatExpiry, and for the same
+ * reason: the argument is a bare 'YYYY-MM-DD', which is UTC midnight, so
+ * rendering it in ET would name the *previous* day and label a Friday
+ * session Thursday. An **instant** must be resolved to its market date
+ * first (api.ts#latestSession) rather than handed straight to this.
+ *
+ * The weekday is the point of the format. "Which day was the last market
+ * day" is a question about the weekend or the holiday sitting between then
+ * and now, and "Fri" answers it without arithmetic. The year is omitted for
+ * the same reason formatExpiry omits it — the newest point of a live chart
+ * is always recent. */
+export function formatSessionDay(isoDate: string): string {
+  return SESSION_DAY.format(new Date(`${isoDate}T00:00:00Z`))
+}
+
 /** Today's calendar date in market time, as 'YYYY-MM-DD'.
  *
  * `en-CA` because it is the locale whose short date *is* ISO order; the

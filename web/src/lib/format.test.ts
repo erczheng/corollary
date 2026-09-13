@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { formatDateET, formatDateOnly, formatExpiry, formatSignedNumber } from './format'
+import {
+  formatDateET,
+  formatDateOnly,
+  formatExpiry,
+  formatSessionDay,
+  formatSignedNumber,
+} from './format'
 
 /** A bare 'YYYY-MM-DD' is a calendar date, not an instant. It parses as UTC
  * midnight, and ET is behind UTC, so rendering one in ET shows the previous
@@ -55,5 +61,26 @@ describe('formatSignedNumber', () => {
   it('takes a digit count', () => {
     expect(formatSignedNumber(-2.605, 1)).toBe('−2.6')
     expect(formatSignedNumber(3, 0)).toBe('+3')
+  })
+})
+
+/** Names the session a chart is actually showing. Same UTC rule as
+ * formatDateOnly — it takes a calendar date, and an instant has to be
+ * resolved to its market day (api.ts#latestSession) before it gets here. */
+describe('formatSessionDay', () => {
+  it('names the weekday, which is the whole reason the label helps', () => {
+    // "Fri" is what says the two days since were a weekend.
+    expect(formatSessionDay('2026-09-11')).toBe('Fri, Sep 11')
+  })
+
+  it('does not slip to the previous day the way an ET render would', () => {
+    // ET is behind UTC, so 2026-09-11 through an ET formatter is Sep 10 —
+    // a Friday session labelled Thursday.
+    expect(formatSessionDay('2026-09-11')).not.toContain('Thu')
+    expect(formatSessionDay('2026-09-11')).not.toContain('Sep 10')
+  })
+
+  it('omits the year, which the newest point on a live chart never needs', () => {
+    expect(formatSessionDay('2026-01-02')).toBe('Fri, Jan 2')
   })
 })

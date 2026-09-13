@@ -9,6 +9,7 @@ import {
   apiUrl,
   formatSeriesKey,
   isInvalidSeriesWindow,
+  latestSession,
   quoteSeries,
   resolutionForTimeframe,
   seriesChange,
@@ -34,8 +35,10 @@ import {
   updateNotificationRoutes,
   updateRiskLimits,
   wireMoney,
+  type ChartSeries,
 } from './api'
 import type { AccountMode, UnderlyingQuote } from './types'
+import { marketToday } from './format'
 
 /** A response stub carrying only what `request` touches. Built by hand
  * rather than from the platform `Response`, so the tests do not depend on
@@ -588,6 +591,84 @@ describe('seriesSpansDays', () => {
     // 00:30Z on the 11th is 20:30 ET on the 10th: one ET evening, two UTC
     // dates.
     expect(seriesSpansDays([day('2026-09-10T22:00:00Z'), day('2026-09-11T00:30:00Z')])).toBe(false)
+  })
+})
+
+/** The chart shows the last market day on a Saturday, and has to say so.
+ *
+ * The question is answered by the series — is its newest point today's ET
+ * date — and never by a market calendar, which would be a second answer
+ * able to disagree with the data on screen. */
+describe('latestSession', () => {
+  const daily = (...dates: string[]): ChartSeries => ({
+    resolution: 'daily',
+    points: dates.map((date) => ({ key: date, value: 1 })),
+  })
+  const intraday = (...instants: string[]): ChartSeries => ({
+    resolution: 'intraday',
+    points: instants.map((at) => ({ key: at, value: 1 })),
+  })
+
+  it('names the day and leads with it when the newest point is not today', () => {
+    expect(latestSession(daily('2026-09-10', '2026-09-11'), '2026-09-12')).toEqual({
+      date: '2026-09-11',
+      isToday: false,
+      lead: 'Last market day',
+    })
+  })
+
+  it('says nothing about a last market day while the session on screen is today’s', () => {
+    // A session in progress is not the last market day, and the chart
+    // already reads as today because it is today.
+    expect(latestSession(daily('2026-09-10', '2026-09-11'), '2026-09-11')).toEqual({
+      date: '2026-09-11',
+      isToday: true,
+      lead: null,
+    })
+  })
+
+  it('reads the newest point, not the first', () => {
+    expect(latestSession(daily('2026-08-03', '2026-09-11'), '2026-09-12')?.date).toBe('2026-09-11')
+  })
+
+  it('takes a daily key as the calendar date it already is', () => {
+    // The date-only trap: run through an ET formatter, 2026-09-11 becomes
+    // Sep 10 and a Friday session gets labelled Thursday.
+    expect(latestSession(daily('2026-09-11'), '2026-09-12')?.date).toBe('2026-09-11')
+  })
+
+  it('resolves an intraday instant to the ET day it fell on, not its UTC one', () => {
+    // 00:05Z on the 12th is 8:05 PM ET on the 11th — one ET evening, two
+    // UTC dates. Sliced off the string, this would claim Saturday the 12th
+    // was a market day and, on the 12th, that the chart was live.
+    expect(latestSession(intraday('2026-09-12T00:05:00Z'), '2026-09-12')).toEqual({
+      date: '2026-09-11',
+      isToday: false,
+      lead: 'Last market day',
+    })
+  })
+
+  it('recognises an intraday session running today', () => {
+    expect(latestSession(intraday('2026-09-11T13:30:00Z', '2026-09-11T19:55:00Z'), '2026-09-11'))
+      .toEqual({ date: '2026-09-11', isToday: true, lead: null })
+  })
+
+  it('defaults to today in market time, never the browser’s day', () => {
+    // No second argument: the default has to be New York's date. Built from
+    // `marketToday` on both sides so the assertion holds at any hour.
+    expect(latestSession(daily(marketToday()))?.lead).toBeNull()
+  })
+
+  it('has no session to name when neither series field came back', () => {
+    // `1D` on a Sunday. That state has its own wording; this must not add
+    // a day label to it.
+    expect(latestSession({ resolution: null, points: [] })).toBeNull()
+  })
+
+  it('costs the label rather than the chart when a key is unparseable', () => {
+    // Intl throws RangeError on an invalid Date, and this sits above a
+    // drawn chart.
+    expect(latestSession(intraday('not-an-instant'), '2026-09-12')).toBeNull()
   })
 })
 
