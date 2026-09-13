@@ -288,6 +288,65 @@ P&L, average win, average loss and win rate are then all wrong in the same
 direction with nothing on screen to say so. The first symptom is a terminal
 that believes you never win.
 
+**CLOSED 2026-09-12 — the events posted early, and the ledger reconciles to
+the broker exactly.** All three rows landed on 2026-09-11, two days ahead of
+the expected 09-14, and every prediction above held:
+
+| Event | Symbol | `qty` | `net_amount` | `group_id` pairing |
+|---|---|---|---|---|
+| `OPEXP` | `NVDA260911C00240000` | `-1` | `0` | alone — nothing was delivered |
+| `OPEXC` | `NVDA260911C00205000` | `-1` | `0` | paired with `OPTRD` 100 NVDA @ 205 |
+| `OPASN` | `NVDA260911P00230000` | **`+1`** | `0` | paired with `OPTRD` 100 NVDA @ 230 |
+
+The sign convention is confirmed live: `-1` when contracts leave a long,
+`+1` when a short is assigned away. `group_id` is confirmed as the only
+linkage — the `OPEXP` sits in a group by itself, which is exactly right,
+because an OTM expiry delivers nothing and so has no `OPTRD` to pair with.
+
+One ingestion pass over the real account: **40 activities pulled, 18 fills,
+4 realized trades, 4 mleg groups, 0 refusals.** The matcher does *not* trust
+`net_amount`:
+
+| Contract | Booked close | Implied NVDA | P&L | A total-loss matcher would book |
+|---|---|---|---|---|
+| $205 call, exercised | `13.29` | 205 + 13.29 = **218.29** | −$91 | −$1,420 |
+| $230 put, assigned | `11.71` | 230 − 11.71 = **218.29** | −$16 | −$1,155 |
+| $240 call, expired | `0` | — | −$2 | −$2 ✓ correct |
+
+Two independent contracts agree on 218.29 to the cent, which is NVDA's
+official SIP close for 2026-09-11 — so the settlement price is sourced once
+per `(underlying, session)` and shared, as `_ensure_settlements` documents.
+
+**The reconciliation that closes this question.** The ledger exists because
+Alpaca does not expose realized P&L, which also means Alpaca cannot confirm
+it — so *"validated against what?"* was the real open item, not *"is there
+data?"*. There is exactly one identity that ties a computed figure to a
+number the broker states independently, and it holds to the cent:
+
+```
+broker equity  99,901.08  −  deposits 100,000  =  −98.92
+
+  realized (ledger)     −116.00
+  unrealized (open)      +18.00
+  fees                    −0.92
+                        ────────
+                         −98.92
+```
+
+The fee leg is five distinct types, not one: 15×`OCC` (−0.45), `ORF`
+(−0.23), `REG` (−0.21), `TAF` (−0.02), `CAT` (−0.01). A matcher booking
+every exercise as a total loss — the failure this question was written about
+— would show here as a gap near **−$2,500**. The gap was fees.
+
+**Do not treat this as permanent proof.** It is one account, one session,
+four closed trades, and no adjusted contract has ever been held here, so
+open question 4's refusal path is still untested against real data. What the
+identity does establish is that the FIFO matcher, the mleg grouper, all
+three option-event branches, the intrinsic settlement path and fee handling
+are not *collectively* wrong — which is a much stronger statement than any
+one of their unit tests makes, and it should be re-run whenever the ledger
+changes. It is cheap: equity, deposits, realized, unrealized, fees.
+
 What follows is the original framing, kept because the reasoning still applies
 to the part that is open.
 
@@ -614,6 +673,48 @@ Rejected: sorting on `transaction_time` in SQL instead. Non-trade rows carry
 `date` rather than `transaction_time`, so the column that would do the
 ordering is not populated on the rows most likely to be skipped.
 
+### 14. A refused closing carries its reason, persisted — decided 2026-09-12
+
+`ActivityStats` ships `notBooked` and `notBookedSymbols`: how many closings
+the lifetime figures are missing, and which contracts they were. That much is
+arithmetic over two tables and needs nothing new.
+
+What it deliberately does **not** carry is *why* each gap exists. The
+`RejectionRule` is logged by `engine/ledger.py` and no Phase 2 table stores
+it, so an unverified-deliverable refusal is the case the count exists for
+rather than provably the only thing that can produce one. The route was
+written to state the count and stop, rather than to assert a cause it cannot
+evidence — correctly, because a confident wrong reason on a money figure is
+worse than an admitted gap.
+
+**Decided: persist the refusals, at step 8.** Either a `ledger_rejection`
+table, or `IngestResult` handed to the API — step 8 is already the point
+where `EngineRuntime` owns the ingest loop and its result, so the second is
+likely cheaper. The Activity page then reads:
+
+```
+⚠ 1 trade not booked — adjusted deliverable
+   GME1261016C00003000
+```
+
+rather than a bare count the reader has to reconcile by hand against the
+engine log or the broker's own history.
+
+Why it is worth a table rather than left to the log. Rule 8 already requires
+every rejection to record its rule, inputs and timestamp, so the information
+exists — the question is only whether the person looking at a wrong lifetime
+P&L can see it. A gap with a stated cause is a decision the reader can agree
+with; a gap without one is indistinguishable from a bug, and the reader's
+only honest response is to stop trusting the number. That is the same
+standard §8.5 sets when it says a fluent non-answer is worse than an admitted
+gap.
+
+Not urgent, and deliberately sequenced after step 7: `notBooked` is **0** on
+the live account today, because no adjusted contract has ever been held here.
+Nothing is being hidden while this waits. It becomes load-bearing the moment
+one is, which is also exactly when nobody will be in a position to reconstruct
+the reason by hand.
+
 ### 12. Finnhub stays, reaffirmed 2026-09-11
 
 Decision 7 was re-examined against the alternatives and stands. The market-cap
@@ -926,7 +1027,7 @@ News page owns it.
 5. Fill ingestion, FIFO matcher, `realized_trade`.
 6. Multi-leg grouping.
 7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
-8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`.
+8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`. **Also persist the matcher's refusals — decision 14.** `EngineRuntime` owns the ingest loop and therefore owns `IngestResult`, which is the cheapest point to hand a rejection's rule and inputs to the API; doing it here is what lets the Activity page name a gap's cause instead of only counting it.
 9. Finnhub market cap; fixture markers.
 10. Doc amendments.
 
