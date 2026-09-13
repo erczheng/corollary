@@ -54,6 +54,7 @@ __all__ = [
     "AnalyticsSource",
     "Bar",
     "BarTimeframe",
+    "ContractStatus",
     "FeedAccessError",
     "MarketDataProvider",
     "OptionContract",
@@ -107,6 +108,46 @@ class BarTimeframe(StrEnum):
     DAY = "1Day"
     WEEK = "1Week"
     MONTH = "1Month"
+
+
+class ContractStatus(StrEnum):
+    """Whether a contract is still listed, or has been retired.
+
+    **Read from Alpaca's OpenAPI document, not guessed.** The query parameter
+    is ``status`` and its enum is exactly ``["active", "inactive"]`` —
+    *"Filter contracts by status (active/inactive). By default only active
+    contracts are returned."* There is no ``expired`` value, which is the word
+    the concept invites and which would have been a silently-ignored parameter
+    rather than an error.
+
+    The distinction is load-bearing rather than administrative, and it is
+    load-bearing in one direction only: **an expired contract's terms are
+    needed precisely after it stops being active.** The FIFO matcher takes
+    ``multiplier`` per contract and refuses to book a P&L it cannot state
+    correctly, so a contract that expires and drops off the active list takes
+    its own realized loss with it unless the retired list can be asked. The
+    default stays :attr:`ACTIVE`, matching the vendor's own default, so no
+    existing caller changes behaviour.
+
+    **Unprobed against the live account**, and the gap is named rather than
+    hidden: the parameter's name and values are authoritative (they are the
+    vendor's own schema), but *whether an expired contract is reported
+    ``inactive``* is an inference from the two-value enum. It could not be
+    checked here — the Alpaca MCP server holds non-paper keys and answers
+    ``401 {'code': 40110000}`` on every trading endpoint, and
+    ``/v2/options/contracts`` is a trading-host endpoint. The three NVDA
+    contracts that expired 2026-09-11 are the reconciliation checkpoint.
+
+    An alternative exists if this one turns out not to answer:
+    ``GET /v2/options/contracts/{symbol_or_id}`` fetches one contract by
+    symbol and documents no status filter at all, returning ``404`` when it
+    genuinely does not know the symbol. It is a second method on this
+    interface rather than a parameter on this one, which is why it is recorded
+    here rather than built.
+    """
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
 
 
 class AnalyticsSource(StrEnum):
@@ -478,10 +519,18 @@ class MarketDataProvider(ABC):
         option_type: OptionType | None = None,
         include_adjusted: bool = False,
         show_deliverables: bool = False,
+        status: ContractStatus = ContractStatus.ACTIVE,
     ) -> list[OptionContract]:
         """Reference data for an underlying's contracts.
 
         ``include_adjusted`` defaults to ``False``: an adjusted contract is
         excluded from the universe unless a caller asks for it by name and has
         therefore thought about the multiplier.
+
+        ``status`` defaults to :attr:`ContractStatus.ACTIVE`, which is the
+        vendor's own default, so this parameter changes nothing for a caller
+        that does not pass it. Passing :attr:`ContractStatus.INACTIVE` is how
+        a **retired** contract's terms are reached — see
+        :class:`ContractStatus` for why that is the case the ledger cannot do
+        without.
         """

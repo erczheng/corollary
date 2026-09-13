@@ -22,6 +22,7 @@ from corollary.data.providers.alpaca import (
 from corollary.data.providers.interface import (
     AnalyticsSource,
     BarTimeframe,
+    ContractStatus,
     FeedAccessError,
     OptionType,
     ProviderError,
@@ -952,6 +953,44 @@ async def test_the_multiplier_is_read_and_never_hardcoded(make_provider) -> None
     assert all(isinstance(c.multiplier, Decimal) for c in contracts)
     # size is carried separately and must never be used as the multiplier.
     assert all(c.size is not None for c in contracts)
+
+
+async def test_the_contracts_request_defaults_to_the_active_list(
+    make_provider,
+) -> None:
+    """The vendor's own default, sent explicitly rather than assumed.
+
+    ``status`` used to be a hardcoded ``"active"`` in the query dict, which
+    read as harmless and was not: a contract leaves the active list when it
+    expires, so the terms the FIFO matcher needs to book that very expiry
+    became unreachable at the moment they started mattering.
+    """
+    provider, transport = make_provider(contracts_page("option_contracts_nvda"))
+    await provider.option_contracts("NVDA")
+    assert transport.params_for("/v2/options/contracts")["status"] == "active"
+
+
+async def test_retired_contracts_are_reachable_by_asking_for_them(
+    make_provider,
+) -> None:
+    """``inactive`` is the word, and it is the vendor's, not an invention.
+
+    Alpaca's OpenAPI document gives ``status`` an enum of exactly
+    ``["active", "inactive"]``. ``expired`` is the word the concept invites
+    and is **not** a value the endpoint accepts -- it would be a silently
+    ignored parameter rather than an error, so the whole fallback would answer
+    from the active list and look like it worked.
+
+    What this test pins is the request. Whether Alpaca reports an *expired*
+    contract as ``inactive`` is an inference from the two-value enum and is
+    unprobed: the MCP server holds non-paper keys and answers 401 on every
+    trading endpoint, and this is a trading-host endpoint.
+    """
+    provider, transport = make_provider(contracts_page("option_contracts_nvda"))
+    await provider.option_contracts("NVDA", status=ContractStatus.INACTIVE)
+    assert transport.params_for("/v2/options/contracts")["status"] == "inactive"
+    assert ContractStatus.INACTIVE.value == "inactive"
+    assert {member.value for member in ContractStatus} == {"active", "inactive"}
 
 
 async def test_adjusted_contracts_are_filtered_on_root_symbol(

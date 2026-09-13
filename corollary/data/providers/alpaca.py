@@ -83,6 +83,7 @@ from corollary.data.providers.interface import (
     AnalyticsSource,
     Bar,
     BarTimeframe,
+    ContractStatus,
     FeedAccessError,
     MarketDataProvider,
     OptionContract,
@@ -1125,6 +1126,7 @@ class AlpacaProvider(MarketDataProvider):
         option_type: OptionType | None = None,
         include_adjusted: bool = False,
         show_deliverables: bool = False,
+        status: ContractStatus = ContractStatus.ACTIVE,
     ) -> list[OptionContract]:
         """Reference data — the only source of ``multiplier`` and open interest.
 
@@ -1134,13 +1136,22 @@ class AlpacaProvider(MarketDataProvider):
         against ``data.alpaca.markets``. One logical operation, two budgets —
         which is why :class:`~corollary.ratelimit.HostRateLimiter` keys on the
         host rather than holding a single counter.
+
+        ``status`` was a hardcoded ``"active"`` here, and that was a hole in
+        the ledger rather than a tidiness issue: a contract drops off the
+        active list when it expires, which is **exactly** when the matcher
+        needs its multiplier to book the expiry. The value is sent rather than
+        assumed now, and it still defaults to the vendor's own default so no
+        existing caller moves. See :class:`ContractStatus` for the enum, which
+        is read from Alpaca's schema and is ``active``/``inactive`` — not
+        ``expired``.
         """
         pages = await self._paginate(
             self._credentials.trading_base_url,
             "/v2/options/contracts",
             {
                 "underlying_symbols": underlying,
-                "status": "active",
+                "status": status.value,
                 "limit": _CONTRACTS_PAGE_LIMIT,
                 "type": option_type.value if option_type is not None else None,
                 "strike_price_gte": _plain(strike_gte),
