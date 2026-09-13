@@ -51,7 +51,7 @@ from sqlalchemy.orm import (
     validates,
 )
 
-from corollary.db.types import Money, UtcDateTime
+from corollary.db.types import ActivityId, Money, UtcDateTime
 
 __all__ = [
     "ACCOUNT_MODES",
@@ -537,7 +537,9 @@ class Fill(Base):
       **not on the event row**. ``OPEXC`` and ``OPASN`` carry
       ``net_amount: "0"``; the strike arrives on the paired ``OPTRD`` or is
       parsed out of the OCC symbol. A row written straight from ``net_amount``
-      books every exercise as a total loss.
+      books every exercise as a total loss. It is also the one money column in
+      this schema that is **nullable**, for a reason the column comment
+      states.
 
     ``order_id``, ``group_id`` and ``position_intent`` are all nullable, and
     each absence means something specific rather than "missing data" — see the
@@ -558,7 +560,9 @@ class Fill(Base):
             name="ck_fill_position_intent",
         ),
         CheckConstraint(_positive_count("qty"), name="ck_fill_qty"),
-        CheckConstraint(_money_shape("price"), name="ck_fill_price"),
+        CheckConstraint(
+            _money_shape("price", nullable=True), name="ck_fill_price"
+        ),
         # Ingestion resumes from the newest row it already holds, per book.
         Index("ix_fill_account_at", "account", "at"),
         # The matcher's open-lot queue is per contract symbol.
@@ -586,7 +590,17 @@ class Fill(Base):
     #: symbol, which is what ``ix_fill_account_at`` and ``ix_fill_symbol``
     #: exist for. The measurement and the full reasoning live on
     #: :attr:`~corollary.engine.execution.interface._ActivityBase.stamp`.
-    activity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    #:
+    #: The type is :class:`~corollary.db.types.ActivityId` rather than a bare
+    #: ``String`` so that ordering, comparison and aggregation **raise** —
+    #: decision 13, and in particular ``MAX(activity_id)``, which is not a
+    #: resume cursor but the bug: non-trade rows carry a **zeroed** time, so
+    #: every ``FEE``, journal, ``OPEXP``, ``OPEXC`` and ``OPASN`` of a day
+    #: sorts *below* that day's last fill and a ``MAX`` cursor steps straight
+    #: over them. ``ActivityId`` is a ``TypeDecorator`` over ``String(128)``
+    #: with no bind or result processing, so this emits the same
+    #: ``VARCHAR(128)`` it always did and revision ``0002`` still matches.
+    activity_id: Mapped[str] = mapped_column(ActivityId(128), nullable=False)
     #: The **leg's** order id on an ``mleg`` order, not the parent's — each leg
     #: is a full order object with its own id, and the parent id appears
     #: nowhere on the fill. Reaching the parent is a two-hop join through
@@ -610,7 +624,25 @@ class Fill(Base):
     position_intent: Mapped[str | None] = mapped_column(String(16), nullable=True)
     #: Contracts, whole and unsigned. See the class docstring.
     qty: Mapped[int] = mapped_column(Integer, nullable=False)
-    price: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    #: NULL means **the ledger could not establish this price**, and it is
+    #: reached by exactly one path: an ``OPEXC``/``OPASN`` on a contract whose
+    #: deliverable could not be verified.
+    #:
+    #: Those settle at **intrinsic value** — ``max(close − strike, 0)`` — and
+    #: an adjusted root (``AAPL1``, ``GME1``) is precisely the finding that the
+    #: OCC strike is no longer the price at which the deliverable changes
+    #: hands. ``engine/ledger.py`` already refuses the realized trade on that
+    #: rule (``UNVERIFIED_DELIVERABLE``) and the Activity page counts the close
+    #: in ``not_booked``; writing the intrinsic anyway put an estimate derived
+    #: from the rejected premise into a column of prices actually paid, on a
+    #: row already flagged as unaccounted for.
+    #:
+    #: **Never 0 in its place.** Zero is a price — it is what an ``OPEXP``
+    #: closes at — and on a long it books a total loss. An option event with
+    #: no settlement price at all is refused before it becomes a row, so
+    #: nothing else here is ever NULL: a ``FILL`` always carries what was
+    #: paid.
+    price: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
     at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
 
 

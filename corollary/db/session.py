@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from corollary.db.types import guard_money_sql
+from corollary.db.types import guard_activity_id_sql, guard_money_sql
 
 __all__ = [
     "DATABASE_URL_ENV",
@@ -63,26 +63,34 @@ def database_url() -> str:
 
 
 def create_db_engine(url: str | None = None) -> Engine:
-    """A new Engine with the SQLite pragmas and the money guard attached.
+    """A new Engine with the SQLite pragmas and the column guards attached.
 
     Every Engine in this codebase is built here — ``get_engine``, the Alembic
     env, and the test fixtures all route through it — which is what makes
-    attaching the guard here equivalent to attaching it globally, without an
-    import-time side effect on ``sqlalchemy.Engine`` itself.
+    attaching the guards here equivalent to attaching them globally, without
+    an import-time side effect on ``sqlalchemy.Engine`` itself.
     """
     engine = create_engine(url or database_url())
     _attach_sqlite_pragmas(engine)
-    _attach_money_guard(engine)
+    _attach_column_guards(engine)
     return engine
 
 
-def _attach_money_guard(engine: Engine) -> None:
-    """Refuse to execute a statement that orders or aggregates money.
+def _attach_column_guards(engine: Engine) -> None:
+    """Refuse to execute a statement that orders or aggregates a guarded column.
 
-    ``Money`` is TEXT on SQLite, so ``ORDER BY value`` and ``MAX(value)``
-    answer lexicographically — 8 is the maximum of (7, 20, 8, 25, 40). The
-    column's comparator catches every *operator*; neither of those two forms
-    is one, so they are caught here instead. See ``corollary.db.types``.
+    Two columns types answer a plausible wrong number rather than erroring, and
+    both do it in ``ORDER BY`` and in an aggregate — the two forms a column's
+    comparator never sees, because neither is an operator call.
+
+    * ``Money`` is TEXT on SQLite, so ``MAX(value)`` over the five seeded
+      ceilings (7, 20, 8, 25, 40) answers 8.
+    * ``ActivityId`` is the broker's composite id, and non-trade rows carry a
+      **zeroed** timestamp half, so ``MAX(activity_id)`` answers with the
+      day's last *fill* and a cursor built on it steps over that day's
+      expiries and assignments without trace. Decision 13; no carve-out.
+
+    See ``corollary.db.types``.
     """
 
     @event.listens_for(engine, "before_execute")
@@ -94,6 +102,7 @@ def _attach_money_guard(engine: Engine) -> None:
         execution_options: Any,
     ) -> None:
         guard_money_sql(clauseelement)
+        guard_activity_id_sql(clauseelement)
 
 
 def _attach_sqlite_pragmas(engine: Engine) -> None:

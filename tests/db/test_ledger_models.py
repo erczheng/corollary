@@ -190,6 +190,51 @@ def test_fill_price_is_stored_as_text(session: Session) -> None:
     )
 
 
+def test_fill_price_may_be_null_and_null_is_not_zero(session: Session) -> None:
+    """The one nullable money column in this schema, and what it means.
+
+    An ``OPEXC``/``OPASN`` settles at intrinsic value against the OCC strike,
+    and an adjusted root is exactly the finding that the strike is no longer
+    the price the deliverable changes hands at -- which is why the matcher
+    already refuses the realized trade. NULL is where that refusal reaches the
+    price. Zero would be a *price*: it is what an ``OPEXP`` closes at, and on
+    a long it books a total loss.
+    """
+    session.add(a_fill(price=None))
+    session.commit()
+    session.expunge_all()
+
+    stored = session.query(Fill).one()
+    assert stored.price is None
+    assert (
+        session.execute(text("SELECT typeof(price) FROM fill")).scalar_one() == "null"
+    )
+
+
+def test_a_nullable_price_column_still_refuses_a_price_that_is_not_a_number(
+    session: Session,
+) -> None:
+    """``ck_fill_price`` learned about NULL and nothing else.
+
+    ``Decimal('NaN')`` *succeeds* on the way back out and then folds lifetime
+    P&L to NaN in silence, so the shape CHECK is the only guard -- and
+    widening a constraint to admit NULL is the easiest way to accidentally
+    admit everything.
+    """
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                "INSERT INTO fill (account, activity_id, symbol, side, qty, price, "
+                "at) VALUES ('paper', 'nan-row', :symbol, 'buy', 1, 'NaN', :at)"
+            ),
+            # The timestamp as text: the CHECK under test fires on `price`
+            # long before anything reads this, and binding a datetime through
+            # raw SQL trips Python 3.12's deprecated sqlite3 adapter.
+            {"symbol": IWM_PUT, "at": OPENED_AT.isoformat(sep=" ")},
+        )
+        session.commit()
+
+
 def test_fill_rejects_a_float_price(session: Session) -> None:
     from sqlalchemy.exc import StatementError
 

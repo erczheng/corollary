@@ -88,9 +88,13 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     Alembic two heads and an ambiguous target — which is why the ledger
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
+
+    ``0003`` is the head now: it makes ``fill.price`` nullable, so that an
+    exercise whose deliverable could not be verified has somewhere to put
+    "no price" other than an estimate.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0002"]
+    assert script.get_heads() == ["0003"]
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:
