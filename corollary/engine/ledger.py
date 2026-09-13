@@ -228,7 +228,7 @@ import dataclasses
 import logging
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 from enum import StrEnum
@@ -245,6 +245,7 @@ from corollary.engine.execution.interface import (
     TradeActivity,
 )
 from corollary.instruments import OccSymbol, OptionType, parse_occ_symbol
+from corollary.wire import vendor_detail
 
 __all__ = [
     "CloseKind",
@@ -347,6 +348,13 @@ class RejectionRule(StrEnum):
     FRACTIONAL_QUANTITY = "fractional_quantity"
     #: An ``OPEXC``/``OPASN`` with no settlement price for the underlying.
     #: Refused rather than booked at zero or at the strike.
+    #:
+    #: Also what the matcher answers when a movement reaches it carrying no
+    #: price at all. Normalisation cannot produce one -- a fill always has a
+    #: price and an unpriced event is refused above -- but
+    #: :func:`match_movements` is public and a caller may build its own, and a
+    #: lot opened at an unknown basis, or closed against one, is a P&L nobody
+    #: can stand behind.
     UNPRICED_OPTION_EVENT = "unpriced_option_event"
     #: An ``OPEXC``/``OPASN`` on a contract whose deliverable is not known to
     #: be ``multiplier`` shares of the underlying -- either the terms say
@@ -402,6 +410,15 @@ class LotMovement:
     unambiguously. ``side`` is kept because the ``fill`` table has a ``side``
     column and an option event has to supply one -- derived from the sign of
     the non-trade ``qty``, which is where that sign goes.
+
+    :attr:`price` is **nullable, and null means the ledger could not establish
+    it** -- never zero, which is a price and a total loss. A fill always
+    carries one. An exercise or assignment does not: its price is an intrinsic
+    value synthesised from the strike and the underlying's settlement, and on
+    an adjusted contract the adjustment is exactly what invalidates the strike
+    as an input. :func:`build_ledger` nulls those, on the matcher's own
+    refusal rather than on a second opinion -- see
+    :attr:`RejectionRule.UNVERIFIED_DELIVERABLE`.
     """
 
     activity_id: str
@@ -410,7 +427,7 @@ class LotMovement:
     side: FillSide
     intent: PositionIntent
     qty: int
-    price: Decimal
+    price: Decimal | None
     at: datetime
     order_id: str | None = None
     group_id: str | None = None
@@ -456,6 +473,15 @@ class FeeRecord:
     activity_id: str
     amount: Decimal
     activity_sub_type: str | None = None
+    #: The vendor's own prose, **de-identified**. Rule 6: a ``FEE`` row's
+    #: ``description`` is the one field known to carry the account number in
+    #: running text -- *"CAT fee for proceed of 15 trades on <date> by PA..."*
+    #: -- where a rule written about field *names* cannot see it. This record
+    #: is returned outward on ``IngestResult.fees`` and from there to an API
+    #: route, so it is cleaned at construction rather than at each reader.
+    #: :func:`~corollary.wire.vendor_detail` is that cleaning, reused rather
+    #: than reimplemented: one redactor, or the second one is the one that
+    #: misses something.
     description: str | None = None
     at: datetime | None = None
     #: The hop that matched, or ``None`` for unattributed.
@@ -710,6 +736,33 @@ def _reject(
             "inputs": dict(inputs),
         },
     )
+
+
+def _redacted(text: str | None) -> str | None:
+    """Vendor free text, fit to leave this module in a log line or a return.
+
+    Rule 6 -- *"no keys in code, in tests, in fixtures, or in log output"* --
+    and the account identifiers are in this project's scanned set for a
+    specific reason: **field-name redaction cannot see inside prose**. A
+    ``FEE`` row's ``description`` reads *"CAT fee for proceed of 15 trades on
+    <date> by PA..."*, so a rule that blanks a field called ``account_number``
+    never fires on it. The first fixture recording wrote the real number into
+    eight rows in plain text before this was caught, which is why redaction
+    became a substring pass rather than a field pass.
+
+    :func:`~corollary.wire.vendor_detail` already owns that pass and is
+    deliberately vendor-neutral -- no ``alpaca`` import, no ``.json()`` -- so
+    it is reused here rather than reimplemented. A second redactor is a second
+    thing to keep current, and the one that falls behind is the one that
+    leaks. It also collapses whitespace and bounds the length, both of which a
+    string bound for a log record wants anyway.
+
+    ``None`` stays ``None``: an absent description is not an empty one, and
+    the two say different things about what the vendor sent.
+    """
+    if text is None:
+        return None
+    return vendor_detail(text)
 
 
 def _whole(value: Decimal) -> int | None:
@@ -1086,7 +1139,9 @@ def _attribute_fees(
                 at=_activity_at(activity),
                 activity_type=activity.activity_type,
                 activity_sub_type=activity.activity_sub_type or "",
-                description=activity.description or "",
+                # Rule 6: this reaches a WARNING log record verbatim, and a
+                # FEE description is where the account number lives in prose.
+                description=_redacted(activity.description) or "",
                 net_amount=str(activity.net_amount),
             )
             continue
@@ -1109,7 +1164,7 @@ def _attribute_fees(
                 activity_id=activity.id,
                 amount=amount,
                 activity_sub_type=activity.activity_sub_type,
-                description=activity.description,
+                description=_redacted(activity.description),
                 at=_activity_at(activity),
                 link=link,
                 # Exactly one movement means the fee has a home; several
@@ -1239,13 +1294,19 @@ def _realize(
     symbol: str,
     lot: _Lot,
     closing: LotMovement,
+    close_price: Decimal,
     qty: int,
     multiplier: Decimal,
 ) -> RealizedTradeRecord:
     """One matched slice, in dollars.
 
-    **Precondition on the exercise/assignment path:** ``closing.price`` there
-    is intrinsic value per underlying share, so ``x multiplier`` below is
+    ``close_price`` is passed rather than read off ``closing`` because
+    :attr:`LotMovement.price` is nullable and a trade may not be booked
+    against an unknown one. The caller narrows it; there is no fallback here
+    to narrow it wrongly.
+
+    **Precondition on the exercise/assignment path:** ``close_price`` there is
+    intrinsic value per underlying share, so ``x multiplier`` below is
     asserting that the contract delivers ``multiplier`` shares of the
     underlying at the strike. The caller establishes that with
     :func:`_unverified_deliverable` before calling and refuses instead where
@@ -1253,7 +1314,7 @@ def _realize(
     establish -- both are premium, and premium times the multiplier is right
     on any contract, adjusted or not.
     """
-    move = (closing.price - lot.price) * qty * multiplier
+    move = (close_price - lot.price) * qty * multiplier
     pnl = -move if lot.is_short else move
     # The basis is a magnitude: for a short it is the credit received, which is
     # what makes a gain on a short a positive percentage of it. `orders.ts`
@@ -1266,7 +1327,7 @@ def _realize(
         closed_at=closing.at,
         qty=qty,
         open_price=lot.price,
-        close_price=closing.price,
+        close_price=close_price,
         pnl=pnl,
         pnl_pct=_pnl_pct(pnl, basis),
         close_kind=closing.close_kind,
@@ -1482,6 +1543,20 @@ def match_movements(
                         queue_is_short=str(queue[0].is_short),
                     )
                     continue
+                if movement.price is None:
+                    _reject(
+                        rejections,
+                        RejectionRule.UNPRICED_OPTION_EVENT,
+                        f"{movement.intent.value!r} opens a lot in {symbol} with "
+                        "no price, so it has no cost basis and every P&L "
+                        "measured from it would be measured from nothing",
+                        activity_id=movement.activity_id,
+                        symbol=symbol,
+                        at=movement.at,
+                        intent=movement.intent.value,
+                        activity_type=movement.activity_type,
+                    )
+                    continue
                 queue.append(
                     _Lot(
                         qty=movement.qty,
@@ -1546,6 +1621,22 @@ def match_movements(
                     **evidence,
                 )
 
+            close_price = movement.price
+            if unverified is None and close_price is None:
+                _reject(
+                    rejections,
+                    RejectionRule.UNPRICED_OPTION_EVENT,
+                    f"{movement.activity_type} closes {movement.qty} contracts of "
+                    f"{symbol} at no price, so there is nothing to subtract the "
+                    "basis from. The lots are still consumed, because the "
+                    "contracts really are gone",
+                    activity_id=movement.activity_id,
+                    symbol=symbol,
+                    at=movement.at,
+                    activity_type=movement.activity_type,
+                    closing_qty=str(movement.qty),
+                )
+
             remaining = movement.qty
             while remaining > 0 and queue:
                 lot = queue[0]
@@ -1555,9 +1646,17 @@ def match_movements(
                 # would put `open_lots` at odds with `/v2/positions` -- a
                 # second wrong number, and the more misleading one, since it
                 # reads as a position you could still act on.
-                if unverified is None:
+                if unverified is None and close_price is not None:
                     trades.append(
-                        _realize(account, symbol, lot, movement, taken, multiplier)
+                        _realize(
+                            account,
+                            symbol,
+                            lot,
+                            movement,
+                            close_price,
+                            taken,
+                            multiplier,
+                        )
                     )
                 if settles_off_underlying:
                     deliveries.append(
@@ -1623,6 +1722,20 @@ def build_ledger(
 
     ``contracts`` is optional and reaches only :class:`ShareDelivery` -- see
     :func:`match_movements`.
+
+    **The movements it returns are the normalised ones with one amendment**:
+    an exercise or assignment the matcher refused for an unverified
+    deliverable comes back with :attr:`LotMovement.price` set to ``None``. The
+    normaliser derived that price as intrinsic value against the OCC strike,
+    and the refusal is precisely the finding that the adjustment invalidates
+    that strike -- so the number is the same guess about money that open
+    question 4 forbade deriving from ``deliverables`` or ``size``, one column
+    over. It reaches ``fill.price`` and the Activity page's Price cell, where
+    it would read as a price paid.
+
+    The amendment is driven by the **matcher's own refusals** rather than by a
+    second call to :func:`_unverified_deliverable`, so the two answers cannot
+    disagree: whatever books no trade carries no price, by construction.
     """
     normalised = normalise_activities(
         activities, intents=intents, settlements=settlements
@@ -1633,13 +1746,24 @@ def build_ledger(
         multipliers=multipliers,
         contracts=contracts,
     )
+    unpriced = {
+        rejection.activity_id
+        for rejection in matched.rejections
+        if rejection.rule is RejectionRule.UNVERIFIED_DELIVERABLE
+        and rejection.activity_id is not None
+    }
     return Ledger(
         account=account,
         trades=matched.trades,
         open_lots=matched.open_lots,
         deliveries=matched.deliveries,
         fees=normalised.fees,
-        movements=normalised.movements,
+        movements=tuple(
+            replace(movement, price=None)
+            if movement.activity_id in unpriced
+            else movement
+            for movement in normalised.movements
+        ),
         rejections=normalised.rejections + matched.rejections,
     )
 

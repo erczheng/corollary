@@ -793,6 +793,59 @@ def test_an_exercised_adjusted_contract_books_no_pnl_and_reports_why() -> None:
     assert result.open_lots == ()
 
 
+def movement_for(result: Ledger, symbol: str, activity_type: str) -> object:
+    (found,) = [
+        movement
+        for movement in result.movements
+        if movement.symbol == symbol and movement.activity_type == activity_type
+    ]
+    return found
+
+
+def test_a_refused_exercise_carries_no_price_either() -> None:
+    """The refusal has to reach the *price*, not only the P&L.
+
+    ``max(close - strike, 0)`` is an intrinsic value against the **unadjusted
+    OCC strike**, and the whole reason the trade is refused is that the
+    adjustment invalidates that strike as a settlement input. Carried onto the
+    movement anyway it becomes ``fill.price``, and lands on the Activity page
+    as an estimate sitting in a column of prices actually paid -- on a row
+    already counted as not booked. Open question 4 forbade deriving a ratio
+    from ``deliverables``, ``size`` or an assumed split factor because each is
+    a guess about money; a price derived from the invalidated strike is the
+    same guess one column over.
+    """
+    result = exercised(
+        ADJUSTED_CALL,
+        contracts={
+            ADJUSTED_CALL: contract(
+                ADJUSTED_CALL,
+                underlying="AAPL",
+                deliverables=(equity_deliverable("AAPL", "150"),),
+            )
+        },
+    )
+
+    movement = movement_for(result, ADJUSTED_CALL, "OPEXC")
+    assert movement.price is None  # type: ignore[attr-defined]
+
+
+def test_a_verified_exercise_still_carries_its_intrinsic() -> None:
+    """The other side of the same rule: the refusal is narrow.
+
+    A standard contract whose terms were supplied settles at intrinsic --
+    160.00 against a 150 strike is 10.00 -- and that number is knowable, so it
+    is stated. Nulling every exercise's price to be safe would lose the one
+    figure that reconciles the close against the account's cash.
+    """
+    result = exercised(AAPL_CALL, contracts={AAPL_CALL: standard(AAPL_CALL, "AAPL")})
+
+    movement = movement_for(result, AAPL_CALL, "OPEXC")
+    assert movement.price == Decimal("10.00")  # type: ignore[attr-defined]
+    (trade,) = result.trades
+    assert trade.close_price == Decimal("10.00")
+
+
 def test_an_exercise_with_no_contract_terms_is_refused_because_it_cannot_be_asked() -> (
     None
 ):

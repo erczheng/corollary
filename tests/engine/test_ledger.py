@@ -27,15 +27,19 @@ from corollary.engine.ledger import (
     FeeLink,
     Ledger,
     LedgerRejection,
+    LotMovement,
     RealizedTradeRecord,
     RejectionRule,
     as_row_kwargs,
     biggest_loser,
     build_ledger,
     intents_from_orders,
+    match_movements,
     realized_pnl,
     summarise,
 )
+
+from corollary.wire import REDACTED
 
 from .ledger_support import at, fee, fill, option_event
 
@@ -744,6 +748,68 @@ def test_an_unattributed_fee_is_reported_separately_rather_than_dropped() -> Non
 
 
 # --------------------------------------------------------------------------
+# Rule 6: a fee's description is vendor prose, and prose carries identifiers
+# --------------------------------------------------------------------------
+
+#: Account-number **shaped**, and deliberately not an account number. Rule 6
+#: keeps real key material and real identifiers out of code, tests and
+#: fixtures alike -- and the shape is the whole of what a redactor can see.
+PLACEHOLDER_ACCOUNT = "PA0EXAMPLE00"
+
+#: The sentence this exists for, in the form the vendor actually sends it.
+FEE_PROSE = f"CAT fee for proceed of 15 trades on 2026-09-10 by {PLACEHOLDER_ACCOUNT}"
+
+
+def test_a_fee_description_reaches_neither_a_log_nor_a_record_unredacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Both halves, because the description travels two ways out of here.
+
+    A ``FEE`` row's ``description`` is the one field known to carry the
+    account number in running text, which is exactly why a rule written about
+    field *names* never fires on it. Two exits:
+
+    * a missing ``net_amount`` refuses the row, and the refusal logs its
+      ``inputs`` verbatim at WARNING -- a modelled state rather than an
+      impossible one, since the published ``NonTradeActivities`` schema is
+      known-incomplete;
+    * an amount that *is* present builds a :class:`FeeRecord`, which leaves on
+      ``IngestResult.fees`` and from there to an API route.
+
+    Redacted, not dropped: the fee is still identifiable as a CAT fee, which
+    is the whole reason the log line is worth keeping.
+    """
+    with caplog.at_level("INFO", logger="corollary.engine.ledger"):
+        result = ledger(
+            fee("-0.21", when=at(20, 30), sub_type="CAT", description=FEE_PROSE),
+            fee(None, when=at(20, 31), sub_type="CAT", description=FEE_PROSE),
+        )
+
+    (charge,) = result.fees
+    assert charge.description is not None
+    assert PLACEHOLDER_ACCOUNT not in charge.description
+    assert REDACTED in charge.description
+    assert charge.description.startswith("CAT fee for proceed of 15 trades")
+
+    (rejection,) = result.rejections
+    assert rejection.rule is RejectionRule.MISSING_FEE_AMOUNT
+    assert PLACEHOLDER_ACCOUNT not in rejection.inputs["description"]
+    assert REDACTED in rejection.inputs["description"]
+
+    logged = [record for record in caplog.records if getattr(record, "rule", None)]
+    assert len(logged) == 1
+    record = logged[0]
+    assert PLACEHOLDER_ACCOUNT not in record.getMessage()
+    assert PLACEHOLDER_ACCOUNT not in caplog.text
+    inputs: dict[str, str] = getattr(record, "inputs")
+    assert PLACEHOLDER_ACCOUNT not in inputs["description"]
+    # Nothing else on the record smuggles it out either.
+    assert not any(
+        PLACEHOLDER_ACCOUNT in str(value) for value in record.__dict__.values()
+    )
+
+
+# --------------------------------------------------------------------------
 # The folds -- every one of these is Python, because Money refuses SQL
 # --------------------------------------------------------------------------
 
@@ -828,3 +894,95 @@ def test_realized_pnl_folds_the_same_way_the_stats_do() -> None:
     rows = [a_trade("120"), a_trade("-7"), a_trade("-41")]
     assert realized_pnl(rows) == summarise(rows).realized_pnl == Decimal("72")
     assert realized_pnl([]) == Decimal(0)
+
+
+# --------------------------------------------------------------------------
+# A movement with no price at all
+# --------------------------------------------------------------------------
+#
+# Normalisation cannot produce one: a fill always carries a price and an
+# unpriced option event is refused before it becomes a movement. But
+# `LotMovement.price` is nullable -- `build_ledger` nulls the intrinsic on an
+# exercise whose deliverable it could not verify -- and `match_movements` is
+# public, so the matcher has to answer for the shape rather than assume it
+# away. Both answers are the same: refuse, log, and never invent a basis.
+
+
+def unpriced_movement(
+    *, intent: PositionIntent, side: FillSide, qty: int, hour: int, price: str | None
+) -> LotMovement:
+    return LotMovement(
+        activity_id=f"2026091{hour}::{intent.value}",
+        activity_type="FILL",
+        symbol=IWM,
+        side=side,
+        intent=intent,
+        qty=qty,
+        price=None if price is None else Decimal(price),
+        at=at(hour),
+    )
+
+
+def test_an_opening_movement_with_no_price_opens_no_lot_and_says_why() -> None:
+    """A lot with no basis makes every P&L measured from it measured from nothing.
+
+    Zero is not the fallback: zero is a price, and it would report the entire
+    proceeds of the eventual close as profit.
+    """
+    result = match_movements(
+        [
+            unpriced_movement(
+                intent=PositionIntent.BUY_TO_OPEN,
+                side=FillSide.BUY,
+                qty=2,
+                hour=14,
+                price=None,
+            )
+        ],
+        account=PAPER,
+        multipliers=multipliers(IWM),
+    )
+
+    assert result.open_lots == ()
+    assert result.trades == ()
+    (refusal,) = result.rejections
+    assert refusal.rule is RejectionRule.UNPRICED_OPTION_EVENT
+    assert refusal.symbol == IWM
+    assert refusal.at == at(14)
+
+
+def test_a_close_with_no_price_books_nothing_and_still_consumes_the_lot() -> None:
+    """The same two halves the unverified deliverable takes.
+
+    No trade, because there is no close price to subtract the basis from --
+    and no surviving open lot, because the contracts really are gone. A
+    phantom lot would put ``open_lots`` at odds with ``/v2/positions``, which
+    is the more misleading of the two wrong numbers: it reads as a position
+    you could still act on.
+    """
+    result = match_movements(
+        [
+            unpriced_movement(
+                intent=PositionIntent.BUY_TO_OPEN,
+                side=FillSide.BUY,
+                qty=2,
+                hour=14,
+                price="8.21",
+            ),
+            unpriced_movement(
+                intent=PositionIntent.SELL_TO_CLOSE,
+                side=FillSide.SELL,
+                qty=2,
+                hour=15,
+                price=None,
+            ),
+        ],
+        account=PAPER,
+        multipliers=multipliers(IWM),
+    )
+
+    assert result.trades == ()
+    assert result.open_lots == ()
+    (refusal,) = result.rejections
+    assert refusal.rule is RejectionRule.UNPRICED_OPTION_EVENT
+    assert refusal.at == at(15)
