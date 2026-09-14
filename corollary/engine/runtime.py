@@ -721,6 +721,20 @@ class EngineRuntime:
         #: every announcement for the life of the process -- rule 9 off, with
         #: no sign of it anywhere.
         self._announced: HaltRule | None = None
+        #: The announcing halt's correlation id, and the moment it was
+        #: announced. Carried for exactly as long as :attr:`_announced` is --
+        #: set, cleared and forgotten in the same places, on adjacent lines,
+        #: so the three can never come to describe different halts.
+        #:
+        #: Read in **one** place, :meth:`_retry_persist`'s log line, and never
+        #: by the gate -- the same standing the two fields below have. Without
+        #: them a halt written half an hour late is a record with no key
+        #: joining it to the alert it belongs to: three artifacts, two
+        #: timestamps, one event, and a post-incident reader reconciling the
+        #: gap out of prose. CLAUDE.md asks for one correlation id per
+        #: decision, and every other record on this file's halt path has one.
+        self._announced_correlation_id: str | None = None
+        self._announced_at: datetime | None = None
         #: The rule whose halt this process wrote into ``engine_state``, for
         #: as long as a read still shows *that* halt in force -- cleared the
         #: moment a read says otherwise, because then the row is somebody
@@ -969,7 +983,7 @@ class EngineRuntime:
         :meth:`_halt_is_recorded` is where that distinction lives.
 
         The gate has **two terms**, because neither alone is right in all
-        four states it has to cover:
+        five states it has to cover:
 
         =================================  =============================  ==========
         State                              What the gate has              Outcome
@@ -985,7 +999,38 @@ class EngineRuntime:
                                            halt, and the halt announced
                                            *was* recorded -- so a human
                                            cleared it
+        New episode, halt never recorded   row carries no explained       announces
+                                           halt, and the announcement
+                                           ended with the episode it
+                                           belonged to
         =================================  =============================  ==========
+
+        **The last two rows read identically to the gate and are not the same
+        thing**, which is why both are listed rather than one standing in for
+        the other. ``_announced is None`` means *the halt we announced was
+        recorded, so the empty row is a human's doing* in the fourth, and *the
+        episode that announcement belonged to ended* in the fifth -- where
+        nobody cleared anything, the write was refused, the feed came back and
+        then died again. Both announce, which is what a returning fault needs
+        either way, but only one of them involved a human. A reader who takes
+        the fourth row as the only reading of an empty :attr:`_announced` goes
+        looking for a resume that never happened, and
+        ``test_a_fault_that_ends_clears_an_announcement_the_row_never_took``
+        is what pins the fifth.
+
+        **A third history reaches the fourth row's shape, and it is not a
+        resume either.** If the write is refused and a human then halts
+        deliberately -- ``POST /api/engine/halt`` succeeding where ours did
+        not -- :meth:`_halt_is_recorded` sees an explained halt in force and
+        clears :attr:`_announced` against *their* record rather than ours.
+        Our halt is then permanently unrecorded, because :meth:`_retry_persist`
+        does nothing once :attr:`_announced` is empty. When that human resumes
+        into a feed that is still dead, the gate announces, correctly -- but
+        no ``engine_halt_persisted_late`` was ever written and the row's reason
+        was never ours, so the only surviving record of that first fault is the
+        ``engine_halt_ongoing`` line. Do not read the fourth row as promising
+        that our halt reached the row; read it as the gate having nothing left
+        in memory, which three different histories can produce.
 
         Row first: ``engine_state`` is the only source of truth about whether
         this engine is halted, and it is the row ``POST /api/engine/resume``
@@ -1023,6 +1068,8 @@ class EngineRuntime:
             # disarmed. `_recorded` is deliberately untouched: it describes
             # the row, not an episode, and `_halt_is_recorded` maintains it.
             self._announced = None
+            self._announced_correlation_id = None
+            self._announced_at = None
             return None
         recorded = self._halt_is_recorded()
         if recorded or self._announced is not None:
@@ -1170,6 +1217,8 @@ class EngineRuntime:
             return False
         if in_force:
             self._announced = None
+            self._announced_correlation_id = None
+            self._announced_at = None
             if recorded_reason != self._recorded_reason:
                 self._recorded = None
                 self._recorded_reason = None
@@ -1239,6 +1288,11 @@ class EngineRuntime:
         # close, so it must not be re-opened by the gate's own fallback. When
         # the write succeeded the row is the record, and memory is redundant.
         self._announced = None if persisted else decision.rule
+        # Its provenance, for the record `_retry_persist` may have to write on
+        # its behalf later: that record describes *this* halt, from a
+        # timestamp that can be half an hour away, so it carries this id.
+        self._announced_correlation_id = None if persisted else correlation_id
+        self._announced_at = None if persisted else decision.at
         # What the record now says, for `_log_ongoing` to compare the next
         # tick's fault against: the rule, and the exact sentence written
         # beside it. Both cleared when the write was refused -- there is no
@@ -1296,11 +1350,18 @@ class EngineRuntime:
             return False
         if not self._persist(decision):
             return False
+        # Read out before they are cleared: the record below is the
+        # announcement's, not this tick's, and its id is the only thing
+        # joining the two.
+        announced_correlation_id = self._announced_correlation_id
+        announced_at = self._announced_at
         # Exactly what a successful `halt` sets, and for the same reasons:
         # the row is the record now, so memory of an unrecorded announcement
         # is wrong to keep, and `_log_ongoing` has a rule and a sentence to
         # compare the next tick's fault against.
         self._announced = None
+        self._announced_correlation_id = None
+        self._announced_at = None
         self._recorded = decision.rule
         self._recorded_reason = _bounded(decision.reason)
         logger.warning(
@@ -1311,6 +1372,30 @@ class EngineRuntime:
                 "rule": decision.rule.value,
                 "reason": decision.reason,
                 "at": decision.at.isoformat(),
+                # The announcing halt's id, so this record, its `engine_halted`
+                # line and its critical notification join up -- and the moment
+                # it was announced, so the gap to `at` above is arithmetic
+                # rather than prose.
+                #
+                # Not necessarily the same *rule*, and deliberately so. The
+                # watchdog latches nothing and checks its conditions in order,
+                # so a silent feed can be announced and the socket can then
+                # formally close before the write lands; the row and this line
+                # take the rule evaluated now, while the id and `announced_at`
+                # come from the announcement. That is the right way round: the
+                # announcing id is the only alert the operator actually
+                # received for the episode, since everything after it was
+                # suppressed, so joining to it beats joining to nothing. It
+                # does mean `at` minus `announced_at` can measure the earlier
+                # rule's outage rather than this one's. `at` and
+                # the row's `halted_at` both stay the moment the write landed:
+                # they are written from one decision alongside a reason
+                # measured at that moment, and a timestamp that disagrees with
+                # the sentence beside it is worse than one that is late.
+                "correlation_id": announced_correlation_id,
+                "announced_at": (
+                    announced_at.isoformat() if announced_at is not None else None
+                ),
                 "policy": (
                     "a halt this process announced but could not write is "
                     "retried on every suppressed tick; until it lands the "

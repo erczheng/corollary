@@ -9,6 +9,45 @@ the connection state is recorded by hand, because a test that waits ninety
 seconds is a test that gets marked slow and then gets skipped.
 """
 
+# --------------------------------------------------------------------------
+# Why some of these carry ``@pytest.mark.risk`` and some do not
+# --------------------------------------------------------------------------
+#
+# ``uv run python -m pytest -m risk`` is the gate CLAUDE.md makes mandatory
+# before any engine change, so what it selects has to mean something. The
+# marker means **this test protects a money-safety rule**. When
+# ``RiskManager`` lands its limits will be the largest group; today rule 9's
+# switch is the first, and it is this file.
+#
+# A test here is tagged when its failure would mean the engine did something
+# unsafe with money at stake: it did not halt when rule 9 says halt, it
+# halted when nothing was wrong (the boundary below the timeout -- a false
+# halt stops the book trading, which is a cost of its own), it resumed
+# itself, it lost the record of the halt, or the human never heard about
+# one. That last clause is why the storm cases are tagged: a critical alert
+# repeated every five seconds until somebody pulls the plug informs nobody.
+#
+# A test here is left bare when the engine's *behaviour* is the same either
+# way and only its reporting differs:
+#
+#   * the three ``_log_ongoing`` level tests -- DEBUG or WARNING, the engine
+#     is halted and stays halted in both, and the halt's own record is
+#     pinned by a tagged test;
+#   * ``test_a_halt_does_not_route_to_a_channel_that_is_switched_off`` --
+#     the failure direction is one alert too many on a channel the human
+#     muted, and *that* a halt notifies at all is tagged;
+#   * the whole stream-budget section, plan parsing included -- dropping a
+#     symbol silently is a real defect, but the cap is a plan limit rather
+#     than a hard rule, and a section that has to be right is not the same
+#     set as a section that has to be right *before touching the engine*.
+#     ``tests/engine/test_stream.py`` is bare for the same reason;
+#   * ``test_closing_a_runtime_that_never_supervised_is_fine`` -- lifecycle
+#     hygiene; it asserts nothing about halting.
+#
+# Adding a test to this file: tag it if breaking it could cost money, leave
+# it bare if breaking it could only cost clarity. A marker applied by vibe
+# stops meaning anything.
+
 import asyncio
 import re
 from collections.abc import Iterator
@@ -212,22 +251,26 @@ def halt_engine(engine: Engine, reason: str) -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_ninety_seconds_is_a_named_constant() -> None:
     assert WATCHDOG_TIMEOUT_SECONDS == 90.0
 
 
+@pytest.mark.risk
 def test_a_watchdog_with_no_connection_yet_does_not_halt() -> None:
     """Unarmed until something connects. A cold start is already halted."""
     watchdog = Watchdog(started_at=T0)
     assert watchdog.evaluate(T0 + timedelta(seconds=600)) is None
 
 
+@pytest.mark.risk
 def test_eighty_nine_seconds_without_a_message_does_not_halt() -> None:
     watchdog = Watchdog(started_at=T0)
     watchdog.record_message(T0)
     assert watchdog.evaluate(T0 + timedelta(seconds=89)) is None
 
 
+@pytest.mark.risk
 def test_ninety_seconds_without_a_message_halts() -> None:
     watchdog = Watchdog(started_at=T0)
     watchdog.record_message(T0)
@@ -237,6 +280,7 @@ def test_ninety_seconds_without_a_message_halts() -> None:
     assert decision.at == T0 + timedelta(seconds=90)
 
 
+@pytest.mark.risk
 def test_ninety_seconds_without_a_successful_poll_halts() -> None:
     """A poll is liveness too -- the spec says *message or successful poll*."""
     watchdog = Watchdog(started_at=T0)
@@ -247,6 +291,7 @@ def test_ninety_seconds_without_a_successful_poll_halts() -> None:
     assert decision.rule is HaltRule.CONNECTION_STALE
 
 
+@pytest.mark.risk
 def test_a_later_message_refreshes_the_liveness_clock() -> None:
     watchdog = Watchdog(started_at=T0)
     watchdog.record_message(T0)
@@ -255,6 +300,7 @@ def test_a_later_message_refreshes_the_liveness_clock() -> None:
     assert watchdog.evaluate(T0 + timedelta(seconds=150)) is not None
 
 
+@pytest.mark.risk
 def test_a_stream_close_halts_immediately() -> None:
     watchdog = Watchdog(started_at=T0)
     watchdog.record_message(T0)
@@ -265,6 +311,7 @@ def test_a_stream_close_halts_immediately() -> None:
     assert "1006 abnormal" in decision.reason
 
 
+@pytest.mark.risk
 def test_the_watchdog_keeps_reporting_an_ongoing_fault() -> None:
     """No latch in here, and that is the fix rather than the bug.
 
@@ -281,6 +328,7 @@ def test_the_watchdog_keeps_reporting_an_ongoing_fault() -> None:
         assert decision.rule is HaltRule.CONNECTION_STALE
 
 
+@pytest.mark.risk
 def test_activity_ends_the_connection_fault() -> None:
     watchdog = Watchdog(started_at=T0)
     watchdog.record_message(T0)
@@ -290,6 +338,7 @@ def test_activity_ends_the_connection_fault() -> None:
     assert watchdog.evaluate(T0 + timedelta(seconds=190)) is not None
 
 
+@pytest.mark.risk
 def test_a_poll_does_not_end_a_stream_close() -> None:
     """The socket is still shut. Only reopening it says otherwise."""
     watchdog = Watchdog(started_at=T0)
@@ -308,6 +357,7 @@ def test_a_poll_does_not_end_a_stream_close() -> None:
     assert watchdog.evaluate(T0 + timedelta(seconds=20)) is not None
 
 
+@pytest.mark.risk
 def test_a_naive_datetime_is_refused() -> None:
     watchdog = Watchdog(started_at=T0)
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -319,6 +369,7 @@ def test_a_naive_datetime_is_refused() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_the_heartbeat_condition_is_inert_by_default() -> None:
     """No producer until ``RiskManager`` grows a body, so it is not armed.
 
@@ -330,6 +381,7 @@ def test_the_heartbeat_condition_is_inert_by_default() -> None:
     assert watchdog.evaluate(T0 + timedelta(seconds=300)) is None
 
 
+@pytest.mark.risk
 def test_the_heartbeat_condition_halts_when_it_is_armed() -> None:
     watchdog = Watchdog(started_at=T0, heartbeat_armed=True)
     watchdog.record_message(T0 + timedelta(seconds=89))
@@ -338,12 +390,14 @@ def test_the_heartbeat_condition_halts_when_it_is_armed() -> None:
     assert decision.rule is HaltRule.HEARTBEAT_STALE
 
 
+@pytest.mark.risk
 def test_an_armed_heartbeat_does_not_halt_at_eighty_nine_seconds() -> None:
     watchdog = Watchdog(started_at=T0, heartbeat_armed=True)
     watchdog.record_message(T0 + timedelta(seconds=89))
     assert watchdog.evaluate(T0 + timedelta(seconds=89)) is None
 
 
+@pytest.mark.risk
 def test_a_heartbeat_refreshes_its_own_clock() -> None:
     watchdog = Watchdog(started_at=T0, heartbeat_armed=True)
     watchdog.record_heartbeat(T0 + timedelta(seconds=60))
@@ -357,11 +411,13 @@ def test_a_heartbeat_refreshes_its_own_clock() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_cold_start_comes_up_halted(runtime: EngineRuntime, db_engine: Engine) -> None:
     runtime.start()
     assert read_state(db_engine).halted is True
 
 
+@pytest.mark.risk
 def test_t0_is_written_on_the_first_start(
     runtime: EngineRuntime, db_engine: Engine, clock: Clock
 ) -> None:
@@ -369,6 +425,7 @@ def test_t0_is_written_on_the_first_start(
     assert read_state(db_engine).t0 == clock.now
 
 
+@pytest.mark.risk
 def test_t0_is_not_overwritten_on_a_second_start(
     runtime: EngineRuntime, db_engine: Engine, clock: Clock
 ) -> None:
@@ -379,6 +436,7 @@ def test_t0_is_not_overwritten_on_a_second_start(
     assert read_state(db_engine).t0 == first
 
 
+@pytest.mark.risk
 def test_starting_never_clears_a_halt(
     runtime: EngineRuntime, db_engine: Engine
 ) -> None:
@@ -395,6 +453,7 @@ def test_starting_never_clears_a_halt(
     assert state.halted_reason is not None
 
 
+@pytest.mark.risk
 def test_the_opening_snapshot_does_not_clear_the_halt(
     runtime: EngineRuntime, db_engine: Engine
 ) -> None:
@@ -411,6 +470,7 @@ def test_the_opening_snapshot_does_not_clear_the_halt(
     assert runtime.opening_snapshot_ok is True
 
 
+@pytest.mark.risk
 def test_reconnecting_leaves_the_engine_halted(
     runtime: EngineRuntime, db_engine: Engine, notifier: SpyNotifier
 ) -> None:
@@ -436,6 +496,7 @@ def test_reconnecting_leaves_the_engine_halted(
     assert len(notifier.sent) == 1
 
 
+@pytest.mark.risk
 def test_the_first_fault_after_a_cold_start_is_still_announced(
     runtime: EngineRuntime, db_engine: Engine, notifier: SpyNotifier, clock: Clock
 ) -> None:
@@ -462,6 +523,7 @@ def test_the_first_fault_after_a_cold_start_is_still_announced(
     assert read_state(db_engine).halted_reason == decision.reason
 
 
+@pytest.mark.risk
 def test_resuming_while_the_stream_is_still_closed_re_halts(
     runtime: EngineRuntime, db_engine: Engine, notifier: SpyNotifier, clock: Clock
 ) -> None:
@@ -497,6 +559,7 @@ def test_resuming_while_the_stream_is_still_closed_re_halts(
     assert len(notifier.sent) == 2
 
 
+@pytest.mark.risk
 def test_resuming_while_the_feed_is_still_silent_re_halts(
     runtime: EngineRuntime, db_engine: Engine, notifier: SpyNotifier, clock: Clock
 ) -> None:
@@ -523,6 +586,7 @@ def test_resuming_while_the_feed_is_still_silent_re_halts(
     assert len(notifier.sent) == 2
 
 
+@pytest.mark.risk
 def test_an_ongoing_fault_is_not_announced_on_every_tick(
     runtime: EngineRuntime, db_engine: Engine, notifier: SpyNotifier, clock: Clock
 ) -> None:
@@ -545,6 +609,7 @@ def test_an_ongoing_fault_is_not_announced_on_every_tick(
     assert read_state(db_engine).halted is True
 
 
+@pytest.mark.risk
 def test_a_database_that_cannot_be_written_does_not_storm_the_alert_channel(
     db_engine: Engine, clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -596,6 +661,7 @@ def test_a_database_that_cannot_be_written_does_not_storm_the_alert_channel(
     assert state.halted_reason is None
 
 
+@pytest.mark.risk
 def test_a_persist_that_failed_then_recovered_re_arms_the_switch(
     db_engine: Engine, clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -671,6 +737,7 @@ def test_a_persist_that_failed_then_recovered_re_arms_the_switch(
     assert len(notifier.sent) == 2
 
 
+@pytest.mark.risk
 def test_a_resume_the_gate_could_not_observe_ends_with_the_engine_halted(
     db_engine: Engine, clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -734,6 +801,7 @@ def test_a_resume_the_gate_could_not_observe_ends_with_the_engine_halted(
     assert len(notifier.sent) == 2
 
 
+@pytest.mark.risk
 def test_a_fault_that_ends_clears_an_announcement_the_row_never_took(
     db_engine: Engine, clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -781,6 +849,141 @@ def test_a_fault_that_ends_clears_an_announcement_the_row_never_took(
     assert second.rule is HaltRule.CONNECTION_STALE
     assert len(notifier.sent) == 2
     assert notifier.sent[1].severity == "critical"
+
+
+def test_the_record_of_a_late_halt_names_the_alert_it_belongs_to(
+    db_engine: Engine,
+    clock: Clock,
+    notifier: SpyNotifier,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``engine_halt_persisted_late`` carries the announcing halt's id, not a new one.
+
+    The retry writes a record for a halt that was announced half an hour
+    earlier, so three artifacts describe one event at two different times: the
+    critical notification and ``engine_halted`` at the moment of the fault,
+    and this row plus ``engine_halt_persisted_late`` at the moment the
+    database came back. CLAUDE.md's convention is one correlation id per
+    decision, and the late record had none -- leaving a post-incident reader
+    starting from ``engine_state`` with no key joining the row to the alert
+    and a gap to reconcile out of prose.
+
+    **``halted_at`` deliberately stays the moment the write landed**, and this
+    test pins that rather than leaving it to be changed by whoever next reads
+    the gap and assumes it is a bug. ``halted_at`` and ``halted_reason`` are
+    written from one :class:`HaltDecision` and must describe one moment:
+    backdating the timestamp alone would put ``13:31:30`` beside a sentence
+    measuring the outage at ``1895s``, and backdating both would persist a
+    sentence understating a half-hour outage by half an hour -- in the one
+    field the operator reads, with no second artifact beside it. The
+    announcement time is not lost: it is on ``engine_halted``, and the late
+    record now carries both the id that joins them and ``announced_at``
+    outright, so the gap is arithmetic rather than prose.
+
+    Left un-tagged deliberately, by the line at the top of this file: the
+    engine is halted, recorded and quiet either way, and what changes is only
+    whether a human can trace it afterwards. ``_announced`` itself, which is
+    the part that could cost money, is tagged three tests above.
+    """
+    ids = iter(["halt-announced", "halt-second", "halt-third"])
+    sessions = FlakyWrites(db_engine)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: next(ids),
+    )
+    runtime.start()
+    runtime.record_message()
+    announced_at = clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+
+    with caplog.at_level("DEBUG", logger="corollary.engine.runtime"):
+        assert runtime.check_watchdog() is not None
+        # The outage runs for half an hour before the database takes a write.
+        sessions.writable = True
+        landed_at = clock.advance(1805)
+        assert runtime.check_watchdog() is None
+
+    announced = [
+        r for r in caplog.records if getattr(r, "event", "") == "engine_halted"
+    ]
+    late = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "engine_halt_persisted_late"
+    ]
+    assert len(announced) == 1
+    assert len(late) == 1
+
+    # The join key: one decision, one id, on every artifact describing it.
+    assert announced[0].correlation_id == "halt-announced"
+    assert notifier.sent[0].correlation_id == "halt-announced"
+    assert late[0].correlation_id == "halt-announced"
+
+    # And both ends of the gap, stated rather than inferred.
+    assert late[0].announced_at == announced_at.isoformat()
+    assert late[0].at == landed_at.isoformat()
+
+    # The row is written at the moment the write landed, with the reason
+    # measured at that same moment. Changing either means changing both.
+    state = read_state(db_engine)
+    assert state.halted is True
+    assert state.halted_at == landed_at
+    assert state.halted_reason is not None
+    assert "1895s" in state.halted_reason
+
+
+def test_a_late_record_names_its_own_episode_rather_than_an_earlier_one(
+    db_engine: Engine,
+    clock: Clock,
+    notifier: SpyNotifier,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two episodes, and the id travels with the announcement that is still open.
+
+    The provenance of an announcement is cleared everywhere ``_announced`` is,
+    which is what stops the second episode's late record being filed under the
+    first episode's alert. Captured because an id remembered once at the first
+    refused write would pass the test above and be wrong here -- and wrong in
+    the direction that points an incident reader at the wrong alert, which is
+    worse than pointing them at none.
+    """
+    ids = iter(["halt-first-episode", "halt-second-episode", "halt-third"])
+    sessions = FlakyWrites(db_engine)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: next(ids),
+    )
+    runtime.start()
+    runtime.record_message()
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+
+    # The feed comes back: the episode the first announcement belonged to is
+    # over, and its id goes with it.
+    runtime.record_message()
+    assert runtime.check_watchdog() is None
+
+    # It dies again. A second announcement, refused by the same database.
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    with caplog.at_level("DEBUG", logger="corollary.engine.runtime"):
+        assert runtime.check_watchdog() is not None
+        sessions.writable = True
+        clock.advance(WATCHDOG_INTERVAL_SECONDS)
+        assert runtime.check_watchdog() is None
+
+    late = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "engine_halt_persisted_late"
+    ]
+    assert len(late) == 1
+    assert late[0].correlation_id == "halt-second-episode"
+    assert notifier.sent[1].correlation_id == "halt-second-episode"
 
 
 def test_an_ongoing_fault_the_record_already_describes_logs_at_debug(
@@ -884,6 +1087,7 @@ def test_a_manual_halt_replacing_this_engines_reason_stops_reading_as_recorded(
     assert ongoing[0].recorded_rule is None
 
 
+@pytest.mark.risk
 def test_the_runtime_has_no_code_that_clears_a_halt() -> None:
     """Structural, the way ``test_no_order_path`` is structural.
 
@@ -944,6 +1148,7 @@ def test_the_runtime_has_no_code_that_clears_a_halt() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_a_halt_persists_the_reason_and_a_utc_timestamp(
     runtime: EngineRuntime, db_engine: Engine, clock: Clock
 ) -> None:
@@ -961,6 +1166,7 @@ def test_a_halt_persists_the_reason_and_a_utc_timestamp(
     assert state.halted_reason is not None and len(state.halted_reason) <= 256
 
 
+@pytest.mark.risk
 def test_a_halt_emits_one_critical_notification(
     runtime: EngineRuntime, notifier: SpyNotifier, clock: Clock
 ) -> None:
@@ -1002,6 +1208,7 @@ def test_a_halt_does_not_route_to_a_channel_that_is_switched_off(
     assert notifier.sent[0].channels == ("bell",)
 
 
+@pytest.mark.risk
 def test_a_halt_still_notifies_when_the_database_is_unavailable(
     unmigrated_engine: Engine, clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -1022,6 +1229,7 @@ def test_a_halt_still_notifies_when_the_database_is_unavailable(
     assert notifier.sent[0].severity == "critical"
 
 
+@pytest.mark.risk
 def test_a_halt_notifies_even_when_the_persist_step_raises_something_else(
     clock: Clock, notifier: SpyNotifier
 ) -> None:
@@ -1056,6 +1264,7 @@ def test_a_halt_notifies_even_when_the_persist_step_raises_something_else(
     assert set(notifier.sent[0].channels) == set(NOTIFICATION_CHANNELS)
 
 
+@pytest.mark.risk
 def test_the_rule_the_inputs_and_the_timestamp_are_logged(
     runtime: EngineRuntime, clock: Clock, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1200,6 +1409,7 @@ def test_a_subscription_plan_carries_the_runtime_clock_and_a_correlation_id(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 @pytest.mark.asyncio
 async def test_the_supervisor_halts_without_anyone_ticking_it(
     db_engine: Engine, clock: Clock, notifier: SpyNotifier
@@ -1237,6 +1447,7 @@ async def test_closing_a_runtime_that_never_supervised_is_fine(
     await runtime.aclose()
 
 
+@pytest.mark.risk
 def test_the_lifespan_exposes_a_started_runtime(db_engine: Engine) -> None:
     """Decision 1 is *one process*, so the runtime lives in the lifespan."""
     from corollary.api.app import create_app
