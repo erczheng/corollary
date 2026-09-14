@@ -3,6 +3,7 @@ import {
   formatDateET,
   formatDateOnly,
   formatExpiry,
+  formatSessionDateTimeET,
   formatSessionDay,
   formatSignedNumber,
 } from './format'
@@ -82,5 +83,40 @@ describe('formatSessionDay', () => {
 
   it('omits the year, which the newest point on a live chart never needs', () => {
     expect(formatSessionDay('2026-01-02')).toBe('Fri, Jan 2')
+  })
+})
+
+/** The crosshair label for an intraday chart, which is drawn on an ordinal
+ * axis: the sessions are concatenated, so x is a position and no longer
+ * says when a point was. This is the only surface that can, so it carries
+ * the weekday, the date, the year *and* the time.
+ *
+ * The opposite timestamp rule from `formatSessionDay` above, because the
+ * input is the opposite kind of value: `IntradayPoint.at` is a UTC
+ * **instant**, not a calendar date, and every instant in this terminal is
+ * shown in America/New_York. */
+describe('formatSessionDateTimeET', () => {
+  it('carries the date and the time, not one or the other', () => {
+    // 19:55Z is 3:55 PM ET on Friday the 11th — the last five-minute bar
+    // of a regular session.
+    const label = formatSessionDateTimeET('2026-09-11T19:55:00Z')
+    expect(label).toContain('Fri, Sep 11, 2026')
+    expect(label).toContain('3:55 PM')
+  })
+
+  it('renders in market time, so a late bar keeps its own day', () => {
+    // 20:00Z is 4:00 PM ET on the 11th. The UTC day is already the 11th
+    // here, but an evening instant is where the two part company: a bare
+    // ET-less render of the next case would name the 12th.
+    expect(formatSessionDateTimeET('2026-09-12T00:30:00Z')).toContain('Fri, Sep 11, 2026')
+    expect(formatSessionDateTimeET('2026-09-12T00:30:00Z')).toContain('8:30 PM')
+  })
+
+  it('names the weekday, which is what makes a concatenated week readable', () => {
+    // Monday 09:30 ET, the point that sits immediately right of Friday's
+    // close on the ordinal axis. Without the weekday the two are
+    // indistinguishable.
+    expect(formatSessionDateTimeET('2026-09-14T13:30:00Z')).toContain('Mon, Sep 14, 2026')
+    expect(formatSessionDateTimeET('2026-09-14T13:30:00Z')).toContain('9:30 AM')
   })
 })

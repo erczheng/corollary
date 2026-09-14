@@ -36,13 +36,37 @@ function quote(parts: Partial<UnderlyingQuote> = {}): UnderlyingQuote {
   }
 }
 
-/** 09:30 ET onward, five minutes apart — what `1D` now asks for. */
-function bars(count: number): IntradayPoint[] {
+/** One session: five-minute bars from 09:30 ET on Fri 2026-09-11 — what
+ * `1D` asks for. **A full regular-hours session is 78 of them**, ending
+ * 15:55 ET, now that the server filters extended hours out.
+ *
+ * It steps five minutes from one day's open whatever `count` is, so it
+ * cannot stand in for a multi-session window: 192 of these ran to 01:25 ET
+ * on the 12th, which put a fixture named "the day" onto the concatenated
+ * multi-session path with a separator under the `1D` button — passing only
+ * because nothing is drawn in this file. A week is `weekBars`. */
+function bars(count = 78): IntradayPoint[] {
   const open = Date.UTC(2026, 8, 11, 13, 30)
   return Array.from({ length: count }, (_, i) => ({
     at: new Date(open + i * 5 * 60_000).toISOString(),
     value: 180 + i * 0.5,
   }))
+}
+
+/** A week: fifteen-minute bars over five ET sessions — what `1W` asks for,
+ * and ~130 points, since a regular-hours session is 26 of them.
+ *
+ * The days are Tue 8 → Fri 11 then Mon 14, which is what a rolling five
+ * sessions looks like here (Mon the 7th is Labor Day). A 1W fixture has to
+ * actually span days: the concatenation, the seams and the dated ticks all
+ * key off the ET day changing. */
+function weekBars(perSession = 26): IntradayPoint[] {
+  return [8, 9, 10, 11, 14].flatMap((day, s) =>
+    Array.from({ length: perSession }, (_, i) => ({
+      at: new Date(Date.UTC(2026, 8, day, 13, 30) + i * 15 * 60_000).toISOString(),
+      value: 180 + (s * perSession + i) * 0.1,
+    })),
+  )
 }
 
 /** Calendar dates walked back from Fri 2026-09-11, not `2026-09-${i}`:
@@ -109,11 +133,12 @@ describe('UnderlyingChart', () => {
   })
 
   it('asks for the day at five-minute bars and draws all of them', async () => {
-    // The whole point: 192 bars where there used to be one daily close.
+    // The whole point: a session of 78 five-minute bars where there used
+    // to be one daily close.
     const windows = stubUnderlyings((period) =>
       jsonResponse(
         200,
-        period === '1D' ? [quote({ intraday: bars(192) })] : [quote({ history: closes(60) })],
+        period === '1D' ? [quote({ intraday: bars(78) })] : [quote({ history: closes(60) })],
       ),
     )
     renderChart()
@@ -133,7 +158,7 @@ describe('UnderlyingChart', () => {
     const windows = stubUnderlyings((period) =>
       jsonResponse(
         200,
-        period === '1W' ? [quote({ intraday: bars(256) })] : [quote({ history: closes(60) })],
+        period === '1W' ? [quote({ intraday: weekBars() })] : [quote({ history: closes(60) })],
       ),
     )
     renderChart()
@@ -142,6 +167,41 @@ describe('UnderlyingChart', () => {
     fireEvent.click(screen.getByRole('button', { name: '1W' }))
 
     await waitFor(() => expect(windows).toContain('1W/15Min'))
+  })
+
+  /** The axis for a multi-session intraday window is ordinal — Friday 16:00
+   * butts against Monday 09:30 — and the two readouts beside it still
+   * measure the window on screen rather than the day. Concatenating changed
+   * where points sit, not what is being measured. The separators the
+   * concatenation needs are counted on a drawn SVG in
+   * `UnderlyingChart.sessions.test.tsx`; nothing is drawn here. */
+  it('still measures the window on screen across concatenated sessions', async () => {
+    // 56 bars over three ET days at the 15Min the `1W` button asks for:
+    // two full regular-hours sessions (Fri, Mon — 26 bars each, 09:30 to
+    // 15:45) and the first four bars of a third, with two overnight gaps
+    // between them that the ordinal axis closes. Values run by position,
+    // 180 to 185.5 — +$5.50 on a 180 start, +3.06%.
+    const day = (d: number, count: number, from: number) =>
+      Array.from({ length: count }, (_, i) => ({
+        at: new Date(Date.UTC(2026, 8, d, 13, 30) + i * 15 * 60_000).toISOString(),
+        value: 180 + (from + i) * 0.1,
+      }))
+    const intraday = [...day(11, 26, 0), ...day(14, 26, 26), ...day(15, 4, 52)]
+    stubUnderlyings((period) =>
+      jsonResponse(
+        200,
+        period === '1W' ? [quote({ intraday })] : [quote({ history: closes(60) })],
+      ),
+    )
+    renderChart()
+    await settled()
+
+    fireEvent.click(screen.getByRole('button', { name: '1W' }))
+    await settled()
+
+    expect(screen.getByText(/over 1W/)).toBeInTheDocument()
+    expect(screen.getByText(/3\.06%/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('says there was no session rather than drawing an empty chart', async () => {

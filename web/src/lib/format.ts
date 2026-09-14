@@ -97,6 +97,16 @@ const ET_DATE = new Intl.DateTimeFormat('en-US', {
   year: 'numeric',
 })
 
+const ET_SESSION_DATE_TIME = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+})
+
 /** All timestamps are stored UTC, displayed in America/New_York — market
  * data is Eastern, never local. See CLAUDE.md conventions. */
 export function formatTimeET(iso: string): string {
@@ -109,6 +119,26 @@ export function formatDateTimeET(iso: string): string {
 
 export function formatDateET(iso: string): string {
   return ET_DATE.format(new Date(iso))
+}
+
+/** An instant with its weekday, its date, its year *and* its clock time —
+ * "Fri, Sep 11, 2026, 3:55 PM".
+ *
+ * The long form exists for a chart whose x-axis no longer encodes elapsed
+ * time. An intraday range spanning several sessions is drawn on an **ordinal**
+ * axis so Friday 16:00 butts against Monday 09:30 with no overnight dead
+ * space, and once the axis is a position rather than a clock the crosshair is
+ * the only thing left that can answer "when was that spike". `formatTimeET`
+ * cannot ("3:55 PM" on which of five days) and `formatDateTimeET` is short a
+ * weekday, which is the part that makes a concatenated week readable.
+ *
+ * An **instant**, in ET like every other timestamp here — not a date-only
+ * value. `IntradayPoint.at` is UTC, stamped at the interval's open, and
+ * carries its own offset, so it goes straight to `new Date`. Compare
+ * `formatSessionDay`, which takes a bare `YYYY-MM-DD` and must format in UTC
+ * for the opposite reason. */
+export function formatSessionDateTimeET(iso: string): string {
+  return ET_SESSION_DATE_TIME.format(new Date(iso))
 }
 
 const EXPIRY = new Intl.DateTimeFormat('en-US', {

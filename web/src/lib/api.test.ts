@@ -10,10 +10,14 @@ import {
   formatSeriesKey,
   isInvalidSeriesWindow,
   latestSession,
+  ordinalSeries,
+  ordinalTicks,
   quoteSeries,
   resolutionForTimeframe,
   seriesChange,
+  seriesPointLabel,
   seriesSpansDays,
+  sessionBoundaries,
   windowForRange,
   fetchAccount,
   fetchAccountHistory,
@@ -36,6 +40,7 @@ import {
   updateRiskLimits,
   wireMoney,
   type ChartSeries,
+  type SeriesPoint,
 } from './api'
 import type { AccountMode, UnderlyingQuote } from './types'
 import { marketToday } from './format'
@@ -879,5 +884,236 @@ describe('isInvalidSeriesWindow', () => {
         new ApiError({ status: 500, code: HTTP_ERROR, message: 'boom', url: '/api' }),
       ),
     ).toBe(false)
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * The ordinal intraday axis
+ *
+ * The server serves regular trading hours only, so an intraday window of
+ * several sessions puts Friday 16:00 directly beside Monday 09:30. **That
+ * was already true of the axis these helpers replaced** — a bare
+ * `dataKey="key"` is a Recharts category on a point scale, evenly spaced by
+ * position, sessions already concatenated. There was no overnight dead
+ * space and no defect of that kind to fix.
+ *
+ * What a numeric axis over the index buys is the **seams and the ticks**: a
+ * category axis can put a `ReferenceLine` only on top of a bar rather than
+ * in the half-step between two, and takes no explicit `ticks` array. So
+ * these four helpers are the addressable positions plus the two things that
+ * pay for an axis that does not encode time — a tooltip that still says
+ * when a point was, and a rule at every seam.
+ *
+ * The daily path keeps the category axis, and that is a statement about the
+ * **axis** and not about the data: even spacing is what a category axis
+ * does to whatever it is handed, irregular or not. Daily simply wants no
+ * seams (there would be one at every point) and no tick control.
+ * ---------------------------------------------------------------------- */
+
+/** `count` five-minute bars from 09:30 ET on 2026-09-`day`, which is what a
+ * regular-hours session now arrives as. A full one is 78 bars, not 192.
+ * September is EDT, so 13:30Z *is* 09:30 ET. */
+function session(day: number, count = 78): SeriesPoint[] {
+  const open = Date.UTC(2026, 8, day, 13, 30)
+  return Array.from({ length: count }, (_, i) => ({
+    key: new Date(open + i * 5 * 60_000).toISOString(),
+    value: 180 + i * 0.1,
+  }))
+}
+
+describe('ordinalSeries', () => {
+  // Fri 2026-09-11 and Mon 2026-09-14: the weekend is the widest gap the
+  // axis has to swallow.
+  const week = [...session(11), ...session(14)]
+
+  it('puts the last point of one session next to the first of the next', () => {
+    const rows = ordinalSeries(week)
+
+    // Consecutive positions across the break — 77 then 78, with nothing
+    // interpolated between them.
+    expect(rows[77].index).toBe(77)
+    expect(rows[78].index).toBe(78)
+    expect(rows[78].index - rows[77].index).toBe(1)
+
+    // While the instants either side of it are two and a half days apart:
+    // Friday 15:55 to Monday 09:30. That is the hole a time scale renders,
+    // and it dwarfs the five minutes between every other pair.
+    const gap = new Date(rows[78].key).getTime() - new Date(rows[77].key).getTime()
+    expect(gap).toBe(65 * 3_600_000 + 35 * 60_000)
+    expect(new Date(rows[1].key).getTime() - new Date(rows[0].key).getTime()).toBe(300_000)
+  })
+
+  it('numbers every point, in the order the response gave them', () => {
+    const rows = ordinalSeries(week)
+    expect(rows).toHaveLength(156)
+    expect(rows.map((r) => r.index)).toEqual(week.map((_, i) => i))
+    expect(rows.map((r) => r.key)).toEqual(week.map((p) => p.key))
+  })
+
+  it('does not write the index back onto the series the readout reads', () => {
+    // The same array feeds `seriesChange`, so this returns a new one
+    // rather than annotating in place.
+    const points = session(11, 3)
+    ordinalSeries(points)
+    expect(points[0]).not.toHaveProperty('index')
+  })
+})
+
+describe('sessionBoundaries', () => {
+  it('finds one seam per boundary — not one per point, and not none', () => {
+    expect(sessionBoundaries('intraday', [...session(11), ...session(14)])).toEqual([78])
+    expect(
+      sessionBoundaries('intraday', [...session(10), ...session(11), ...session(14)]),
+    ).toEqual([78, 156])
+  })
+
+  it('finds nothing to separate inside a single session', () => {
+    // A 1D window: 78 bars, one day, no rule anywhere on it. A separator
+    // here would assert a break that did not happen.
+    expect(sessionBoundaries('intraday', session(11))).toEqual([])
+    expect(sessionBoundaries('intraday', [])).toEqual([])
+    expect(sessionBoundaries('intraday', session(11, 1))).toEqual([])
+  })
+
+  it('names the seam by the first point of the new session', () => {
+    const week = [...session(11), ...session(14)]
+    const [seam] = sessionBoundaries('intraday', week)
+    // 13:30Z on the Monday — the open, not the Friday close before it.
+    expect(week[seam].key).toBe('2026-09-14T13:30:00.000Z')
+  })
+
+  it('compares the ET day, not the UTC one', () => {
+    // Both of these are Friday evening in New York — 7:30 PM and 9:00 PM
+    // ET — and they straddle UTC midnight. A UTC-date comparison finds a
+    // session break in the middle of one ET day.
+    const evening: SeriesPoint[] = [
+      { key: '2026-09-11T23:30:00Z', value: 180 },
+      { key: '2026-09-12T01:00:00Z', value: 181 },
+    ]
+    expect(sessionBoundaries('intraday', evening)).toEqual([])
+  })
+
+  it('finds no seam on a key it cannot parse, rather than inventing one', () => {
+    // The opposite fail-closed direction from `seriesSpansDays`, because
+    // the consequence is opposite: there, not knowing costs a tick its
+    // date, which is only ever more information. Here it would draw a rule
+    // claiming a session break nobody can confirm.
+    const broken: SeriesPoint[] = [
+      { key: '2026-09-11T13:30:00Z', value: 180 },
+      { key: 'not-a-time', value: 181 },
+      { key: '2026-09-14T13:30:00Z', value: 182 },
+    ]
+    expect(() => sessionBoundaries('intraday', broken)).not.toThrow()
+    expect(sessionBoundaries('intraday', broken)).toEqual([])
+  })
+
+  it('answers a daily series with no seams at all, rather than one per bar', () => {
+    // The constraint is in the signature because the wrong answer is
+    // spectacular: a daily key is one calendar date per session, so every
+    // point after the first is a boundary and the honest reading of a
+    // daily series as instants is a hairline on every bar. The component
+    // guards its call site too; this is what makes the guard belong to the
+    // function.
+    const closes: SeriesPoint[] = [
+      { key: '2026-09-09', value: 180 },
+      { key: '2026-09-10', value: 181 },
+      { key: '2026-09-11', value: 182 },
+    ]
+    expect(sessionBoundaries('daily', closes)).toEqual([])
+    // `null` is "the server stated no resolution", which only happens with
+    // nothing to draw — and so nothing to separate either.
+    expect(sessionBoundaries(null, closes)).toEqual([])
+  })
+})
+
+describe('ordinalTicks', () => {
+  it('ticks the session opens when there are sessions on screen', () => {
+    // Two days of bars: a label at each open, sitting where its day
+    // starts.
+    expect(ordinalTicks(156, [78])).toEqual([0, 78])
+  })
+
+  it('spreads ticks across a single session, ends included', () => {
+    const ticks = ordinalTicks(78, [])
+    expect(ticks[0]).toBe(0)
+    expect(ticks[ticks.length - 1]).toBe(77)
+    expect(ticks).toHaveLength(6)
+    // Strictly increasing, so no two ticks land on one bar.
+    expect([...ticks].sort((a, b) => a - b)).toEqual(ticks)
+    expect(new Set(ticks).size).toBe(ticks.length)
+  })
+
+  it('thins to six, keeping the first and the last session labelled', () => {
+    // Eleven sessions of 78 bars — more opens than the axis can hold.
+    const seams = Array.from({ length: 10 }, (_, i) => (i + 1) * 78)
+    const ticks = ordinalTicks(858, seams)
+
+    expect(ticks.length).toBeLessThanOrEqual(6)
+    expect(ticks[0]).toBe(0)
+    // Every other day, not the first six days and then nothing: the tail
+    // of the window is the part a trader is looking at.
+    expect(ticks).toContain(780)
+  })
+
+  it('labels the newest session at every session count, not just the tidy ones', () => {
+    // This is the property the comment above used to assert while the code
+    // did not hold it. Striding from the front by `ceil(n / max)` labelled
+    // the last open only when `max` divided the opens: at **eight** the
+    // stride was 2, ticks landed on opens 0, 2, 4 and 6, and open 7 — the
+    // newest day on screen — went unlabelled while the oldest kept a
+    // label. No live window reaches eight seams (1D has none, 1W has at
+    // most four), so this is held for the next range button rather than
+    // for anything drawn today.
+    for (let sessions = 2; sessions <= 12; sessions += 1) {
+      const seams = Array.from({ length: sessions - 1 }, (_, i) => (i + 1) * 78)
+      const ticks = ordinalTicks(sessions * 78, seams)
+
+      expect(ticks.length).toBeLessThanOrEqual(6)
+      expect(ticks[0]).toBe(0)
+      expect(ticks[ticks.length - 1]).toBe(seams[seams.length - 1])
+      // Every tick is a session open, and no two land on one bar.
+      expect(ticks.every((t) => t === 0 || seams.includes(t))).toBe(true)
+      expect(new Set(ticks).size).toBe(ticks.length)
+      expect([...ticks].sort((a, b) => a - b)).toEqual(ticks)
+    }
+  })
+
+  it('has nothing to tick on an empty series, and one tick on one point', () => {
+    expect(ordinalTicks(0)).toEqual([])
+    expect(ordinalTicks(1)).toEqual([0])
+  })
+})
+
+describe('seriesPointLabel', () => {
+  const bar = '2026-09-11T19:55:00Z'
+
+  it('carries the date *and* the time for an intraday point', () => {
+    const label = seriesPointLabel('intraday', bar)
+    expect(label).toContain('Fri, Sep 11, 2026')
+    expect(label).toContain('3:55 PM')
+    expect(label).toContain('ET')
+  })
+
+  it('is more than the tick below it, which may be a bare clock time', () => {
+    // The whole reason this exists as its own function. Once the axis is
+    // ordinal, x is a position, and a tooltip reading "3:55 PM" cannot say
+    // which of a week's five sessions it belongs to.
+    expect(formatSeriesKey('intraday', bar, { compact: true })).toBe('3:55 PM')
+    expect(seriesPointLabel('intraday', bar)).not.toBe('3:55 PM')
+  })
+
+  it('keeps the daily rule, which is the opposite one', () => {
+    // A daily key is a calendar date and formats in UTC, or it renders the
+    // previous day. Untouched by the ordinal change — the daily path still
+    // draws on the category axis it always did.
+    expect(seriesPointLabel('daily', '2026-09-11')).toBe('Sep 11, 2026')
+    expect(seriesPointLabel('daily', '2026-09-11')).not.toContain('Sep 10')
+  })
+
+  it('fails closed on a key Intl cannot parse rather than throwing', () => {
+    // This runs inside Recharts' `labelFormatter`: a RangeError here is a
+    // blank Markets page, not a bad label.
+    expect(seriesPointLabel('intraday', 'not-a-time')).toBe('not-a-time')
+    expect(seriesPointLabel('daily', '2026-09-60')).toBe('2026-09-60')
   })
 })

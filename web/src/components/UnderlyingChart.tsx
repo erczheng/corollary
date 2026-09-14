@@ -16,10 +16,14 @@ import {
   formatSeriesKey,
   isInvalidSeriesWindow,
   latestSession,
+  ordinalSeries,
+  ordinalTicks,
   quoteSeries,
   resolutionForTimeframe,
   seriesChange,
+  seriesPointLabel,
   seriesSpansDays,
+  sessionBoundaries,
   windowForRange,
   type ChartSeries,
 } from '../lib/api'
@@ -71,6 +75,32 @@ const NO_SERIES: ChartSeries = { resolution: null, points: [] }
  * The range control stays mounted through every one of those states. A
  * refused window that replaced the whole panel with an error would leave no
  * way back to a range that works.
+ *
+ * **The intraday axis is a numeric ordinal; the daily one is a category.**
+ * The server serves regular trading hours only, so Friday 16:00 sits
+ * directly beside Monday 09:30 with the overnight hole closed — and it
+ * always did. The axis this replaced was `dataKey="key"` with no `type`,
+ * which Recharts reads as a category on a point scale: one evenly spaced
+ * slot per bar, sessions already concatenated. The concatenation is not
+ * what changed and there was never any overnight dead space to remove.
+ *
+ * What `type="number"` over the index buys is **the seams and the tick
+ * control**. A category axis can place a `ReferenceLine` only on top of a
+ * bar, never in the half-step between two, and a seam drawn on a bar
+ * strikes through one of the two sessions it is separating; and a category
+ * axis takes no explicit `ticks` array, so the session opens could not be
+ * made the tick positions. The daily path keeps its category axis because
+ * one point per session wants neither of those — a decision about the
+ * **axis**, not a property of the data.
+ *
+ * Placing points by position costs the axis its meaning as elapsed time —
+ * a cost the old axis was already paying — and two things pay it back. The
+ * tooltip carries the **full date and clock time** (`seriesPointLabel`):
+ * once x is a position, the crosshair is the only thing that can answer
+ * "when was that spike", and the change readout exists to make exactly
+ * that window legible. And every seam gets a **hairline in `outline`**
+ * (`sessionBoundaries`), because sessions butting together with nothing
+ * between them read as one continuous session, which is its own lie.
  *
  * It carries no strike and no contract. It sat in the option ticket first
  * and that was the wrong home — a chart is a thing you *browse*, and the
@@ -164,10 +194,13 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
   const compactTicks = resolution === 'intraday' && !seriesSpansDays(points)
   const tickLabel = (key: string) =>
     formatSeriesKey(resolution ?? 'daily', key, { compact: compactTicks })
-  const pointLabel = (key: string) =>
-    resolution === 'intraday'
-      ? `${formatSeriesKey('intraday', key)} ET`
-      : formatSeriesKey('daily', key)
+
+  // The tooltip is not a longer tick. An intraday axis is ordinal — the
+  // sessions are concatenated, so a point's x position says where it sits
+  // in the series and no longer says when it was — and this is the only
+  // surface left that can answer that. Full date, weekday and clock time,
+  // however terse the ticks below it read. `api.ts#seriesPointLabel`.
+  const pointLabel = (key: string) => seriesPointLabel(resolution ?? 'daily', key)
 
   return (
     <div>
@@ -344,9 +377,11 @@ function ChartBody({
     )
   }
 
-  // `resolution` is not read here: what it decides is how a key reads, and
-  // that arrives already resolved, as `tickLabel` and `pointLabel`.
-  const { points } = series
+  // How a key *reads* arrives already resolved, as `tickLabel` and
+  // `pointLabel`. What `resolution` still decides here is the shape of the
+  // x-axis, which is a different question: an intraday series is placed
+  // **ordinally** and a daily one is not.
+  const { points, resolution } = series
 
   // A series field was missing **and nothing drawable arrived** — which is
   // a different thing from both fields being empty, and so gets different
@@ -396,25 +431,62 @@ function ChartBody({
     )
   }
 
+  // The intraday axis is **ordinal**: a point's x is its index, so Friday
+  // 16:00 butts directly against Monday 09:30. The category axis in the
+  // other branch already did that much — a point scale places by position
+  // too, and no build of this chart drew the nights to scale. The numeric
+  // index is what makes those positions *addressable*, which is what the
+  // seams (at `index - 0.5`) and the explicit ticks need. Daily keeps the
+  // category axis, which wants neither. `api.ts#ordinalSeries`.
+  //
+  // `sessionBoundaries` takes the resolution rather than being guarded
+  // here: a daily series has a boundary at every point, so the answer for
+  // that shape belongs in the function and not in a caller's ternary.
+  const ordinal = resolution === 'intraday'
+  const rows = ordinal ? ordinalSeries(points) : points
+  const seams = sessionBoundaries(resolution, points)
+
   return (
     <div
       className={`h-48 transition-opacity duration-base ease-standard ${stale ? 'opacity-50' : ''}`}
       aria-busy={stale}
     >
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+        <LineChart data={rows} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
           <CartesianGrid stroke="var(--outline-warm)" strokeOpacity={0.4} vertical={false} />
-          <XAxis
-            // The raw key, daily or intraday — formatted for display but
-            // never used as the category itself. Two five-minute bars an
-            // hour apart share a display label and would collapse onto one x.
-            dataKey="key"
-            tickFormatter={tickLabel}
-            tick={AXIS_TICK}
-            tickLine={false}
-            axisLine={{ stroke: 'var(--outline-warm)' }}
-            minTickGap={40}
-          />
+          {ordinal ? (
+            <XAxis
+              // Position, not instant. `type="number"` over the index is
+              // what makes the spacing uniform *and* leaves room between
+              // two points for a seam at `index - 0.5`; a category axis
+              // could place a rule only on top of a bar.
+              type="number"
+              dataKey="index"
+              domain={[0, points.length - 1]}
+              // Stated, not left to Recharts, which would pick round
+              // numbers like 19.25 — a tick at a fraction of a *position*
+              // labels whichever bar happens to sit near it.
+              ticks={ordinalTicks(points.length, seams)}
+              tickFormatter={(index: number) => tickLabel(points[index]?.key ?? '')}
+              tick={AXIS_TICK}
+              tickLine={false}
+              axisLine={{ stroke: 'var(--outline-warm)' }}
+              minTickGap={40}
+              allowDecimals={false}
+            />
+          ) : (
+            <XAxis
+              // The raw key, daily or intraday — formatted for display but
+              // never used as the category itself. Two five-minute bars an
+              // hour apart share a display label and would collapse onto one x.
+              dataKey="key"
+              tickFormatter={tickLabel}
+              tick={AXIS_TICK}
+              tickLine={false}
+              axisLine={{ stroke: 'var(--outline-warm)' }}
+              minTickGap={40}
+            />
+          )}
           <YAxis
             tick={AXIS_TICK}
             tickLine={false}
@@ -433,9 +505,37 @@ function ChartBody({
               borderRadius: 8,
               color: 'var(--on-surface)',
             }}
-            labelFormatter={(d) => pointLabel(String(d))}
+            // On the ordinal axis the label Recharts hands over is the
+            // *index*, so it is resolved back to its key before it is
+            // formatted. Left as `String(index)` the tooltip read "0".
+            labelFormatter={(d) =>
+              ordinal ? pointLabel(points[Number(d)]?.key ?? '') : pointLabel(String(d))
+            }
             formatter={(value) => [formatUsd(Number(value)), symbol]}
           />
+          {/* One hairline per session seam, sitting in the half-step
+              between the close and the next open. Without it two
+              concatenated sessions read as one continuous one, which is
+              its own lie.
+              `outline`, and deliberately a **different token from the
+              gridlines it sits among** — not a slip to be corrected back.
+              CLAUDE.md assigns `outline-warm` to chart gridlines, but a
+              gridline is scaffolding and this rule is the entire reason the
+              seam exists: it is the only mark on the plot saying the axis
+              breaks here. WCAG 1.4.11 floors a graphical object that
+              carries information at 3:1, and `outline-warm` measures
+              1.93:1 in light (#b7b7a5 on #fbfae7) and 2.74:1 in dark
+              (#5c5c52 on #13140d). `outline` clears 3:1 in both themes.
+              The `CartesianGrid` above stays `outline-warm` at 0.4 opacity
+              and should: it genuinely is scaffolding and should recede. */}
+          {seams.map((seam) => (
+            <ReferenceLine
+              key={`session-${seam}`}
+              x={seam - 0.5}
+              stroke="var(--outline)"
+              strokeWidth={1}
+            />
+          ))}
           {/* Yesterday's close, so the day's move is the distance from
               this line rather than something to work out. */}
           {/* Absent on a name with no prior session — the line is then

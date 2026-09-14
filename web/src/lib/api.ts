@@ -28,7 +28,14 @@
  * runs the other way: a risk ceiling being *written* leaves as a string,
  * because it is stored exactly — see `wireMoney`.
  */
-import { formatDateET, formatDateOnly, formatDateTimeET, formatTimeET, marketToday } from './format'
+import {
+  formatDateET,
+  formatDateOnly,
+  formatDateTimeET,
+  formatSessionDateTimeET,
+  formatTimeET,
+  marketToday,
+} from './format'
 import type {
   AccountMode,
   AccountResponse,
@@ -321,19 +328,26 @@ function ytdPeriod(now: Date): string {
 
 /** What a range button asks the server for.
  *
- *     1D  -> period 1D    timeframe 5Min    ~192 points
- *     1W  -> period 1W    timeframe 15Min   ~256
+ *     1D  -> period 1D    timeframe 5Min     ~78 points
+ *     1W  -> period 1W    timeframe 15Min   ~130
  *     1M  -> period 1M    timeframe 1D       ~22
  *     3M  -> period 3M    timeframe 1D       ~64
  *     YTD -> period nD    timeframe 1D       n × 5/7, n = days since Jan 1
  *     1Y  -> period 1A    timeframe 1D      ~251
  *     All -> period 400D  timeframe 1D      ~275
  *
+ * The two intraday rows are **regular hours only** — the server filters
+ * extended hours out — so a session is 78 five-minute bars or 26
+ * fifteen-minute ones, and 1W is five of the latter. Size a new button
+ * against those figures and not against a 6.5-hour day stretched over 24:
+ * an all-hours 1D at 5Min would be 288, and these counts read as though
+ * they were once computed that way.
+ *
  * Every row sits inside the 2,000-point-per-symbol ceiling with room to
- * spare. Finer is permitted where it fits — 1M at 15Min is 1,408 points —
- * but a year at 5Min across the quoted universe is ~1.26M bars against a
- * budget the Markets page already polls into, and a ~900px chart can only
- * draw ~900 of them.
+ * spare. Finer is permitted where it fits — 1M at 15Min is ~572 points —
+ * but a year at 5Min is ~19,600 bars for one symbol, ten times that
+ * ceiling, against a budget the Markets page already polls into; and a
+ * ~900px chart can only draw ~900 of them anyway.
  *
  * `now` is injectable so the YTD row is testable without a clock. */
 export function windowForRange(range: ChartRange, now: Date = new Date()): SeriesWindow {
@@ -484,8 +498,14 @@ export function resolutionForTimeframe(timeframe: string): SeriesResolution {
  *
  * `compact` drops the date, for an axis whose whole window is one ET day.
  *
- * This belongs in `format.ts` beside `formatDateOnly`; that file is owned by
- * another dispatch this round, so the move is reported rather than made. */
+ * It stays in `api.ts` rather than moving to `format.ts`, and that is the
+ * settled arrangement, not a deferral. What this adds over the formatters
+ * it calls is **dispatch on a `SeriesResolution`** — an `api.ts` type, read
+ * off a response shape `api.ts` parses — plus the fail-closed guard below,
+ * which exists because of where Recharts calls it from. Neither is
+ * formatting, and `format.ts` would have to import the resolution to hold
+ * it. It sits beside `seriesPointLabel`, which makes the same decision for
+ * the tooltip. */
 export function formatSeriesKey(
   resolution: SeriesResolution,
   key: string,
@@ -541,6 +561,181 @@ export function seriesSpansDays(points: readonly SeriesPoint[]): boolean {
     return true
   }
   return formatDateET(first) !== formatDateET(last)
+}
+
+/** How a point reads in the tooltip — **always the full date and the time**.
+ *
+ * This is not the axis label and must not be reduced to one. An intraday
+ * range is drawn on an ordinal axis (`ordinalSeries`), so Friday 16:00 sits
+ * directly beside Monday 09:30 and the x position no longer encodes elapsed
+ * time. The crosshair is then the only surface that can say *when* a point
+ * was, which is why it carries the weekday, the date, the year and the clock
+ * time however compact the ticks below it are.
+ *
+ * The daily rule is untouched and stays the opposite one: a daily key is a
+ * calendar date and formats in UTC, or it renders the previous day.
+ *
+ * Fails closed on an unparseable key exactly like `formatSeriesKey`, and for
+ * the same reason — this runs inside Recharts' `labelFormatter`, where a
+ * RangeError is a blank page rather than a bad label. */
+export function seriesPointLabel(resolution: SeriesResolution, key: string): string {
+  if (!isFormattableSeriesKey(resolution, key)) return key
+  if (resolution === 'daily') return formatDateOnly(key)
+  return `${formatSessionDateTimeET(key)} ET`
+}
+
+/** One point of a series, placed on an **ordinal** axis. */
+export interface OrdinalPoint extends SeriesPoint {
+  /** Position on the axis: the point's index in the series, and nothing
+   * else. Consecutive points are one apart whether five minutes or a
+   * weekend separates them. */
+  index: number
+}
+
+/** Place an intraday series by **index rather than by instant**.
+ *
+ * **This is not what makes the sessions concatenate.** They already did.
+ * The axis this replaced was a bare `dataKey="key"` with no `type` and no
+ * `scale`, which Recharts reads as `type: 'category'` on a point scale:
+ * one evenly spaced slot per bar, the overnight hole already closed. No
+ * build of this chart ever drew a week as five thin bands with the nights
+ * to scale, and a comment claiming one did sends the next reader hunting a
+ * defect that was never there.
+ *
+ * What the explicit index buys is **the seams and the ticks**, neither of
+ * which a category axis can do. A `ReferenceLine` on a category axis lands
+ * *on top of* a bar, and a session seam has to sit in the half-step
+ * *between* a close and the next open (`index - 0.5`) or it strikes
+ * through one of the two bars it is separating. And a category axis takes
+ * no explicit `ticks` array, so the session opens could not be made the
+ * tick positions. A numeric axis over the index gives the same uniform
+ * spacing, addressably.
+ *
+ * The cost is unchanged and was already being paid either way: x is a
+ * position and not elapsed time, because the server serves regular hours
+ * only and Friday 16:00 sits directly beside Monday 09:30. Two things pay
+ * it back and both are load-bearing — `seriesPointLabel` puts the full
+ * date and time in the tooltip, and `sessionBoundaries` puts a hairline at
+ * each seam so the concatenation is visible rather than implied.
+ *
+ * The daily path keeps its category axis, and that is a decision about the
+ * **axis**, not a property of the data: one point per session wants no
+ * seams (there would be a boundary at every point) and no tick control (a
+ * date per bar reads fine). It is *not* that a daily series is "already
+ * evenly spaced" — even spacing is what a category axis does to whatever
+ * it is handed. Feed that path weekly bars, or a gapped equity curve, and
+ * it will space those evenly too, honest or not.
+ *
+ * Nothing is sorted or filtered here: the response's order is the axis
+ * order, and a new array is returned rather than the points being mutated,
+ * since the same array feeds the window readout. */
+export function ordinalSeries(points: readonly SeriesPoint[]): OrdinalPoint[] {
+  return points.map((point, index) => ({ ...point, index }))
+}
+
+/** Where one session ends and the next begins, as the **index of the first
+ * point of each session after the first**.
+ *
+ * `[78]` over two concatenated 78-bar sessions: one entry per seam, so a
+ * caller gets one separator per boundary rather than one per point. A
+ * single-session window returns `[]` and draws no separator at all — a rule
+ * with nothing to separate.
+ *
+ * **Intraday only, and now stated in the signature rather than implied.**
+ * The resolution is a parameter and a daily series returns `[]`: its keys
+ * are calendar dates, one per session, so every point after the first is a
+ * boundary and the honest answer for that shape is a rule on every bar —
+ * which is not a thing anybody wants drawn. Its sibling `seriesSpansDays`
+ * documents the same constraint in prose; this one takes it as an
+ * argument, because the wrong answer here is 250 hairlines rather than one
+ * over-dated tick.
+ *
+ * The comparison is the **ET market date** of each instant, via
+ * `marketToday`, never a bare `new Date()` and never the UTC date: a 16:00
+ * ET bar is stamped 20:00Z, and a UTC-date comparison would find a seam in
+ * the middle of every afternoon.
+ *
+ * **Fails closed by finding no seam** on a key `Intl` cannot parse, the
+ * opposite direction from `seriesSpansDays` because the consequence is the
+ * opposite. There the unknown answer costs a tick's date, which is only ever
+ * more information; here it would draw a line asserting a session break that
+ * may not exist, and a fabricated seam is a worse lie than a missing one. */
+export function sessionBoundaries(
+  resolution: SeriesResolution | null,
+  points: readonly SeriesPoint[],
+): number[] {
+  // `null` — the server stated no resolution — lands here too, and lands
+  // on the same side as daily: with nothing drawn there is nothing to
+  // separate.
+  if (resolution !== 'intraday') return []
+
+  const seams: number[] = []
+  let previous: string | null = null
+  for (let i = 0; i < points.length; i += 1) {
+    const key = points[i].key
+    if (!isFormattableSeriesKey('intraday', key)) {
+      previous = null
+      continue
+    }
+    const day = marketToday(new Date(key))
+    if (previous !== null && day !== previous) seams.push(i)
+    previous = day
+  }
+  return seams
+}
+
+/** Which indices of an ordinal axis get a tick.
+ *
+ * Stated here rather than left to Recharts, which picks its own round
+ * numbers for a numeric axis — and on an axis whose numbers are *positions*,
+ * a tick at 19.25 formats as whatever bar happens to sit near it.
+ *
+ * Two shapes, because the question a tick answers differs by window. With
+ * session seams on screen the useful ticks are the **session opens**: one
+ * label per day, each sitting where its day starts. Inside a single session
+ * there are no opens to mark, so the candidates are the bar positions
+ * themselves.
+ *
+ * Both shapes thin the same way, and that rule is the one property here
+ * worth holding: **at most `max` picks, spread evenly across the
+ * candidates, with the first and the last always among them.** Striding by
+ * `ceil(n / max)` from the front looks equivalent and is not — at eight
+ * session opens the stride is 2, ticks land on opens 0, 2, 4 and 6, and
+ * open 7 goes unlabelled. That drops the *newest* day on screen, which is
+ * the part of the window anybody is looking at, while the oldest keeps its
+ * label. The spread is mildly irregular when `max` does not divide the
+ * candidates (eight opens label days 1, 2, 4, 5, 7 and 8); an unevenly
+ * spaced label is cosmetic and a missing last day is wrong.
+ *
+ * No live window reaches that case — `1D` has no seams at all and `1W` has
+ * at most four — so this is a property kept against the next range button
+ * rather than a fix to something on screen. It is here because
+ * `api.test.ts` claimed it and the code did not hold it, and of the two the
+ * claim was the better behaviour. */
+export function ordinalTicks(
+  count: number,
+  boundaries: readonly number[] = [],
+  max = 6,
+): number[] {
+  if (count <= 0) return []
+  if (count === 1) return [0]
+
+  if (boundaries.length > 0) {
+    const opens = [0, ...boundaries]
+    return spreadIndices(opens.length, max).map((i) => opens[i])
+  }
+
+  return spreadIndices(count, max)
+}
+
+/** At most `max` indices into a list of `length`, evenly spread, **both
+ * ends included**. Deduplicated, because a list shorter than `max` would
+ * otherwise pick the same index twice and put two ticks on one bar. */
+function spreadIndices(length: number, max: number): number[] {
+  if (length <= 1) return length === 1 ? [0] : []
+  const n = Math.min(max, length)
+  const picked = Array.from({ length: n }, (_, k) => Math.round((k * (length - 1)) / (n - 1)))
+  return [...new Set(picked)]
 }
 
 /** Which session the newest point on screen belongs to, and whether that
