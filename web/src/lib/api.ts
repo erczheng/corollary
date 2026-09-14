@@ -374,6 +374,43 @@ export interface ChartSeries {
    * chart and not a flat line. */
   resolution: SeriesResolution | null
   points: SeriesPoint[]
+  /** True when the response was **missing a series field** — not the same
+   * thing as carrying an empty one. Either field absent is enough: both
+   * are non-optional in the schema.
+   *
+   * Two empty arrays is the server *stating* that the window held no
+   * session. A field that is not there at all is a response this client
+   * cannot read a series out of, which means the running API and this page
+   * disagree about the shape. The two share `resolution: null` and must not share wording:
+   * reporting a skew as a quiet Sunday is a confident answer to a question
+   * nobody answered.
+   *
+   * **Set whether or not the other field was populated**, which is the
+   * whole point of the flag and the part that was missing. It used to be
+   * computed only on the both-empty return path, so the shape that
+   * actually occurs — `history: [...]` with no `intraday` key, a server
+   * predating the split — came back as an ordinary
+   * `{ resolution: 'daily', points }`. The only remaining detector was
+   * requested-against-served resolution, and that mismatches only when the
+   * request was intraday: `1D` and `1W`. On `1M`/`3M`/`YTD`/`1Y`/`All` a
+   * stale server's default 400 closes drew cleanly under an `over 3M`
+   * label measuring a year, with nothing on screen saying so.
+   *
+   * **It states a fact about the response, not what to render.** Which of
+   * the two states it is comes from combining it with `points`:
+   *
+   * - **no points** — nothing drawable arrived, and the chart says the
+   *   response carried no series at all, in place of a chart.
+   * - **points** — draw them, and withhold everything that describes the
+   *   *window*: the change figure and the session lead. A server that
+   *   omits a field this build reads cannot be taken to have honoured the
+   *   `period` it was sent either, and the drawn series is still the best
+   *   thing to show.
+   *
+   * Optional because a series assembled on this side
+   * (`/api/account/history`, which has no two-field split to read) always
+   * states one. Absent means both fields were there. */
+  missingField?: boolean
 }
 
 /** Read an underlying's series **off the response**, not off what was asked
@@ -383,19 +420,47 @@ export interface ChartSeries {
  * states the resolution. Inferring it from the requested timeframe would be
  * right until the server answered something else, and then wrong silently. */
 export function quoteSeries(quote: UnderlyingQuote): ChartSeries {
-  if (quote.intraday.length > 0) {
+  // Both fields are read through `Array.isArray` rather than indexed
+  // straight into. An API that predates the two-field split answers with
+  // `history` and **no `intraday` key**, and `undefined.length` threw here
+  // during render — which unmounted the whole Markets tree rather than
+  // costing the one chart. The type says `IntradayPoint[]`, so nothing on
+  // this side can catch that: only the server the browser is talking to can
+  // be wrong about it, and it is not the client's to assume.
+  const intraday = Array.isArray(quote.intraday) ? quote.intraday : null
+  const history = Array.isArray(quote.history) ? quote.history : null
+
+  // `||`, not `&&`, and computed **before** the returns rather than on the
+  // empty one. Both fields are non-optional lists in the schema, so a
+  // *missing* one is skew whichever it is and whether or not the other one
+  // came back full — there is no shape in which the server means "no
+  // session" by omitting a key. It was `&&` on the both-empty path only,
+  // which missed the shape that actually occurs: `history` populated, no
+  // `intraday` key. That returned a clean daily series and left the whole
+  // detection to requested-against-served resolution, which is blind on
+  // the five daily ranges. See `ChartSeries#missingField`.
+  const missingField = intraday === null || history === null
+
+  if (intraday !== null && intraday.length > 0) {
     return {
       resolution: 'intraday',
-      points: quote.intraday.map((point) => ({ key: point.at, value: point.value })),
+      points: intraday.map((point) => ({ key: point.at, value: point.value })),
+      missingField,
     }
   }
-  if (quote.history.length > 0) {
+  if (history !== null && history.length > 0) {
     return {
       resolution: 'daily',
-      points: quote.history.map((point) => ({ key: point.date, value: point.value })),
+      points: history.map((point) => ({ key: point.date, value: point.value })),
+      missingField,
     }
   }
-  return { resolution: null, points: [] }
+  // Empty either way, but for two different reasons — see `missingField`.
+  // A stale server answering `history: []` with no `intraday` key for a
+  // symbol it has no daily bars for (a recent listing, a halted name) read
+  // as a quiet Sunday: the chart told the user to try a longer range, at a
+  // server that ignores `period` and answers every range the same.
+  return { resolution: null, points: [], missingField }
 }
 
 /** The resolution an echoed `timeframe` states.
@@ -426,17 +491,56 @@ export function formatSeriesKey(
   key: string,
   opts: { compact?: boolean } = {},
 ): string {
+  // Fails closed, exactly like `latestSession`'s caption guard and for a
+  // worse version of the same reason: this runs inside Recharts'
+  // `tickFormatter` and `labelFormatter`, so a key `Intl` cannot parse
+  // raises RangeError *during render* and takes the chart and the Markets
+  // tree down for an axis label. The caption was guarded and this was not,
+  // which only moved the crash from the caption to the axis.
+  //
+  // The key itself is the fallback: it is what the server said, it is
+  // never empty, and an axis reading `2026-13-45` is a legible fault where
+  // a blank page is not. Only the server can be wrong about this shape —
+  // a conforming one serialises `date`/`datetime` through pydantic and
+  // cannot emit these.
+  if (!isFormattableSeriesKey(resolution, key)) return key
   if (resolution === 'daily') return formatDateOnly(key)
   return opts.compact === true ? formatTimeET(key) : formatDateTimeET(key)
+}
+
+/** Would `Intl` accept this key, under the rule its resolution takes?
+ *
+ * The two constructions are the ones the formatters themselves use —
+ * `format.ts#formatDateOnly` appends `T00:00:00Z` to a bare date, and every
+ * ET formatter hands the key straight to `new Date`. Testing any other
+ * construction would pass keys the real call then throws on. */
+function isFormattableSeriesKey(resolution: SeriesResolution, key: string): boolean {
+  const at = new Date(resolution === 'daily' ? `${key}T00:00:00Z` : key)
+  return !Number.isNaN(at.getTime())
 }
 
 /** Does an intraday window cross an ET date boundary?
  *
  * A 1D window does not, so its ticks read `9:30 AM`. A 1W window does, and a
- * tick reading `3:45 PM` four times over would not say which day it meant. */
+ * tick reading `3:45 PM` four times over would not say which day it meant.
+ *
+ * Asked only of an intraday series — a daily key is a day already — so the
+ * endpoints are parsed the way an instant is.
+ *
+ * **Fails closed as `true`, and that is the safe direction.** `formatDateET`
+ * raises RangeError on a key `Intl` cannot parse, in the component body
+ * rather than in a formatter, which is a blank page instead of a wrong tick.
+ * An unparseable endpoint means the span is unknown, and the answer that
+ * survives not knowing is the one that keeps the date on every tick: a
+ * labelled day is never ambiguous, a bare `3:45 PM` repeated is. */
 export function seriesSpansDays(points: readonly SeriesPoint[]): boolean {
   if (points.length < 2) return false
-  return formatDateET(points[0].key) !== formatDateET(points[points.length - 1].key)
+  const first = points[0].key
+  const last = points[points.length - 1].key
+  if (!isFormattableSeriesKey('intraday', first) || !isFormattableSeriesKey('intraday', last)) {
+    return true
+  }
+  return formatDateET(first) !== formatDateET(last)
 }
 
 /** Which session the newest point on screen belongs to, and whether that
@@ -492,6 +596,12 @@ export function latestSession(
   let date: string
   if (resolution === 'daily') {
     date = newest.key.slice(0, 10)
+    // The same fail-closed rule as the intraday branch below, for the same
+    // reason: this date is handed to `formatSessionDay`, which runs it
+    // through `Intl` and raises RangeError on an unparseable one *during
+    // render* — taking the chart, and the page around it, down for a
+    // caption. Only the server can be wrong about this shape.
+    if (Number.isNaN(new Date(`${date}T00:00:00Z`).getTime())) return null
   } else {
     const at = new Date(newest.key)
     // Fails closed rather than throwing: Intl raises RangeError on an

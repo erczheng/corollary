@@ -17,6 +17,7 @@ import {
   isInvalidSeriesWindow,
   latestSession,
   quoteSeries,
+  resolutionForTimeframe,
   seriesChange,
   seriesSpansDays,
   windowForRange,
@@ -46,6 +47,27 @@ const NO_SERIES: ChartSeries = { resolution: null, points: [] }
  * Sunday. That is a designed state here, not an empty chart and not a flat
  * line.
  *
+ * What *is* compared against the request is whether the answer answers it,
+ * and there are **two separate ways it can fail to**, because one detector
+ * only sees two of the seven buttons:
+ *
+ * - **The served resolution is not the requested one** — daily closes to a
+ *   `1D`/`5Min` request. Only ever a mismatch when the request was
+ *   intraday, so it is blind on `1M`/`3M`/`YTD`/`1Y`/`All`, which all ask
+ *   for `1D` bars and would accept a daily answer from any server.
+ * - **The response omitted a series field** (`quoteSeries`' `missingField`)
+ *   — the live skew, and the one the five daily ranges need: a server
+ *   predating the split answers `history` with no `intraday` key and its
+ *   own default 400 closes, which under `3M` draws cleanly and measures a
+ *   year.
+ *
+ * Either way the series that *did* arrive is still drawn, and only the two
+ * readouts that describe the **window** are withheld — the change figure
+ * and the session day — with an alert naming which of the two causes it
+ * was. Withheld, not caveated: a figure labelled `over 3M` measuring 400
+ * calendar days is worse than no figure. The served resolution still
+ * decides how every key reads; that is a different operation.
+ *
  * The range control stays mounted through every one of those states. A
  * refused window that replaced the whole panel with an error would leave no
  * way back to a range that works.
@@ -72,6 +94,48 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
   // describes.
   const stale = query.isPlaceholderData
 
+  // Did the server answer the question that was asked?
+  //
+  // This infers nothing. The *served* resolution stays authoritative for
+  // every decision that reads one — `tickLabel`, `pointLabel`,
+  // `compactTicks` — and this asks the separate question of whether the
+  // answer is an answer to *this* request. A server that ignores `period`
+  // and `timeframe` returns its default daily series to a `1D`/`5Min`
+  // request: 400 dated bars under a button that says intraday, with a
+  // change figure labelled "over 1D" measuring a year. Before the crash
+  // fix that payload threw and the page blanked, which was at least
+  // unmistakable; drawn, it looks fine and is wrong.
+  //
+  // `/api/markets/underlyings` echoes no `timeframe` the way
+  // `/api/account/history` does, so requested-against-served is the only
+  // form this question can take here. A false positive would itself be
+  // worth surfacing: `1D` asked at `5Min` and answered as daily closes is
+  // not something a correct server produces.
+  //
+  // Not raised while the previous window is still on screen — a daily
+  // series under a freshly picked 5Min timeframe is exactly what
+  // `placeholderData` is for, and it settles on the next paint.
+  const resolutionSkew =
+    !stale &&
+    resolution !== null &&
+    resolution !== resolutionForTimeframe(seriesWindow.timeframe)
+
+  // The other half of the same question, and the half that covers the five
+  // daily ranges. `resolutionSkew` can only fire on `1D` and `1W`: every
+  // other button asks for `1D` bars, so a stale server's daily closes are
+  // a resolution match and sail straight through. What that server *also*
+  // does is omit the `intraday` key, and a build that does not carry a
+  // field this page reads cannot be taken to have honoured `period`
+  // either — the 400 closes it returns are its default window, not the one
+  // that was asked for.
+  //
+  // Gated on there being something drawn: with no points this is the
+  // nothing-arrived state, which `ChartBody` states in full and in place
+  // of a chart. Raising the alert there too would say it twice.
+  const shapeSkew = !stale && series.missingField === true && points.length > 0
+
+  const skewed = resolutionSkew || shapeSkew
+
   // The move over the window on screen, not over the day. A range control
   // that redraws the axis but leaves a daily figure beside it is reporting
   // on a chart nobody is looking at.
@@ -91,7 +155,7 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
   // the no-session and single-bar states already say more than this would.
   const session = latestSession(series)
   const sessionLead =
-    stale || query.isPending || query.isError || points.length < 2
+    stale || skewed || query.isPending || query.isError || points.length < 2
       ? null
       : (session?.lead ?? null)
 
@@ -137,12 +201,16 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
           </span>
           {/* Withheld while the previous window is still drawn: a figure
               labelled "over 1W" measured across three months is worse than
-              no figure. */}
+              no figure. Withheld on the same terms when the server answered
+              at a resolution nobody asked for — the same sentence, with a
+              version skew as the cause instead of a pending refetch, and
+              the case that actually occurs. */}
           {stale ? (
             <span role="status" className="text-label-md text-on-surface-variant">
               Reading {range}…
             </span>
           ) : (
+            !skewed &&
             windowChange && (
               <span className={`text-data-md ${signClass(windowChange.change)}`}>
                 {formatUsd(windowChange.change, { signed: true })}{' '}
@@ -153,6 +221,38 @@ export function UnderlyingChart({ symbol }: { symbol: string }) {
           )}
         </p>
       </div>
+
+      {/* Stated, not caveated: the figure and the day label are both gone
+          above, and this says why they are. `error` rather than `bearish`
+          or `caution` — a response that does not answer the request is a
+          fault between this page and the server, not a loss and not a
+          market condition. */}
+      {skewed && (
+        <p role="alert" className="mb-2 max-w-prose text-caption text-error">
+          {/* Two causes, one consequence. The cause is named because the
+              two are fixed by different things — one is a server ignoring
+              the query, the other a server that predates the field — and
+              "something is off with this chart" is not a bug report
+              anybody can act on. */}
+          {shapeSkew ? (
+            <>
+              The quote for {symbol} left out one of the two price series fields this page
+              reads, so the running API and this build disagree about the shape of a quote. A
+              server missing that field cannot be taken to have honoured the {range} window it
+              was sent either, so the change over the window and the session day are withheld
+              rather than printed over a window nobody can confirm was served.
+            </>
+          ) : (
+            <>
+              Asked for {symbol} over {range} at {seriesWindow.timeframe} bars; the server
+              answered with {resolution === 'daily' ? 'daily closes' : 'intraday bars'}. The
+              change over the window is withheld rather than printed with a caveat, because it
+              would measure a window nobody asked for.
+            </>
+          )}{' '}
+          What is drawn below is the series that did arrive, at the resolution it arrived at.
+        </p>
+      )}
 
       {/* Informational, so `on-surface-variant` and not `caution` — an
           earlier session is not a fault and not a loss. The day itself is
@@ -247,6 +347,32 @@ function ChartBody({
   // `resolution` is not read here: what it decides is how a key reads, and
   // that arrives already resolved, as `tickLabel` and `pointLabel`.
   const { points } = series
+
+  // A series field was missing **and nothing drawable arrived** — which is
+  // a different thing from both fields being empty, and so gets different
+  // words. Both empty is the server saying the window held no session.
+  // Neither present is this page and the API disagreeing about the shape
+  // of a quote, and captioning that "no session" would report a quiet
+  // Sunday for a version skew. `error` rather than `bearish`: a response
+  // this client cannot read is a fault, not a loss.
+  //
+  // `points.length === 0` is load-bearing. `missingField` is now also true
+  // when one field was absent and the *other* came back full — 400 daily
+  // closes and no `intraday` key — and this paragraph would be flatly
+  // false over a drawable series, claiming no price series above a drawn
+  // one. That case takes the withholding path instead: the caller draws
+  // the bars, drops the window figure and the session lead, and says why
+  // in the skew alert above.
+  if (series.missingField === true && points.length === 0) {
+    return (
+      <p role="alert" className="max-w-prose text-caption text-error">
+        The quote for {symbol} carried no price series — neither daily closes nor intraday
+        bars. This page and the API it is talking to disagree about the shape of a quote, so
+        nothing is drawn rather than a flat line at the last price. Reload once the server has
+        been restarted on the current build.
+      </p>
+    )
+  }
 
   // Neither series field came back. The market did not open inside this
   // window — `1D` on a Sunday, or a holiday Monday — and the honest answer
@@ -347,4 +473,6 @@ function ChartBody({
 /* A note for whoever adds the next chart: the intraday/daily split is read
    from the response and nothing here guesses it. `resolution === null` means
    the server stated no resolution, which only happens when both series
-   fields are empty. */
+   fields came back with nothing in them — empty, absent, or one of each.
+   Whether a field was *absent* is the separate `missingField`, and it is
+   set on a populated response too. */
