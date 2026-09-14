@@ -968,3 +968,58 @@ describe('audit log', () => {
     expect(await within(log).findByText(/most recent 1 of 240/)).toBeInTheDocument()
   })
 })
+
+/** Phase 2 decision 8, and the half of it that is specific to this page:
+ * Settings mixes real and mock inside one page, so the marker sits on the
+ * affected panel. Over the title it would label the engine's own risk
+ * ceilings as invented, which is worse than no marker at all. */
+describe('the fixture marker', () => {
+  it('is scoped to the sentiment panel and marks nothing that the server serves', async () => {
+    stubFetch()
+    render(<App />)
+
+    // Wait for the served panels to finish loading first: a skeleton carries
+    // no marker either, so an unawaited assertion would pass for the wrong
+    // reason.
+    await within(section('Risk limits')).findByLabelText('Max daily loss')
+
+    const marker = screen.getByText('Sample data — Phase 1')
+    expect(marker.closest('section')).toBe(section('Sentiment accuracy'))
+
+    for (const name of [
+      'API keys',
+      'Risk limits',
+      'Notification routing',
+      'Data sources',
+      'Configuration audit log',
+    ]) {
+      expect(within(section(name)).queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
+    }
+  })
+
+  it('appears exactly once on a page that is mostly server-backed', async () => {
+    stubFetch()
+    render(<App />)
+    await within(section('Risk limits')).findByLabelText('Max daily loss')
+
+    expect(screen.getAllByText('Sample data — Phase 1')).toHaveLength(1)
+  })
+
+  /** News and Research carry a screen-reader copy of the marker's detail,
+   * because a tooltip on a non-focusable span is mouse-only and neither page
+   * restates it. This panel does restate it, visibly and to everyone, so the
+   * copy is suppressed here — a description repeated verbatim a second later
+   * is how a screen-reader user learns to stop listening to them. */
+  it('does not say in a screen reader what the panel already says in prose', async () => {
+    stubFetch()
+    render(<App />)
+    await within(section('Risk limits')).findByLabelText('Max daily loss')
+    const sentiment = section('Sentiment accuracy')
+
+    expect(within(sentiment).getByText('Sample data — Phase 1').getAttribute('title')).toMatch(
+      /Nothing has scored a sentiment label/,
+    )
+    expect(screen.queryByText(/Nothing has scored a sentiment label/)).not.toBeInTheDocument()
+    expect(within(sentiment).getByText(/not the engine’s own configuration/)).toBeInTheDocument()
+  })
+})

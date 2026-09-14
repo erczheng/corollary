@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Chip } from '../components/Chip'
+import { FixtureMarker } from '../components/FixtureMarker'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { RequestFailed } from '../components/RequestFailed'
 import { RiskLimitField } from '../components/RiskLimitField'
@@ -566,18 +566,27 @@ export function Settings() {
           title="Sentiment accuracy"
           description={`Every published label is scored weekly against that ticker's realized forward return. Below ${SENTIMENT_FLOOR}% is coin-flip territory, and a source that falls under it is demoted from a scanner input to display-only.`}
           aside={
-            /* `caution`, not `error`: a fixture standing in for a pipeline
-               that has not been built is a stage of the build, not a fault.
-               The marker is on the panel rather than the page title because
-               every other panel here is live, and an unmarked table of
-               invented percentages reads as measured now that its neighbours
-               are real. */
-            <Chip
-              variant="caution"
-              title="These figures are sample data. Nothing has scored a sentiment label against realized return yet — the news and sentiment pipeline is PRD §9, a later phase."
-            >
-              Sample data — Phase 1
-            </Chip>
+            /* On the panel and not the page title: everything else here is
+               the engine's own configuration, and a marker over the title
+               would label real risk ceilings as invented — worse than no
+               marker. Unmarked, a table of invented percentages reads as
+               measured now that its neighbours are real.
+
+               Shared with News and Research so the three cannot drift into
+               three different sentences; the choice of `neutral` over
+               `caution` is argued in `FixtureMarker`, and matters most right
+               here, where the genuinely actionable amber thing — the
+               demoted-source banner — is a few pixels below it.
+
+               `detailRestated` because the paragraph directly below this
+               panel's heading already says the same thing in visible prose,
+               to everyone. The marker's screen-reader copy exists for News
+               and Research, which have no such paragraph; here it would only
+               make a screen reader read the claim twice. */
+            <FixtureMarker
+              detailRestated
+              detail="These figures are sample data. Nothing has scored a sentiment label against realized return yet — the news and sentiment pipeline is PRD §9, a later phase."
+            />
           }
         >
           <p className="mb-4 max-w-prose text-caption text-caution">

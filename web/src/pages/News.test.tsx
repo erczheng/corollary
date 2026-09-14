@@ -337,3 +337,49 @@ describe('the market calendar', () => {
     expect(within(panel).getAllByText('Central bank').length).toBeGreaterThan(0)
   })
 })
+
+/** Phase 2 decision 8. PRD §8.5's "a table of invented numbers reads as
+ * invented" held while every page was a fixture; it stops holding once
+ * Account, Activity, Markets and Settings' ceilings are the engine's own
+ * data. The sentiment composite is the sharpest case on this page — a
+ * number with a published formula behind it reads as *computed* — and the
+ * poll pill beside the title is reporting a freshness for fixtures. */
+describe('the fixture marker', () => {
+  it('says at the page title that everything here is sample data', () => {
+    render(<App />)
+    const marker = screen.getByText('Sample data — Phase 1')
+
+    expect(marker).toBeInTheDocument()
+    expect(marker.getAttribute('title')).toMatch(/sample data/i)
+  })
+
+  it('marks the page once rather than each panel, since every panel is mock', () => {
+    render(<App />)
+
+    expect(screen.getAllByText('Sample data — Phase 1')).toHaveLength(1)
+    for (const name of ['Latest intel', 'Market Sentiment', 'Market calendar']) {
+      expect(within(section(name)).queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
+    }
+  })
+
+  it('is a status label, not a control', () => {
+    render(<App />)
+    expect(screen.getByText('Sample data — Phase 1').closest('button')).toBeNull()
+  })
+
+  /** The three-word label says *whether* this page is a fixture; the detail
+   * says *what* is invented and when it becomes real. On a non-focusable span
+   * the tooltip is mouse-only, and this page has no visible restatement the
+   * way the Settings panel does — so without the screen-reader copy, the
+   * sentiment composite in particular is a published-looking formula with no
+   * reachable statement that no headline went into it. */
+  it('puts the detail in reach without a pointer, in the tooltip’s own words', () => {
+    render(<App />)
+    const detail = screen.getByText(/nothing here was computed from a published headline/)
+
+    expect(detail).toHaveClass('sr-only')
+    expect(detail.textContent).toBe(
+      screen.getByText('Sample data — Phase 1').getAttribute('title'),
+    )
+  })
+})

@@ -478,3 +478,54 @@ describe('recommendation state is shared with the Dashboard', () => {
     ).toBeGreaterThan(0)
   })
 })
+
+/** Phase 2 decision 8. The chat has said it is scripted since Phase 1; the
+ * rest of the page had been relying on §8.5's argument that invented
+ * numbers read as invented, which is much weaker now that the pages next
+ * door are the broker's own records. */
+describe('the fixture marker', () => {
+  it('marks the page as sample data, in the same words as the scripted chat', () => {
+    render(<App />)
+    const marker = screen.getByText('Sample data — Phase 1')
+
+    expect(marker).toBeInTheDocument()
+    expect(marker.getAttribute('title')).toMatch(/sample data/i)
+  })
+
+  it('sits at the page title rather than on one panel, since every panel is mock', () => {
+    render(<App />)
+
+    expect(screen.getAllByText('Sample data — Phase 1')).toHaveLength(1)
+    for (const name of ['Recommended Trades', 'Strategies', 'Chat']) {
+      expect(within(section(name)).queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
+    }
+  })
+
+  /** The two markers are different claims and both stay: the page one says
+   * the numbers are invented, the chat one says the sentences are. A fluent
+   * reply is the one thing here that could mislead on its own wording. */
+  it('does not displace the chat marker, which is the narrower claim', () => {
+    render(<App />)
+    expect(within(section('Chat')).getByText(/Scripted — Phase 1/)).toBeInTheDocument()
+  })
+
+  it('is a status label, not a control', () => {
+    render(<App />)
+    expect(screen.getByText('Sample data — Phase 1').closest('button')).toBeNull()
+  })
+
+  /** The label says *whether*; the detail says *what* and *when*. The chip is
+   * a non-focusable span, so its tooltip is mouse-only, and nothing on this
+   * page restates the claim in visible prose — so without the screen-reader
+   * copy, a keyboard-only reader is never told that no model produced the
+   * recommendations. */
+  it('puts the detail in reach without a pointer, in the tooltip’s own words', () => {
+    render(<App />)
+    const detail = screen.getByText(/no model produced anything here/)
+
+    expect(detail).toHaveClass('sr-only')
+    expect(detail.textContent).toBe(
+      screen.getByText('Sample data — Phase 1').getAttribute('title'),
+    )
+  })
+})

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { FixtureMarker } from '../components/FixtureMarker'
 import { RefreshButton } from '../components/RefreshButton'
 import { ResearchChat } from '../components/ResearchChat'
 import { StatCard } from '../components/StatCard'
@@ -60,7 +61,16 @@ export function Research() {
 
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
-      <h1 className="text-display-lg text-on-surface">Research</h1>
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="text-display-lg text-on-surface">Research</h1>
+        {/* On the title: every panel here is a fixture, not just the chat.
+            The chat keeps its own `caution` chip below — that one is a
+            stronger claim about a narrower thing (a fluent sentence reads
+            as a considered answer), and it is the one surface in the app
+            that could mislead on its own wording. This says the quieter,
+            wider thing about the numbers. */}
+        <FixtureMarker detail="Recommendations, strategies, origination stats and the market pulse on this page are sample data. The scanner and the LLM layer arrive in Phase 4 — no model produced anything here." />
+      </div>
       <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
         Today’s full candidate set, the strategies behind it, and how the LLM layer is earning its
         place. The chat is scoped to this account and its data.

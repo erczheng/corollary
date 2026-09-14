@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { LiveStatus } from '../components/LiveStatus'
 import { Pagination } from '../components/Pagination'
+import { FixtureMarker } from '../components/FixtureMarker'
 import { SentimentGauge } from '../components/SentimentGauge'
 import { TableSkeleton } from '../components/Skeleton'
 import { usePagination } from '../hooks/usePagination'
@@ -634,7 +635,16 @@ export function News() {
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-display-lg text-on-surface">News</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-display-lg text-on-surface">News</h1>
+            {/* On the title, because the whole page is the fixture — feed,
+                composite, social attention, consensus and calendar alike.
+                The pill to the right of this one reports how recently the
+                mock feed was polled, which is exactly the combination
+                decision 8 exists for: a freshness badge over invented
+                numbers reads as a measurement. */}
+            <FixtureMarker detail="Every figure on this page is sample data. News, sentiment, the calendar, analyst consensus and social attention are PRD §9's pipeline, built in Phase 3 — nothing here was computed from a published headline." />
+          </div>
           <p className="mt-1 text-body-md text-on-surface-variant">
             Market intelligence, sentiment and what is scheduled ahead.
           </p>
