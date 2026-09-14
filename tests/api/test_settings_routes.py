@@ -1009,21 +1009,42 @@ def test_sources_are_deterministic(settings_client: TestClient) -> None:
 
 
 # --------------------------------------------------------------------------
-# Structural: config is not an order, and this is not the vendor surface
+# Structural: config is not an order
+#
+# ``test_the_settings_module_never_imports_the_vendor_sdk`` used to sit here
+# as one regex. It is now two guards, in two files, and neither contains the
+# other -- which is the correction, because the note that replaced it once
+# claimed containment that does not hold.
+#
+# The parsed half is tree-wide: ``tests/test_hard_rules.py`` takes the
+# top-level package off every ``ast.Import`` and ``ast.ImportFrom`` in the
+# package, so it catches statement shapes no line-anchored regex sees --
+# ``import os, alpaca`` and ``x = 1; import alpaca``. What it does *not* add
+# is indentation or aliasing: the two deleted regexes each opened with a
+# leading-whitespace match, which already caught the indented import, and
+# the first closed on a word boundary, which already caught the aliased
+# form ``import alpaca as a``.
+#
+# The textual half is ``test_the_settings_module_never_writes_the_vendor
+# _import`` below, and it stays *here* for the reason the order-path guard
+# beside it stays here. Parsing gives up **text**: a line
+# reading ``import alpaca`` inside a docstring or behind a ``#`` fires no
+# ``ast.Import`` node and the tree-wide guard is silent, while it is one diff
+# away from being an import. That is the same argument, applied to the same
+# module, and declining to apply it to the vendor SDK while applying it to
+# ``submit_order`` was an asymmetry with no reason behind it.
+#
+# The containment claim is also why ``tests/api/test_account_mode.py``'s
+# sibling deletion went wrong -- see the note there. Check the helper, in
+# both directions, before deleting anything else on these grounds.
+#
+# The guard below stays, and stays *here*, because it asserts something the
+# general one deliberately cannot. Every tree-wide rule-1 guard reads
+# identifiers and ignores text, since the names it forbids appear correctly
+# in prose elsewhere. This module is the one place with no such prose and no
+# reason to grow any, so it can afford the stricter test: not in the code,
+# and not in a comment a later diff could uncomment either.
 # --------------------------------------------------------------------------
-
-
-def test_the_settings_module_never_imports_the_vendor_sdk() -> None:
-    """CLAUDE.md: ``alpaca`` is imported in exactly two files, and this is not one.
-
-    Importing ``corollary.data.providers.alpaca`` *is* allowed and is what this
-    module does -- that is our module, and it owns which feed values Alpaca's
-    endpoints accept. The thing being excluded is the vendor SDK.
-    """
-    source = SETTINGS_MODULE.read_text(encoding="utf-8")
-
-    assert not re.search(r"^\s*import alpaca\b", source, re.MULTILINE)
-    assert not re.search(r"^\s*from alpaca[\s.]", source, re.MULTILINE)
 
 
 def test_settings_reaches_no_order_path() -> None:
@@ -1037,6 +1058,29 @@ def test_settings_reaches_no_order_path() -> None:
 
     assert "submit_order" not in source
     assert "BrokerExecution" not in source
+
+
+#: The vendor import as *text*, in both shapes the deleted one-module regex
+#: matched. Unanchored on purpose: a line-anchored pattern was already equal
+#: to the parsed guard on indentation and on aliasing, and what this has to
+#: cover is the line an ``ast`` walk cannot see at all.
+VENDOR_IMPORT_TEXT = re.compile(r"\bimport\s+alpaca\b|\bfrom\s+alpaca[\s.]")
+
+
+def test_the_settings_module_never_writes_the_vendor_import() -> None:
+    """``alpaca`` is imported in exactly two files, and this is neither.
+
+    ``tests/test_hard_rules.py`` proves that by parsing, for every module in
+    the package, and that is the guard that matters. This one covers what
+    parsing gives up: the words ``import alpaca`` inside a docstring or behind
+    a ``#`` raise no ``ast.Import`` node and sit one diff from being real.
+    Settings reads feed *names* out of the environment; the SDK is not its
+    business, in code or in prose.
+    """
+    source = SETTINGS_MODULE.read_text(encoding="utf-8")
+
+    found = VENDOR_IMPORT_TEXT.findall(source)
+    assert found == [], f"the settings module names the vendor import: {found}"
 
 
 def test_every_variable_this_module_reads_is_named_in_env_example() -> None:

@@ -40,7 +40,7 @@ packages = ["corollary"]
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
 markers = [
-    "risk: risk manager tests — run before any change to the engine",
+    "risk: money-safety tests — rule 9's dead-man's switch today, RiskManager's limits when it lands. Run before any change to the engine.",
 ]
 # Strict, not auto: an async test without @pytest.mark.asyncio should fail
 # loudly rather than be silently collected and skipped. Same reasoning as

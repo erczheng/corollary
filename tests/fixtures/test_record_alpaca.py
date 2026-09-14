@@ -31,6 +31,10 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# And the repo root, so the write-verb list can be *imported* from the guard
+# that owns it rather than copied alongside it. ``tests`` is a package and
+# this file's own directory is not, which is why both entries are needed.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from record_alpaca import (  # noqa: E402
     REDACTED,
@@ -40,6 +44,7 @@ from record_alpaca import (  # noqa: E402
     parse_sections,
     scrub,
 )
+from tests.test_hard_rules import WRITE_VERBS  # noqa: E402
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "alpaca"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -524,14 +529,53 @@ def test_an_unknown_section_exits_rather_than_recording_nothing() -> None:
     assert "trading" in str(raised.value)
 
 
-def test_the_recorder_can_only_issue_gets() -> None:
-    """Read-only probes, enforced rather than intended.
+# --------------------------------------------------------------------------
+# Rule 1: the recorder is read-only, checked twice
+#
+# ``test_the_recorder_can_only_issue_gets`` used to be the whole of it. The
+# parsed half now lives in ``tests/test_hard_rules.py``, which walks the
+# vendor surface -- the two package files *and this recorder*, the only other
+# thing in the tree holding live credentials -- and refuses any write verb
+# anywhere on it. That guard parses instead of grepping, so it catches shapes
+# the substring version missed: a ``request("POST", ...)`` reached through a
+# local alias, a module-level ``httpx.post(...)``, a ``.send()`` of a
+# prebuilt request. It carries ``@pytest.mark.risk``.
+#
+# What parsing gives up is **text**, and the substring version below is
+# restored rather than left deleted. A ``.post(`` sitting in a comment or a
+# docstring is invisible to an AST and one diff away from being code, which
+# is the exact argument that keeps ``test_settings_reaches_no_order_path``
+# alive in ``tests/api/test_settings_routes.py``. The two files are in the
+# same position -- neither holds prose about these verbs, neither has any
+# reason to grow some -- so they get the same guard for the same stated
+# reason. If either one ever needs to *discuss* a write verb, delete the text
+# half there and say why; do not weaken the parsed one.
+#
+# This file stays bare of ``@pytest.mark.risk``, being dev tooling that is
+# never on the "before any engine change" path.
+# --------------------------------------------------------------------------
+
+
+def test_the_recorder_names_no_write_verb_even_in_prose() -> None:
+    """Read-only probes, enforced rather than intended -- the text half.
 
     Phase 2 places no order at all, and a recorder that could POST would be a
     write path to the broker sitting outside ``RiskManager.approve()``.
+    ``tests/test_hard_rules.py`` proves no write verb is *called*; this proves
+    none is *written*, commented out or otherwise.
+
+    The verbs are **imported** from that file, not listed again here. A
+    hand-copied list is content-identical right up to the day Alpaca invents
+    a seventh verb -- which is the eventuality the parsed guard's own
+    docstring anticipates -- and then the text half goes stale with nothing
+    failing. Silent scope decay is the exact failure ``tests/test_hard_rules
+    .py`` names as its reason for existing, and it would be a poor joke to
+    reproduce it in the guard standing beside it.
     """
     source = (Path(__file__).resolve().parent / "record_alpaca.py").read_text(
         encoding="utf-8"
     )
-    for verb in (".post(", ".put(", ".patch(", ".delete(", ".request("):
-        assert verb not in source, f"the recorder gained a {verb} call"
+    assert WRITE_VERBS, "the verb list arrived empty; a guard over nothing passes"
+    for verb in sorted(WRITE_VERBS):
+        call = f".{verb}("
+        assert call not in source, f"the recorder gained a {call} call"

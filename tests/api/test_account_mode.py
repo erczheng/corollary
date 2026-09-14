@@ -12,7 +12,6 @@ through a probe route, which resolves exactly as those routes will.
 """
 
 import inspect
-from pathlib import Path
 from typing import Callable
 
 import pytest
@@ -31,8 +30,6 @@ from corollary.api.deps import (
 from corollary.engine.execution.interface import BrokerAccount
 
 from .conftest import RecordedBroker, probe_route
-
-API_PACKAGE = Path(__file__).resolve().parents[2] / "corollary" / "api"
 
 
 def build(registry: ServiceRegistry, db_engine: Engine) -> FastAPI:
@@ -206,6 +203,27 @@ def test_the_broker_is_built_once_and_cached(db_engine: Engine) -> None:
 
 # --------------------------------------------------------------------------
 # Rule 1, kept structural
+#
+# The tree-wide half of rule 1 lives in ``tests/test_hard_rules.py``, which
+# reads every module under ``corollary/`` rather than only this package --
+# ``test_no_api_module_names_an_order_verb`` and
+# ``test_no_api_module_imports_the_vendor_sdk`` were that same assertion
+# scoped to ``corollary/api/``, so the general guards contain them.
+#
+# **Containment is a claim about a specific helper, and it was briefly
+# false.** The ``_identifiers`` function deleted from here walked
+# ``ast.alias`` and collected both ``alias.name`` and ``alias.asname``;
+# ``_referenced_names``, which replaced it, did not. For one revision
+# ``from corollary.engine.risk import submit_order as _submit`` in a route
+# passed the whole gate, having been caught here before the move. The alias
+# branch is back in ``_referenced_names`` and its docstring says it is
+# load-bearing *because of this deletion*. Before deleting anything else on
+# grounds of containment, read the helper that is supposed to contain it.
+#
+# What stays here is the thing a tree-wide guard cannot express: *this*
+# dependency's return annotation. ``broker_for_account`` handing back the read
+# half is a fact about one signature, and it is the reason a route has no
+# order method to call in the first place.
 # --------------------------------------------------------------------------
 
 
@@ -214,57 +232,3 @@ def test_the_broker_dependency_is_typed_as_the_read_half() -> None:
     assert (
         inspect.signature(broker_for_account).return_annotation is BrokerAccount
     )
-
-
-def _identifiers(path: Path) -> set[str]:
-    """Every name this module actually *uses*, docstrings and comments aside.
-
-    Parsed rather than grepped because both forbidden names appear in prose in
-    ``deps.py``, explaining why they are absent. A grep that cannot tell a
-    reference from an explanation either fails on a correct file or has to be
-    weakened until it stops catching anything.
-    """
-    import ast
-
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        elif isinstance(node, ast.Attribute):
-            names.add(node.attr)
-        elif isinstance(node, ast.alias):
-            names.add(node.name)
-            if node.asname:
-                names.add(node.asname)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-    return names
-
-
-def test_no_api_module_names_an_order_verb() -> None:
-    """``submit_order`` is not reachable from a route, and not spelled in one.
-
-    ``BrokerExecution`` too: it does not exist until Phase 6, and a route that
-    could name the type is a route that could call the method.
-    """
-    for path in API_PACKAGE.rglob("*.py"):
-        used = _identifiers(path)
-        assert "submit_order" not in used, path
-        assert "BrokerExecution" not in used, path
-
-
-def test_no_api_module_imports_the_vendor_sdk() -> None:
-    """``alpaca`` is imported in exactly two files, and neither is here."""
-    import ast
-
-    for path in API_PACKAGE.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                roots = [alias.name.split(".")[0] for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                roots = [(node.module or "").split(".")[0]]
-            else:
-                continue
-            assert "alpaca" not in roots, f"{path}: {roots}"

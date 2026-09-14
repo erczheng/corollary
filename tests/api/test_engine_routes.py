@@ -11,6 +11,23 @@ is the one item here that cannot be added later: by the time there is an order
 path, every caller that clears a halt already exists.
 """
 
+# --------------------------------------------------------------------------
+# Why some of these carry ``@pytest.mark.risk`` and some do not
+# --------------------------------------------------------------------------
+#
+# The line -- what earns the marker and what does not -- is stated once, at the
+# top of ``tests/engine/test_runtime.py``. This file applies it; it does not
+# restate it. Read that note before tagging anything here.
+#
+# Why the line reaches an API file at all: rule 9's second sentence,
+# *"Recovery requires an explicit human resume"*, is enforced by
+# ``POST /api/engine/resume`` rather than by the runtime, and that endpoint is
+# the only code path in the project that ends a halt. The cold-start halt, the
+# halt's own record, the fail-safe default, and every guard on the one control
+# that clears a halt are therefore on the money side of the line. ``t0`` (an
+# equity-chart marker that gates no trading and reaches no limit), reason
+# validation, wire format and route mounting are not, and are left bare.
+
 import logging
 import re
 from datetime import datetime, timezone
@@ -45,6 +62,7 @@ def stored(engine: Engine) -> EngineState:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_a_cold_start_comes_up_halted(client: TestClient) -> None:
     """Halted until the opening snapshot succeeds, per the design spec.
 
@@ -84,6 +102,7 @@ def test_t0_is_never_rewritten(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_halt_persists_the_reason_and_a_utc_timestamp(
     client: TestClient, db_engine: Engine
 ) -> None:
@@ -104,12 +123,14 @@ def test_halt_persists_the_reason_and_a_utc_timestamp(
     assert row.halted_at.utcoffset() == timezone.utc.utcoffset(None)
 
 
+@pytest.mark.risk
 def test_halt_survives_a_new_session(client: TestClient) -> None:
     client.post("/api/engine/halt", json={"reason": "manual"})
 
     assert client.get("/api/engine/state").json()["haltedReason"] == "manual"
 
 
+@pytest.mark.risk
 def test_halt_logs_the_rule_the_inputs_and_the_timestamp(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -143,6 +164,7 @@ def test_a_reason_longer_than_the_column_is_refused(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.risk
 def test_halting_twice_keeps_the_first_cause_in_the_record(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -165,6 +187,7 @@ def test_halting_twice_keeps_the_first_cause_in_the_record(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_only_the_resume_endpoint_clears_the_halt(client: TestClient) -> None:
     """Nothing but ``POST /api/engine/resume`` may end a halt.
 
@@ -189,6 +212,7 @@ def test_only_the_resume_endpoint_clears_the_halt(client: TestClient) -> None:
     assert body["haltedAt"] is None
 
 
+@pytest.mark.risk
 def test_resume_clears_the_stored_row(
     client: TestClient, db_engine: Engine
 ) -> None:
@@ -202,6 +226,7 @@ def test_resume_clears_the_stored_row(
     assert row.halted_at is None
 
 
+@pytest.mark.risk
 def test_a_restart_does_not_resume(
     registry: ServiceRegistry, db_engine: Engine
 ) -> None:
@@ -236,6 +261,7 @@ def test_resume_logs_who_ended_the_halt(
     assert resumes[0].__dict__["correlation_id"]
 
 
+@pytest.mark.risk
 def test_nothing_else_in_the_package_clears_a_halt() -> None:
     """Structural, like ``test_no_order_path.py``.
 
@@ -253,6 +279,7 @@ def test_nothing_else_in_the_package_clears_a_halt() -> None:
     assert offenders == ["api/routes/engine.py"], offenders
 
 
+@pytest.mark.risk
 def test_the_resume_helper_has_exactly_one_caller() -> None:
     callers = [
         path.relative_to(PACKAGE).as_posix()
@@ -280,6 +307,7 @@ def served_paths(app: FastAPI) -> list[str]:
     return sorted(app.openapi()["paths"])
 
 
+@pytest.mark.risk
 def test_there_is_no_flatten_endpoint(app: FastAPI) -> None:
     """Rule 7 keeps the two apart, and there is no execution path this phase.
 
@@ -357,6 +385,7 @@ def test_the_routes_package_exports_every_router() -> None:
     assert routes.settings_router.prefix == "/api/settings"
 
 
+@pytest.mark.risk
 def test_state_survives_a_missing_row(
     client: TestClient, db_engine: Engine
 ) -> None:
