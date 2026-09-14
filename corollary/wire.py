@@ -93,6 +93,7 @@ from typing import Any, Callable, Final, TypeVar
 __all__ = [
     "ERROR_BODY_MAX",
     "REDACTED",
+    "STORED_DETAIL_MAX",
     "WireFormatError",
     "as_date",
     "as_datetime",
@@ -161,6 +162,28 @@ def translating(
 #: substitution pass is what removes one.
 ERROR_BODY_MAX: Final = 300
 
+#: The same scrubber's bound when the destination is a **stored row** rather
+#: than a log line.
+#:
+#: One scrubber, two limits, and deliberately not two scrubbers: redaction and
+#: truncation have to stay in that order at both bounds, and a second redactor
+#: is how one of them ends up missing a pattern the other has.
+#:
+#: A log line quotes a *vendor* body, and 300 characters is generous for one.
+#: A stored refusal is mostly **our own prose** -- ``engine/ingest.py`` writes
+#: a sentence naming the contract, a sentence quoting the endpoint's failure,
+#: and a closing sentence saying whether the position merely has no terms yet
+#: or has ended with its P&L permanently missing. That last clause is the
+#: severity qualifier, it is last, and at 300 it was cut *deterministically*
+#: whenever a fetch failure was present: the detail measures 487 characters in
+#: that case, of which 366 are ours.
+#:
+#: 1024 holds all of it with a vendor tail attached and still bounds a
+#: surprising body, which is the thing a cap is for. It bounds the *content*;
+#: :func:`vendor_detail` appends a truncation notice of at most 32 characters
+#: on top, which is why ``ledger_rejection.detail`` is wider than this number.
+STORED_DETAIL_MAX: Final = 1024
+
 #: What replaces an identifier found in vendor free text.
 REDACTED: Final = "<redacted>"
 
@@ -188,7 +211,9 @@ REDACTED: Final = "<redacted>"
 _ACCOUNT_NUMBER: Final = re.compile(r"\bPA[0-9A-Z]{10}\b")
 
 
-def vendor_detail(text: str, *, secrets: Sequence[str] = ()) -> str:
+def vendor_detail(
+    text: str, *, secrets: Sequence[str] = (), limit: int = ERROR_BODY_MAX
+) -> str:
     """A vendor error body, bounded and de-identified, for an exception message.
 
     Callers pass **both halves of the key pair** in ``secrets``, because both
@@ -198,7 +223,14 @@ def vendor_detail(text: str, *, secrets: Sequence[str] = ()) -> str:
     Whitespace collapses first, so one response stays one log record and a cap
     counted in characters counts content rather than indentation. Redaction
     runs **before** truncation: the other order can cut an identifier in half
-    and keep the half, which is worth no less to whoever reads the log.
+    and keep the half, which is worth no less to whoever reads the log. That
+    ordering is why ``limit`` is a parameter rather than a second function --
+    a longer cut is a *different* cut, and two redactors would be two places
+    for a pattern to go missing from.
+
+    ``limit`` defaults to :data:`ERROR_BODY_MAX`, which is the log's bound.
+    The one other destination is a stored row, which passes
+    :data:`STORED_DETAIL_MAX`; see that constant for why the two differ.
 
     An empty string in ``secrets`` is skipped rather than substituted --
     ``"".replace`` splices between every character, so a caller holding half a
@@ -210,12 +242,9 @@ def vendor_detail(text: str, *, secrets: Sequence[str] = ()) -> str:
         if secret:
             detail = detail.replace(secret, REDACTED)
     detail = _ACCOUNT_NUMBER.sub(REDACTED, detail)
-    if len(detail) <= ERROR_BODY_MAX:
+    if len(detail) <= limit:
         return detail
-    return (
-        f"{detail[:ERROR_BODY_MAX]}… "
-        f"({len(detail) - ERROR_BODY_MAX} characters truncated)"
-    )
+    return f"{detail[:limit]}… ({len(detail) - limit} characters truncated)"
 
 
 # --------------------------------------------------------------------------

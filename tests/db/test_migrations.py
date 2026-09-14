@@ -48,6 +48,8 @@ EXPECTED_TABLES = {
     "realized_trade",
     "mleg_group",
     "mleg_leg",
+    # 0004 — the refusals, kept so a gap in P&L can state its cause
+    "ledger_rejection",
 }
 
 
@@ -69,7 +71,9 @@ def test_alembic_ini_exists() -> None:
     assert ALEMBIC_INI.is_file()
 
 
-def test_upgrade_head_creates_the_nine_tables(migrated: Engine) -> None:
+def test_upgrade_head_creates_every_table_the_models_declare(
+    migrated: Engine,
+) -> None:
     tables = set(inspect(migrated).get_table_names())
     assert EXPECTED_TABLES <= tables
 
@@ -89,12 +93,13 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0003`` is the head now: it makes ``fill.price`` nullable, so that an
-    exercise whose deliverable could not be verified has somewhere to put
-    "no price" other than an estimate.
+    ``0004`` is the head now: it adds ``ledger_rejection``, so that the gap
+    ``0003`` made representable — an exercise whose deliverable could not be
+    verified, booking no realized trade — can state its cause after the
+    process that found it has gone.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0003"]
+    assert script.get_heads() == ["0004"]
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:

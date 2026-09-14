@@ -141,6 +141,7 @@ endpoint did not answer" are not the same problem and only one of them heals
 on the next run.
 """
 
+import hashlib
 import logging
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -148,7 +149,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final
+from typing import Any, Final
 from uuid import uuid4
 
 from sqlalchemy import Engine, select
@@ -169,6 +170,7 @@ from corollary.db.models import (
     MlegGroup,
     MlegLeg,
     RealizedTrade,
+    RejectionRecord,
 )
 from corollary.db.session import session_scope
 from corollary.engine.execution.interface import (
@@ -181,6 +183,7 @@ from corollary.engine.execution.interface import (
     TradeActivity,
 )
 from corollary.engine.ledger import (
+    BY_DESIGN_RULES,
     FILL_ACTIVITY_TYPES,
     OPTION_EVENT_TYPES,
     CloseKind,
@@ -193,6 +196,7 @@ from corollary.engine.ledger import (
     intents_from_orders,
 )
 from corollary.instruments import OccSymbol, parse_occ_symbol
+from corollary.wire import STORED_DETAIL_MAX, vendor_detail
 
 __all__ = [
     "IngestRefusal",
@@ -363,6 +367,16 @@ class IngestResult:
     rejections: tuple[LedgerRejection, ...] = ()
     #: Ingestion's own refusals.
     refusals: tuple[IngestRefusal, ...] = ()
+
+    #: Refusal rows written to ``ledger_rejection`` this pass. Not the number
+    #: of refusals: the by-design declines are not stored, and a refusal this
+    #: table already held is updated rather than written again.
+    rejections_written: int = 0
+    #: Rows cleared because this pass re-examined what they were about and no
+    #: longer refuses it. **The number that matters for trusting the rest of
+    #: them** -- a persisted refusal that outlives its cause claims a gap that
+    #: is not there, which decision 14 rates as worse than no table at all.
+    rejections_cleared: int = 0
 
     @property
     def unfetched_terms(self) -> tuple[IngestRefusal, ...]:
@@ -594,9 +608,33 @@ class IngestService:
 
         # Any symbol this run could not fully account for. Its existing rows
         # are left alone below: a provider outage must not erase lifetime P&L.
-        guarded = {item.symbol for item in refusals if item.symbol} | {
-            rejection.symbol for rejection in ledger.rejections if rejection.symbol
-        }
+        #
+        # Canonicalised, because the two sides of that comparison are written
+        # by different hands. `_write_trades` tests `RealizedTrade.symbol`,
+        # which is always the parser's form -- it comes from
+        # `LotMovement.symbol`, which is `parse_occ_symbol(...).symbol`,
+        # stripped and upper-cased. This side is the **vendor's** spelling:
+        # `_demand` keys on `activity.symbol`, and the four matcher rules that
+        # reject before a contract is resolved (FRACTIONAL_QUANTITY,
+        # INTENT_CONTRADICTS_SIDE, UNKNOWN_INTENT, MISSING_SYMBOL) pass
+        # `activity.symbol` through verbatim.
+        #
+        # Left raw, a padded or lower-cased spelling misses the held row and a
+        # **booked trade is deleted**: a short closed by a `buy` books while
+        # the order is still in the orders window, and on the pass after that
+        # window rolls off `implied_intent` is None, the close is refused with
+        # UNKNOWN_INTENT under the vendor's spelling, no trade is re-derived,
+        # and lifetime P&L silently loses one it had already stated. Folding
+        # can only *widen* the guard, which is the direction to be wrong in:
+        # too broad leaves a row that should have gone, too narrow erases
+        # money.
+        guarded: set[str] = set()
+        for spelling in [item.symbol for item in refusals] + [
+            rejection.symbol for rejection in ledger.rejections
+        ]:
+            canonical = _canonical_symbol(spelling)
+            if canonical is not None:
+                guarded.add(canonical)
 
         with session_scope(self._engine) as session:
             fills_written, fills_updated = self._write_fills(session, ledger)
@@ -605,6 +643,22 @@ class IngestService:
             )
             groups_written, legs_written = self._write_mleg(
                 session, orders, refusals, correlation
+            )
+            # Last, and inside the same transaction: `_write_mleg` appends to
+            # `refusals` as it goes, so anything written before it would miss
+            # the mleg refusals entirely. One transaction, because a run that
+            # wrote rows and then failed to record what it would not write is
+            # a gap with no stated cause -- the exact thing decision 14 is
+            # about.
+            rejections_written, rejections_cleared = self._write_rejections(
+                session,
+                ledger.rejections,
+                refusals,
+                correlation=correlation,
+                at=started,
+                examined_activities=set(self._history),
+                examined_orders={order.id for order in orders},
+                examined_symbols=self._examined_symbols(),
             )
 
         result = IngestResult(
@@ -623,6 +677,8 @@ class IngestService:
             fees=ledger.fees,
             rejections=ledger.rejections,
             refusals=tuple(refusals),
+            rejections_written=rejections_written,
+            rejections_cleared=rejections_cleared,
         )
         logger.info(
             "ingest pulled %d activities and wrote %d fills, %d trades",
@@ -641,6 +697,8 @@ class IngestService:
                 "trades_removed": result.trades_removed,
                 "mleg_groups_written": result.mleg_groups_written,
                 "rejections": len(result.rejections),
+                "rejections_written": result.rejections_written,
+                "rejections_cleared": result.rejections_cleared,
                 "unfetched_terms": len(result.unfetched_terms),
                 "cursor": result.cursor,
             },
@@ -1404,9 +1462,486 @@ class IngestService:
         return written, legs_written
 
 
+    # ------------------------------------------------------------------
+    # ledger_rejection
+    # ------------------------------------------------------------------
+
+    def _examined_symbols(self) -> set[str]:
+        """Every contract this pass has activity-level information about.
+
+        The held history, and deliberately **not** the orders' symbols as
+        well: this set is what licenses a *delete*, so it names only what the
+        pass could actually have re-derived a refusal from.
+
+        Canonicalised on the way in, because the other side of the comparison
+        is: see :func:`_canonical_symbol`. This side is whatever the vendor
+        sent. The stored side is canonical because :meth:`_rejection_values`
+        folds it on the way in -- **not** because every matcher rule supplies
+        the parser's form. Four do not: ``FRACTIONAL_QUANTITY``,
+        ``INTENT_CONTRADICTS_SIDE``, ``UNKNOWN_INTENT`` and ``MISSING_SYMBOL``
+        reject before a contract is resolved and carry ``activity.symbol``
+        verbatim. The conclusion holds, but the fold is the reason for it, and
+        a guard justified by a premise that is not true is a guard someone
+        deletes later.
+        """
+        symbols: set[str] = set()
+        for activity in self._history.values():
+            canonical = _canonical_symbol(activity.symbol)
+            if canonical is not None:
+                symbols.add(canonical)
+        return symbols
+
+    def _write_rejections(
+        self,
+        session: Session,
+        rejections: Sequence[LedgerRejection],
+        refusals: Sequence[IngestRefusal],
+        *,
+        correlation: str,
+        at: datetime,
+        examined_activities: set[str],
+        examined_orders: set[str],
+        examined_symbols: set[str],
+    ) -> tuple[int, int]:
+        """Reconcile ``ledger_rejection`` against what *this* pass refused.
+
+        Decision 14 persists the refusals so a gap in lifetime P&L can state
+        its cause after the process that found it has gone. The hazard that
+        creates is staleness: an in-memory refusal is rebuilt from current
+        logic every pass and cannot go stale, a stored one can, and a row
+        claiming a gap the matcher no longer has is a confident wrong reason
+        on a money figure. So this reconciles rather than appends.
+
+        Three rules, and the third is the one that makes the table honest:
+
+        * **Upsert on the fingerprint.** Ingestion is idempotent on
+          ``activity_id`` and its refusals are idempotent the same way, so a
+          second identical pass leaves the same rows rather than a second copy
+          of them. ``at`` and ``correlation_id`` are refreshed on the way
+          through, because a row is a statement about the latest pass that
+          made it, not about the first.
+        * **Do not store the by-design declines.** ``BY_DESIGN_RULES`` -- a
+          cash journal is not a fill, a stock trade is not an option -- are
+          expected on every pass and are not missing trades. They are still
+          logged and still in :attr:`IngestResult.rejections`; what they are
+          not is rows, because nineteen of them a pass would drown the count.
+        * **Clear what this pass re-examined and no longer refuses**, and
+          nothing else. ``_re_examined`` is deliberately narrow: a pass that
+          pulled ten activities may not delete a refusal about an eleventh it
+          never saw, and a pass that saw nothing but NVDA may not delete a
+          refusal about AAPL -- a symbol is a subject, not decoration. That is a guard against where the cursor is *going* --
+          ``self._cursor`` is in memory today, so every pass re-derives
+          everything, but the ``fill`` table exists precisely because
+          re-fetching all history per request is untenable, and on the day the
+          cursor is persisted a wholesale delete here would erase every
+          refusal the pass did not happen to re-derive.
+
+        A fourth thing, which is a *non*-write: a refusal naming no subject at
+        all is skipped, with a WARNING so rule 8 still holds. See
+        :func:`_identity`.
+
+        **Where this over-states, and why that is the direction chosen.** A
+        rule flip plus a shrinking history can leave two rows for one gap. If
+        pass 1 stores ``contract_terms_unavailable`` for a symbol with N
+        activity ids and pass 2 refuses the same symbol under
+        ``contract_terms_fetch_failed``, the rule is part of the fingerprint,
+        so the second refusal is a **new row** -- and if pass 2 also holds
+        *fewer* activities than pass 1 recorded, ``_re_examined`` correctly
+        declines to clear the first. The Activity page then reports two
+        missing trades where there is one. It takes the vendor's activity
+        window shrinking across a restart, which is why this is written down
+        rather than coded around: the error is an **over**-statement, and this
+        design prefers over-stating a gap to erasing a stated one. A duplicate
+        row is visible and reconcilable against ``fill``; a deleted row is a
+        gap with no stated cause, which is the state decision 14 exists to get
+        out of.
+
+        Returns ``(written, cleared)``.
+        """
+        desired: dict[str, dict[str, Any]] = {}
+        for rejection in rejections:
+            if rejection.rule in BY_DESIGN_RULES:
+                continue
+            named = (rejection.activity_id,) if rejection.activity_id else ()
+            # Through `_canonical_symbol`, so the gate and the value it admits
+            # read the same string rather than agreeing by the vendor's
+            # habits. They part on exactly one class of input: whitespace-only,
+            # which `_identity` counts as a subject and `_rejection_values`
+            # folds to NULL. A refusal admitted on a subject its row does not
+            # carry is stored **subject-less**, and every subject-less refusal
+            # of one rule digests identically -- two genuinely different gaps
+            # collapse into one row and the count under-states, which is the
+            # one direction of error nothing about the row reveals.
+            if not _identity(
+                "ledger", named, None, _canonical_symbol(rejection.symbol)
+            ):
+                self._unattributable(
+                    "ledger", rejection.rule.value, rejection.inputs, correlation
+                )
+                continue
+            values = self._rejection_values(
+                source="ledger",
+                rule=rejection.rule.value,
+                symbol=rejection.symbol,
+                order_id=None,
+                activity_ids=(
+                    (rejection.activity_id,) if rejection.activity_id else ()
+                ),
+                detail=rejection.detail,
+                inputs=rejection.inputs,
+                activity_at=rejection.at,
+                at=at,
+                correlation=correlation,
+            )
+            desired[str(values["fingerprint"])] = values
+        for refusal in refusals:
+            # Canonicalised for the reason given on the ledger gate above.
+            if not _identity(
+                "ingest",
+                refusal.activity_ids,
+                refusal.order_id,
+                _canonical_symbol(refusal.symbol),
+            ):
+                self._unattributable(
+                    "ingest", refusal.rule.value, refusal.inputs, correlation
+                )
+                continue
+            values = self._rejection_values(
+                source="ingest",
+                rule=refusal.rule.value,
+                symbol=refusal.symbol,
+                order_id=refusal.order_id,
+                activity_ids=refusal.activity_ids,
+                detail=refusal.detail,
+                inputs=refusal.inputs,
+                activity_at=refusal.at,
+                at=at,
+                correlation=correlation,
+            )
+            desired[str(values["fingerprint"])] = values
+
+        held = list(
+            session.scalars(
+                select(RejectionRecord).where(
+                    RejectionRecord.account == self._account
+                )
+            )
+        )
+        cleared = 0
+        for row in held:
+            # A fresh name rather than reusing `values`: mypy binds `pop`'s
+            # overload from the target's declared type, and the one above is
+            # already a plain dict.
+            reasserted: dict[str, Any] | None = desired.pop(row.fingerprint, None)
+            if reasserted is None:
+                if _re_examined(
+                    row, examined_activities, examined_orders, examined_symbols
+                ):
+                    session.delete(row)
+                    cleared += 1
+                continue
+            for column, value in reasserted.items():
+                if getattr(row, column) != value:
+                    setattr(row, column, value)
+
+        written = 0
+        for values in desired.values():
+            # ``first_seen`` is set here and nowhere else. The update loop
+            # above refreshes ``at`` -- *still true as of* -- and a row that
+            # refreshed both could not say how long its gap has persisted,
+            # which is what makes a stale row indistinguishable from a fresh
+            # one. A row is deleted only when the pass did *not* re-derive its
+            # fingerprint, so nothing inserted here can carry a deleted row's
+            # key: the unit of work emits every INSERT before any DELETE, and
+            # a collision would be an IntegrityError rolling back the whole
+            # pass, ``fill`` rows included.
+            session.add(RejectionRecord(**values, first_seen=values["at"]))
+            written += 1
+
+        session.flush()
+        if written or cleared:
+            logger.info(
+                "ingest recorded %d refusals and cleared %d",
+                written,
+                cleared,
+                extra={
+                    "event": "ingest_rejections_written",
+                    "correlation_id": correlation,
+                    "account": self._account,
+                    "rejections_written": written,
+                    "rejections_cleared": cleared,
+                },
+            )
+        return written, cleared
+
+    def _rejection_values(
+        self,
+        *,
+        source: str,
+        rule: str,
+        symbol: str | None,
+        order_id: str | None,
+        activity_ids: Sequence[str],
+        detail: str,
+        inputs: Mapping[str, str],
+        activity_at: datetime | None,
+        at: datetime,
+        correlation: str,
+    ) -> dict[str, Any]:
+        """One row's columns, de-identified on the way in.
+
+        Rule 6 reaches a persistence boundary here. Alpaca embeds the account
+        number in prose -- *"CAT fee for proceed of 15 trades on <date> by
+        PA..."* -- which a field-name redactor cannot see inside, so
+        ``vendor_detail``'s substring pass runs on ``detail`` and on every
+        input value **before** they reach the database rather than on the way
+        out: a redactor on the read path leaves the row itself holding the
+        number. The same call bounds the length, which a stored string wants
+        anyway; the unabridged text is in the log record this refusal already
+        emitted, under the same ``correlation_id``.
+
+        The bound is ``STORED_DETAIL_MAX`` and **not** the log's
+        ``ERROR_BODY_MAX``. One scrubber, two limits: redaction still runs
+        before truncation, so the longer cut is no weaker, but a stored
+        refusal is mostly our own prose and its closing clause is the severity
+        qualifier -- at 300 characters the sentence saying *the position ended
+        and its P&L is permanently gone* was cut deterministically whenever a
+        fetch failure was present, leaving the row saying only that a
+        multiplier is unknown.
+
+        **Two limits of this boundary, stated where they bite.**
+
+        * ``wire._ACCOUNT_NUMBER`` matches an Alpaca **paper** account number
+          (``PA`` plus ten characters). A live account number is bare digits
+          and is deliberately uncovered -- no digit-run rule can tell one from
+          a quantity, a price or an epoch. ``self._account`` may be ``cash``,
+          and on that book this pass is uncovered. Nothing here creates that
+          gap, but this is where a log line that rotates away becomes a
+          committed row that does not.
+        * ``inputs`` carries **stringified money** on several rules --
+          ``strike``, ``net_amount``, ``paired_price``, ``multiplier``. There
+          is no money *column* here, but there is money in the row, as TEXT
+          inside a JSON blob where neither ``Money``'s refusing comparator nor
+          ``guard_money_sql`` can see it. A future
+          ``WHERE json_extract(inputs, '$.strike') > ...`` gets SQLite's
+          lexicographic answer with no raise. Load the row and compare as
+          ``Decimal`` in Python.
+
+        ``at`` is when the refusal was recorded and ``activity_at`` is the
+        vendor's own stamp, which may be absent -- an activity with no usable
+        timestamp is itself something the matcher refuses, so rule 8's
+        timestamp cannot be the vendor's.
+        """
+        ids = sorted(activity_ids)
+        # A subject, or nothing -- never an empty string, and never two
+        # spellings of one contract. ``_identity`` tests both of these for
+        # truthiness, so ``""`` already contributes nothing to the
+        # fingerprint; folding it here is what makes the **column** mean
+        # "NULL is no subject" rather than agree with the digest by luck.
+        # Alpaca really does send ``symbol: ""`` on structure rows, and
+        # ``MISSING_SYMBOL`` passes it straight through.
+        symbol = _canonical_symbol(symbol)
+        order_id = order_id or None
+        return {
+            "account": self._account,
+            "source": source,
+            "rule": rule,
+            "fingerprint": _fingerprint(source, rule, ids, order_id, symbol),
+            "symbol": symbol,
+            "order_id": order_id,
+            "activity_ids": ids,
+            "detail": vendor_detail(detail, limit=STORED_DETAIL_MAX),
+            "inputs": {
+                key: vendor_detail(value, limit=STORED_DETAIL_MAX)
+                for key, value in inputs.items()
+            },
+            "at": at,
+            "activity_at": activity_at,
+            "correlation_id": correlation,
+        }
+
+    def _unattributable(
+        self,
+        source: str,
+        rule: str,
+        inputs: Mapping[str, str],
+        correlation: str,
+    ) -> None:
+        """A refusal that named no subject: logged, never stored.
+
+        Rule 8 is satisfied here rather than by a row -- the rule, the inputs
+        and the timestamp all reach the log. What cannot be satisfied is the
+        *reader*: see :func:`_identity` for why a row nobody can attribute to
+        a contract would make the count worse rather than better.
+        """
+        logger.warning(
+            "ingest refusal has no subject and cannot be stored: %s/%s",
+            source,
+            rule,
+            extra={
+                "event": "ingest_rejection_unattributable",
+                "correlation_id": correlation,
+                "account": self._account,
+                "source": source,
+                "rule": rule,
+                "inputs": dict(inputs),
+            },
+        )
+
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+def _identity(
+    source: str,
+    activity_ids: Sequence[str],
+    order_id: str | None,
+    symbol: str | None,
+) -> tuple[str, ...]:
+    """What a refusal is *about*, as distinct from the evidence it names.
+
+    The distinction is the whole of this function, and getting it wrong
+    double-counts money. An **ingest** refusal lists every held activity for
+    the symbol it refuses -- and that list is a property of how much history
+    the pass happened to pull, not of the refusal. Hash it and the key moves
+    between passes: pass two over a shorter history derives a *different*
+    fingerprint, so the upsert misses, the old row is not cleared (its
+    activities were not re-examined, correctly) and a second row lands beside
+    it. ``UNIQUE (account, fingerprint)`` cannot catch that, because the two
+    keys differ by construction. The Activity page then reports two missing
+    trades where there is one.
+
+    So for an ingest refusal the identity is the **contract**, or the order on
+    the ``mleg`` rules -- the thing the refusal concerns. The activity ids are
+    evidence; they are stored in the row, where a reader can see them, and
+    kept out of the digest.
+
+    A **ledger** rejection is the other shape: it names exactly one activity,
+    and that activity *is* the subject. Two rejections of one rule about two
+    different fills are two missing trades, not one, so the id stays in.
+
+    An empty result means the refusal names no subject at all, and the writer
+    skips it rather than storing it. That is not tidiness: every subject-less
+    refusal of a given rule digests identically, so two genuinely different
+    gaps would collapse into one row and the count would *under*-state -- the
+    one direction of error nothing about the row would reveal. It is logged
+    instead, with its rule and its inputs, so rule 8 still holds.
+    """
+    subjects: list[str] = []
+    if source != "ingest":
+        subjects.extend(f"activity:{value}" for value in sorted(activity_ids))
+    if order_id:
+        subjects.append(f"order:{order_id}")
+    if symbol:
+        subjects.append(f"symbol:{symbol}")
+    return tuple(subjects)
+
+
+def _canonical_symbol(symbol: str | None) -> str | None:
+    """One symbol's storable form: stripped, upper-cased, ``""`` to ``None``.
+
+    **The canonical form is the parser's.** ``parse_occ_symbol`` returns
+    ``symbol.strip().upper()``, and a matcher rejection raised *after* the
+    contract is resolved carries that form via ``contract.symbol``. Four are
+    raised before it and do not: ``FRACTIONAL_QUANTITY``,
+    ``INTENT_CONTRADICTS_SIDE``, ``UNKNOWN_INTENT`` and ``MISSING_SYMBOL``
+    pass ``activity.symbol`` through verbatim. Ingestion's own refusals name
+    the vendor's spelling, and ``examined_symbols`` is built from the vendor's
+    spelling too, so today the forms agree by **observation** --
+    Alpaca sends canonical uppercase -- rather than by construction. On the day
+    they do not, a row written in one form and compared against the other can
+    never be cleared, and it states a gap that is not there for as long as the
+    database lives. That is the same failure an empty-string symbol caused,
+    arriving by a different route, so it is closed the same way: compare
+    normalised forms on both sides rather than trust the vendor's casing.
+
+    ``""`` folds to ``None`` because an empty string is not a subject.
+    :func:`_identity` already treats it as none at all, and a column
+    disagreeing with the digest about what a row is about is that same
+    stranding by the shorter route.
+    """
+    if symbol is None:
+        return None
+    return symbol.strip().upper() or None
+
+
+def _fingerprint(
+    source: str,
+    rule: str,
+    activity_ids: Sequence[str],
+    order_id: str | None,
+    symbol: str | None,
+) -> str:
+    """The identity of one refusal: its rule, and the subjects it is about.
+
+    Everything hashed here is stored in the row beside it, so the digest is
+    derived rather than authored and nothing depends on being able to read it
+    back. It is a digest instead of the readable join because that join can
+    grow -- a ledger rejection carries an activity id per row -- and a unique
+    index should not have to.
+
+    The subjects are ordered, not merely concatenated: two passes deriving the
+    same refusal must land on the same fingerprint, or the upsert becomes an
+    append and the table double-counts the gap it is reporting. *Which*
+    subjects count is :func:`_identity`, and is the part that is easy to get
+    wrong.
+    """
+    subjects = _identity(source, activity_ids, order_id, symbol)
+    payload = "\n".join([source, rule, *subjects])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _re_examined(
+    row: RejectionRecord,
+    examined_activities: set[str],
+    examined_orders: set[str],
+    examined_symbols: set[str],
+) -> bool:
+    """Whether this pass looked at everything the row is about.
+
+    Only then may a row that the pass did not re-derive be deleted. A refusal
+    the pass never re-examined is not disproved by that pass's silence, and
+    deleting it would turn a stated gap back into an unexplained one -- which
+    is the state decision 14 exists to get out of.
+
+    All three of ``activity_ids``, ``order_id`` and ``symbol`` are subjects,
+    and the third is the one that reads like decoration and is not:
+    :func:`_identity` builds an ingest fingerprint out of the symbol alone, so
+    a row can name a symbol and nothing else. Treated as subject-less it would
+    be *vacuously* re-examined -- deletable by any pass at all, including one
+    whose entire history is a different underlying. That is one step away from
+    ordinary: ``LedgerRejection.activity_id`` defaults to ``None``, so the
+    first whole-symbol matcher refusal lands in exactly this shape.
+
+    **Truthiness, not ``is not None``, and the gap between them is permanent.**
+    These predicates have to mean by ``symbol`` and ``order_id`` exactly what
+    :func:`_identity` means by them, because the fingerprint is built from that
+    reading: ``""`` is no subject there. Tested for ``is not None`` instead, a
+    row carrying ``symbol=""`` failed this check on **every** pass, forever --
+    ``examined_symbols`` holds truthy symbols and can never contain it -- so
+    the refusal stopped being derived, the row survived anyway, and the table
+    went on claiming lifetime P&L was short a trade that had in fact been
+    booked, with ``at`` frozen at the last pass that asserted it. That is
+    decision 14's own *worse than no table at all*, and it was reachable:
+    Alpaca sends ``symbol: ""`` on structure rows, and ``MISSING_SYMBOL`` --
+    which fires exactly when the symbol is empty, and is not by-design -- is
+    stored with what it was given. ``_rejection_values`` now folds it to
+    ``NULL`` on the way in; this half also covers the rows an older build
+    already wrote.
+
+    Both sides of the symbol comparison are canonicalised for a second reason
+    of the same shape -- see :func:`_canonical_symbol`.
+    """
+    if any(value not in examined_activities for value in row.activity_ids):
+        return False
+    if row.order_id and row.order_id not in examined_orders:
+        return False
+    symbol = _canonical_symbol(row.symbol)
+    if symbol and symbol not in examined_symbols:
+        return False
+    return True
 
 
 def _occ_root(occ: OccSymbol) -> str:

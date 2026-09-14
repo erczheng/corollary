@@ -248,6 +248,7 @@ from corollary.instruments import OccSymbol, OptionType, parse_occ_symbol
 from corollary.wire import vendor_detail
 
 __all__ = [
+    "BY_DESIGN_RULES",
     "CloseKind",
     "FeeLink",
     "FeeRecord",
@@ -376,6 +377,18 @@ class RejectionRule(StrEnum):
     OVER_CLOSE = "over_close"
     #: An open or close against the direction the live queue already holds.
     DIRECTION_CONFLICT = "direction_conflict"
+
+
+#: The two refusals that are the design working rather than a gap in it.
+#: A cash journal is not a fill and a stock trade is not an option; both are
+#: declined on every pass, both are expected, and neither is a trade missing
+#: from lifetime P&L. They log at info rather than warning for that reason --
+#: expected and still not silent -- and ``ledger_rejection`` does not store
+#: them: nineteen ``FEE`` rows' worth of *"this was never a fill"* per pass
+#: would make the count that table exists to state mean nothing.
+BY_DESIGN_RULES: Final = frozenset(
+    {RejectionRule.NOT_A_LEDGER_ACTIVITY, RejectionRule.NOT_AN_OPTION}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,10 +732,7 @@ def _reject(
         inputs=dict(inputs),
     )
     sink.append(rejection)
-    expected = rule in (
-        RejectionRule.NOT_A_LEDGER_ACTIVITY,
-        RejectionRule.NOT_AN_OPTION,
-    )
+    expected = rule in BY_DESIGN_RULES
     logger.log(
         logging.INFO if expected else logging.WARNING,
         "ledger declined an activity: %s -- %s",

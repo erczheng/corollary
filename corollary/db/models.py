@@ -1,7 +1,9 @@
 """The Phase-2 configuration, engine-state and ledger tables.
 
-Nine of the ten tables the design spec lists. The tenth — ``notification`` —
-belongs to step 8 and is deliberately absent.
+Nine of the ten tables the design spec lists, plus ``ledger_rejection``, which
+the spec does not list: decision 14 added it at step 8 so that a gap in
+lifetime P&L can state its cause after the process that found it has gone. The
+tenth of the original ten — ``notification`` — is still deliberately absent.
 
 Three config tables rather than one key/value table, because the risk limits
 need an exact decimal and the other two do not; collapsing them would push
@@ -35,6 +37,7 @@ from datetime import datetime
 from typing import Any, Mapping, NamedTuple
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     ForeignKey,
@@ -68,7 +71,9 @@ __all__ = [
     "MlegLeg",
     "NotificationRoute",
     "POSITION_INTENTS",
+    "REJECTION_SOURCES",
     "RealizedTrade",
+    "RejectionRecord",
     "RiskLimit",
     "RISK_LIMIT_ABSOLUTE_MAX",
     "RISK_LIMIT_RANGES",
@@ -86,6 +91,12 @@ AUDIT_CATEGORIES = ("risk", "feed", "notification")
 #: PRD §10's two channels. ``Notifier`` gains more later; adding one is a
 #: migration, which is the point — a typo must not create a third silently.
 NOTIFICATION_CHANNELS = ("bell", "discord")
+
+#: Which vocabulary a ``ledger_rejection.rule`` is drawn from. Two, because a
+#: refusal to *fetch* and a refusal to *book* are different failures with
+#: different remedies — ``RejectionRule`` is the matcher's and ``IngestRule``
+#: is ingestion's, and neither is translated into the other on the way in.
+REJECTION_SOURCES = ("ledger", "ingest")
 
 #: The two books, spelled exactly as the frontend's ``AccountMode`` union in
 #: ``web/src/lib/types.ts`` — ``type AccountMode = 'paper' | 'cash'``. Same
@@ -842,3 +853,156 @@ class MlegLeg(Base):
     position_intent: Mapped[str] = mapped_column(String(16), nullable=False)
 
     group: Mapped["MlegGroup"] = relationship(back_populates="legs")
+
+
+class RejectionRecord(Base):
+    """One thing ingestion would not book, kept so the gap has a stated cause.
+
+    Decision 14: *"A gap with a stated cause is a decision the reader can
+    agree with; a gap without one is indistinguishable from a bug, and the
+    reader's only honest response is to stop trusting the number."* The
+    ledger's refusals are computed on every pass and were, until this table,
+    thrown away with the process — so the Activity page could say lifetime
+    P&L was short a trade only for as long as the run that noticed lasted.
+
+    **The class is not named for the table, and that is deliberate.** The
+    table is ``ledger_rejection`` because that is the name the design records;
+    the rows are not all the ledger's, because ingestion refuses things the
+    matcher never sees — a symbol whose contract terms never arrived is
+    refused before ``build_ledger`` is called at all. ``source`` says which
+    vocabulary ``rule`` is drawn from:
+    :class:`~corollary.engine.ledger.RejectionRule` for ``ledger``,
+    :class:`~corollary.engine.ingest.IngestRule` for ``ingest``. Two enums,
+    one table, no third spelling — a refusal to *fetch* and a refusal to
+    *book* are different failures with different remedies, and collapsing
+    them into one vocabulary would lose that.
+
+    **No money column, on purpose.** A refusal is the absence of a figure; if
+    it could state one it would not be a refusal. Nothing here is ``Money``,
+    nothing here is ``Numeric``, and the arithmetic question this table
+    answers — *how many trades are missing* — is a count.
+
+    **"No money column" is true; "no money in the row" is not.** :attr:`inputs`
+    is a JSON blob and several rules put stringified money inside it —
+    ``strike``, ``net_amount``, ``paired_price``, ``multiplier``. Those are
+    TEXT inside a blob, so neither ``Money``'s refusing comparator nor
+    ``guard_money_sql`` can see them, and a future
+    ``WHERE json_extract(inputs, '$.strike') > …`` gets SQLite's
+    **lexicographic** answer with no raise — the exact failure ``Money``
+    exists to make impossible elsewhere. Read the row, parse the value as a
+    ``Decimal`` in Python, compare there. Do not write that query.
+
+    **A row is a statement about the pass that wrote it, not a permanent
+    accusation.** An in-memory refusal cannot go stale because it is rebuilt
+    from current logic every pass; a persisted one can, and a leftover row
+    claiming a gap that no longer exists is exactly the confident wrong reason
+    decision 14 exists to prevent. So the writer
+    (``IngestService._write_rejections``) reconciles rather than appends:
+    every refusal the pass derived is upserted on :attr:`fingerprint`, and
+    every row the pass re-examined and did *not* re-derive is deleted.
+
+    **Free text on this table is redacted before it is written**, not on the
+    way out. Rule 6 reaches a persistence boundary here for the first time:
+    Alpaca embeds the account number in prose a field-name redactor cannot
+    see inside — *"CAT fee for proceed of 15 trades on <date> by PA…"* — and
+    a secret in a committed database row outlives a secret in a log.
+    """
+
+    __tablename__ = "ledger_rejection"
+    __table_args__ = (
+        # Two rows for one refusal would double the count the Activity page
+        # reports, which is the one number this table exists to state.
+        UniqueConstraint(
+            "account", "fingerprint", name="uq_ledger_rejection_fingerprint"
+        ),
+        CheckConstraint(
+            _in_list("account", ACCOUNT_MODES), name="ck_ledger_rejection_account"
+        ),
+        CheckConstraint(
+            _in_list("source", REJECTION_SOURCES), name="ck_ledger_rejection_source"
+        ),
+        # "What is missing from this book, most recent first" — the whole read
+        # pattern. `at` is a timestamp, so ORDER BY is available to it; that
+        # is not true of the `Money` or `ActivityId` columns elsewhere here.
+        Index("ix_ledger_rejection_account_at", "account", "at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account: Mapped[str] = mapped_column(String(8), nullable=False)
+    #: ``ledger`` or ``ingest`` — which enum ``rule`` is a member of.
+    source: Mapped[str] = mapped_column(String(8), nullable=False)
+    #: The rule's ``value``, never a sentence. Rule 8's *"the rule that
+    #: rejected it"*: a rule is a thing you can count, filter and alert on.
+    #: Deliberately **not** a CHECK-listed set — the two Python enums are the
+    #: authority, and a constraint naming today's members would turn adding
+    #: one into a migration for no gain in safety.
+    rule: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The identity of this refusal: source, rule, and the subjects it names,
+    #: hashed to something an index can hold. Derived, never authored —
+    #: everything it is derived from is in the row beside it. A digest rather
+    #: than the readable join because that join grows with the number of
+    #: activities a symbol has, and a unique index should not.
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The contract, when the refusal is about one. ``None`` for a refusal
+    #: about an order, or about an activity that carried no symbol at all —
+    #: which is itself one of the rules.
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The parent order, for the ``mleg`` refusals, which name an order and no
+    #: activities.
+    order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Every activity this refusal concerns, as a JSON array. A list rather
+    #: than a column because a ledger rejection names exactly one and an
+    #: ingest refusal may name a dozen — one symbol's whole history — and
+    #: because nothing queries by activity id: the reconcile loads the
+    #: account's rows and matches in Python, the way ``_write_fills`` does.
+    #: This is also what the writer reads to decide whether a pass re-examined
+    #: the row's subject and may therefore clear it.
+    activity_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    #: Why, in prose, bounded and de-identified by ``vendor_detail`` at
+    #: ``STORED_DETAIL_MAX`` — which is the *storage* bound, not the log's
+    #: ``ERROR_BODY_MAX``. A stored refusal is mostly our own prose and its
+    #: closing clause is the severity qualifier, so the log's 300 cut the one
+    #: sentence that says whether a position merely lacks terms or has ended
+    #: with its P&L permanently missing. The unabridged text is still in the
+    #: log record the refusal emitted, under the same ``correlation_id``.
+    #:
+    #: Wider than ``STORED_DETAIL_MAX`` (1024) because that bounds the
+    #: *content*: ``vendor_detail`` appends a truncation notice of at most 32
+    #: characters on top of it.
+    detail: Mapped[str] = mapped_column(String(1280), nullable=False)
+    #: Rule 8's *"the inputs"* — the values the rule was applied to, as a JSON
+    #: object of strings. Redacted the same way ``detail`` is.
+    inputs: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False, default=dict)
+    #: Rule 8's *"the timestamp"*, and **not** the activity's. This is when
+    #: the refusal was recorded, which is the one instant that always exists:
+    #: an activity arriving with no usable timestamp is itself a thing the
+    #: matcher refuses, so a NOT NULL column holding the vendor's stamp could
+    #: not be written for exactly the rows that most need writing.
+    at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    #: When this refusal was **first** recorded, and never updated after.
+    #:
+    #: :attr:`at` is refreshed on every reassertion, which is right for *still
+    #: true as of* and leaves the table unable to say how long a gap has
+    #: persisted — and "how long" is what separates a gap that opened this
+    #: morning from one that has been unexplained for a month. Set on insert
+    #: by ``IngestService._write_rejections``, which deliberately keeps it out
+    #: of the columns it refreshes.
+    first_seen: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    #: The vendor's stamp for the activity, when it gave one. Nullable for the
+    #: reason above, and separate so the two are never confused: ``at``
+    #: answers *when did we notice*, this answers *when did it happen*.
+    activity_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    #: The ingestion pass that last asserted this row — the same id on every
+    #: log line that pass emitted, so a stored gap traces back to the run that
+    #: found it.
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    @validates("source")
+    def _validate_source(self, _key: str, value: str) -> str:
+        if value not in REJECTION_SOURCES:
+            raise ValueError(
+                f"source {value!r} is not one of {REJECTION_SOURCES}. The rule "
+                "vocabularies are RejectionRule (ledger) and IngestRule "
+                "(ingest); a third source means a third enum nobody has read."
+            )
+        return value
