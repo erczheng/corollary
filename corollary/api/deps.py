@@ -46,6 +46,14 @@ from corollary.data.providers.alpaca import (
     AlpacaCredentials,
     AlpacaProvider,
 )
+from corollary.data.providers.finnhub import (
+    FinnhubCredentialsError,
+    FinnhubProvider,
+)
+from corollary.data.providers.fundamentals import (
+    FundamentalsProvider,
+    UnavailableFundamentals,
+)
 from corollary.data.providers.interface import MarketDataProvider
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
@@ -55,6 +63,7 @@ __all__ = [
     "AccountModeDep",
     "ApiError",
     "BrokerDep",
+    "FundamentalsDep",
     "LIVE_CREDENTIAL_ENV_VARS",
     "ProviderDep",
     "ServiceRegistry",
@@ -62,6 +71,7 @@ __all__ = [
     "account_mode",
     "broker_for_account",
     "db_session",
+    "fundamentals_data",
     "market_data",
     "missing_live_credentials",
     "service_registry",
@@ -126,6 +136,26 @@ def missing_live_credentials(env: Mapping[str, str]) -> tuple[str, ...]:
 
 BrokerFactory = Callable[[], BrokerAccount]
 ProviderFactory = Callable[[], MarketDataProvider]
+FundamentalsFactory = Callable[[], FundamentalsProvider]
+
+
+def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
+    """Finnhub if it is configured, and a stated absence if it is not.
+
+    **A missing key degrades one column rather than failing the table.** The
+    market-cap column is supplementary -- decision 7 designed its null path --
+    and 503-ing a screener of prices and volumes over a reference-data key
+    nobody set would be the larger error. What must not happen is silence:
+    :class:`~corollary.data.providers.fundamentals.UnavailableFundamentals`
+    logs the cause every time it is asked.
+
+    Caught here rather than at the property, so the composition root is the
+    only place that knows which vendor can be absent.
+    """
+    try:
+        return FinnhubProvider.from_env(env)
+    except FinnhubCredentialsError as exc:
+        return UnavailableFundamentals(str(exc))
 
 
 class ServiceRegistry:
@@ -146,10 +176,21 @@ class ServiceRegistry:
         *,
         brokers: Mapping[AccountMode, BrokerFactory],
         provider: ProviderFactory,
+        fundamentals: FundamentalsFactory | None = None,
         missing_live_credentials: Sequence[str] = (),
     ) -> None:
         self._factories: dict[AccountMode, BrokerFactory] = dict(brokers)
         self._provider_factory = provider
+        #: Optional because it is the one service whose absence is a designed
+        #: state rather than a failure -- see :func:`_fundamentals_from_env`.
+        #: A registry built without one serves a null market cap and says so.
+        self._fundamentals_factory: FundamentalsFactory = (
+            fundamentals
+            if fundamentals is not None
+            else lambda: UnavailableFundamentals(
+                "this app was built with no fundamentals provider"
+            )
+        )
         self.missing_live_credentials: tuple[str, ...] = tuple(missing_live_credentials)
         if (AccountMode.CASH in self._factories) and self.missing_live_credentials:
             raise ValueError(
@@ -159,6 +200,7 @@ class ServiceRegistry:
             )
         self._brokers: dict[AccountMode, BrokerAccount] = {}
         self._provider: MarketDataProvider | None = None
+        self._fundamentals: FundamentalsProvider | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ServiceRegistry":
@@ -184,6 +226,7 @@ class ServiceRegistry:
         return cls(
             brokers=brokers,
             provider=lambda: AlpacaProvider.from_env(source),
+            fundamentals=lambda: _fundamentals_from_env(source),
             missing_live_credentials=missing,
         )
 
@@ -250,6 +293,18 @@ class ServiceRegistry:
             self._provider = self._provider_factory()
         return self._provider
 
+    @property
+    def fundamentals(self) -> FundamentalsProvider:
+        """The one fundamentals provider, built on first use and cached after.
+
+        One instance, so Finnhub's 60/min is counted once. Never ``None``:
+        an unconfigured vendor is a provider that answers "unavailable" with
+        a reason, which is a thing every call site can handle.
+        """
+        if self._fundamentals is None:
+            self._fundamentals = self._fundamentals_factory()
+        return self._fundamentals
+
     async def aclose(self) -> None:
         """Close whatever was actually built. Called from the lifespan.
 
@@ -260,8 +315,11 @@ class ServiceRegistry:
         built: list[Any] = list(self._brokers.values())
         if self._provider is not None:
             built.append(self._provider)
+        if self._fundamentals is not None:
+            built.append(self._fundamentals)
         self._brokers.clear()
         self._provider = None
+        self._fundamentals = None
         for service in built:
             close = getattr(service, "aclose", None)
             if close is None:
@@ -331,6 +389,18 @@ def market_data(
     return registry.provider
 
 
+def fundamentals_data(
+    registry: Annotated[ServiceRegistry, Depends(service_registry)],
+) -> FundamentalsProvider:
+    """The fundamentals provider. Account-independent, and never ``None``.
+
+    A second vendor behind a second interface, because the two fail
+    independently: Alpaca going down is a table with no prices, Finnhub going
+    down is one column of nulls.
+    """
+    return registry.fundamentals
+
+
 def db_session(request: Request) -> Iterator[Session]:
     """A session on the app's engine.
 
@@ -356,4 +426,5 @@ def db_session(request: Request) -> Iterator[Session]:
 AccountModeDep = Annotated[AccountMode, Depends(account_mode)]
 BrokerDep = Annotated[BrokerAccount, Depends(broker_for_account)]
 ProviderDep = Annotated[MarketDataProvider, Depends(market_data)]
+FundamentalsDep = Annotated[FundamentalsProvider, Depends(fundamentals_data)]
 SessionDep = Annotated[Session, Depends(db_session)]

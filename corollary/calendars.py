@@ -39,10 +39,22 @@ dominated by everything else about it.
 
 :func:`nyse_session_close` is the honest version -- ``None`` when the calendar
 has nothing to say -- and is what a caller that needs to *know* should ask.
+
+The second caller is the intraday price series
+--------------------------------------------------
+
+Alpaca's bars feed runs roughly 04:00--20:00 ET, so a session of ``5Min``
+bars arrives 192 long where the regular session is 78. Scoping a chart to
+regular hours needs the **open** as well as the close, and both come from
+here for the same reason: a half-day closes at 13:00 and a hardcoded
+09:30--16:00 filter would append three hours of post-market prints to the
+session they follow. :func:`nyse_session_open` is the mirror of
+:func:`nyse_session_close`, with the same ``None`` for a non-session day.
 """
 
 from datetime import date, datetime, time, timezone
 from functools import lru_cache
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 __all__ = [
@@ -50,6 +62,7 @@ __all__ = [
     "NYSE_TZ",
     "nyse_close_at",
     "nyse_session_close",
+    "nyse_session_open",
 ]
 
 #: The regular-session close, in Eastern. Stated as a wall-clock time in ET
@@ -65,14 +78,28 @@ NYSE_TZ = ZoneInfo("America/New_York")
 _NYSE_CALENDAR = "XNYS"
 
 
+class _Session(NamedTuple):
+    """One published session's two boundaries, both UTC instants."""
+
+    opens: datetime
+    closes: datetime
+
+
 @lru_cache(maxsize=1)
-def _session_closes() -> dict[date, datetime]:
-    """Every published NYSE session mapped to its closing instant, in UTC.
+def _sessions() -> dict[date, _Session]:
+    """Every published NYSE session mapped to its two boundaries, in UTC.
 
     Materialised into a plain dict once rather than queried through pandas on
     every call. The calendar is ~5,000 sessions, the build happens on first
     use, and the lookup afterwards costs a hash -- which matters because a
-    200-row chain resolves a close per row.
+    200-row chain resolves a close per row, and a day of ``1Min`` bars
+    resolves a session per bar.
+
+    Both ends come out of **one** build, keyed on the session date the two
+    pandas Series share. Two independently cached dicts would be two
+    half-second builds and, worse, two places for the pair to disagree about
+    which days are sessions at all. A date missing from either side is
+    dropped: a session with only one boundary cannot bound anything.
 
     The import is deliberately inside the function. ``exchange_calendars``
     drags in pandas and numpy and takes about half a second to construct XNYS;
@@ -82,9 +109,16 @@ def _session_closes() -> dict[date, datetime]:
     import exchange_calendars
 
     calendar = exchange_calendars.get_calendar(_NYSE_CALENDAR)
+    opens: dict[date, datetime] = {
+        session.date(): opened.to_pydatetime().astimezone(timezone.utc)
+        for session, opened in calendar.opens.items()
+    }
     return {
-        session.date(): close.to_pydatetime().astimezone(timezone.utc)
+        session.date(): _Session(
+            opens[session.date()], close.to_pydatetime().astimezone(timezone.utc)
+        )
         for session, close in calendar.closes.items()
+        if session.date() in opens
     }
 
 
@@ -96,7 +130,27 @@ def nyse_session_close(day: date) -> datetime | None:
     for one answer, and the caller that cares which should ask the calendar
     directly rather than have this function guess.
     """
-    return _session_closes().get(day)
+    session = _sessions().get(day)
+    return None if session is None else session.closes
+
+
+def nyse_session_open(day: date) -> datetime | None:
+    """The instant NYSE opened (or will open) on ``day``, or ``None``.
+
+    The mirror of :func:`nyse_session_close`, from the same cached build and
+    with the same ``None`` semantics. 09:30 ET on every session including the
+    half-days -- an early close is the only thing a half-day changes -- but
+    read rather than assumed, because "the open never moves" is exactly the
+    kind of fact that holds until the day it does not.
+
+    There is no ``nyse_open_at`` fallback twin. The close has one because a
+    LEAP past the end of the published schedule still has to be priced; the
+    only caller here is filtering bars that already exist, and a bar on a date
+    the calendar cannot answer is one this app would rather drop than guess a
+    session for.
+    """
+    session = _sessions().get(day)
+    return None if session is None else session.opens
 
 
 def nyse_close_at(day: date) -> datetime:

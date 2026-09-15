@@ -15,8 +15,9 @@ operation — "show me the chain for NVDA" — crosses both hosts:
   (``paper-api.alpaca.markets``) and is the only source of ``multiplier``,
   ``root_symbol`` and ``open_interest``.
 
-The budget from the Phase 2 design: a 2s market poll is 30/min, the account
-trio at 15s is 12/min, chains on demand. Comfortable headroom on both hosts,
+The budget from the Phase 2 design: the market poll runs at 400ms in the
+foreground and 5s in the background, so roughly 150 requests a minute at its
+hottest; the account trio at 15s is 12/min; chains on demand. Comfortable headroom on both hosts,
 and no headroom at all if the two are added together against one ceiling.
 
 The bucket is a plain token bucket with continuous refill — no windowing, no
@@ -28,10 +29,14 @@ tokens rather than wall time.
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
 
 __all__ = [
     "ALPACA_DATA_HOST",
+    "DEFAULT_PER_HOST_REQUESTS_PER_MINUTE",
+    "FINNHUB_HOST",
+    "FINNHUB_REQUESTS_PER_MINUTE",
     "ALPACA_LIVE_TRADING_HOST",
     "ALPACA_PAPER_TRADING_HOST",
     "DEFAULT_REQUESTS_PER_MINUTE",
@@ -51,9 +56,40 @@ ALPACA_PAPER_TRADING_HOST = "paper-api.alpaca.markets"
 #: needs it; nothing in Phase 2 reaches it.
 ALPACA_LIVE_TRADING_HOST = "api.alpaca.markets"
 
+#: Company reference data -- market cap today, and PRD section 7's news,
+#: calendar and analyst consensus later. A second vendor rather than a second
+#: Alpaca host, which is the whole reason the ceiling below is per host.
+FINNHUB_HOST = "finnhub.io"
+
 #: Alpaca's documented Basic-plan ceiling, per host. Algo Trader Plus raises
 #: this to 10,000/min, which is a constructor argument and not a code change.
 DEFAULT_REQUESTS_PER_MINUTE = 200
+
+#: Finnhub's free-tier ceiling. A third of Alpaca's, on a host that is not
+#: Alpaca's, which is why :class:`HostRateLimiter` meters per host rather than
+#: applying one number everywhere.
+FINNHUB_REQUESTS_PER_MINUTE = 60
+
+#: The hosts whose ceiling is not :data:`DEFAULT_REQUESTS_PER_MINUTE`.
+#:
+#: A table rather than a second limiter, and that is the load-bearing part.
+#: :func:`default_limiter`'s docstring explains why a component must not
+#: construct its own budget: two limiters against one server-side ceiling
+#: over-spend by double and look fine locally until the 429s arrive. A second
+#: *vendor* is exactly the case that makes a private limiter tempting -- a
+#: different key, a different host, a different number -- so the number moves
+#: into the shared limiter instead of the limiter multiplying.
+#: Read-only, and that is the point of a module-level default: a limiter
+#: built with ``per_host=None`` reads this table, so anything that could
+#: mutate it would silently re-budget every vendor in the process. A
+#: ``MappingProxyType`` makes the declared ``Mapping`` true rather than
+#: aspirational -- ``HostRateLimiter`` copies it on the way in anyway, so
+#: nothing here loses a capability.
+DEFAULT_PER_HOST_REQUESTS_PER_MINUTE: Mapping[str, int] = MappingProxyType(
+    {
+        FINNHUB_HOST: FINNHUB_REQUESTS_PER_MINUTE,
+    }
+)
 
 Clock = Callable[[], float]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -153,10 +189,25 @@ class HostRateLimiter:
         self,
         requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
         *,
+        per_host: Mapping[str, int] | None = None,
         clock: Clock = time.monotonic,
         sleep: Sleeper = asyncio.sleep,
     ) -> None:
         self._requests_per_minute = requests_per_minute
+        #: ``None`` means the documented table, **not** "no overrides": a
+        #: limiter that has to be told Finnhub is 60/min is a limiter that
+        #: will one day not be told. Pass ``per_host={}`` to opt out
+        #: explicitly, which is what a test wanting one budget everywhere
+        #: does.
+        #:
+        #: Lower-cased on the way in, because ``bucket_for`` lower-cases its
+        #: lookup key and a mixed-case entry here would silently never match
+        #: -- handing a 60/min vendor Alpaca's 200/min budget, which is the
+        #: one failure this table exists to prevent.
+        source = (
+            DEFAULT_PER_HOST_REQUESTS_PER_MINUTE if per_host is None else per_host
+        )
+        self._per_host = {host.lower(): limit for host, limit in source.items()}
         self._clock = clock
         self._sleep = sleep
         self._buckets: dict[str, TokenBucket] = {}
@@ -166,7 +217,7 @@ class HostRateLimiter:
         bucket = self._buckets.get(key)
         if bucket is None:
             bucket = TokenBucket(
-                self._requests_per_minute,
+                self._per_host.get(key, self._requests_per_minute),
                 60.0,
                 clock=self._clock,
                 sleep=self._sleep,

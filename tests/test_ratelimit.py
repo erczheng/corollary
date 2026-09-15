@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from corollary.ratelimit import (
+    FINNHUB_HOST,
+    FINNHUB_REQUESTS_PER_MINUTE,
     ALPACA_DATA_HOST,
     ALPACA_PAPER_TRADING_HOST,
     DEFAULT_REQUESTS_PER_MINUTE,
@@ -197,3 +199,37 @@ def test_the_default_limiter_carries_the_documented_ceiling() -> None:
     assert default_limiter().bucket_for(
         ALPACA_PAPER_TRADING_HOST
     ).capacity == float(DEFAULT_REQUESTS_PER_MINUTE)
+
+
+def test_a_second_vendors_host_carries_its_own_smaller_ceiling(
+    clock: FakeClock,
+) -> None:
+    """Finnhub's free tier is 60/min, not Alpaca's 200.
+
+    One limiter per process is the rule (see above), so the second vendor
+    cannot be given its own limiter without re-creating the over-spending bug
+    the shared one exists to prevent. The per-host override is how both facts
+    hold at once.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    assert FINNHUB_REQUESTS_PER_MINUTE == 60
+    assert limiter.bucket_for(FINNHUB_HOST).capacity == 60.0
+    assert limiter.bucket_for(ALPACA_DATA_HOST).capacity == 200.0
+
+
+def test_the_default_limiter_meters_finnhub_at_sixty() -> None:
+    assert default_limiter().bucket_for(FINNHUB_HOST).capacity == float(
+        FINNHUB_REQUESTS_PER_MINUTE
+    )
+
+
+def test_an_explicit_per_host_budget_overrides_the_default(clock: FakeClock) -> None:
+    limiter = HostRateLimiter(
+        requests_per_minute=10_000,
+        per_host={"example.test": 3},  # replaces the table, does not extend it
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    assert limiter.bucket_for("EXAMPLE.TEST").capacity == 3.0
+    assert limiter.bucket_for("other.test").capacity == 10_000.0
+    assert limiter.bucket_for(FINNHUB_HOST).capacity == 10_000.0

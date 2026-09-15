@@ -691,6 +691,36 @@ async def main() -> None:
                 secrets,
             )
 
+            # Hourly bars over a **full session and a half-day**, which is
+            # the pair that pins how the regular-hours filter in
+            # `api/routes/markets.py` behaves at `1H`. 26 November 2025 is a
+            # 16:00 close and the 28th -- the Friday after Thanksgiving --
+            # is a 13:00 one. The window is fixed in the past on purpose:
+            # this recording is evidence about Alpaca's *alignment* (bars
+            # stamped on the Eastern hour, so 09:30 is off the grid), and
+            # evidence that moves with the wall clock proves less each time
+            # it is re-recorded. The date-only `start` is UTC midnight,
+            # which is why the file opens with a 19:00 ET bar from the
+            # evening of the 25th; that bar is part of what is tested.
+            save(
+                "stock_bars_hourly",
+                await get(
+                    DATA_BASE_URL,
+                    "/v2/stocks/bars",
+                    {
+                        "symbols": "NVDA",
+                        "timeframe": "1Hour",
+                        "start": "2025-11-26",
+                        "end": "2025-11-29",
+                        "feed": feeds.stock_historical,
+                        "adjustment": "split",
+                        "limit": 10000,
+                        "sort": "asc",
+                    },
+                ),
+                secrets,
+            )
+
             # Two pages of one chain, so the pagination loop is replayed rather
             # than assumed.
             page1 = await get(

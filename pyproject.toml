@@ -24,9 +24,10 @@ dev = [
     "pytest-asyncio>=0.24",
     "time-machine>=2.15",
     "mypy>=1.13",
-    # Used only by tests/fixtures/record_alpaca.py, the one-shot recorder that
-    # captures live Alpaca responses into tests/fixtures/alpaca/. Nothing under
-    # corollary/ reads .env directly -- the process environment is the input.
+    # Used only by the one-shot recorders under tests/fixtures/ --
+    # record_alpaca.py and record_finnhub.py -- which capture live vendor
+    # responses into tests/fixtures/<vendor>/. Nothing under corollary/ reads
+    # .env directly; the process environment is the engine's input.
     "python-dotenv>=1.0",
 ]
 

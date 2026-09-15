@@ -108,17 +108,47 @@ from corollary.engine.execution.interface import BrokerAccount
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = REPO_ROOT / "corollary"
 
-#: The one-shot fixture recorder. Not part of the shipped package, but it
-#: holds live credentials and talks to the live host, so it is on the vendor
-#: surface for the purposes of "nothing reaches Alpaca with a write verb"
-#: even though it is not on it for anything else.
-RECORDER = REPO_ROOT / "tests" / "fixtures" / "record_alpaca.py"
+FIXTURES = REPO_ROOT / "tests" / "fixtures"
+
+#: The one-shot fixture recorders. Not part of the shipped package, but each
+#: one holds live credentials and talks to a live host, so they are on the
+#: vendor surface for the purposes of "nothing reaches a vendor with a write
+#: verb" even though they are not on it for anything else.
+#:
+#: **Discovered rather than listed, and that is the fix for a real miss.**
+#: This was a single path spelled ``record_alpaca.py``. ``record_finnhub.py``
+#: then arrived -- a second script loading ``.env`` and calling a live vendor
+#: with real credentials -- and was in the scope of no guard at all, while
+#: its own docstring claimed a test asserted it contained no write verb. A
+#: named list is a list somebody forgets to extend; a glob covers the third
+#: recorder on the day it is written, by nobody's deliberate act.
+#:
+#: :data:`KNOWN_RECORDERS` is the floor under the glob, checked by
+#: :func:`recorders` at every point of use. A pattern that matched nothing --
+#: the directory renamed, the naming convention changed -- would report
+#: success over an empty scope, which is this file's own stated failure mode.
+#: ``_sources`` cannot help here the way it helps a named path: a glob never
+#: yields a path that does not exist, so its staleness raise sees nothing
+#: wrong with a scope that has quietly emptied.
+#:
+#: **The glob is deliberately non-recursive.** A future
+#: ``tests/fixtures/recorders/record_x.py`` would fall outside it, and so
+#: outside every guard below -- a recorder lives beside these two or the
+#: pattern changes with it. What ``KNOWN_RECORDERS`` does catch is a *move*
+#: of the two that exist, which is the case that matters: that is the one
+#: where the credentials are already written and the guard is the thing that
+#: goes missing. A recorder nobody has written yet leaks nothing.
+RECORDER_GLOB = "record_*.py"
+RECORDERS = tuple(sorted(FIXTURES.glob(RECORDER_GLOB)))
+
+#: The recorders that exist today. The glob must find at least these.
+KNOWN_RECORDERS = frozenset({"record_alpaca.py", "record_finnhub.py"})
 
 #: The package's own two vendor directories -- the files that reach Alpaca
 #: through a ``self._client`` attribute.
 #:
-#: Named rather than sliced off the front of ``VENDOR_SURFACE`` by position. A
-#: third package root added ahead of ``RECORDER`` would silently shrink a
+#: Named rather than sliced off the front of the vendor surface by position. A
+#: third package root added ahead of the recorders would silently shrink a
 #: ``[:2]`` back to one directory, and ``_sources`` could not help: every path
 #: in the slice still exists, so nothing raises and the guard reports success
 #: over half its scope. That is this file's own stated failure mode -- a guard
@@ -128,8 +158,42 @@ VENDOR_PACKAGES = (
     PACKAGE / "data" / "providers",
 )
 
-#: Everything in the tree that may speak to Alpaca at all.
-VENDOR_SURFACE = VENDOR_PACKAGES + (RECORDER,)
+def recorders() -> tuple[Path, ...]:
+    """Every fixture recorder, with the glob's floor checked *here*.
+
+    A function rather than a constant, because the check has to run wherever
+    the scope is used -- including from ``tests/fixtures/test_record_alpaca
+    .py``, which walks these same files for the prose half of the same rule.
+    The floor used to be asserted only inside
+    ``test_every_fixture_recorder_is_inside_the_vendor_surface`` below, which
+    made one test load-bearing for three guards across two files: skip it or
+    delete it and all three quietly shrink back to :data:`VENDOR_PACKAGES`
+    with nothing failing. A guard whose scope can evaporate in silence is the
+    thing this file exists to refuse, so it does not get to live in this file.
+
+    That test stays, because a named ``-m risk`` gate with a written reason
+    is worth more than a raise nobody reads -- but it now *states* what this
+    function enforces rather than being the only thing enforcing it.
+    """
+    found = {path.name for path in RECORDERS}
+    missing = sorted(KNOWN_RECORDERS - found)
+    if missing:
+        raise AssertionError(
+            f"the recorder glob {RECORDER_GLOB!r} under {_where(FIXTURES)} "
+            f"found {sorted(found)}, which is missing {missing}. A script "
+            "that loads .env and calls a live vendor is in no guard's scope "
+            "until it is in this one."
+        )
+    return RECORDERS
+
+
+def vendor_surface() -> tuple[Path, ...]:
+    """Everything in the tree that may speak to a data vendor at all.
+
+    The package's two vendor directories plus every recorder. Not a constant,
+    so the recorder half can never silently be empty: see :func:`recorders`.
+    """
+    return VENDOR_PACKAGES + recorders()
 
 #: Verbs that change something at the other end. ``request`` and ``send`` are
 #: here because both take the method as an argument, so an audit that only
@@ -177,6 +241,12 @@ def _sources(*roots: Path) -> list[Path]:
     offenders and reports success. That is the failure mode this whole file
     exists to end, so a missing root is an error here rather than an empty
     list.
+
+    **This protects named roots only.** A scope assembled by a glob --
+    :data:`RECORDERS` -- never hands this function a path that does not
+    exist: the glob simply returns fewer of them, or none, and every one it
+    does return is real. That scope is checked by :func:`recorders` instead,
+    and anything built out of a pattern needs the same treatment.
     """
     found: set[Path] = set()
     for root in roots:
@@ -478,6 +548,37 @@ def test_no_broker_exposes_a_write_shaped_method() -> None:
 
 
 @pytest.mark.risk
+def test_every_fixture_recorder_is_inside_the_vendor_surface() -> None:
+    """The floor under :data:`RECORDERS`' glob.
+
+    Two guards below, and one in ``tests/fixtures/test_record_alpaca.py``,
+    run over the recorders and would pass over an empty scope. This is the
+    named statement that the scope is populated and contains the scripts
+    anybody would name if asked -- so renaming the convention, or moving the
+    recorders, fails here rather than quietly somewhere downstream.
+
+    It no longer *is* the protection: :func:`recorders` raises on the same
+    condition at every point of use, so deleting or skipping this test
+    shrinks nobody's scope. It is the copy of that rule with a reason
+    attached, which a raise inside a helper cannot be.
+
+    It is also the missing half of a claim that was written down as done:
+    ``record_finnhub.py`` documented a ``test_record_finnhub.py`` asserting
+    it contained no write verb, and that file never existed. Generalising
+    this file's guard was preferred to writing that one, because a per-vendor
+    copy is how the eight-copies-with-seven-blind-spots problem in the module
+    docstring started.
+    """
+    found = {path.name for path in recorders()}
+    assert found >= KNOWN_RECORDERS, (
+        f"the recorder glob found {sorted(found)}, which is missing "
+        f"{sorted(KNOWN_RECORDERS - found)}. A script that loads .env and "
+        "calls a live vendor is in no guard's scope until it is in this one."
+    )
+    assert set(recorders()) <= set(vendor_surface())
+
+
+@pytest.mark.risk
 def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     """The files that touch Alpaca are read-only in this phase.
 
@@ -486,17 +587,19 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     a guard that broke on that is one somebody silences. What must stay true
     is that nothing *reaches Alpaca* with a verb that changes anything.
 
-    The recorder under ``tests/fixtures/`` is in scope here and nowhere else:
-    it is the only other thing in the tree holding live credentials, and a
-    recorder that could POST is a write path to the broker sitting outside
-    ``RiskManager.approve()``.
+    The recorders under ``tests/fixtures/`` are in scope here and nowhere
+    else: they are the only other things in the tree holding live
+    credentials, and a recorder that could POST is a write path to the broker
+    sitting outside ``RiskManager.approve()``. **All** of them are in scope,
+    found by :data:`RECORDERS`, because the second one was in scope of
+    nothing while its own docstring said otherwise.
 
     One test rather than one per verb: the failure message names the verb and
     the line, so parametrising bought identity in the report and nothing in
     coverage, and the gate is the thing that has to stay short.
     """
     offenders = []
-    for path in _sources(*VENDOR_SURFACE):
+    for path in _sources(*vendor_surface()):
         for node in ast.walk(_tree(path)):
             if (
                 isinstance(node, ast.Call)
@@ -514,9 +617,9 @@ def test_the_only_http_call_on_the_vendor_surface_is_get() -> None:
     A new verb Alpaca invents would not be in ``WRITE_VERBS`` and the negative
     test would pass in silence. This one enumerates what *is* called on a
     client and insists it is only ``get``. Scoped to ``VENDOR_PACKAGES``
-    because it keys on ``self._client``: the recorder owns its
-    ``httpx.AsyncClient`` as a local, and is covered by the negative form
-    above, which runs over the whole surface including it.
+    because it keys on ``self._client``: a recorder owns its ``httpx`` client
+    as a local, and is covered by the negative form above, which runs over
+    the whole surface including every recorder.
     """
     client_calls = set()
     for path in _sources(*VENDOR_PACKAGES):
@@ -545,7 +648,7 @@ def test_the_vendor_sdk_is_imported_nowhere() -> None:
     """
     offenders = {
         _where(path)
-        for path in _sources(PACKAGE, RECORDER)
+        for path in _sources(PACKAGE, *RECORDERS)
         if "alpaca" in _imported_roots(_tree(path))
     }
     assert offenders == set(), f"the vendor SDK is imported in {sorted(offenders)}"

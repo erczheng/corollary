@@ -101,13 +101,24 @@ through it would arrive at the client as a sorted fragment that cannot be
 re-sorted without fetching the rest. The window (60 DTE, 15% of spot) is what
 bounds the size, which is the bound that also saves the requests.
 
-Things that are deliberately not here
+Market cap comes from a second vendor
 -------------------------------------
 
-**Market cap.** Finnhub, step 9. Every ``marketCap`` this module serves is
-``None``. A fund's is legitimately null and a company's is merely not fetched
-yet; the wire cannot distinguish them, and inventing either is the failure
-PRD 8.5 names.
+It is the one column Alpaca does not carry, and step 9's decision 7 takes it
+from Finnhub's ``/stock/profile2``, cached for the trading date. The vendor
+reports millions; ``data/providers/finnhub.py`` converts to whole dollars at
+the boundary, so everything here is in dollars.
+
+**Three different things serialize to the same ``null``** -- a fund, which
+files no share count; a fetch that failed; and a symbol not yet fetched on
+this date, which is every symbol for the first request after a cold start.
+The wire cannot tell them apart and does not try. The log can, and does:
+a failure is a warning naming its cause, a fund is not logged as a fault at
+all, and an unset ``FINNHUB_API_KEY`` says so once per fetch rather than 26
+times.
+
+Things that are deliberately not here
+-------------------------------------
 
 **Greeks.** The provider computes them and the schema does not carry them:
 PRD 8.2 deferred greeks in the ticket, and a delayed greek is a display value
@@ -132,7 +143,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Path, Query, Request
 
-from corollary.api.deps import ApiError, ProviderDep
+from corollary.api.deps import ApiError, FundamentalsDep, ProviderDep
 from corollary.api.schemas import (
     AnalyticsSource,
     IntradayPoint,
@@ -143,7 +154,7 @@ from corollary.api.schemas import (
     StockQuote,
     UnderlyingQuote,
 )
-from corollary.calendars import nyse_session_close
+from corollary.calendars import nyse_session_close, nyse_session_open
 from corollary.data.providers.interface import (
     AnalyticsSource as ProviderAnalyticsSource,
 )
@@ -157,9 +168,16 @@ from corollary.data.providers.interface import (
 from corollary.data.providers.interface import (
     OptionContract as ContractTerms,
 )
+from corollary.data.providers.fundamentals import (
+    FundamentalsError,
+    FundamentalsProvider,
+    MarketCap,
+)
 from corollary.instruments import OccSymbol, OptionType, parse_occ_symbol
 
 __all__ = [
+    "MARKET_CAP_FETCH_BUDGET_SECONDS",
+    "MARKET_CAP_RETRY_TTL",
     "UNDERLYING_SYMBOLS",
     "UNIVERSE",
     "UNIVERSE_SYMBOLS",
@@ -277,6 +295,32 @@ AVG_VOLUME_SESSIONS: Final = 30
 #: :func:`_session_state` and :class:`IntradayCache`.
 SESSION_VOLUME_TTL: Final = timedelta(seconds=60)
 
+#: How long before a **failed** market-cap fetch is tried again.
+#:
+#: Not a TTL on the figure. A market cap is a daily number and an answer is
+#: held for the trading date, settled by :attr:`MarketCap.is_answered`; this
+#: bounds the other case. Without it a vendor outage would either blank the
+#: column until tomorrow (if failures were cached as answers) or re-ask 26
+#: symbols every two-second poll, which is 780 requests a minute against a
+#: 60/min ceiling.
+MARKET_CAP_RETRY_TTL: Final = timedelta(minutes=5)
+
+#: The longest the price table will wait for the market-cap column.
+#:
+#: The column's failure mode was written for a *fast* failure -- a 401, a
+#: 500, a refused connection -- and a hanging vendor is neither fast nor a
+#: failure. ``httpx``'s own 15s timeout is the only other bound, and
+#: :meth:`IntradayCache.resolve` holds its lock across the fetch, so one
+#: unresponsive Finnhub would stall every concurrent poll of a table of
+#: *prices* for fifteen seconds over one display-only cell.
+#:
+#: Five seconds is generous against the measured shape of the call: 26
+#: concurrent requests into a bucket that starts full at 60, one round trip
+#: each, once per trading date. Exceeding it is a vendor problem and is
+#: recorded as one; the entries expire on :data:`MARKET_CAP_RETRY_TTL` and
+#: the next poll tries again.
+MARKET_CAP_FETCH_BUDGET_SECONDS: Final = 5.0
+
 #: How long after a session's close its daily bar covers the whole session.
 #:
 #: The historical feed serves up to fifteen minutes ago, so a bar read at
@@ -340,42 +384,86 @@ DAILY_TIMEFRAME: Final = "1D"
 #: so the default response is exactly what it was before ``period`` existed.
 DEFAULT_PERIOD: Final = f"{HISTORY_DAYS}D"
 
-#: Minutes in a session **as the bars feed reports one**, not as the regular
-#: session runs.
+#: Minutes in a session **as this endpoint serves one**: 09:30--16:00, the
+#: regular session and nothing either side.
 #:
-#: Measured rather than assumed, and the measurement is the whole point: one
-#: full session of NVDA at ``5Min`` comes back as **192 bars**, not the 78 that
-#: 09:30--16:00 would give. Alpaca includes extended hours, roughly
-#: 04:00--20:00 ET, so an estimate built on regular hours is 2.5x too
-#: generous and every ceiling derived from it is 2.5x too loose.
+#: It was 960 -- the ~04:00--20:00 ET the bars feed actually returns, measured
+#: as 192 bars for one NVDA session at ``5Min`` rather than 78. The series is
+#: now filtered to regular hours at the one place bars become points (see
+#: :func:`_in_regular_session`), so the extended figure would over-estimate
+#: every window by 2.5x and refuse combinations that comfortably fit.
 #:
-#: An upper bound rather than an exact figure: a half-day's extended session
-#: is shorter, so the estimate over-counts there, which is the safe direction
-#: for a ceiling. The *session count* underneath it is exact and comes from
-#: the market calendar -- see :func:`_sessions_in`.
-EXTENDED_SESSION_MINUTES: Final = 960
+#: **This loosens the ceiling, deliberately.** A period and timeframe that
+#: :func:`_finest_timeframe_to_suggest` previously refused may now be served
+#: -- a year at ``1H`` *estimates* 251 x 7 = 1,757 points where it used to
+#: estimate 251 x 16 = 4,016 and be refused. That is the safe direction: the
+#: estimate is being corrected downwards to match what is actually returned,
+#: not relaxed away from it. :data:`MAX_SERIES_POINTS` and
+#: :data:`MAX_RESPONSE_POINTS` are unchanged and still bound the pair.
+#:
+#: **At ``1H`` the estimate is seven a session and the response carries six**
+#: -- 251 x 6 = 1,506 over that year, not 1,757. An hourly bar's grid cannot
+#: begin at 09:30, so the opening half hour arrives inside the 09:00 bar and
+#: is dropped with it; :func:`_in_regular_session` states the mechanism and
+#: :func:`_bars_per_session` says why the estimate keeps the seventh anyway.
+#:
+#: Still an upper bound rather than an exact figure: a half-day runs 09:30 to
+#: 13:00, so the estimate over-counts there, which is the safe direction for
+#: a ceiling. The *session count* underneath it is exact and comes from the
+#: market calendar -- see :func:`_sessions_in`.
+REGULAR_SESSION_MINUTES: Final = 390
 
 #: The most points one symbol's series may contain.
 #:
 #: **Expressed as "more points than any chart can render."** A chart in this
 #: app is about 900 pixels wide, so 2,000 points is already better than two
 #: per pixel and past the resolution a screen can show. Everything the range
-#: control actually needs sits well inside it: a day at ``5Min`` is 192
-#: points, a day at ``1Min`` is 960, a week at ``1H`` is 80, a year at ``1D``
-#: is 252. What it refuses is only the *combination* of a long period with a
-#: fine timeframe -- a year at ``5Min`` is ~48,000 points, which is fifty per
-#: pixel, tens of megabytes across a list of symbols, and invisible data paid
-#: for in full.
+#: control actually needs sits well inside it: a day at ``5Min`` is 78
+#: points, a day at ``1Min`` is 390, a week at ``1H`` is 35 estimated and 30
+#: served (see :func:`_bars_per_session`), a year at ``1D`` is 252. What it
+#: refuses is only the *combination* of a long period with a fine timeframe
+#: -- a year at ``5Min`` is ~19,600 points, which is twenty per pixel,
+#: megabytes across a list of symbols, and invisible data paid for in full.
+#:
+#: Unchanged by the move to regular hours. It is a statement about what a
+#: chart can draw, which no filtering on the data side alters; what changed
+#: is the *estimate* measured against it -- see
+#: :data:`REGULAR_SESSION_MINUTES`.
 MAX_SERIES_POINTS: Final = 2_000
 
 #: The most points one **response** may contain, across every symbol in it.
 #:
 #: A per-symbol ceiling is not a bound on this endpoint, because this endpoint
 #: takes a list: twenty-six symbols each just inside the per-symbol limit is a
-#: 52,000-point response. 20,000 is two things at once -- roughly 2 MB at the
-#: measured 110 bytes per bar, and **two pages** at Alpaca's 10,000-bar
-#: response cap, so a chart view costs at most two round trips against a
-#: ``data.alpaca.markets`` budget the Markets page is already polling into.
+#: 52,000-point response. 20,000 is roughly 2 MB at the measured 110 bytes
+#: per bar, and that -- bytes on the wire to the client -- is the whole of
+#: what it now bounds.
+#:
+#: **It is no longer two vendor pages, though it used to say it was.** The
+#: regular-hours filter runs on the way *out* of :func:`_fetch_intraday`,
+#: while the request going *in* still asks for the ~04:00--20:00 ET the feed
+#: serves whether asked or not: about 2.46x what this ceiling counts. Twenty-
+#: six symbols over one ``1Min`` session now passes at 390 x 26 = 10,140
+#: counted while fetching 960 x 26 = 24,960 bars -- three pages at Alpaca's
+#: 10,000-bar response cap, where before the filter the same request
+#: estimated 24,960 and was refused. The worst case this ceiling permits is
+#: ten symbols over five ``1Min`` sessions: ~49,000 bars, about **five**
+#: pages. Well inside ``_MAX_PAGES`` in the provider, so nothing raises; the
+#: cost is round trips against the shared 200/min ``data.`` budget, of which
+#: decision 18 of ``2026-09-10-phase-2-real-data-design.md`` already spends
+#: 150/min on the 400ms Markets poll. :func:`_fetch_intraday` is also the one
+#: series path with no cache behind it.
+#:
+#: **The number stays at 20,000 rather than dropping to ~8,000 to restore the
+#: two-page property.** Three reasons. The 2.46x is a property of the
+#: *intraday* fetch alone -- ``1D`` is one bar per session on both sides of
+#: the filter -- so scaling the ceiling by it would refuse daily windows that
+#: cost the vendor nothing extra, which is the default path and the common
+#: one. A ceiling counted in served points is the honest bound on the
+#: response; bounding the *fetch* is a second measurement and belongs where
+#: the fetch is described, not in a constant named for the response. And five
+#: pages is the worst *permitted* case rather than a typical one: this path
+#: runs when a user expands a chart, never on the poll.
 #:
 #: It clears every current caller: the six default underlyings over 400 days
 #: of daily closes is ~1,650 points, and all twenty-six is ~7,150.
@@ -425,6 +513,15 @@ class SessionVolume:
 ValueT = TypeVar("ValueT")
 
 FetchMany = Callable[[tuple[str, ...]], Awaitable[Mapping[str, ValueT]]]
+
+#: Whether a cached entry can still change before the trading date rolls.
+#:
+#: Takes the **value as well as the instant it was read**, because for two of
+#: the three things cached here the answer depends on the value: today's
+#: volume settles when the session does, but a market cap settles only if the
+#: vendor actually answered. Judged on the clock alone, a failed fetch would
+#: be pinned for the rest of the day exactly like a real figure.
+Settled = Callable[[ValueT, datetime], bool]
 
 
 class SessionCache(Generic[ValueT]):
@@ -488,7 +585,7 @@ class IntradayCache(Generic[ValueT]):
     late.
 
     ``settled`` is the other half of "a bounded slice". It is asked about the
-    instant an entry was **read**, and answering ``True`` means nothing that
+    **value** and the instant it was **read**, and answering ``True`` means nothing that
     happens before the date rolls can change what was read -- so the entry
     keeps its value and the TTL stops applying to it. Today's volume settles
     when today's session finishes, which on a weekend or a holiday is before
@@ -525,7 +622,7 @@ class IntradayCache(Generic[ValueT]):
         today: date,
         now: datetime,
         fetch: FetchMany[ValueT],
-        settled: Callable[[datetime], bool] | None = None,
+        settled: Settled[ValueT] | None = None,
     ) -> dict[str, ValueT]:
         async with self._lock:
             if self._day != today:
@@ -549,10 +646,10 @@ class IntradayCache(Generic[ValueT]):
             }
 
     def _drop_expired(
-        self, *, now: datetime, settled: Callable[[datetime], bool] | None
+        self, *, now: datetime, settled: Settled[ValueT] | None
     ) -> None:
         for symbol, read_at in list(self._read_at.items()):
-            if settled is not None and settled(read_at):
+            if settled is not None and settled(self._values[symbol], read_at):
                 continue
             if now - read_at >= self._ttl:
                 self._values.pop(symbol, None)
@@ -576,6 +673,21 @@ class MarketCaches:
             SESSION_VOLUME_TTL
         )
         self.history: SessionCache[tuple[PricePoint, ...]] = SessionCache()
+        #: Market cap, one Finnhub request per symbol per trading date.
+        #:
+        #: An :class:`IntradayCache` rather than a :class:`SessionCache`
+        #: even though the value is a daily one, because the *failure* is
+        #: not daily: ``settled`` pins an answer for the date and lets a
+        #: failure expire, which is the whole difference between a column
+        #: that recovers from a transient 500 and one that does not.
+        #:
+        #: **Cold start is null, never stale and never invented.** The map
+        #: is empty when the process comes up, a symbol with no entry is
+        #: served ``null``, and the first request of the trading date is
+        #: what fills it.
+        self.market_cap: IntradayCache[MarketCap] = IntradayCache(
+            MARKET_CAP_RETRY_TTL
+        )
 
     def today(self) -> date:
         """The trading date in New York.
@@ -759,6 +871,52 @@ def _session_date(bar: Bar) -> date:
     return bar.at.astimezone(EASTERN).date()
 
 
+def _in_regular_session(at: datetime) -> bool:
+    """Whether ``at`` falls inside regular trading hours on its own session.
+
+    The bounds come from the market calendar for **that instant's session
+    date in New York**, never from a hardcoded 09:30--16:00: the Friday after
+    Thanksgiving closes at 13:00, and so do about nine other days a year.
+    Resolving one day's bounds and reusing them across a multi-session window
+    would be right for a window of one session and wrong for every other.
+
+    **Half-open: ``open <= at < close``.** Bars are stamped at the interval's
+    **open** (the vendor's convention, and the one
+    :class:`~corollary.api.schemas.IntradayPoint` documents the no-look-ahead
+    rule against), so at ``5Min`` the bar stamped 15:55 is the session's last
+    regular bar -- it covers 15:55--16:00 -- and the one stamped 16:00 covers
+    16:00--16:05, which is post-market. A closed interval would append one
+    post-market bar to every session in the window; excluding the open
+    instant would drop the opening bar of each.
+
+    **At ``1H`` this drops the opening half hour, unavoidably.** Alpaca's
+    hourly bars are aligned to the *Eastern hour*, so the bar covering
+    09:30--10:00 is stamped 09:00 (verified against
+    ``tests/fixtures/alpaca/stock_bars_hourly.json``, whose stamps run 04:00,
+    05:00 ... 19:00 ET) and that stamp is before the open. An hourly series
+    therefore begins at **10:00 ET** and runs six points on a full session,
+    three on a half-day. There is no exact answer available: the bar
+    straddles the boundary, so keeping it imports thirty minutes of
+    pre-market into a figure labelled "the move over the window" and dropping
+    it loses the opening thirty minutes. Dropping is the choice, because the
+    filter's whole purpose is that no extended-hours print reaches the
+    series. ``1H`` stays *askable* and
+    :func:`_finest_timeframe_to_suggest` stops *offering* it.
+
+    A date the calendar has nothing to say about -- a weekend, a holiday, or
+    one past the end of the published schedule -- is **not** in a session, so
+    an instant on it answers ``False`` and the caller drops it. That is the
+    same answer :func:`_sessions_in` gives such a day, and it has to be: a
+    bar counted by one and dropped by the other would make the size estimate
+    disagree with the response it is estimating.
+    """
+    day = at.astimezone(EASTERN).date()
+    opens, closes = nyse_session_open(day), nyse_session_close(day)
+    if opens is None or closes is None:
+        return False
+    return opens <= at < closes
+
+
 def _session_state(day: date, *, now: datetime) -> SessionState:
     """Whether ``day``'s own volume can still move, per the market calendar.
 
@@ -808,9 +966,18 @@ class SeriesSize:
     """How large a window would come back, before it is asked for.
 
     An estimate, and deliberately an over-estimate: :data:`
-    EXTENDED_SESSION_MINUTES` is the longest a session's bars can run, so a
-    window that passes this bound cannot exceed it in fact. The session count
-    is exact.
+    REGULAR_SESSION_MINUTES` is the longest a *served* session can run -- a
+    half-day is shorter and nothing is longer, because the series is filtered
+    to regular hours -- and ``1H`` is counted at seven bars a session where
+    six are served. The session count is exact.
+
+    **One point can still land past it: the live one.** During a session the
+    response appends the quote to close the fifteen minutes the historical
+    feed is short by, and that point is not a bar, so a ``1Min``/``5Min``/
+    ``15Min`` series -- where the per-session figure is otherwise exact --
+    can come back at estimate **+1**. Harmless against a ceiling that means
+    "more points than a chart can draw", and stated because "cannot exceed
+    it in fact" was the previous sentence here and is now untrue.
     """
 
     sessions: int
@@ -861,7 +1028,7 @@ def _sessions_in(start: date, end: date) -> int:
     Never a ratio of calendar days. 6--10 September 2026 is five days and
     **three** sessions -- a weekend and Labor Day -- and the difference decides
     whether a window is refused. Half-days count as sessions, which is right:
-    they are shorter, and :data:`EXTENDED_SESSION_MINUTES` is an upper bound
+    they are shorter, and :data:`REGULAR_SESSION_MINUTES` is an upper bound
     that already covers them.
 
     A day the calendar has nothing to say about -- past the end of the
@@ -878,14 +1045,27 @@ def _sessions_in(start: date, end: date) -> int:
 
 
 def _bars_per_session(timeframe: str) -> int:
-    """Bars one session yields at ``timeframe``, rounded up.
+    """Bars one regular session yields at ``timeframe``, rounded up.
 
-    960, 192, 64 and 16 for the four intraday resolutions; one for ``1D``.
+    390, 78, 26 and 7 for the four intraday resolutions; one for ``1D``. The
+    first three are exact for a full session, because 09:30 sits on their
+    grid. A half-day yields fewer of all four.
+
+    **``1H`` is the one over-estimate, and by one rather than by a half.**
+    The arithmetic rounds 6.5 up to 7; the response carries **six**, because
+    the bar covering 09:30--10:00 is stamped 09:00 -- Alpaca's hourly bars
+    are aligned to the Eastern hour -- and is dropped along with the
+    pre-market half of itself. See :func:`_in_regular_session`.
+
+    The seventh is kept anyway. This figure feeds a *ceiling*, and an
+    over-estimate is the safe side of one: correcting it to six would let
+    through windows nobody has measured, to save one bar a session on a
+    resolution :func:`_finest_timeframe_to_suggest` no longer even proposes.
     """
     if timeframe == DAILY_TIMEFRAME:
         return 1
     minutes = _TIMEFRAME_MINUTES[timeframe]
-    return -(-EXTENDED_SESSION_MINUTES // minutes)
+    return -(-REGULAR_SESSION_MINUTES // minutes)
 
 
 def _series_size(sessions: int, timeframe: str, *, symbol_count: int) -> SeriesSize:
@@ -903,16 +1083,55 @@ def _fits(size: SeriesSize) -> bool:
     )
 
 
-def _finest_timeframe_that_fits(sessions: int, *, symbol_count: int) -> str | None:
-    """The most detail this window can carry, or ``None`` if even ``1D`` cannot.
+#: Minutes past the hour at which NYSE opens.
+#:
+#: Not a session boundary and not a substitute for one -- every boundary in
+#: this module still comes from the market calendar, per bar, per session
+#: date. This is the *offset* of the open within the hour, which is what
+#: decides whether a bar grid can begin a bar there, and it is the same on a
+#: half-day: an early close is the only thing a half-day changes. Pinned by a
+#: test that walks the published calendar rather than taken on trust.
+_SESSION_OPEN_PAST_THE_HOUR: Final = 30
+
+
+def _can_begin_at_the_open(timeframe: str) -> bool:
+    """Whether ``timeframe``'s bar grid has a bar that *starts* at the open.
+
+    Alpaca's intraday bars are aligned to the Eastern hour and stamped at the
+    interval's open, so a grid whose step divides thirty has a bar beginning
+    at :30 and one whose step does not, does not. 1, 5 and 15 do; 60 does
+    not, which is why an hourly series begins at 10:00 ET --
+    :func:`_in_regular_session` has the mechanism.
+
+    ``1D`` is ``True`` and not a special case in spirit: a daily bar covers
+    the session, open included, whatever the session's length.
+    """
+    if timeframe == DAILY_TIMEFRAME:
+        return True
+    return _SESSION_OPEN_PAST_THE_HOUR % _TIMEFRAME_MINUTES[timeframe] == 0
+
+
+def _finest_timeframe_to_suggest(sessions: int, *, symbol_count: int) -> str | None:
+    """The most detail this endpoint will *recommend*, or ``None``.
 
     ``_TIMEFRAMES`` runs fine to coarse, so the first that fits is the best
     answer available -- which is what the refusal names. ``None`` means the
     period itself is the problem, or there are simply too many symbols, and
     the message says so instead of suggesting a timeframe that would also be
     refused.
+
+    **Fitting is necessary and not sufficient: a timeframe that cannot begin
+    a bar at the open is never suggested.** ``1H`` fits a great many windows
+    and serves every one of them without the session's first half hour, so
+    steering a caller onto it trades a refusal for a quietly incomplete
+    chart. It stays accepted when asked for explicitly -- removing a
+    documented resolution is a different change -- but the refusal for a year
+    at ``5Min`` now names ``1D``, which is the honest suggestion anyway: a
+    year of intraday bars is not a thing a ~900px chart can draw.
     """
     for name in _TIMEFRAMES:
+        if not _can_begin_at_the_open(name):
+            continue
         if _fits(_series_size(sessions, name, symbol_count=symbol_count)):
             return name
     return None
@@ -1001,7 +1220,7 @@ def _check_series_window(
     # nobody asked.
     remedy = "Shorten the period, or narrow ?symbols= to fewer names."
     if size.per_symbol > MAX_SERIES_POINTS:
-        suggestion = _finest_timeframe_that_fits(
+        suggestion = _finest_timeframe_to_suggest(
             size.sessions, symbol_count=symbol_count
         )
         if suggestion is not None:
@@ -1285,12 +1504,21 @@ async def _fetch_intraday(
     plan -- because ``stock_bars`` is a historical endpoint and resolves its
     own ``end``. They therefore stop fifteen minutes short of now; the live
     point that closes that gap is appended at response time, from the quote.
+
+    **Scoped to regular trading hours here, at the one place a bar becomes a
+    point.** Alpaca serves roughly 04:00--20:00 ET whether or not it is
+    asked to: one full NVDA session at ``5Min`` arrives 192 bars long, not
+    78. Three quarters of a 1D chart was therefore pre- and post-market
+    prints on a sliver of the volume, and the change figure beside it
+    measured a window nobody asked for. :func:`_in_regular_session` owns the
+    boundary rule, including what happens to a bar the calendar cannot place.
     """
     bars = await provider.stock_bars(symbols, timeframe=timeframe, start=start)
     return {
         symbol: tuple(
             IntradayPoint(at=bar.at, value=bar.close)
             for bar in bars.get(symbol, [])
+            if _in_regular_session(bar.at)
         )
         for symbol in symbols
     }
@@ -1304,6 +1532,96 @@ def _eastern_midnight(day: date) -> datetime:
     session's extended hours.
     """
     return datetime.combine(day, time.min, tzinfo=EASTERN).astimezone(timezone.utc)
+
+
+async def _fetch_market_caps(
+    fundamentals: FundamentalsProvider, symbols: Sequence[str]
+) -> Mapping[str, MarketCap]:
+    """Market caps for the symbols the cache is missing, never raising.
+
+    The interface promises an entry per symbol and no raise for a single
+    symbol's failure. This is the belt to that braces, and it holds for all
+    three ways the promise could be broken -- because the market-cap column
+    is supplementary and the price column is not:
+
+    * **A whole-call failure** -- a :class:`FundamentalsError`, or a vendor
+      unset at startup -- becomes an ``UNAVAILABLE`` entry per symbol.
+    * **A slow one.** The wait is bounded by
+      :data:`MARKET_CAP_FETCH_BUDGET_SECONDS`, because a hang is not a
+      failure and nothing else here would stop one: ``httpx``'s timeout is
+      15s and :meth:`IntradayCache.resolve` holds its lock across this call,
+      so an unresponsive vendor would otherwise stall every concurrent poll
+      of a table of prices for fifteen seconds over one display-only cell.
+    * **A fault in our own code**, which is logged at ERROR with its
+      traceback rather than at WARNING, and is *still* not a 500. The two
+      are kept apart by level and by event name for the reason
+      ``finnhub._log_internal_fault`` states at length: a vendor outage and
+      a bug are different events, and a table of prices may not fall over
+      for either.
+    """
+    try:
+        async with asyncio.timeout(MARKET_CAP_FETCH_BUDGET_SECONDS):
+            return await fundamentals.market_caps(symbols)
+    except (FundamentalsError, TimeoutError) as exc:
+        cause = (
+            f"the fundamentals vendor did not answer within "
+            f"{MARKET_CAP_FETCH_BUDGET_SECONDS:g}s"
+            if isinstance(exc, TimeoutError)
+            else str(exc)
+        )
+        logger.warning(
+            "market caps unavailable for %d symbol(s): %s",
+            len(symbols),
+            cause,
+            extra={
+                "event": "market_caps_unavailable",
+                "rule": (
+                    "a fundamentals failure -- including a slow one -- empties "
+                    "one column within a bounded wait and is logged; it never "
+                    "fails the table or invents a figure"
+                ),
+                "symbols": list(symbols),
+                "cause": cause,
+                "at": _utc_now().isoformat(),
+            },
+        )
+        return {symbol: MarketCap.unavailable(symbol, cause) for symbol in symbols}
+    except Exception as exc:  # noqa: BLE001 - a bug here must not blank prices
+        logger.error(
+            "the fundamentals provider raised %s for %d symbol(s)",
+            type(exc).__name__,
+            len(symbols),
+            exc_info=exc,
+            extra={
+                "event": "market_caps_internal_fault",
+                "rule": (
+                    "a display-only column never fails the price table, so a "
+                    "provider bug degrades one column -- recorded at error "
+                    "level with its traceback, never as a vendor outage"
+                ),
+                "symbols": list(symbols),
+                "cause": f"{type(exc).__name__}: {exc}",
+                "at": _utc_now().isoformat(),
+            },
+        )
+        return {
+            symbol: MarketCap.unavailable(
+                symbol, f"internal fault: {type(exc).__name__}"
+            )
+            for symbol in symbols
+        }
+
+
+def _market_cap_value(cap: MarketCap | None) -> Decimal | None:
+    """The figure, or ``null`` for any of the three reasons there is none.
+
+    A fund files no share count, a vendor outage answered nothing, and a
+    symbol not yet fetched on this trading date has no entry at all. All
+    three are ``null`` on the wire -- the client has no vocabulary for the
+    difference and a dollar column must not invent one -- and all three are
+    distinguishable in the log, which is where the difference is needed.
+    """
+    return None if cap is None else cap.value
 
 
 def _log_unpriced(symbols: Sequence[str], *, route: str) -> None:
@@ -1335,6 +1653,7 @@ def _log_unpriced(symbols: Sequence[str], *, route: str) -> None:
 @router.get("/stocks", summary="The stock table: price, change, volume, relative volume")
 async def stocks(
     provider: ProviderDep,
+    fundamentals: FundamentalsDep,
     caches: CachesDep,
     symbols: SymbolsQuery = None,
 ) -> list[StockQuote]:
@@ -1376,6 +1695,16 @@ async def stocks(
         today=today,
         fetch=lambda missing: _fetch_daily_volumes(provider, missing, today=today),
     )
+    caps = await caches.market_cap.resolve(
+        requested,
+        today=today,
+        now=now,
+        fetch=lambda missing: _fetch_market_caps(fundamentals, missing),
+        # An answer -- a figure, or a fund's legitimate null -- cannot change
+        # before the date rolls, so it is read once a day. A failure can, so
+        # it expires and is retried.
+        settled=lambda cap, _read_at: cap.is_answered,
+    )
     volumes = await caches.session_volume.resolve(
         requested,
         today=today,
@@ -1384,7 +1713,9 @@ async def stocks(
         # Today's figure climbs all session and then stops. Past the close it
         # is re-read once and held, so a closed market costs one request a day
         # rather than one a minute.
-        settled=lambda read_at: _session_state(today, now=read_at) == "completed",
+        settled=lambda _volume, read_at: (
+            _session_state(today, now=read_at) == "completed"
+        ),
     )
 
     table: list[StockQuote] = []
@@ -1416,10 +1747,7 @@ async def stocks(
                 volume_session=measured.state,
                 volume_date=measured.session,
                 avg_volume=measured.average,
-                # Finnhub, step 9. Null for a fund is the truth; null for a
-                # company is "not fetched yet", and both are better than a
-                # number nobody computed.
-                market_cap=None,
+                market_cap=_market_cap_value(caps.get(symbol)),
             )
         )
     _log_unpriced(unpriced, route="/api/markets/stocks")
@@ -1447,7 +1775,11 @@ async def underlyings(
         Query(
             description=(
                 "Resolution: 1Min, 5Min, 15Min, 1H or 1D. 1D fills history; "
-                "the other four fill intraday."
+                "the other four fill intraday, scoped to regular trading "
+                "hours (09:30–16:00 ET, earlier on a half-day). At 1H the "
+                "series begins at 10:00 ET: hourly bars are aligned to the "
+                "Eastern hour, so the bar containing the open also contains "
+                "half an hour of pre-market and is dropped with it."
             ),
         ),
     ] = DAILY_TIMEFRAME,
@@ -1489,7 +1821,16 @@ async def underlyings(
     the window on screen, and a chart that stops a quarter of an hour short
     reports on a window nobody is looking at. It is appended only when today
     has actually traded -- on a Saturday the last bar is Friday's and a point
-    stamped now would draw a flat line across the weekend.
+    stamped now would draw a flat line across the weekend -- and only while
+    the session is open, since after the close it would be the one
+    post-market point on a regular-hours chart.
+
+    **``intraday`` is regular trading hours only.** Alpaca's bars feed runs
+    roughly 04:00--20:00 ET, which is 192 five-minute bars a session rather
+    than 78, and a 1D chart made mostly of thin pre-market prints reports a
+    window nobody asked for. Both bounds come from the market calendar per
+    session, so a half-day ends at 13:00. ``history`` is untouched: a daily
+    bar is one point a session whatever hours it covers.
 
     **One field carries the answer and the other is empty.** ``history`` is
     daily closes, ``intraday`` is everything finer, and they are never both
@@ -1548,7 +1889,15 @@ async def underlyings(
         intraday = list(intradays.get(symbol, ()))
         if traded_today and daily:
             history.append(PricePoint(date=today, value=price))
-        elif traded_today:
+        elif traded_today and _in_regular_session(now):
+            # Bars stop fifteen minutes short of now, and during the session
+            # the quote closes that gap. Once the session has closed it must
+            # not: the series above is regular hours only, so a point at the
+            # wall clock would draw a post-market tick on an RTH chart, and
+            # re-stamping it at 16:00 would be worse -- the price by then is
+            # a post-market print, and stamping it at the close would report
+            # it as the closing price. The series ends at the last regular
+            # bar; ``price`` still carries what the name is trading at now.
             intraday.append(IntradayPoint(at=now, value=price))
         quotes.append(
             UnderlyingQuote(

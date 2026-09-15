@@ -37,10 +37,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from corollary.api.routes import markets as markets_routes
+from corollary.calendars import nyse_session_open
+from corollary.data.providers.fundamentals import (
+    FundamentalsError,
+    FundamentalsProvider,
+    MarketCap,
+)
 
 from .conftest import (
     FIXTURE_DIR,
     MARKET_DATA_RECORDED_AT,
+    FakeFundamentals,
     RecordingTransport,
     Route,
     chain_page,
@@ -525,7 +532,7 @@ async def test_a_figure_read_after_its_session_finished_outlives_the_ttl() -> No
     at = datetime(2026, 8, 14, 19, 0, tzinfo=timezone.utc)
     settled_at = at + timedelta(minutes=5)
 
-    def settled(read_at: datetime) -> bool:
+    def settled(_value: int | None, read_at: datetime) -> bool:
         return read_at >= settled_at
 
     async def read(offset: timedelta) -> int | None:
@@ -596,20 +603,185 @@ def test_a_day_with_no_session_has_no_session_in_progress() -> None:
     assert markets_routes._session_state(saturday, now=noon) == "completed"
 
 
-def test_market_cap_is_absent_because_it_is_not_alpacas_to_give(
+def test_a_companys_market_cap_is_dollars_and_a_funds_is_null(
     make_market_client: MarketClient,
 ) -> None:
-    """Finnhub is step 9. Until then the column is honestly empty.
+    """Decision 7's column, and the null that is not a zero.
 
-    A fund's market cap is legitimately null and a company's is merely not
-    fetched yet; the wire cannot tell those apart, and inventing a number for
-    either is the failure PRD 8.5 names.
+    The provider converts Finnhub's millions to whole dollars and
+    ``MarketCap.reported`` rounds there -- ``…522.442`` becomes ``…522`` --
+    so what the route owes is that *exact* integer and no rounding of its
+    own. Asserted exactly rather than through ``pytest.approx``, whose
+    relative tolerance on a figure this size is about ±$4.8M: a regression
+    quantising market caps to the nearest ten million dollars passed it,
+    which was measured rather than supposed. Every integer below 2**53 is
+    exact in a double, so equality against the JSON number is well defined.
+
+    The other half is a fund's absence serving as ``null``. CLAUDE.md:
+    coerced to zero, SPY sorts to the top of an ascending column of dollars
+    and reads as worth nothing.
+    """
+    fundamentals = FakeFundamentals(
+        {
+            "NVDA": MarketCap.reported("NVDA", Decimal("4849208193522.442")),
+            "SPY": MarketCap.not_filed("SPY", "a fund files no share count"),
+        }
+    )
+    client, _ = make_market_client(market_data_routes(), fundamentals=fundamentals)
+
+    table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert [row["symbol"] for row in table] == ["NVDA", "SPY"]
+    assert table[0]["marketCap"] == 4849208193522
+    assert table[1]["marketCap"] is None
+
+
+def test_a_market_cap_that_could_not_be_fetched_is_null_not_a_guess(
+    make_market_client: MarketClient,
+) -> None:
+    fundamentals = FakeFundamentals(
+        {
+            "NVDA": MarketCap.unavailable("NVDA", "GET /stock/profile2 returned 503"),
+            "SPY": MarketCap.not_filed("SPY"),
+        }
+    )
+    client, _ = make_market_client(market_data_routes(), fundamentals=fundamentals)
+
+    table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert [row["marketCap"] for row in table] == [None, None]
+    # The prices are untouched: a reference-data outage empties one column.
+    assert all(row["price"] is not None for row in table)
+
+
+def test_a_whole_call_failure_empties_one_column_and_is_logged(
+    make_market_client: MarketClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 8. The table still renders; the log says why the column did not.
+
+    Without the log, the first time this column empties nobody can tell an
+    outage from two funds.
+    """
+
+    class Exploding(FundamentalsProvider):
+        async def market_caps(self, symbols: Any) -> dict[str, MarketCap]:
+            raise FundamentalsError("GET /stock/profile2 failed: timed out")
+
+    client, _ = make_market_client(market_data_routes(), fundamentals=Exploding())
+
+    with caplog.at_level(logging.WARNING, logger="corollary.api.routes.markets"):
+        table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert [row["marketCap"] for row in table] == [None, None]
+    failures = [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "market_caps_unavailable"
+    ]
+    assert len(failures) == 1
+    assert "timed out" in failures[0].__dict__["cause"]
+    assert failures[0].__dict__["symbols"] == ["NVDA", "SPY"]
+
+
+def test_an_answer_is_fetched_once_a_day_rather_than_once_a_poll(
+    make_market_client: MarketClient,
+) -> None:
+    """The daily cache, which is what keeps 26 symbols inside 60 req/min.
+
+    A two-second poll re-asking every symbol would be 780 requests a minute
+    against a ceiling of sixty.
+    """
+    fundamentals = FakeFundamentals(
+        {
+            "NVDA": MarketCap.reported("NVDA", Decimal("4.5e12")),
+            "SPY": MarketCap.not_filed("SPY"),
+        }
+    )
+    client, _ = make_market_client(market_data_routes(), fundamentals=fundamentals)
+
+    table: list[dict[str, Any]] = []
+    for _ in range(3):
+        table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert fundamentals.calls == [("NVDA", "SPY")]
+    assert table[0]["marketCap"] == pytest.approx(4.5e12)
+
+
+def test_a_failure_is_retried_rather_than_blanking_the_column_all_day(
+    make_market_client: MarketClient,
+) -> None:
+    """A transient 503 must not cost the column until tomorrow.
+
+    The other half of the same predicate: an *answer* is pinned for the
+    trading date, a failure expires after ``MARKET_CAP_RETRY_TTL``. Judged on
+    the clock alone -- the shape ``settled`` had before this column existed --
+    the two would be held identically, and a vendor blip would empty the
+    column until the date rolled.
+    """
+    fundamentals = FakeFundamentals(
+        {
+            "NVDA": MarketCap.unavailable("NVDA", "503"),
+            "SPY": MarketCap.not_filed("SPY"),
+        }
+    )
+    client, _ = make_market_client(market_data_routes(), fundamentals=fundamentals)
+
+    clock = [MARKET_DATA_RECORDED_AT]
+    client.app.state.market_caches = markets_routes.MarketCaches(now=lambda: clock[0])
+
+    first = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    assert first[0]["marketCap"] is None
+
+    fundamentals.caps["NVDA"] = MarketCap.reported("NVDA", Decimal("4.5e12"))
+    # Inside the retry window: still the failure, and no second request.
+    clock[0] = MARKET_DATA_RECORDED_AT + timedelta(minutes=1)
+    second = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    assert second[0]["marketCap"] is None
+    assert len(fundamentals.calls) == 1
+
+    clock[0] = MARKET_DATA_RECORDED_AT + markets_routes.MARKET_CAP_RETRY_TTL
+    third = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert third[0]["marketCap"] == pytest.approx(4.5e12)
+    # SPY answered the first time and is never asked again.
+    assert fundamentals.calls == [("NVDA", "SPY"), ("NVDA",)]
+
+
+def test_a_cold_start_serves_null_rather_than_a_stale_or_invented_figure(
+    make_market_client: MarketClient,
+) -> None:
+    """Nothing is cached when the process comes up, and nothing is guessed.
+
+    A provider that answers for no symbol at all is the sharpest form of the
+    cold-start state: no entry, so no figure, so ``null`` -- never a zero and
+    never yesterday's.
+    """
+
+    class Silent(FundamentalsProvider):
+        async def market_caps(self, symbols: Any) -> dict[str, MarketCap]:
+            return {}
+
+    client, _ = make_market_client(market_data_routes(), fundamentals=Silent())
+
+    table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert [row["marketCap"] for row in table] == [None, None]
+
+
+def test_an_app_with_no_fundamentals_vendor_still_serves_the_table(
+    make_market_client: MarketClient,
+) -> None:
+    """The shipped state when ``FINNHUB_API_KEY`` is unset.
+
+    Decision 7 designed the null path for this column; 503-ing a screener of
+    prices over a reference-data key nobody set would be the larger error.
     """
     client, _ = make_market_client(market_data_routes())
 
     table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
 
     assert [row["marketCap"] for row in table] == [None, None]
+    assert all(row["price"] is not None for row in table)
 
 
 def test_a_symbol_outside_the_universe_is_refused_and_the_rule_is_logged(
@@ -1341,10 +1513,18 @@ def test_a_period_and_timeframe_too_fine_to_draw_are_refused_naming_a_coarser_on
 ) -> None:
     """The combination is what is bounded, not either half.
 
-    A year at ``5Min`` is ~48,000 points per symbol: ~5 paginated vendor
-    requests per symbol against a shared 200/min budget, megabytes on the
-    wire, and roughly fifty points per pixel on a chart that can draw about
-    nine hundred. The refusal has to name what to ask for instead.
+    A year at ``5Min`` is ~19,600 points per symbol -- 251 sessions of 78:
+    paginated vendor requests against a shared 200/min budget, megabytes on
+    the wire, and roughly twenty points per pixel on a chart that can draw
+    about nine hundred. The refusal has to name what to ask for instead.
+
+    **It names ``1D``, and deliberately not ``1H``.** A year of hourly bars
+    fits the ceiling once the series is scoped to regular hours -- 251 x 7 =
+    1,757 estimated, where the extended-session estimate put it at 4,016 and
+    refused it -- and it is still the wrong thing to steer a caller onto,
+    because an hourly grid cannot begin a bar at 09:30 and every session in
+    it would arrive without its opening half hour. A year of intraday bars
+    is not something a ~900px chart can draw either way.
     """
     client, transport = make_market_client(market_data_routes())
 
@@ -1357,7 +1537,8 @@ def test_a_period_and_timeframe_too_fine_to_draw_are_refused_naming_a_coarser_on
     )
 
     assert body["code"] == "invalid_series_window"
-    assert "1D" in body["message"]
+    assert "Ask for 1A at 1D instead" in body["message"]
+    assert "1H" not in body["message"]
     assert transport.requests == []
 
 
@@ -1366,20 +1547,23 @@ def test_the_ceiling_permits_the_largest_window_that_still_draws(
 ) -> None:
     """Every limit proves it rejects **and** proves it permits at the boundary.
 
-    Two sessions at ``1Min`` is 1,920 points -- inside the 2,000 ceiling by
-    eighty. Three is 2,880 and is not.
+    Five sessions at ``1Min`` is 1,950 points -- inside the 2,000 ceiling by
+    fifty. Six is 2,340 and is not. ``8D`` back from the recorded Thursday
+    reaches five sessions (a weekend and Labor Day are not sessions) and
+    ``9D`` reaches six, so the pair is one calendar day apart at the boundary
+    the ceiling actually draws.
     """
     client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
 
     permitted = client.get(
         "/api/markets/underlyings",
-        params={"symbols": "NVDA", "period": "2D", "timeframe": "1Min"},
+        params={"symbols": "NVDA", "period": "8D", "timeframe": "1Min"},
     )
     assert permitted.status_code == 200, permitted.text
 
     refused = client.get(
         "/api/markets/underlyings",
-        params={"symbols": "NVDA", "period": "3D", "timeframe": "1Min"},
+        params={"symbols": "NVDA", "period": "9D", "timeframe": "1Min"},
     )
     assert refused.status_code == 422, refused.text
 
@@ -1389,10 +1573,10 @@ def test_the_estimate_counts_sessions_from_the_calendar_not_calendar_days(
 ) -> None:
     """Half-days and holidays are real, and this is where that bites.
 
-    6--10 September 2026 is five calendar days and **three** sessions: the 5th
-    and 6th are a weekend and the 7th is Labor Day. Counting days rather than
-    sessions would put the estimate at 4,800 points where the window holds
-    2,880.
+    1--10 September 2026 is ten calendar days and **seven** sessions: the
+    5th and 6th are a weekend and the 7th is Labor Day. Counting days rather
+    than sessions would put the estimate at 3,900 points where the window
+    holds 2,730 -- and the difference is what decides the refusal.
     """
     client, _ = make_market_client(market_data_routes())
 
@@ -1400,12 +1584,12 @@ def test_the_estimate_counts_sessions_from_the_calendar_not_calendar_days(
         client,
         "/api/markets/underlyings",
         symbols="NVDA",
-        period="5D",
+        period="10D",
         timeframe="1Min",
     )
 
-    assert "2,880" in body["message"]
-    assert "4,800" not in body["message"]
+    assert "2,730" in body["message"]
+    assert "3,900" not in body["message"]
 
 
 def test_the_ceiling_counts_every_symbol_in_the_request(
@@ -1413,14 +1597,15 @@ def test_the_ceiling_counts_every_symbol_in_the_request(
 ) -> None:
     """One symbol's series is not the response, and the response is the cost.
 
-    ``/underlyings`` takes a list. A window each symbol can afford on its own
-    is one the request as a whole may not.
+    ``/underlyings`` takes a list. Two sessions at ``1Min`` is 780 points,
+    which any one symbol can afford four times over; across the 26-name
+    universe it is 20,280 and over the response ceiling by 280.
     """
     client, _ = make_market_client(market_data_routes(bars=intraday_bars()))
 
     one = client.get(
         "/api/markets/underlyings",
-        params={"symbols": "NVDA", "period": "1D", "timeframe": "1Min"},
+        params={"symbols": "NVDA", "period": "2D", "timeframe": "1Min"},
     )
     assert one.status_code == 200, one.text
 
@@ -1428,7 +1613,7 @@ def test_the_ceiling_counts_every_symbol_in_the_request(
         "/api/markets/underlyings",
         params={
             "symbols": ",".join(markets_routes.UNIVERSE_SYMBOLS),
-            "period": "1D",
+            "period": "2D",
             "timeframe": "1Min",
         },
     )
@@ -1496,3 +1681,395 @@ def test_history_days_and_period_together_are_refused_rather_than_ranked(
 
     assert body["code"] == "invalid_series_window"
     assert "history_days" in body["message"]
+
+
+# --------------------------------------------------------------------------
+# Regular trading hours: the extended-hours bars are not the chart
+# --------------------------------------------------------------------------
+#
+# Measured, not assumed. Alpaca's bars feed runs roughly 04:00--20:00 ET, so
+# one full session of NVDA at `5Min` comes back **192 bars, not 78**. The 1D
+# chart therefore drew mostly thin pre- and post-market prints, and the change
+# figure beside it measured a window nobody asked for.
+#
+# The bounds come from the market calendar per bar, for that bar's own session
+# date -- never a hardcoded 09:30--16:00, because a half-day closes at 13:00
+# and those are real.
+
+
+#: 04:00 ET on the recorded trading date: the first bar the extended feed
+#: serves. 192 five-minute bars from here reach 19:55 ET, the last one.
+SEP_10_EXTENDED_OPEN = datetime(2026, 9, 10, 8, 0, tzinfo=timezone.utc)
+
+#: 09:30 and 15:55 ET on that session -- the first and last bars a regular
+#: session yields at ``5Min``, both stamped at their interval's open.
+SEP_10_REGULAR_OPEN = datetime(2026, 9, 10, 13, 30, tzinfo=timezone.utc)
+SEP_10_LAST_REGULAR_BAR = datetime(2026, 9, 10, 19, 55, tzinfo=timezone.utc)
+
+#: 16:30 ET on the recorded trading date. The session has closed, the daily
+#: bar exists, and the live price is a post-market print.
+AFTER_THE_CLOSE = datetime(2026, 9, 10, 20, 30, tzinfo=timezone.utc)
+
+#: The Friday after Thanksgiving 2025, which closes at **13:00 ET**, asked at
+#: 14:00 ET -- an hour into what is post-market on that day alone.
+HALF_DAY_AFTER_THE_CLOSE = datetime(2025, 11, 28, 19, 0, tzinfo=timezone.utc)
+
+
+def bars_at(stamps: list[datetime], symbol: str = "NVDA") -> Route:
+    """A bars page stamped at exactly these instants, in the order given.
+
+    ``intraday_bars`` walks a fixed step from one start, which cannot express
+    the cases this section is about: a bar either side of a boundary, a
+    Saturday, or two sessions with the overnight gap between them.
+    """
+    rows_out = [
+        {
+            "t": stamp.isoformat().replace("+00:00", "Z"),
+            "o": 175.0,
+            "h": 176.0,
+            "l": 174.0,
+            "c": 175.5 + index,
+            "v": 1_000,
+            "n": 10,
+            "vw": 175.4,
+        }
+        for index, stamp in enumerate(stamps)
+    ]
+    body = json.dumps({"bars": {symbol: rows_out}, "next_page_token": None})
+    return lambda _request: (200, body)
+
+
+def five_minutes_from(start: datetime, count: int) -> list[datetime]:
+    return [start + timedelta(minutes=5 * index) for index in range(count)]
+
+
+def stamps_of(quote: dict[str, Any]) -> list[datetime]:
+    return [datetime.fromisoformat(point["at"]) for point in quote["intraday"]]
+
+
+def intraday_quote(
+    make_market_client: MarketClient,
+    route: Route,
+    *,
+    now: datetime,
+    period: str = "1D",
+    timeframe: str = "5Min",
+) -> dict[str, Any]:
+    """One symbol's quote, asked at ``now`` over bars the caller chose."""
+    client, _ = make_market_client(market_data_routes(bars=route), now=now)
+    return by_symbol(
+        rows(
+            client,
+            "/api/markets/underlyings",
+            symbols="NVDA",
+            period=period,
+            timeframe=timeframe,
+        )
+    )["NVDA"]
+
+
+def test_the_intraday_series_drops_the_extended_hours_bars(
+    make_market_client: MarketClient,
+) -> None:
+    """192 bars in, 78 out -- the regular session and nothing either side.
+
+    The defect in one assertion: three quarters of the points on the 1D chart
+    were pre- and post-market prints on a fraction of the volume, and the
+    change figure beside the chart was measured from 04:00 ET.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(five_minutes_from(SEP_10_EXTENDED_OPEN, 192)),
+        now=AFTER_THE_CLOSE,
+    )
+
+    stamps = stamps_of(quote)
+    assert len(stamps) == 78
+    assert stamps[0] == SEP_10_REGULAR_OPEN
+    assert stamps[-1] == SEP_10_LAST_REGULAR_BAR
+
+
+def test_the_session_bounds_are_half_open_so_the_close_bar_is_post_market(
+    make_market_client: MarketClient,
+) -> None:
+    """09:30 in, 09:25 out; 15:55 in, 16:00 out.
+
+    ``IntradayPoint.at`` is stamped at the interval's **open**, which is the
+    vendor's convention and the one the no-look-ahead rule depends on. So a
+    bar stamped 15:55 is the session's last regular bar -- it covers
+    15:55--16:00 -- and one stamped 16:00 covers 16:00--16:05, which is
+    post-market. A closed interval would append one post-market bar to every
+    session in the window.
+    """
+    inside = [SEP_10_REGULAR_OPEN, SEP_10_LAST_REGULAR_BAR]
+    outside = [
+        SEP_10_REGULAR_OPEN - timedelta(minutes=5),  # 09:25 ET
+        SEP_10_LAST_REGULAR_BAR + timedelta(minutes=5),  # 16:00 ET
+    ]
+
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(sorted(inside + outside)),
+        now=AFTER_THE_CLOSE,
+    )
+
+    # Equality, not membership: the kept stamps are the vendor's own, in the
+    # vendor's order. Filtering moves no point and renumbers nothing.
+    assert stamps_of(quote) == inside
+
+
+def test_a_half_day_is_measured_from_the_calendar_not_a_hardcoded_four(
+    make_market_client: MarketClient,
+) -> None:
+    """13:00 ET on the Friday after Thanksgiving: 12:55 kept, 13:00 dropped.
+
+    The case that makes this belong in ``calendars.py``. A hardcoded
+    09:30--16:00 filter passes every other test in this section and appends
+    three hours of post-market prints here, on about ten days a year that
+    cluster in the busiest weekly-expiry season there is.
+    """
+    opening = datetime(2025, 11, 28, 14, 30, tzinfo=timezone.utc)  # 09:30 ET
+    last_regular = datetime(2025, 11, 28, 17, 55, tzinfo=timezone.utc)  # 12:55 ET
+    first_post = datetime(2025, 11, 28, 18, 0, tzinfo=timezone.utc)  # 13:00 ET
+
+    quote = intraday_quote(
+        make_market_client,
+        bars_at([opening, last_regular, first_post]),
+        now=HALF_DAY_AFTER_THE_CLOSE,
+    )
+
+    assert stamps_of(quote) == [opening, last_regular]
+
+
+def test_a_multi_session_window_is_sessions_times_bars_per_session(
+    make_market_client: MarketClient,
+) -> None:
+    """Two extended sessions in, 156 regular points out, the gap intact.
+
+    Per-bar bounds, looked up for **that bar's own session date** -- not the
+    request's. Resolving one day's bounds and applying them across the window
+    would be right on a window of one session and quietly wrong on every
+    other.
+    """
+    day_before = SEP_10_EXTENDED_OPEN - timedelta(days=1)
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(
+            five_minutes_from(day_before, 192)
+            + five_minutes_from(SEP_10_EXTENDED_OPEN, 192)
+        ),
+        now=AFTER_THE_CLOSE,
+        period="2D",
+    )
+
+    stamps = stamps_of(quote)
+    assert len(stamps) == 2 * 78
+    eastern = [stamp.astimezone(markets_routes.EASTERN) for stamp in stamps]
+    assert {stamp.date() for stamp in eastern} == {
+        date(2026, 9, 9),
+        date(2026, 9, 10),
+    }
+    assert all(
+        (stamp.hour, stamp.minute) >= (9, 30) and stamp.hour < 16
+        for stamp in eastern
+    )
+
+
+def test_a_bar_on_a_day_with_no_session_is_dropped_not_bucketed(
+    make_market_client: MarketClient,
+) -> None:
+    """A Saturday stamp has no session bounds, so it is not a point.
+
+    Consistent with ``_sessions_in``, which does not count a day the calendar
+    has nothing to say about. The alternative -- keeping it, or filing it
+    under a neighbouring session -- would draw a point on a day the market
+    never opened.
+    """
+    saturday = datetime(2026, 9, 5, 17, 0, tzinfo=timezone.utc)
+
+    quote = intraday_quote(
+        make_market_client,
+        bars_at([saturday, SEP_10_REGULAR_OPEN]),
+        now=AFTER_THE_CLOSE,
+        period="1W",
+    )
+
+    assert stamps_of(quote) == [SEP_10_REGULAR_OPEN]
+
+
+def test_the_live_point_is_omitted_once_the_session_has_closed(
+    make_market_client: MarketClient,
+) -> None:
+    """A chart of the last session must not grow a point at the wall clock.
+
+    Bars stop fifteen minutes short of now and the quote closes that gap
+    during the session. After the close the same append would draw a
+    post-market tick on a chart that has just been scoped to regular hours --
+    and stamping it at 16:00 instead would be worse, since the price is a
+    post-market print and that would report it as the close.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(five_minutes_from(SEP_10_REGULAR_OPEN, 78)),
+        now=AFTER_THE_CLOSE,
+    )
+
+    assert stamps_of(quote)[-1] == SEP_10_LAST_REGULAR_BAR
+    # The price is still served; it is the *series* that stops at the close.
+    assert quote["price"]
+
+
+def test_the_live_point_is_still_appended_while_the_session_is_open(
+    make_market_client: MarketClient,
+) -> None:
+    """The clamp is a bound, not a removal -- the boundary case that permits.
+
+    15:10 ET is inside the session, so the fifteen-minute gap at the
+    right-hand edge is still closed by the quote.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(five_minutes_from(SEP_10_REGULAR_OPEN, 12)),
+        now=MARKET_DATA_RECORDED_AT,
+    )
+
+    stamps = stamps_of(quote)
+    assert stamps[-1] == MARKET_DATA_RECORDED_AT
+    assert quote["intraday"][-1]["value"] == quote["price"]
+
+
+# --------------------------------------------------------------------------
+# 1H: the one grid that cannot begin a bar at the open
+# --------------------------------------------------------------------------
+#
+# Alpaca's hourly bars are aligned to the *Eastern hour*, so the bar covering
+# 09:30--10:00 is stamped 09:00 -- before the open -- and the regular-session
+# filter drops it along with the half hour of pre-market it also carries. An
+# hourly series therefore begins at 10:00 ET and runs six points on a full
+# session, three on a half-day. There is no exact alternative: the bar
+# straddles the boundary, so keeping it imports pre-market into a figure
+# labelled "the move over the window" and dropping it loses the opening half
+# hour.
+#
+# `stock_bars_hourly.json` is a *recorded* response and not a synthetic one,
+# because everything here rests on the vendor's alignment and a fixture
+# stamped by hand would only pin the assumption being tested.
+
+
+def hourly_series(make_market_client: MarketClient) -> list[datetime]:
+    """The served hourly series over the two sessions the recording covers.
+
+    Asked at 14:00 ET on the half-day, which is after its 13:00 close, so no
+    live point is appended and the series is bars alone.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        single("stock_bars_hourly"),
+        now=HALF_DAY_AFTER_THE_CLOSE,
+        period="1W",
+        timeframe="1H",
+    )
+    return [stamp.astimezone(markets_routes.EASTERN) for stamp in stamps_of(quote)]
+
+
+def test_the_recorded_hourly_bars_are_stamped_on_the_eastern_hour() -> None:
+    """The vendor fact the rest of this section rests on.
+
+    Every stamp in the recording is exactly on the hour in New York, 04:00
+    through 19:00, which is what puts 09:30 off the grid. Asserted against
+    the file rather than described in a comment: if Alpaca ever re-aligns its
+    hourly bars to the session, this is the test that should fail first.
+
+    The 09:00 bar is **present** in the recording, so what the next test
+    measures is the filter dropping it rather than the vendor omitting it.
+    """
+    stamps = [
+        datetime.fromisoformat(bar["t"].replace("Z", "+00:00")).astimezone(
+            markets_routes.EASTERN
+        )
+        for bar in fixture("stock_bars_hourly")["bars"]["NVDA"]
+    ]
+
+    assert stamps, "the recording is empty"
+    assert all((stamp.minute, stamp.second) == (0, 0) for stamp in stamps)
+    assert [
+        stamp.strftime("%H:%M")
+        for stamp in stamps
+        if stamp.date() == date(2025, 11, 26)
+    ] == [f"{hour:02d}:00" for hour in range(4, 20)]
+
+
+def test_an_hourly_series_begins_at_ten_because_the_open_bar_holds_pre_market(
+    make_market_client: MarketClient,
+) -> None:
+    """Six points on a full session and three on a half-day, from 10:00 ET.
+
+    The 6-vs-7 question, answered here rather than only in a docstring.
+    ``_bars_per_session("1H")`` estimates seven a session and the response
+    carries six; the estimate keeps the seventh on purpose, because it feeds
+    a ceiling and over-counting is the safe side of one.
+
+    ``1H`` is still served when it is asked for explicitly -- this request
+    is a 200 -- it is only no longer *suggested*. See
+    ``test_the_suggestion_skips_a_timeframe_that_fits_but_misses_the_open``.
+
+    The recording also opens with a 19:00 ET bar from the evening of the
+    25th, because a date-only ``start`` is UTC midnight. It is post-market on
+    a session outside the window and is dropped like any other.
+    """
+    served = hourly_series(make_market_client)
+
+    assert [(stamp.date(), stamp.strftime("%H:%M")) for stamp in served] == [
+        (date(2025, 11, 26), "10:00"),
+        (date(2025, 11, 26), "11:00"),
+        (date(2025, 11, 26), "12:00"),
+        (date(2025, 11, 26), "13:00"),
+        (date(2025, 11, 26), "14:00"),
+        (date(2025, 11, 26), "15:00"),
+        # 13:00 close: the 13:00 bar is the first post-market one.
+        (date(2025, 11, 28), "10:00"),
+        (date(2025, 11, 28), "11:00"),
+        (date(2025, 11, 28), "12:00"),
+    ]
+
+
+def test_the_suggestion_skips_a_timeframe_that_fits_but_misses_the_open(
+    make_market_client: MarketClient,
+) -> None:
+    """``1H`` fits a year comfortably and is still not offered.
+
+    Both halves matter. If the first assertion failed -- if ``1H`` were
+    merely too large here -- the second would pass for the wrong reason and
+    go on passing after the rule that skips it had been deleted.
+    """
+    sessions = 251
+
+    assert markets_routes._fits(
+        markets_routes._series_size(sessions, "1H", symbol_count=1)
+    )
+    assert (
+        markets_routes._finest_timeframe_to_suggest(sessions, symbol_count=1) == "1D"
+    )
+
+
+def test_every_published_session_opens_at_the_same_offset_past_the_hour() -> None:
+    """``_SESSION_OPEN_PAST_THE_HOUR`` is read off the calendar, not assumed.
+
+    Two years of dates, half-days and holidays included -- an early close is
+    the only thing a half-day changes, and this is what says so. The constant
+    decides which grids can represent the open, so a calendar that ever
+    disagreed with it would silently change which timeframe a refusal names.
+    """
+    day, sessions = date(2025, 1, 1), 0
+    while day <= date(2026, 12, 31):
+        opens = nyse_session_open(day)
+        if opens is not None:
+            eastern = opens.astimezone(markets_routes.EASTERN)
+            assert (
+                eastern.minute,
+                eastern.second,
+            ) == (markets_routes._SESSION_OPEN_PAST_THE_HOUR, 0), day
+            sessions += 1
+        day += timedelta(days=1)
+
+    assert sessions > 450, sessions

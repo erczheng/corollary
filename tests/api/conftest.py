@@ -42,6 +42,10 @@ from corollary.data.providers.alpaca import (
     AlpacaProvider,
     FeedConfig,
 )
+from corollary.data.providers.fundamentals import (
+    FundamentalsProvider,
+    MarketCap,
+)
 from corollary.db.models import Base
 from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine.execution.alpaca import AlpacaBroker
@@ -251,6 +255,29 @@ def paper_broker() -> RecordedBroker:
 @pytest.fixture
 def cash_broker() -> RecordedBroker:
     return RecordedBroker(label="cash")
+
+
+class FakeFundamentals(FundamentalsProvider):
+    """A fundamentals provider that serves a script and counts its calls.
+
+    The call count is the point of the fixture, not decoration: the daily
+    cache's whole job is that twenty-six symbols cost twenty-six requests a
+    day rather than twenty-six every two seconds, and nothing else can
+    observe that.
+    """
+
+    def __init__(self, caps: Mapping[str, MarketCap] | None = None) -> None:
+        self.caps: dict[str, MarketCap] = dict(caps or {})
+        self.calls: list[tuple[str, ...]] = []
+
+    async def market_caps(self, symbols: Sequence[str]) -> dict[str, MarketCap]:
+        self.calls.append(tuple(symbols))
+        return {
+            symbol: self.caps.get(
+                symbol, MarketCap.unavailable(symbol, "not scripted")
+            )
+            for symbol in symbols
+        }
 
 
 @pytest.fixture
@@ -506,7 +533,10 @@ def make_market_client(
     stack = ExitStack()
 
     def build(
-        route: Route, *, now: datetime = MARKET_DATA_RECORDED_AT
+        route: Route,
+        *,
+        now: datetime = MARKET_DATA_RECORDED_AT,
+        fundamentals: FundamentalsProvider | None = None,
     ) -> tuple[TestClient, RecordingTransport]:
         transport = RecordingTransport(route)
         provider = AlpacaProvider(
@@ -523,6 +553,11 @@ def make_market_client(
         registry = ServiceRegistry(
             brokers={AccountMode.PAPER: lambda: paper_broker},
             provider=lambda: provider,
+            # Absent unless a test asks for one, so the registry's own
+            # "no fundamentals vendor configured" path is what the rest of
+            # the suite exercises -- which is also the shipped state when
+            # FINNHUB_API_KEY is unset.
+            fundamentals=None if fundamentals is None else (lambda: fundamentals),
             missing_live_credentials=("ALPACA_LIVE_API_KEY", "ALPACA_LIVE_SECRET_KEY"),
         )
         app = create_app(registry=registry, db_engine=db_engine)

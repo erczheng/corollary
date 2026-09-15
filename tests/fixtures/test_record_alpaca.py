@@ -44,10 +44,20 @@ from record_alpaca import (  # noqa: E402
     parse_sections,
     scrub,
 )
-from tests.test_hard_rules import WRITE_VERBS  # noqa: E402
+from tests.test_hard_rules import WRITE_VERBS, recorders  # noqa: E402
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "alpaca"
+FIXTURES_ROOT = Path(__file__).resolve().parent
+FIXTURE_DIR = FIXTURES_ROOT / "alpaca"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Every vendor's recorded bodies, relative to :data:`FIXTURES_ROOT`.
+#:
+#: One level of directory rather than ``alpaca/`` by name. The sweep below
+#: was written for the Alpaca fixtures because those were the only ones; the
+#: day ``finnhub/`` appeared beside them, a secrets guard scoped to one
+#: vendor's directory was the same miss the sweep itself was widened to fix.
+#: Rule 6 is not per vendor.
+FIXTURE_JSON = "*/*.json"
 
 #: Twenty-three significant figures. A double holds about seventeen, so this
 #: is a value that cannot survive ``json.loads`` without ``parse_float``.
@@ -377,8 +387,8 @@ SWEEP_SKIP_DIRS = frozenset(
 WORKTREES = REPO_ROOT / ".claude" / "worktrees"
 
 #: Swept everywhere under the root, because prose is where the leak actually
-#: was. ``.json`` is swept only under :data:`FIXTURE_DIR` -- the recorder's own
-#: output, and the reason any of this exists.
+#: was. ``.json`` is swept only under :data:`FIXTURES_ROOT` -- the recorders'
+#: own output, and the reason any of this exists.
 SWEEP_SUFFIXES = (".py", ".md")
 
 
@@ -395,8 +405,8 @@ def swept_paths(root: Path) -> list[Path]:
         found.extend(
             here / name for name in sorted(filenames) if name.endswith(SWEEP_SUFFIXES)
         )
-    if FIXTURE_DIR.is_relative_to(root):
-        found.extend(sorted(FIXTURE_DIR.glob("*.json")))
+    if FIXTURES_ROOT.is_relative_to(root):
+        found.extend(sorted(FIXTURES_ROOT.glob(FIXTURE_JSON)))
     return found
 
 
@@ -416,6 +426,25 @@ def offenders(compiled: "re.Pattern[str]", root: Path) -> dict[str, list[str]]:
     return found
 
 
+#: The shapes a credential takes here. **Alpaca's three, and a stated gap.**
+#:
+#: The sweep's *scope* is every vendor -- ``.py``, ``.md`` and every
+#: recorded body under ``fixtures/*/`` -- but its *vocabulary* is
+#: single-vendor, and deliberately stays that way. A Finnhub token is about
+#: twenty lowercase alphanumerics with no prefix to anchor on, so matching it
+#: means matching bare ``[0-9a-z]{20}``: abbreviated hashes, base32 ids,
+#: request ids, and half the invented constants in this repository. A secret
+#: scanner that cries wolf is one that gets waved through, and the pattern
+#: that fires on ordinary test data would take the three below down with it.
+#:
+#: What carries that vendor instead is the **record-time** scrub in
+#: ``record_finnhub.py`` (``save``'s ``secrets`` check), which knows the
+#: literal token because it just used it, and aborts the run with nothing on
+#: disk rather than guessing at a shape. That is the load-bearing guard for
+#: Finnhub; this sweep is defence in depth behind it and does not reach it.
+#: Written down because a known gap behaves differently from an unnoticed
+#: one: the next person to add a vendor needs to know the scan will not cover
+#: their token, so the record-time abort is not optional there.
 IDENTIFIER_SHAPES = [
     (r"(?<![0-9A-Z])PA[0-9A-Z]{10}(?![0-9A-Z])", "an account number"),
     (r"(?<![0-9A-Z])PK[0-9A-Z]{14,}(?![0-9A-Z])", "an API key id"),
@@ -468,6 +497,24 @@ def test_no_file_in_the_repository_carries_an_account_identifier(
         "real, it does not belong in this repository at any strength of "
         "justification -- rule 6 has no exception for documentation."
     )
+
+
+def test_the_sweep_reads_every_vendors_recorded_bodies() -> None:
+    """A second vendor's fixtures are in scope, not just the first one's.
+
+    The ``.json`` half of the sweep globbed ``fixtures/alpaca/*.json``, which
+    was every recorded body there was until ``fixtures/finnhub/`` arrived.
+    A secret in the new directory would have missed the guard that exists for
+    exactly that -- the same shape as the miss the ``.py``/``.md`` half was
+    widened to fix, one directory further in.
+
+    Asserts the glob is populated as well as included: a pattern matching
+    nothing sweeps nothing and says so by passing.
+    """
+    recorded = set(FIXTURES_ROOT.glob(FIXTURE_JSON))
+    assert recorded, "no recorded fixtures found; the glob has gone stale"
+    assert {path.parent.name for path in recorded} >= {"alpaca", "finnhub"}
+    assert recorded <= set(swept_paths(REPO_ROOT))
 
 
 @pytest.mark.parametrize("pattern, what", IDENTIFIER_SHAPES)
@@ -545,18 +592,27 @@ def test_an_unknown_section_exits_rather_than_recording_nothing() -> None:
 # restored rather than left deleted. A ``.post(`` sitting in a comment or a
 # docstring is invisible to an AST and one diff away from being code, which
 # is the exact argument that keeps ``test_settings_reaches_no_order_path``
-# alive in ``tests/api/test_settings_routes.py``. The two files are in the
-# same position -- neither holds prose about these verbs, neither has any
-# reason to grow some -- so they get the same guard for the same stated
-# reason. If either one ever needs to *discuss* a write verb, delete the text
-# half there and say why; do not weaken the parsed one.
+# alive in ``tests/api/test_settings_routes.py``. Every recorder is in the
+# same position -- none holds prose about these verbs, none has any reason to
+# grow some -- so they get the same guard for the same stated reason. If one
+# of them ever needs to *discuss* a write verb, delete the text half there
+# and say why; do not weaken the parsed one.
+#
+# **Both halves walk the same scope, and that took two goes.** The parsed
+# half was generalised to every ``record_*.py`` when ``record_finnhub.py``
+# arrived in the scope of no guard at all; this half was left reading one
+# hardcoded path, so a commented-out ``client.post(...)`` -- left as a
+# re-recording note in a script that loads ``.env`` and holds live
+# credentials -- failed nothing in the new file while the identical line
+# failed immediately in the old one. Half a guard on half the files is the
+# same miss one directory further in.
 #
 # This file stays bare of ``@pytest.mark.risk``, being dev tooling that is
 # never on the "before any engine change" path.
 # --------------------------------------------------------------------------
 
 
-def test_the_recorder_names_no_write_verb_even_in_prose() -> None:
+def test_no_recorder_names_a_write_verb_even_in_prose() -> None:
     """Read-only probes, enforced rather than intended -- the text half.
 
     Phase 2 places no order at all, and a recorder that could POST would be a
@@ -564,18 +620,26 @@ def test_the_recorder_names_no_write_verb_even_in_prose() -> None:
     ``tests/test_hard_rules.py`` proves no write verb is *called*; this proves
     none is *written*, commented out or otherwise.
 
-    The verbs are **imported** from that file, not listed again here. A
-    hand-copied list is content-identical right up to the day Alpaca invents
-    a seventh verb -- which is the eventuality the parsed guard's own
-    docstring anticipates -- and then the text half goes stale with nothing
-    failing. Silent scope decay is the exact failure ``tests/test_hard_rules
-    .py`` names as its reason for existing, and it would be a poor joke to
-    reproduce it in the guard standing beside it.
+    The verbs **and the files** are imported from that module, not restated
+    here. A hand-copied verb list is content-identical right up to the day
+    Alpaca invents a seventh verb -- which is the eventuality the parsed
+    guard's own docstring anticipates. A hand-named file is worse, and was
+    worse: this read ``record_alpaca.py`` alone while the parsed half had
+    already moved to every ``record_*.py``, so the second recorder had the
+    AST guard and not this one. ``recorders()`` carries its own floor, so an
+    empty scope raises there rather than passing here.
+
+    Silent scope decay is the exact failure ``tests/test_hard_rules.py``
+    names as its reason for existing, and it would be a poor joke to
+    reproduce it in the guard standing beside it. Twice.
     """
-    source = (Path(__file__).resolve().parent / "record_alpaca.py").read_text(
-        encoding="utf-8"
-    )
     assert WRITE_VERBS, "the verb list arrived empty; a guard over nothing passes"
-    for verb in sorted(WRITE_VERBS):
-        call = f".{verb}("
-        assert call not in source, f"the recorder gained a {call} call"
+    offenders = []
+    for path in recorders():
+        source = path.read_text(encoding="utf-8")
+        offenders.extend(
+            f"{path.name}: .{verb}("
+            for verb in sorted(WRITE_VERBS)
+            if f".{verb}(" in source
+        )
+    assert offenders == [], f"a recorder names a write verb in text: {offenders}"
