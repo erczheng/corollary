@@ -762,7 +762,7 @@ describe('data sources', () => {
     const sources = section('Data sources')
 
     expect(within(sources).getByText('Basic (free)')).toBeInTheDocument()
-    expect(within(sources).getByText(/30 streamed symbols/)).toBeInTheDocument()
+    expect(within(sources).getByText(/30 streamed equity symbols/)).toBeInTheDocument()
     expect(within(sources).getByText(/200 requests per minute/)).toBeInTheDocument()
   })
 

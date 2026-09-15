@@ -326,7 +326,7 @@ describe('the price tick', () => {
     useUIStore.getState().tick()
     const after = useUIStore.getState().underlyings
 
-    // The 30-symbol cap on the Basic plan is why the subscription is
+    // The Basic plan's 30-symbol equity cap is why the subscription is
     // scoped to open positions rather than to every symbol we know about.
     const held = new Set(PAPER.positions.map((p) => p.symbol))
     for (const symbol of Object.keys(before)) {
@@ -550,7 +550,7 @@ describe('attached exits', () => {
 
 /** The Markets poll. Distinct from `tick` on purpose — it stands in for a
  * snapshot request across the quoted universe, where the tick stands in
- * for a 30-symbol websocket scoped to open positions. */
+ * for a 30-symbol equity websocket scoped to open positions. */
 describe('pollMarkets', () => {
   it('moves every quoted symbol, not just the ones behind a position', () => {
     const before = { ...useUIStore.getState().underlyings }

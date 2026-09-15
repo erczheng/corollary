@@ -39,8 +39,8 @@ export function streamState(lastTickAt: string | null, now: number): StreamState
  *
  * Both say "Live", because both mean the same thing to whoever is reading:
  * prices are arriving. What differs is the mechanism, and that only shows
- * up in the tooltip — the stream is a 30-symbol websocket scoped to open
- * positions, the poll is a snapshot request across the quoted universe.
+ * up in the tooltip — the stream is a websocket scoped to open positions,
+ * the poll is a snapshot request across the quoted universe.
  * Labelling one of them "Polled" would suggest the numbers are less current
  * than they are. */
 export type FeedKind = 'stream' | 'poll'
@@ -78,7 +78,7 @@ export function LiveStatus({ at: feedAt, kind = 'stream' }: { at?: string | null
       : state === 'stale'
         ? 'No price has arrived recently. The numbers on this page are not current.'
         : kind === 'poll'
-          ? 'Polled snapshots across every quoted symbol. Chains are not streamed — the websocket is capped at 30 symbols and those are spent on open positions.'
+          ? 'Polled snapshots across every quoted symbol. Chains are not streamed — one chain is scores of contracts and the option stream carries 200 quotes on Basic.'
           : 'Streaming prices for the open positions in this account.'
 
   return (

@@ -1410,8 +1410,9 @@ const STOCK_SEEDS: {
  * that one map.
  *
  * The stream and the poll are still different things — the stream is capped
- * at 30 symbols and scoped to open positions, while polled snapshots are
- * bounded by a request budget instead. They write to the same prices. */
+ * per asset class (30 equity symbols, 200 option quotes) and scoped to open
+ * positions, while polled snapshots are bounded by a request budget
+ * instead. They write to the same prices. */
 export const MARKET_QUOTES: Record<string, UnderlyingQuote> = {
   ...UNDERLYINGS,
   ...Object.fromEntries(

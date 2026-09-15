@@ -141,7 +141,7 @@ interface UIState {
    *
    * A **third** feed, and the bar for adding one is that it stands in for a
    * different Alpaca mechanism with different limits — this is the news
-   * endpoint, which is neither the 30-symbol websocket nor the snapshot
+   * endpoint, which is neither the position websocket nor the snapshot
    * poll, and it is not account-scoped because a headline is not owned by
    * whichever keys are loaded. It also fails differently: silence on a
    * price stream means something broke, while silence here means nothing
@@ -164,11 +164,13 @@ interface UIState {
    * behind open positions.
    *
    * This is the *poll*, not the stream, and the distinction is a real one
-   * from CLAUDE.md: the websocket is capped at 30 symbols on the Basic
-   * plan, so it is spent on open positions, while snapshot requests are
-   * bounded by a 200/min budget instead and can cover a whole page of
-   * chains. Phase 2 swaps this for those requests and nothing downstream
-   * changes. */
+   * from CLAUDE.md: the websocket carries two budgets on the Basic plan —
+   * 30 symbols on the equity stream, 200 quotes on the option stream — and
+   * both are spent on open positions, which a full book fits with room to
+   * spare. A page of chains does not fit, because every contract is its own
+   * quote; snapshot requests are bounded by a 200/min budget instead and
+   * can cover that whole page. Phase 2 swaps this for those requests and
+   * nothing downstream changes. */
   pollMarkets: (elapsedMs?: number) => void
   /** Opens a position from a chain row — the Markets ticket.
    *
@@ -232,8 +234,9 @@ interface UIState {
    * Stands in for the Alpaca WebSocket, which Phase 2 puts in its place.
    * Only the active account ticks: `accountMode` is which keys are in use,
    * so the other book has no stream behind it. CLAUDE.md also caps the
-   * stream at 30 symbols on the Basic plan and scopes it to open
-   * positions — which is what this does, one symbol per position.
+   * Basic plan's equity stream at 30 symbols and scopes it to open
+   * positions — which is what this does, one underlying per position. The
+   * contracts themselves draw on a separate 200-quote option budget.
    *
    * This is the mock **broker**, not the risk manager. Fills and exit
    * triggers are simulated here because there is no market to get them
@@ -901,9 +904,9 @@ export const useUIStore = create<UIState>((set) => ({
        * Phase 2 and exist here only as seeds. */
       const notified: Notification[] = []
 
-      // The stocks behind the positions this account holds — one symbol
-      // per position, which is what keeps the subscription inside the
-      // 30-symbol cap the Basic plan imposes (CLAUDE.md).
+      // The stocks behind the positions this account holds — one underlying
+      // per position, which is what keeps the equity subscription inside the
+      // 30-symbol cap the Basic plan imposes on that stream (CLAUDE.md).
       const streamed = new Set(s.openPositions[mode].map((p) => p.symbol))
       const underlyings: Record<string, UnderlyingQuote> = { ...s.underlyings }
       for (const symbol of streamed) {

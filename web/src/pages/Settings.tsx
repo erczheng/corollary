@@ -541,10 +541,11 @@ export function Settings() {
           <p className="mt-4 max-w-prose text-caption text-on-surface-variant">
             This plan allows{' '}
             {plan.streamSymbols === null
-              ? 'unlimited streamed symbols'
-              : `${plan.streamSymbols} streamed symbols`}{' '}
-            and {formatInteger(plan.reqPerMin)} requests per minute. That cap is why open positions
-            stream while the Markets page polls — every option contract is its own symbol.
+              ? 'unlimited streamed equity symbols'
+              : `${plan.streamSymbols} streamed equity symbols`}{' '}
+            and {formatInteger(plan.reqPerMin)} requests per minute. Option contracts draw on a
+            separate quote budget. Together those are why open positions stream while the Markets
+            page polls — a book of positions fits comfortably, a page of chains does not.
           </p>
         </SettingsSection>
 

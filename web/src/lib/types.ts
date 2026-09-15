@@ -913,8 +913,13 @@ export type DataPlan = 'basic' | 'algo_trader_plus'
 export interface DataPlanCaps {
   label: string
   monthlyUsd: number
-  /** Websocket symbol cap, or null for unlimited. Thirty goes fast when
-   * every option contract is its own symbol (CLAUDE.md). */
+  /** The **equity** websocket's symbol cap, or null for unlimited.
+   *
+   * Not the whole story, and deliberately named for the stream it governs:
+   * option quotes are a *separate* budget — 200 on Basic, 1,000 on Algo
+   * Trader Plus, never unlimited — which this type does not yet carry, so
+   * anything rendering it must say "equity" rather than "symbols"
+   * (CLAUDE.md). */
   streamSymbols: number | null
   reqPerMin: number
 }

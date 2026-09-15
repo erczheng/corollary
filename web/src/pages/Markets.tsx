@@ -866,7 +866,8 @@ export function Markets() {
       <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
         Listed option chains and the stock universe the scanner draws from. These are snapshot
         reads, taken when you open the page and when you refresh — every option contract is its own
-        symbol and the socket’s 30-symbol budget belongs to open positions, so nothing here streams.
+        quote, and a page of chains is far past the option stream’s 200-quote budget, so nothing
+        here streams.
         Trading a row opens a position in your {accountMode === 'paper' ? 'Paper' : 'Cash'} account.
       </p>
 

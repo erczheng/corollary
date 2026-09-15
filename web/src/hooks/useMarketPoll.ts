@@ -5,11 +5,12 @@ import { useUIStore } from '../lib/store'
  *
  * Deliberately a sibling of `useLiveTick` rather than a parameter on it.
  * They stand in for two different Alpaca mechanisms with two different
- * limits: the websocket is capped at 30 symbols on the Basic plan and is
- * spent on open positions, while snapshot requests are bounded by a
- * 200/min budget and can cover a whole page of chains. Phase 2 replaces
- * this one with those requests and the other with the subscription, and
- * collapsing them now would mean pulling them apart then.
+ * limits: the websockets are capped per asset class on the Basic plan — 30
+ * equity symbols, 200 option quotes — and are spent on open positions,
+ * which a full book fits with room to spare. A page of chains does not fit,
+ * and is covered by snapshot requests under a 200/min budget instead.
+ * Phase 2 replaces this one with those requests and the other with the
+ * subscription, and collapsing them now would mean pulling them apart then.
  *
  * Pauses when the tab is hidden — a background tab burning polls is wasted
  * work in Phase 1 and wasted request budget in Phase 2. */
