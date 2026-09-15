@@ -193,7 +193,7 @@ Do not import `alpaca` anywhere except these two files: `data/providers/alpaca.p
 
 **Alpaca specifics worth knowing:**
 
-- **Data plan is Basic (free).** Real-time options is the `indicative` feed — a 15-minute-delayed derivative of OPRA, not OPRA itself. Equities real-time is IEX only. 200 req/min, and websocket streams are capped at **30 symbols**. Requesting `feed=opra` or `feed=sip` for a timestamp inside the last 15 minutes returns an auth error, not empty data — if a call fails on feed access, check the plan before debugging the code.
+- **Data plan is Basic (free).** Real-time options is the `indicative` feed — a 15-minute-delayed derivative of OPRA, not OPRA itself. Equities real-time is IEX only. 200 req/min. Websocket subscriptions are **two separate budgets, not one**: **30 symbols** on the equity stream and **200 quotes** on the option stream. Algo Trader Plus raises these to unlimited equity symbols and **1,000** option quotes — a higher ceiling on options, not the absence of one. Requesting `feed=opra` or `feed=sip` for a timestamp inside the last 15 minutes returns an auth error, not empty data — if a call fails on feed access, check the plan before debugging the code.
 - **Feed names are configuration, never literals.** Three env vars, read only inside
   `data/providers/alpaca.py`:
 
@@ -207,7 +207,7 @@ Do not import `alpaca` anywhere except these two files: `data/providers/alpaca.p
 - **Historical equity data uses SIP even on Basic — never default it to IEX.** IEX is
 ~2.5% of US equity volume; SIP is 100%. Any historical request whose `end` is more than 15 minutes old may use `feed=sip` for free. Only the latest/snapshot endpoints and the live stream are IEX-limited. This lands directly on the scanner: `min_avg_volume` in a strategy YAML compares
 against whatever feed produced the bars. Computed from IEX, a 5,000,000 threshold is filtering on a fortieth of real volume and means nothing like what the strategy author wrote.
-- **The 30-symbol stream cap is a design constraint, not a footnote.** Every option contract is its own symbol, so thirty goes fast. Scope the live stream to open positions plus recommended trades; the Markets page chains run on polled snapshots.
+- **The stream caps are a design constraint, not a footnote — and they are two budgets.** The 30-symbol cap is the *equity* stream; option contracts draw on a separate 200-quote budget. Every option contract is its own symbol, so a full book of eight grouped multi-leg positions reaches ~32 option symbols — comfortable against 200, while the 30 equity slots cover the underlyings. Scope the live stream to open positions plus recommended trades; the Markets page chains run on polled snapshots.
 - Historical options data **starts February 2024** — an Alpaca limit, not a fact about the world. OPRA history exists further back and other vendors sell it. A backtest window starting before Feb 2024 is a bug *against this provider*; revisit if a second `MarketDataProvider` is ever added.
 - **Historical options coverage is bars only, in practice.** There is no historical quotes endpoint at all — quotes are latest-only, via snapshot and chain. Trades exist but reach back **7 days**, so anything older than a week is bars and nothing else. The backtester must use the explicit spread model in `backtest/spread.py` and surface the assumption in every result. That model cannot be validated against real prints beyond the 7-day window, so treat every backtest fill price as an estimate, never a measurement.
 - **Backtesting still does not need the paid plan.** Everything older than 15 minutes is available on every feed, so the Feb 2024 → yesterday bulk download to Parquet runs fine on Basic — it just returns bars, per the point above. Only live quotes are degraded by the free tier.
@@ -441,7 +441,8 @@ expect.** Every item below produced working-looking code that was wrong:
 
 **Two feeds, not one: `store.tick()` streams and `store.pollMarkets()`
 polls.** Activity streams at 400ms, scoped to the symbols behind open
-positions — that is the 30-symbol websocket cap on the Basic plan. Markets
+positions — that is the 200-quote option websocket budget on the Basic
+plan; the separate 30-symbol equity cap covers their underlyings. Markets
 polls every 2s across *every* quoted symbol, which is what snapshot
 requests allow under a 200/min budget. They write to the same
 `underlyings` map, because one symbol has one price and a second map is how

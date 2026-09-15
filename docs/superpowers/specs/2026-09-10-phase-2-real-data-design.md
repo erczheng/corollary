@@ -2,6 +2,8 @@
 
 **Date:** 2026-09-10
 **Status:** Approved, not yet implemented. **Amended 2026-09-10** after probing the real paper account. Three claims taken from Alpaca's published specs turned out to be wrong on this plan, and two of them leave the Markets page blocked on a decision. See *What the probe reached, and what it could not* and *Open questions*.
+
+**Amended 2026-09-14.** Five things — four decisions, 17–20, and one verified constraint. One is a **factual correction with shipped code resting on it**: the 30-symbol websocket cap is the *equity* stream only, and the option stream carries a separate 200-quote budget, so `engine/stream.py` is currently rationing a resource that is not scarce. Two are cadence decisions taken by the account holder — an adaptive 400ms/5s Markets poll alongside a push-only position feed, and pulling the Algo Trader Plus subscription forward from Phase 6 to Phase 4. **Decision 20** is what the cadence becomes on the upgraded plan, written now so the upgrade is a config change and a list of deletions rather than a redesign under time pressure; the constraint is the series ceiling's fetch/serve asymmetry and `1H`'s inability to represent the session open, both out of the regular-trading-hours work committed the same day. See *The websocket cap is two budgets, not one* and *The series ceiling counts served points, not fetched bars* under Constraints, the rewritten *Feeds and budgets*, and decisions 17 through 20.
 **Scope:** The backend (`corollary/`), and the Dashboard, Activity, Markets and Account pages
 **Phase:** 2 — Alpaca paper connected, read-only. **No order reaches a broker.**
 
@@ -173,17 +175,162 @@ The **structural** fields on the same endpoint — `strike_price`, `expiration_d
 
 Detection is `root_symbol != underlying_symbol`. Sizing and P&L read `multiplier` per contract, never the frontend's `CONTRACT_MULTIPLIER = 100`.
 
+### The websocket cap is two budgets, not one — verified 2026-09-14
+
+**Spec, read twice from Alpaca's own subscription tables**, once by the
+account holder and once independently here before it was written down. The
+*"Not verified"* item below — *whether the 30-symbol cap is per-stream or
+global* — is answered, and the pessimistic reading this spec chose was wrong
+in the expensive direction.
+
+Alpaca's **Trading API** subscription tables (the Broker API tables are a
+different product and are not these):
+
+| Row | Equities Basic | Equities Algo Trader Plus | Options Basic | Options Algo Trader Plus |
+|---|---|---|---|---|
+| Websocket subscriptions | **30 symbols** | **Unlimited** | **200 quotes** | **1000 quotes** |
+| Historical API calls | 200 / min | 10,000 / min | 200 / min | 10,000 / min |
+| Real-time market coverage | IEX | All US Stock Exchanges | Indicative Pricing Feed | OPRA Feed |
+| Historical data limitation | latest 15 minutes | no restriction | latest 15 minutes | no restriction |
+
+**Two streams, two budgets, not one shared pool of thirty.** Every option
+contract is still its own symbol; there are simply 200 slots for them rather
+than 30, and the 30 equity slots are spent only on underlyings.
+
+Three consequences, in descending order of how much they cost:
+
+1. **`engine/stream.py` currently rations a resource that is not scarce, and
+   the failure that produces is the exact one the module exists to prevent.**
+   Its docstring reasons that *"grouped multi-leg reaches 32 option symbols at
+   eight positions … before a single underlying is counted"*, which is true
+   and no longer binding: 32 contracts fit inside 200 with 168 slots unused.
+   Run against a 30-slot pool, a full eight-position book returns `dropped`
+   units and surfaces *"N symbols not streamed"* for **position contracts that
+   had ~170 free slots available**, leaving those positions marking at a stale
+   price. A stale price looks exactly like a quiet market — the module's own
+   words — so this is a silent, directional wrong number arriving through a
+   wrong budget instead of through a silent server-side truncation. The
+   module's logic is right; its inputs are wrong.
+2. **"Unlimited" is true of the equity stream and false of the option
+   stream.** Algo Trader Plus raises options to **1000 quotes**, a real
+   ceiling. `runtime.UNLIMITED_STREAM_SYMBOL_CAP = 10_000` is a sound sentinel
+   for equities on the paid plan and is **wrong for options on it** — it would
+   let the engine subscribe past 1000 and be truncated or refused by the
+   server, which is precisely the silent truncation `stream.py` was written
+   against.
+3. **The Markets page has spare equity slots.** `max_concurrent_positions` is
+   8, so worst case eight distinct underlyings, leaving **~22 of the 30 equity
+   slots** free. Those are free real-time marks at zero REST cost. Decision 18
+   spends them.
+
+**Connection limits are a separate axis, and the Trading API tables do not
+carry one.** Checked deliberately, because the Broker API table has a *Stream
+Connection Limit* column and it would be easy to read it across: the Trading
+API Equities and Options tables have **no such row**. What the streaming docs
+state instead is *"the number of connections to a single endpoint from a user
+is limited based on the user's subscription, but in many subscriptions (or
+without one) this limit is 1"*, with a `406 connection limit exceeded` on a
+second one. **Per endpoint.** The stock stream, the option stream and
+`trade_updates` are three different endpoints, so one connection each is
+allowed and the three-socket design stands — and decision 1's *"Basic allows
+one websocket per account"* is imprecise in a way worth correcting rather than
+wrong in a way that changes anything: one *per endpoint*, which is still an
+argument for one process, since two processes would contend for the same
+endpoint and take the 406.
+
+### The series ceiling counts served points, not fetched bars — verified 2026-09-14
+
+**Probed, against a recorded fixture.** Two facts about the `period` /
+`timeframe` pair on `GET /api/markets/stocks`, both of which arrived with the
+regular-trading-hours filter committed on 2026-09-14 and neither of which is
+described anywhere else in this spec. They belong under Constraints because
+they spend the same 200/min `data.` bucket decision 18 already spends 150/min
+of, and because one of them changes what a range control may offer.
+
+**The fetch is about 2.46× the serve, so the size estimate bounds the
+response and not the vendor traffic behind it.** `_in_regular_session` runs on
+the way *out* of `_fetch_intraday`, while the request going *in* still asks
+for the ~04:00–20:00 ET the bars feed returns whether asked or not: 960
+minutes fetched per session against the 390 `REGULAR_SESSION_MINUTES` counts.
+Twenty-six symbols over one `1Min` session now passes at 390 × 26 = 10,140
+counted while fetching 960 × 26 = 24,960 bars — three pages at the provider's
+`_BARS_PAGE_LIMIT = 10_000` — and the worst case `MAX_RESPONSE_POINTS =
+20_000` permits is ten symbols over five `1Min` sessions: ~49,000 bars, about
+**five** pages. Well inside `_MAX_PAGES = 50`, so nothing raises.
+
+`MAX_RESPONSE_POINTS` was deliberately **not** scaled down by 2.46× to restore
+the old two-page property. The ratio is a property of the *intraday* path
+alone — `1D` is one bar per session on both sides of the filter — so scaling
+the ceiling by it would refuse daily windows that cost the vendor nothing
+extra, which is the default path and the common one. What is gone is the
+*rationale*, not the number: the constant no longer means "two round trips",
+it means "roughly 2 MB on the wire", and the round trips are now bounded by
+`_MAX_PAGES` somewhere else entirely. Five pages is tolerable against 200/min
+because this path runs when a human expands a chart rather than on the poll —
+but it is also the one series path with **no cache behind it**, so a held
+refresh key is five pages every time. Decision 20 is where this stops
+mattering.
+
+**`1H` cannot represent the session open.** Alpaca's hourly bars are aligned
+to the *Eastern hour* and stamped at the interval's left edge, so the bar
+covering 09:30–10:00 is stamped **09:00** and the half-open regular-hours
+test (`open <= at < close`) drops it. An hourly session therefore serves
+**six** points beginning at 10:00 ET rather than seven, and three on a
+half-day. Verified against `tests/fixtures/alpaca/stock_bars_hourly.json`:
+NVDA's stamps run `2025-11-26T14:00:00Z` (09:00 ET, dropped) then
+`T15:00:00Z` (10:00 ET, the first kept), and the 2025-11-28 half-day carries
+exactly three in-session stamps.
+
+There is no exact answer available — the bar straddles the boundary, so
+keeping it imports thirty minutes of pre-market into a figure labelled *"the
+move over the window"* and dropping it loses the opening thirty minutes — and
+dropping is the choice, because the filter's whole purpose is that no
+extended-hours print reaches the series. So `1H` stays **askable** on an
+explicit request and `_finest_timeframe_to_suggest` stops **offering** it: a
+range control that offers a timeframe which cannot show the open is a control
+that lies about the open. The estimate keeps the seventh bar anyway, since an
+over-estimate is the safe direction for a ceiling.
+
 ### Not verified
 
 Carried forward as implementation-time checks rather than assumptions:
 
-- **Whether the 30-symbol websocket cap is per-stream or global.** The option and stock streams are separate connections. Designed for the pessimistic reading (30 total) behind a config flag.
+- ~~**Whether the 30-symbol websocket cap is per-stream or global.**~~
+  **Resolved 2026-09-14** — per stream, and the two budgets differ. See *The
+  websocket cap is two budgets, not one* above and decision 17. The
+  pessimistic design was wrong in the direction that drops position marks.
+- **Whether option `trades` and `bars` subscriptions count against the same
+  200.** The table's unit is *"200 quotes"* and the equity row's unit is *"30
+  symbols"*, which is a difference in wording that may or may not be a
+  difference in metering. Corollary subscribes option **quotes** for marking,
+  so the pessimistic reading costs nothing today; it becomes a question the
+  moment anything wants option trades. An over-subscription is documented to
+  answer `405` with *"the symbol subscription request you sent would put you
+  over the limit set by your subscription package"* — check that against the
+  real socket rather than counting locally, and treat a 405 as authoritative
+  over any constant in this repo.
+- **Whether an equity symbol subscribed to two channels spends one slot or
+  two.** Same shape as above, and same mitigation: the server's `405` is the
+  source of truth, not `STREAM_SYMBOL_CAP`.
+- **Whether `/v2/stocks/snapshots` caps the `symbols` list.** The reference
+  documents *"a comma-separated list of stock symbols"* with **no stated
+  maximum and no pagination**, and `AlpacaProvider.stock_snapshots` issues
+  exactly one request for any symbol count. Decision 18's 400ms floor rests on
+  that one-request-per-cycle fact. If a cap exists undocumented and the
+  provider has to chunk, the per-cycle count rises and **the floor rises with
+  it** — measure it against the real Markets universe before the interval is
+  hard-coded, and derive the interval from the measured per-cycle count rather
+  than restating 400.
 - Market cap and average daily volume are absent from Alpaca (confident, unverified this session). `avgVolume` is computable from daily bars; market cap comes from Finnhub `/stock/profile2` → `marketCapitalization`.
 - The stock snapshots endpoint's exact field shape.
 - Whether `order_class: oco` is accepted for *options* — carried over unresolved from the Open Positions spec. Phase 6's problem, not this one.
 - `non_marginable_buying_power` semantics on a cash account.
 - Whether the same `id` really appears on both rows of an option-event pair, which would make `fill(activity_id UNIQUE)` drop half of every event. Check against the first real one.
 - Whether `open_interest` is null because of the plan or because Alpaca populates it only after a settlement cycle this account has never had.
+- Decision 20 carries **its own `Not verified` list**, for the claims that only
+  become checkable once the subscription is bought: vendor IV/greeks coverage
+  on OPRA, the option stream's metering unit at 1000, the inbound message rate
+  at full subscription, and what the first invoice actually charges.
 
 **Resolved since the original list:** the MCP 401 is diagnosed — the server holds non-paper keys, and the `.env` keys work — so the provider is no longer being built blind. The account, contracts, snapshot, portfolio-history and activities shapes above are probed.
 
@@ -453,7 +600,7 @@ options trader on both, and is the right thing to size against on both.
 
 ## Decisions
 
-Thirteen decisions, taken 2026-09-09 through 2026-09-12. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
+Nineteen decisions, taken 2026-09-09 through 2026-09-14. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
 
 ### 1. One process
 
@@ -799,6 +946,843 @@ funds, which file no share count, and that gap lands exactly on the `null`
 is ever dropped project-wide, this is the replacement for this column, and
 that decision belongs at the PRD §7 level rather than at step 9.
 
+### 17. Two stream budgets, planned one stream at a time — 2026-09-14
+
+The cap correction above is a fact; this is what the engine does about it.
+
+**`plan_subscriptions` is called twice — once per stream — and its allocation
+logic does not change.** Option units are fitted against 200, equity units
+against 30. The function already takes `cap` as a parameter and already
+refuses to split a unit, dedupes for free, cuts as a strict prefix and reports
+`dropped`, `not_streamed` and `spare_capacity`. All of that is correct at any
+cap. What was wrong was the number it was handed and the arithmetic in its
+docstring, and both are inputs.
+
+So the change is **constants, inputs and one new guard** — not logic:
+
+- `STREAM_SYMBOL_CAP = 30` becomes two named constants with the stream in the
+  name: an equity symbol cap of 30 and an option quote cap of 200. The single
+  unqualified name is the bug's habitat and should not survive the fix.
+- `runtime.stream_symbol_cap_for_plan(plan)` becomes per-stream. On Algo
+  Trader Plus the equity cap is the existing `UNLIMITED_STREAM_SYMBOL_CAP`
+  sentinel and **the option cap is 1000, a real ceiling** — the paid plan does
+  not make options unlimited, and using the 10,000 sentinel there would
+  subscribe past a limit the server enforces.
+- `EngineRuntime.plan_stream_subscriptions` returns **two plans**, and its
+  caller subscribes each to its own socket.
+- The UI's *"N symbols not streamed"* sums across both plans. One number, not
+  two banners: the reader's question is *"is anything I hold unmarked"*, and
+  which socket ran out is a detail for the log record, which already carries
+  `cap` per drop.
+
+**The one genuine logic addition is a refusal.** A `SubscriptionUnit` is
+all-or-nothing over its symbols, and that promise cannot survive a unit whose
+symbols land in two different budgets — half of it would be admitted and half
+dropped, which is the three-legs-live-one-leg-stale failure the all-or-nothing
+rule exists to prevent. So a unit carrying both an OCC symbol and an equity
+ticker is **rejected as a caller bug**, alongside the existing empty-unit and
+empty-symbol refusals. `contract_unit` and `underlying_unit` already satisfy
+this by construction; `recommendation_unit` does not, and Phase 4 must build a
+recommendation as one option unit plus one equity unit rather than one mixed
+unit. That mirrors what positions already do, where contracts and underlyings
+are separate units at separate priorities.
+
+**Blast radius, stated so nobody re-derives it.** `stream.py` is pure, has no
+vendor import, reads no clock and no environment, and is covered by
+`tests/engine/test_stream.py`. Every test that spells `STREAM_SYMBOL_CAP`
+keeps working against the renamed equity constant; the new work is a second
+set at 200 and one test proving a mixed unit raises. `runtime.py` owns the
+plan lookup and is where the per-stream split lands. Nothing else in `engine/`
+or `api/` reads the cap.
+
+Rejected: **teaching `plan_subscriptions` two budgets internally**, by giving
+it a cap per asset class and classifying symbols itself. It is the obvious
+move and it puts OCC-symbol parsing — a vendor-shaped concern — inside the one
+module that is deliberately ignorant of vendors, and it turns a prefix cut
+with one `remaining` into two interleaved cuts whose drop ordering has to be
+reasoned about again. Two calls reuse a proven function.
+
+Rejected: **leaving the cap at 30 because it is the safe direction.** It is
+not. A cap below the real one does not degrade gracefully here — it drops
+position contracts and reports a stale mark as a live one, which is the
+failure mode the module was written against. Under-spending a budget is only
+the safe direction when the thing being rationed is optional, and a held
+contract's mark is not.
+
+Rejected: **reading both caps from the environment**, next to the three feed
+names. Feed names are genuinely per-deployment; these are facts about a
+published price list, and the plan of record already lives in
+`ALPACA_DATA_PLAN`. A cap in the environment is a cap that can be raised by
+someone who has not paid, and the failure is silent truncation.
+
+### 18. Adaptive cadence: push where it matters, 400ms/5s where it does not — 2026-09-14
+
+**What was asked for and what is being built.** The account holder asked for
+~150–200ms in the foreground, ~5s in the background, positions *"as close to
+live as possible"*, and said account and activity may lag. 150ms is 400
+req/min and 200ms is 300 req/min against a hard 200/min; 300ms is exactly at
+the ceiling with nothing left for a chain. So the interval was not adopted as
+asked. What is built is **faster than what was asked for on the two surfaces
+that were the point of asking**, and the substitution was stated plainly
+rather than quietly rounded:
+
+| Surface | Cadence | Why |
+|---|---|---|
+| Position contracts and their underlyings | **push, no interval** | A websocket has no cadence to tune, and it beats 150ms. All 32 worst-case contracts fit the 200-quote budget (decision 17), so nothing is dropped. |
+| Markets, visible rows | **push** | The ~22 equity slots left after position underlyings. Zero REST cost, and Alpaca's own docs recommend the stream over polling the latest endpoints. |
+| Markets, every row | **400ms foreground, 5s background, stopped when hidden** | 150/min of a 200/min bucket, leaving ~49/min for on-demand chains. |
+| Account, positions, activity | **15s**, unchanged | Explicitly allowed to lag, and on the other token bucket anyway. |
+
+**Foreground, background and hidden are three states, not two.**
+
+- **Hidden** — `document.hidden` is true. The poll **stops**, which is what
+  `useMarketPoll` already does and it is kept. Not slowed to 5s: nothing is
+  rendered, so a background tab at 5s is 12 requests a minute of work nobody
+  can see, and the money-bearing numbers are on a server-side stream that does
+  not care whether a tab is painted. On return the first poll is immediate,
+  before the interval restarts — the existing behaviour, and the reason a
+  revisit does not show two seconds of skeletons.
+- **Foreground** — visible **and the Markets route is mounted**. 400ms. Which
+  page is open is the new term, and it is read from the router rather than
+  from a store flag: the component that consumes the data is the component
+  that mounts the hook, so `useMarketPoll(FOREGROUND_MS)` in `Markets.tsx` and
+  nothing to keep in sync. A flag set on navigation is a flag that survives a
+  crash, a modal, or a route the author forgot.
+- **Background** — visible, Markets not mounted. 5s, driven by one app-level
+  hook so exactly one interval exists at a time. It exists so that arriving at
+  Markets renders a five-second-old table instead of skeletons, and so the
+  server's session-volume and daily-series caches stay warm; at 12/min it is
+  noise against the budget.
+
+The two states are one hook and one constant pair, not two hooks: `Markets.tsx`
+mounting simply supersedes the app-level interval, and the app-level one
+resumes on unmount.
+
+**The server bounds the rate; the client only requests it.** This is the part
+that is easy to leave out and is load-bearing. The browser drives the poll and
+the API forwards it to Alpaca, so **two tabs, a reload loop, or a hot-reloading
+dev server multiply the Alpaca rate by the number of clients** — 400ms × 2
+clients is 300/min against a 200/min ceiling. `ratelimit.py`'s bucket *waits*
+rather than refusing, so the symptom is not an error: it is every Markets
+request getting slower until the page looks broken for a reason nothing logs.
+So `GET /api/markets/stocks` gains a **coalescing cache keyed on the requested
+symbol set, with a TTL equal to the foreground interval** — concurrent and
+near-simultaneous callers share one in-flight Alpaca request, and the Alpaca
+rate is bounded by wall-clock rather than by client count. The token bucket
+stays as the hard backstop; the cache is what keeps it from ever being reached.
+
+**One map, one price — how a streamed row and a polled row coexist.**
+CLAUDE.md is explicit that a second quote map is how the Markets table and an
+Activity row end up disagreeing about AAPL, and Phase 2 adds a second *writer*
+to the one map, which is the same hazard one level down. Four rules:
+
+1. **An entry carries its provenance.** `UnderlyingQuote` grows `at` — the
+   **vendor's** observation timestamp, not the client's clock — and
+   `source: 'stream' | 'poll'`. Without those, two writers have no way to tell
+   a newer price from an older one and the last one to arrive wins, which on a
+   400ms poll racing a push means the screen flickers backwards in time.
+2. **Price is last-observation-wins on `at`, with the stream winning a tie.**
+   Both feeds are the same IEX feed on Basic, so the two timestamps are
+   comparable and the comparison is meaningful rather than a heuristic. A poll
+   response older than the entry already held is **discarded for price and
+   applied for everything else**, which is the next rule.
+3. **The merge is field-level.** The stream carries price and nothing else;
+   `previousClose`, session volume, average volume and market cap arrive only
+   on the poll. A stream write must never blank them, and a poll write must
+   never stomp a fresher streamed price. One writer per field, except price,
+   where rule 2 decides.
+4. **Everything derived is derived at read time.** `change` and `changePct`
+   come from `price` and `previousClose` in a selector, never stored. Two
+   writers storing a price and a change independently is how a row reports
+   +1.2% beside a price that is down — the disagreement CLAUDE.md warns about,
+   arriving inside a single row instead of between two pages.
+
+`lastTickAt` and `lastPollAt` stay **separate** and neither becomes the other:
+*"is the stream alive"* and *"is the poll alive"* are different questions, the
+stale pill answers the first, and collapsing them would let a healthy poll
+hide a dead socket.
+
+**The viewport hint is a hint, and it can only ever occupy the lowest tier.**
+The engine owns the socket, so the client has to say which Markets rows are on
+screen: a message on the existing WS, debounced on a settled viewport and sent
+only when the set actually differs. The server treats it as input to a **new
+lowest** `SubscriptionPriority` and nothing else. A client-supplied list can
+never outrank a position contract or an underlying — rule 4's principle
+applied to a stream budget rather than to a risk limit, because a client that
+could evict a held contract from the stream could make a position mark stale
+by scrolling. Churn is harmless by construction: every Markets row is polled
+anyway, so losing a slot costs freshness, never a price.
+
+Rejected: **150ms or 200ms as asked.** Both exceed a hard server-side limit,
+and the failure is latency creep rather than an error, so it would have looked
+like it worked. Stated to the account holder rather than silently rounded.
+
+Rejected: **300ms.** Exactly 200/min, zero headroom, and the first chain click
+of the session pushes the process into the bucket's wait path.
+
+Rejected: **a fixed 2s poll** (the previous design). It is well inside budget
+and it wastes 85% of it on a page whose entire job is watching prices move.
+
+Rejected: **client-side throttling alone**, without the server cache. A
+single well-behaved tab is not the case that breaks the budget; a second one
+is, and no amount of discipline in one browser tab constrains another.
+
+Rejected: **excluding streamed symbols from the poll request.** Saves zero
+requests — it is one request either way — and opens a gap the moment a
+subscription is dropped.
+
+Rejected: **a second quote map for polled rows**, or keying quotes per page.
+Named only to rule it out, because it is the thing someone reaches for when
+two writers first collide, and it is the exact failure CLAUDE.md spends a
+paragraph on.
+
+Rejected: **hidden-tab polling at 5s.** Twelve requests a minute for a
+rendering nobody sees, and it weakens the one honest signal the stale pill
+has.
+
+### 19. Algo Trader Plus is bought at Phase 4, not Phase 6 — 2026-09-14
+
+Decision 10 set the trigger at Phase 6, on the argument that what the
+subscription buys — real-time instead of 15-minute-delayed quotes, OPRA
+instead of indicative, unlimited equity stream symbols — *"changes nothing
+while the terminal is read-only"* and changes everything the moment it
+executes. The account holder has moved it to **Phase 4**.
+
+The reasoning that moves it: Phase 4 is where the strategy runtime and the LLM
+layer start **generating candidates**, and a candidate is a recommendation to
+put money somewhere at a price. Decision 10's own boundary — delayed inputs
+are *"fine for a column and not fine for sizing"* — is crossed by a scanner
+that ranks and sizes, not by the order that eventually follows it. A candidate
+priced off a 15-minute-old mid is wrong before a human ever sees it, and the
+`unvalidated` badge on a Research recommendation does not say *"the price this
+was built on is a quarter of an hour old"*. Buying it at Phase 4 also puts a
+month or two of real-time data behind the first order rather than switching
+feeds in the same phase that first submits one — a feed change and a first
+`submit_order` in one phase is two variables in one experiment.
+
+Cost of moving it: roughly **$99–200 more** than waiting, being the one or two
+extra months across Phases 4 and 5. Decision 10 rejected buying at Phase 2 for
+spending ~$400 to change no behaviour; this spends a fraction of that to
+change behaviour in the phase that starts recommending trades.
+
+**What the upgrade actually changes, so it is not rediscovered:**
+
+- **Three environment variables, and nothing else in the code** —
+  `ALPACA_OPTIONS_FEED=indicative→opra`,
+  `ALPACA_STOCK_FEED_HISTORICAL=sip` (already `sip`, unchanged),
+  `ALPACA_STOCK_FEED_REALTIME=iex→sip`. Read only inside
+  `data/providers/alpaca.py`, per CLAUDE.md. Plus `ALPACA_DATA_PLAN=basic→algo_trader_plus`,
+  which is the plan of record `runtime.data_plan` and `api/routes/settings.py`
+  both read.
+- **The equity stream cap disappears** (30 → Unlimited). The option stream cap
+  rises to **1000 quotes** and does not disappear — decision 17.
+- **REST goes to 10,000/min on both buckets**, which is 50× the current data
+  budget.
+- **The 15-minute historical embargo lifts**, which removes the constraint
+  that forces `_fetch_session_volumes` to read today's volume from a
+  historical-feed bar rather than a live one.
+- **`impliedVolatility`, `greeks` and `open_interest` arrive from OPRA**
+  rather than being partly derived, so decision 10's `iv_source` label stops
+  reading `derived` for most of the chain. The label stays: it is what makes
+  the mixed case legible, and the mix does not vanish, it shrinks.
+
+**What that then permits, at Phase 4 rather than Phase 6:**
+
+- The **whole Markets table on the stream**, not just the visible rows, and
+  the poll demoted from the freshness floor to a **reconciliation net** — a
+  slow sweep that catches a symbol the socket has gone quiet on. PRD §7
+  already says the polled path stays the default so the app degrades
+  gracefully; that survives, at a much lower rate.
+- **150ms becomes affordable** if it is still wanted — 400 req/min against
+  10,000. It will probably not be wanted, because by then the rows that
+  matter are pushed.
+
+**Which Phase 2 constraints become vestigial, flagged so they are not left
+looking permanent.** Each of these is correct today and misleading after the
+upgrade, and none should be deleted in Phase 2:
+
+- The **equity** branch of `stream.py`'s budget — the option branch stays real
+  at 1000. The module is also the graceful-degradation path, so it survives
+  the upgrade rather than being deleted by it; decision 10 already said this
+  and it still holds.
+- Decision 18's **400ms floor and its coalescing cache**, which exist to
+  ration a 200/min bucket.
+- The Markets **viewport hint**, whose whole purpose is choosing which ~22
+  rows get the leftover slots.
+- The **IV/greeks derivation path** and `iv_source: 'derived'` as the common
+  case.
+- `LiveStatus`'s and `Markets.tsx`'s on-screen sentences explaining why the
+  chain is not streamed.
+
+Rejected: **Phase 6, as decision 10 had it.** It draws the line at the first
+real fill, which is the right line for *execution* risk and the wrong one for
+*origination* risk — a bad candidate generated at Phase 4 is a bad order at
+Phase 6, arriving with a confidence score attached.
+
+Rejected: **Phase 2 or Phase 3.** Decision 10's arithmetic is unchanged: the
+read-only terminal learns nothing truer from a real-time quote than from a
+15-minute-old one, and a stale column is a stale column.
+
+Rejected: **buying it only for the phase that needs it and cancelling.** A
+monthly subscription toggled per phase makes the feed configuration a moving
+target across a period when the scanner's own determinism is being
+established, and the saving is one month.
+
+### 20. The post-upgrade cadence: stream the universe, slow the poll, keep the option budget real — 2026-09-14
+
+Decision 19 moved the purchase to Phase 4 and listed what the upgrade
+changes. This is what the **cadence** becomes on the other side of it, written
+now so that upgrade day is four environment variables, two constants and a
+short list of deletions rather than a redesign taken under the pressure of a
+subscription already being billed. Nothing here is Phase 2 work; every item is
+marked Phase 4 in *Order of work*.
+
+**Re-verified independently today** against
+`https://docs.alpaca.markets/us/docs/about-market-data-api`, because a cadence
+designed against a misremembered limit is the failure of decisions 17 and 18
+repeated. The Trading API subscription tables read exactly as decision 17
+records them — equities 30 symbols to **Unlimited**, options 200 quotes to
+**1000 quotes**, historical API calls 200/min to **10,000/min**, coverage IEX
+to all US exchanges and Indicative to OPRA, and the 15-minute historical
+limitation lifted on both. Five further things were checked, and four of them
+change the design:
+
+1. **Only the *market-data* bucket goes to 10,000/min. The trading bucket
+   stays at 200/min.** Alpaca's own support material states the trading
+   endpoints are throttled at 200 requests per minute per account, and that
+   Algo Trader Plus raises market data to 10k/min *"while the trade endpoints
+   are still limited to 200/min"*. `ratelimit.py` already holds one
+   `TokenBucket` per host for exactly this shape, so the upgrade raises the
+   `data.alpaca.markets` bucket and leaves `paper-api.alpaca.markets`
+   untouched. Everything on the trading host keeps its Phase 2 cadence:
+   account, positions and activity stay at 15s, and the chain's contract-terms
+   join — which is where open interest lives — is still on the tight bucket.
+   *"REST goes to 10,000/min"* is true of half the app, and reading it as all
+   of it is the upgrade-day error that surfaces as a slowed Activity page
+   nothing logs.
+2. **The feed is in the websocket URL path** —
+   `wss://stream.data.alpaca.markets/{version}/{feed}`. So
+   `ALPACA_STOCK_FEED_REALTIME=iex→sip` names a **different endpoint** rather
+   than a subscribe parameter: the change takes effect on reconnect, `/v2/iex`
+   and `/v2/sip` are separate endpoints for the one-connection-per-endpoint
+   rule, and a process cannot upgrade its live socket in place.
+3. **The server echoes the full subscription set.** A `subscribe` is answered
+   with `{"T":"subscription","trades":[…],"quotes":[…],"bars":[…],…}` listing
+   every symbol per channel. That acknowledgement, not any constant in this
+   repo, is the authoritative answer to *"was anything truncated"* — see 20.4,
+   where it becomes the backbone of the design rather than a nicety.
+4. **The option stream carries only `trades` and `quotes`.** No greeks, no
+   implied volatility, and `*` is refused for option quotes in the vendor's
+   own words — *"there are simply too many of them."* OPRA changes the
+   *content* of a quote and adds no analytics channel, which is what 20.5
+   turns on.
+5. One $99/mo plan appears to cover both halves — the pricing page lists a
+   single Algo Trader Plus tier carrying real-time OPRA options *and*
+   unlimited-symbol websockets, while the docs present equities and options as
+   two tables. Recorded as **verify on the first invoice**, not as a fact.
+
+Two places where the **marketing page contradicts the docs table**, both in
+the dangerous direction, both resolved in favour of the docs: `alpaca.markets/data`
+says *"Unlimited symbols"* for websockets with no options carve-out, and
+*"Unlimited API calls"* where the table says 10,000/min. Whoever reads the
+price list on upgrade day rather than the subscription table will wire the
+option stream to a sentinel. That is precisely 20.4.
+
+#### 20.1 The equity stream takes the whole Markets universe; the poll becomes a reconciliation sweep at 5s / 30s
+
+The 30-symbol equity budget is what forced decision 18's split between ~22
+streamed rows and a 400ms poll for the remainder. With the cap gone the split
+goes with it: **every symbol in `MARKET_QUOTES` is subscribed** — 26 stock rows
+today, plus the ≤8 position underlyings and the Phase 4 recommendation
+underlyings, so roughly forty symbols against a sentinel of 10,000. There is
+no longer any such thing as a Markets row that is polled because it did not
+fit.
+
+**The poll is retired as the freshness floor and kept as a reconciliation
+sweep: 5s foreground, 30s background, still stopped when hidden.** Those are
+different jobs, and the second one is worth keeping.
+
+- *Retired as the floor*, because a 400ms poll behind a pushed price cannot
+  make anything fresher. Decision 18's rule 2 resolves the two writers on the
+  vendor's `at`, so every one of those 150 requests a minute is a write that
+  can only lose the comparison — cost with no information, and 150 chances a
+  minute to get the merge wrong.
+- *Kept as a sweep*, for four things the stream does not do. It is the
+  **opening snapshot**, and it has to be: a quote stream delivers on events, so
+  an illiquid name prints nothing for minutes and its row would carry no price
+  at all until it traded. It carries the fields the stream has no channel for —
+  `previousClose` — and it is the request the session-volume and daily-series
+  caches sit behind. It is the **degradation path** PRD §7 requires, so a dead
+  socket costs freshness rather than the page. And it is the only thing that
+  notices a subscription that was acknowledged and then went silent.
+
+**Why 5s and not 1s:** a failed or silent subscription is a condition that
+persists until something fixes it, not a transient. Catching it in one second
+rather than five changes nothing a human or the watchdog can act on, and the
+healthy path is pushed anyway. **Why 5s and not 60s:** the sweep is also the
+floor in *degraded* mode, and a minute-old price on a 26-row screener is
+visibly wrong. 5s is chosen for the failure case rather than the healthy one,
+which is the only case in which it is load-bearing at all. It costs 12/min of
+10,000 — 0.12% of budget.
+
+**The three-state hook survives unchanged; two constants change value.**
+Decision 18's hidden / foreground / background machinery is exactly right at
+either plan: foreground 400ms → **5s**, background 5s → **30s**, hidden
+**stopped**, first poll on return still immediate. One diff, no new states.
+The coalescing cache stays and its TTL keeps following the foreground interval
+automatically, so it becomes a 5s cache — but **its stated reason changes, and
+the old one must not be left in the docstring**: at 200/min it existed to stop
+two tabs breaching a hard ceiling, and at 10,000/min it exists so that N
+clients cost one in-flight vendor request. Same code, different argument; a
+cache justified by a limit that no longer binds is a cache someone deletes.
+
+**The sweep is unconditional — never "poll only while the stream is down."** A
+conditional sweep has two code paths and its failure mode is that the
+condition is wrong: a socket that reports connected while delivering nothing is
+exactly the state the sweep exists to survive, and it is the state in which the
+condition says *do not poll*. Decision 18's *"the poll is the floor and the
+stream is the upgrade"* is unchanged by the upgrade.
+
+**Channels, because unlimited symbols makes the choice free for equities.**
+Position underlyings and position contracts subscribe **quotes** — a mark is a
+mid, and a trade print on an illiquid contract is not the mark. Markets rows
+subscribe **trades**, which is the last price the table actually renders. The
+standing question about whether one symbol on two channels spends one slot or
+two **dissolves for equities** at unlimited and stays live for options at 1000.
+
+**After a reconnect, re-read a snapshot for every subscribed symbol
+immediately.** A gap in pushes is a gap in prices and the sweep's next tick is
+up to five seconds away. This is data recovery and it is **not** a resume: rule
+9 stands untouched, the watchdog's halt still clears only through
+`POST /api/engine/resume`, and nothing in this decision lets a reconnect clear
+a halt.
+
+**What still needs polling, and at what rate** — the full post-upgrade table:
+
+| Surface | Mechanism | Cadence | Budget |
+|---|---|---|---|
+| Position contracts | option WS, `quotes`, OPRA | push | option stream: ≤32 of **1000** |
+| Position underlyings | stock WS, `quotes`, SIP | push | equity stream: ≤8, unlimited |
+| Every Markets stock row | stock WS, `trades`, SIP | push | equity stream: 26 today, unlimited |
+| Visible option chain rows | option WS, `quotes`, OPRA | push | option stream: see 20.2 |
+| Markets reconciliation sweep | REST `/v2/stocks/snapshots` | **5s fg / 30s bg / stopped hidden** | data: 12/min of 10,000 |
+| Session volume | REST `/v2/stocks/bars` | 60s TTL in session, unchanged | data: ~1/min |
+| Average volume, daily series | REST `/v2/stocks/bars` | once per trading date, unchanged | data: ~6/day |
+| Intraday chart series | REST `/v2/stocks/bars` | on demand, unchanged | data: 1–5 pages, no longer budgeted |
+| Market cap | Finnhub `/stock/profile2` | daily, unchanged | Finnhub's own budget |
+| Chain reference data (open interest, terms) | REST `/v2/options/contracts` | on demand, unchanged | **trading: still 200/min** |
+| Account, positions, activity | REST | **15s, unchanged** | **trading: still 200/min** |
+
+The last two rows are the ones that will be got wrong: they are on the bucket
+that did **not** move.
+
+#### 20.2 The option stream at 1000 quotes: four tiers, and the thing that must never be subscribed
+
+This is the part that needs real design, because 1000 is a ceiling rather than
+the absence of one, and the surface that wants option symbols in bulk — the
+chain — is the surface Phase 4 is adding.
+
+**`stream.py`'s tiering does not become vestigial at upgrade; it migrates from
+the equity stream to the option one.** Stated plainly, because the natural
+inference from *"equities go unlimited"* is that the module has nothing left to
+do, and the opposite is true: its budget arithmetic stops being exercised on
+the equity stream and becomes the only thing standing between a chain view and
+a server-enforced limit. Decision 10 already said the module survives as the
+graceful-degradation path. It survives for a second reason now — it is the
+option stream's rationer, and the option stream is where the scarcity went.
+
+**Decision 18's `MARKETS_VISIBLE` tier still makes sense — for options.** On
+the equity stream its job disappears, because there is no longer a subset to
+choose: every row is subscribed, so *visible* and *quoted* are the same set.
+On the option stream its job is the whole design: the client says which chain
+rows are on screen, debounced on a settled viewport, and the server treats it
+as input to the **lowest** priority and nothing else. Decision 18's rule holds
+verbatim and matters more here than it did there — a client-supplied list can
+never outrank a position contract, because a client that could evict a held
+contract from the stream could make a position mark stale by scrolling.
+
+**Keep that tier's name page-scoped, not instrument-scoped.**
+`MARKETS_VISIBLE` survives this migration and `MARKETS_VISIBLE_STOCK` would
+not. `SubscriptionPriority.label` appears in log records and in the API's drop
+reports, and renaming a stable label to chase a shade of meaning is churn in
+the audit trail. This is a constraint on decision 18's implementation, not a
+reopening of it.
+
+**The four tiers and the arithmetic at the new cap:**
+
+| Tier | Option stream, cap **1000 quotes** | Equity stream, cap = sentinel |
+|---|---|---|
+| 1 `POSITION_CONTRACT` | ≤32 — 8 positions × 4 legs | — |
+| 2 `POSITION_UNDERLYING` | — | ≤8 |
+| 3 `RECOMMENDED_TRADE` | ≤4 legs × N candidates | N underlyings |
+| 4 `MARKETS_VISIBLE` | the chain rows on screen | every Markets row (26) |
+
+`1000 − 32 − (4 × N)` is what tier 4 may spend, and **tier 3 must be bounded
+by a served top-N**. At N = 25 that is 100 contracts and leaves **868** slots
+for chain rows; at N = 100 it is 400 and leaves 568. Either fits. An
+*unbounded* candidate list does not: tier 3 outranks the chain by design, so
+an unbounded tier 3 starves it silently rather than visibly. Assume N ≤ 25
+until Phase 4 says otherwise, and bound it at the recommendation endpoint
+rather than at the stream — the stream should be rationing a set someone
+already decided to show.
+
+**Measured chain sizes, so the headroom is not a guess.** From recorded
+fixtures: one expiry inside the default ±15% strike band is **26 contracts**
+(`tests/fixtures/alpaca/option_chain_nvda_dated.json` — 13 strikes × 2 rights).
+The *unbanded* near expiry is **at least 160** across 80 strikes and still
+paginating (`option_chain_nvda_page1/2.json`, 100 each with `next_page_token`
+set on both). The window the chain route serves by default is
+`DEFAULT_MAX_DTE = 60` with `DEFAULT_MONEYNESS_PCT = 15`, which on a
+weekly-listed name is roughly eight to ten expiries: **~200–300 contracts,
+estimated rather than measured.** A screenful of chain rows is 20–60.
+
+So the default window fits inside the headroom — and the design still
+subscribes **only the rows on screen**, for three reasons. The window is a
+*server* default the client may widen to `max_dte=365` and `moneyness_pct=100`,
+where a liquid name is thousands of contracts. The vendor refuses `*` for
+option quotes precisely because chains are enormous. And when the local count
+and the server's metering disagree, being wrong by tens is recoverable and
+being wrong by thousands is a `405` on every re-plan.
+
+**The chain tier's unit is one contract, never one chain.** A
+`SubscriptionUnit` is all-or-nothing over its symbols, which is exactly right
+for a spread — three live legs and one stale one produce a net that ticks while
+being neither figure — and exactly wrong for a ladder. A chain row's quote is
+independently meaningful, so a 230-symbol unit buys nothing and costs the
+graceful degradation: it would trip `DropRule.EXCEEDS_CAP` on a widened window
+and blank the **entire** chain rather than trimming its tail. One unit per
+visible row, in the client's display order, and the strict prefix cut then
+drops the far end of what is on screen.
+
+**Do not re-rank the chain tier by moneyness or liquidity.** It is the obvious
+improvement — spend the last slots on the contracts that matter — and it breaks
+determinism: a ranking keyed on spot re-orders between polls, every re-order is
+a resubscribe, and every resubscribe is a gap in the marks the socket was
+opened to deliver. The caller's order is preserved exactly within a tier, and
+the caller's order is the ladder as displayed.
+
+**Two numbers that are equal and unrelated, and must not be conflated.** The
+provider's `_OPTION_CHAIN_PAGE_LIMIT = 1000` is a REST page size; the option
+stream's cap is 1000 *quotes*. *"One page fits the stream"* is a sentence
+someone will eventually write, and it is a coincidence between two unrelated
+constants. Never derive either from the other.
+
+**At the new cap `EXCEEDS_CAP` becomes unreachable** for units built by the
+three constructors — the widest is a four-leg spread — and `NO_ROOM` becomes
+reachable only through a caller that hands over hundreds of contracts at once.
+Worth stating, because it means any `EXCEEDS_CAP` seen after upgrade is a
+caller bug rather than a busy book, and the two drop rules stay worth telling
+apart.
+
+#### 20.3 150ms is affordable and still not worth doing — recommendation: do not build it
+
+The original ask was ~150ms in the foreground. At 10,000/min that costs
+400/min, about **4% of budget**, and decision 18's objection — that it breaches
+a hard server-side limit — is gone. It should still not be built, and this is a
+recommendation rather than an open question.
+
+A 150ms poll behind a streamed universe cannot deliver a price sooner than the
+push that already delivered it. It can only race the push and lose decision
+18's `at` comparison, 400 times a minute, across every symbol at once. What it
+*would* buy is a second writer into `underlyings` running an order of
+magnitude hotter than the thing it cannot beat, a full-universe snapshot
+payload 400 times a minute of bandwidth and parsing for no new information, and
+a much larger surface on which to get the field-level merge wrong. The
+freshness question on Algo Trader Plus is not *"how often do we ask"*; it is
+*"is the socket alive, and is our subscription set the one the server
+acknowledged"* — which is 20.4 and the watchdog.
+
+**Say the substitution out loud, because it reads as a regression against what
+was asked for.** The answer to *"plan for faster updates on the upgraded
+plan"* is that the surfaces that were the point of the request get **push**,
+and the poll behind them gets **twelve times slower** than the number decision
+18 landed on. Faster where it is read, slower where it is redundant. Decision
+18 refused 150ms because it was impossible; decision 20 refuses it because it
+is pointless, and those are different refusals worth recording separately.
+
+#### 20.4 `UNLIMITED_STREAM_SYMBOL_CAP` is equities-only, and structurally so
+
+`runtime.UNLIMITED_STREAM_SYMBOL_CAP = 10_000` is a sound sentinel for a limit
+Alpaca documents as absent, and applying it to the option stream would
+subscribe past a limit the server enforces — the silent truncation `stream.py`
+exists to prevent, arriving from the other direction. The marketing page's flat
+*"Unlimited symbols"* is what makes this the single most likely thing to be
+wired wrong on upgrade day.
+
+**Where it may be used:** as the `cap` argument for a `plan_subscriptions` call
+planning the **equity** stream on the paid plan, and nowhere else. It is
+already only reachable through `runtime.py`, which owns the plan lookup and the
+environment.
+
+**Where it may not be used:** anywhere on the option path — not as a cap, not
+as a default, not inside a `max()`, and not in a test that then asserts a plan
+of several hundred contracts was admitted. The option cap on the paid plan is a
+literal **1000**, named for what it is.
+
+**Discipline is not the mechanism. Three structural things are.**
+
+1. **No singular cap name survives, in `runtime.py` either.** Decision 17
+   already retires `STREAM_SYMBOL_CAP` for two stream-named constants on the
+   grounds that *"the single unqualified name is the bug's habitat."* The same
+   argument convicts `EngineRuntime.stream_symbol_cap` and
+   `stream_symbol_cap_for_plan`, both of which return one `int` for a
+   two-budget world. They become a single lookup returning a **pair** — a
+   frozen `StreamBudget(equity=…, option=…)` constructed only by
+   `stream_budget_for_plan(plan)` — so no call site ever picks a number and the
+   option field cannot be reached by a caller who was thinking about equities.
+2. **A test that the sentinel never reaches the option field**, over every plan
+   value the app accepts: `stream_budget_for_plan(p).option !=
+   UNLIMITED_STREAM_SYMBOL_CAP` for all `p`, and `== 1000` on the paid plan.
+   Cheap, and it fails on exactly the mistake being guarded against.
+3. **The server's acknowledgement reconciles the plan, and outranks every
+   constant in this repo.** After each subscribe, compare
+   `SubscriptionPlan.subscribed` against the `subscription` message's
+   per-channel lists. A symbol in the plan and absent from the acknowledgement
+   is a drop: it counts into *"N symbols not streamed"* and is logged with its
+   rule and inputs, exactly like a locally-refused unit. A `405 symbol limit
+   exceeded` is treated as an authoritative cap **correction** — lower the
+   effective option cap for the session, re-plan, log it — and **never** as
+   permission to raise one. This is what makes 1000 safe even if the metering
+   unit differs from our count, which is a standing *Not verified* item that
+   research cannot close and this can.
+
+Item 3 is cheap enough to build at Phase 2 step 8 alongside the WS fan-out, and
+decision 20 does not require it earlier: at Basic it is a latent safety net, and
+at 1000 option quotes it is the design.
+
+#### 20.5 The embargo lifts: a real-time mark is worth pushing in a way a 15-minute-old one is not
+
+Under Basic the option stream's content is the `indicative` feed — the vendor's
+own description is a free derivative feed with 15-minute delayed trades. So the
+entire push path for option marks, which has no cadence to tune and therefore
+looks maximally fast, has been delivering a price whose *content* is a quarter
+of an hour behind. Three consequences at upgrade:
+
+- **The mark becomes a measurement.** An OPRA NBBO mid is the price the
+  contract is actually quoted at, so the position rows, the P&L total, the
+  payoff curve's y-intercept and every risk figure derived from a mark stop
+  carrying an undisclosed 15-minute lag. This is decision 19's argument
+  restated at the level of one number: pushing a stale price quickly is not
+  freshness.
+- **The stale pill starts meaning what it says.** `LiveStatus`'s ~15s
+  threshold on an option mark is, on Basic, a statement about the *socket*
+  rather than about the *price* — the socket can be perfectly healthy while
+  every number it carries is fifteen minutes old. At OPRA the two readings
+  converge and the pill is honest without a footnote.
+- **Session volume can come from a live bar**, and the intraday series may run
+  to the current minute rather than stopping fifteen minutes short and
+  appending a live point. `UnderlyingChart.tsx` renders that appended point
+  today with a comment naming the embargo; both the comment and the append are
+  revisited at upgrade, and the append is deleted only if the series really
+  does reach the current minute. Measure before deleting.
+
+**The one thing that does not change is the one people will assume does:
+greeks and implied volatility are not on the wire.** The option stream carries
+`trades` and `quotes` and nothing else, verified above. Decision 10's
+derivation path is therefore not made redundant by OPRA; it changes role.
+Vendor analytics arrive only on a REST snapshot, so a streamed contract's
+vendor IV is as old as the last chain read while its *mark* is current, and a
+locally-derived IV re-solved on each push is the only figure that keeps step
+with the price beside it. Refine decision 19's *"`impliedVolatility`, `greeks`
+and `open_interest` arrive from OPRA rather than being partly derived"*: the
+vendor's fields are themselves a Black-Scholes solve — decision 10 quotes
+Alpaca's own OpenAPI document saying so — so the upgrade buys **fresher inputs
+and probably wider coverage, never a measurement**. `iv_source` stays, the
+`derived` branch stays, and whether OPRA widens the vendor's solve coverage
+beyond the 19-of-100 measured on `indicative` is unverified and cheap to
+measure on day one.
+
+#### 20.6 The vestigial list: delete, rewrite, or keep — and which is which
+
+Decision 19 flagged the constraints that become misleading. This is that list
+at file level, split by what must actually happen to each, because *"flagged"*
+is not specific enough to act on and the wrong action here is either a sentence
+that lies to the reader or a deleted degradation path.
+
+**Delete.** Each of these is a claim about a limit that no longer exists, and
+leaving it in place makes a lifted cap look permanent.
+
+- The **equity** half of every *"30 symbols"* sentence, after decision 17 has
+  already narrowed each from *"the websocket"* to *"the equity stream"*:
+  `corollary/engine/stream.py`'s module title and opening paragraph,
+  `corollary/engine/runtime.py`'s `stream_symbol_cap_for_plan` docstring,
+  `corollary/data/providers/interface.py:418`,
+  `corollary/engine/execution/interface.py:678`,
+  `web/src/hooks/useMarketPoll.ts:8`, `web/src/hooks/useLiveTick.ts:13`,
+  `web/src/hooks/useNewsPoll.ts:9`, four comments in `web/src/lib/store.ts`,
+  and `web/src/lib/mockData.ts:1413`. The sweep decision 17 runs in Phase 2
+  runs again here, against a different word.
+- The **Markets viewport hint's equity binding** — the client message, its
+  debounce, and the server's equity producer for that tier. The *mechanism* is
+  not deleted: 20.2 re-points it at chain rows. What is deleted is the reason
+  it ever applied to stocks.
+- `MAX_RESPONSE_POINTS`'s round-trip paragraph in
+  `corollary/api/routes/markets.py` — specifically the sentence costing five
+  pages against *"the shared 200/min `data.` budget, of which decision 18 …
+  already spends 150/min"*. At 10,000/min with the sweep at 5s, that whole
+  paragraph is arithmetic about a constraint that no longer binds. The
+  **constant stays**: it bounds bytes on the wire to the client, which no plan
+  changes.
+- Decision 18's *"300ms would be 200/min exactly"* reasoning wherever it has
+  been copied into a code comment. The floor is no longer a floor.
+- `corollary/ratelimit.py`'s `DEFAULT_REQUESTS_PER_MINUTE = 200` as a
+  *default*: the data host's rate becomes plan-derived and the trading host's
+  does not, so one module-level default covering both is the thing that makes
+  the asymmetry invisible. The per-host override the module already supports is
+  the mechanism; what goes is the assumption that 200 is the right starting
+  number for every host.
+
+**Rewrite, do not delete** — these are on-screen sentences, and the surface
+still needs a sentence:
+
+- `web/src/components/LiveStatus.tsx:81`, the poll tooltip: *"Polled snapshots
+  across every quoted symbol. Chains are not streamed — the websocket is capped
+  at 30 symbols and those are spent on open positions."* Every clause is false
+  at upgrade. It becomes a sentence about what is streamed and what the sweep
+  is for.
+- `web/src/components/LiveStatus.tsx:42`, the module comment's *"the stream is
+  a 30-symbol websocket scoped to open positions."*
+- `web/src/pages/Markets.tsx:869`: *"These are snapshot reads, taken when you
+  open the page and when you refresh — every option contract is its own symbol
+  and the socket's 30-symbol budget belongs to open positions, so nothing here
+  streams."* At upgrade the stock table streams in full and the visible chain
+  rows stream, so this paragraph inverts. It should keep saying which rows are
+  pushed and which are swept: a page that explains its own freshness is the
+  reason the stale pill is legible.
+- `web/src/lib/settings.ts`'s `feedWarning`, which today reasons that
+  *"real-time IEX gets no warning: it is the only thing the free plan serves
+  live."* On the paid plan, real-time IEX becomes a choice to read 2.5% of
+  volume while paying for 100% — which is exactly when it deserves a warning.
+  `feedWarning` takes the plan and gains that branch; `feedOptionsFor` already
+  keys off the plan and needs nothing.
+
+**Keep, explicitly, against the instinct to tidy up:**
+
+- `STREAM_SYMBOL_CAP`'s equity value of 30 and the whole Basic branch. A
+  subscription can lapse, `ALPACA_DATA_PLAN` can read `basic` again tomorrow,
+  and `data_plan`'s unknown-value fallback is deliberately the restrictive
+  direction. Deleting the Basic branch turns a lapsed card into a silent
+  server-side truncation.
+- The reconciliation sweep, the coalescing cache, and decision 18's
+  `at`/`source` provenance with its field-level merge. All of them exist
+  because two writers share one quote map, and the upgrade adds writers rather
+  than removing them. **Decision 19 listed the coalescing cache among the
+  vestigial items; that is right about its rationale and wrong about the
+  mechanism.** The reason it was built — keeping a 200/min ceiling out of reach
+  — does become vestigial, and 20.1 states the replacement reason, which is
+  that N clients should cost one in-flight vendor request whatever the
+  ceiling.
+- The IV/greeks derivation path and `iv_source: 'derived'` — 20.5.
+- `engine/stream.py` in its entirety — 20.2.
+
+#### 20.7 The upgrade is a restart, and a restart comes up halted
+
+Sequencing, because this is the one item with a rule attached. The realtime
+feed lives in the socket URL, so new feeds take effect on reconnect, and the
+clean way to reconnect three sockets and two caps at once is to restart the
+engine. Cold start comes up **halted until the opening snapshot succeeds** and
+always in **Paper** (rule 5), and the halt clears only through
+`POST /api/engine/resume` (rule 9). So upgrade day is: set the four environment
+variables, restart, watch the opening snapshot, confirm the `subscription`
+acknowledgement matches the plan on all three sockets with no `405`, then
+resume **by hand**. Nothing here may auto-resume anything, and the temptation
+will be unusually strong because the restart is planned rather than a fault.
+
+Measure two things during that first session, because both are cheap then and
+archaeology later: the **inbound message rate** at the full subscription set,
+and the vendor's IV/greeks coverage on OPRA. The first is the limit most likely
+to bind next — symbol count stops being scarce for equities while message
+volume does not, and 26 SIP names plus 32 OPRA contracts plus a chain view is a
+materially different inbound rate from eight IEX symbols on one asyncio loop.
+
+#### Not verified (decision 20)
+
+- **Whether one $99/mo charge covers both the equities and the options
+  halves.** The pricing page reads as one plan; the docs present two tables.
+  Check the first invoice, not the marketing page.
+- **Whether OPRA widens Alpaca's own IV/greeks coverage** beyond the 19-of-100
+  and 12-of-100 measured on `indicative` in decision 10.
+- **The option stream's metering unit at 1000.** The table still says *"1000
+  quotes"* where equities say *"symbols"*. 20.4's acknowledgement
+  reconciliation is the answer that does not depend on knowing.
+- **The inbound message rate at the full subscription set**, and therefore
+  whether the coarser stock channels (`bars`, `dailyBars`) should carry the
+  Markets table instead of `trades`. Deferred deliberately — a third writer
+  into `underlyings` for a slow-moving column is a bad trade until the message
+  rate says otherwise.
+- **Whether `/v2/stocks/snapshots` caps its `symbols` list.** Carried forward
+  from Phase 2 unchanged, and no longer load-bearing: at 5s, a chunked request
+  costs nothing.
+- **Whether the equity stream's "Unlimited" holds at hundreds of symbols.**
+  Only the `405` is authoritative, and nothing in this design goes past ~40.
+
+#### Rejected
+
+Rejected (20.1): **retiring the poll entirely.** It is the opening snapshot for
+a symbol that has not traded, the only source of `previousClose`, and PRD §7's
+graceful-degradation path. A push-only design renders a screener with blank
+cells until each row happens to print.
+
+Rejected (20.1): **sweeping only the symbols the stream has gone quiet on.**
+The endpoint takes a list and costs one request either way, so it saves nothing
+and opens a hole the moment the quiet-detection is wrong. Decision 18's
+rejection, for decision 18's reason.
+
+Rejected (20.1): **making the sweep conditional on stream health.** The state
+it exists to survive is a socket claiming health while delivering nothing —
+which is the state in which the condition disables the sweep.
+
+Rejected (20.1): **taking session volume from the `dailyBars` channel.** It
+would work — cumulative daily aggregates arrive each minute mark — and it adds a
+third writer into the one quote map for a column that moves slowly, against a
+60s REST refresh costing ~1/min of 10,000. Revisit only if the message-rate
+measurement makes REST look expensive, which is the opposite of what is
+expected.
+
+Rejected (20.2): **subscribing the whole chain window the API returns.**
+~200–300 contracts on a default window, thousands on a widened one, and the
+vendor refuses `*` for option quotes because chains are enormous. The client's
+viewport is the only bounded set on that page.
+
+Rejected (20.2): **one `SubscriptionUnit` per chain.** All-or-nothing is right
+for a spread and wrong for a ladder: it blanks an entire chain on
+`EXCEEDS_CAP` where trimming the tail degrades correctly.
+
+Rejected (20.2): **ranking the chain tier by moneyness or liquidity.** It
+spends the last slots better and re-orders on every spot move; every re-order
+is a resubscribe, and every resubscribe is a gap in the marks.
+
+Rejected (20.2): **renaming `MARKETS_VISIBLE` when its producer changes
+instrument.** The label is in log records and drop reports, and the name
+already says which page rather than which asset class.
+
+Rejected (20.2): **giving the Phase 4 scanner universe a stream** now that
+equity symbols are unlimited. The scanner is deterministic by requirement —
+same inputs, identical output — and inputs that arrive by push are inputs whose
+value depends on arrival timing. PRD §7 keeps the scanner on polled snapshots,
+and that is a correctness argument rather than a budget one.
+
+Rejected (20.3): **150ms, or any sub-second poll, on the upgraded plan.** 4% of
+budget, zero information, and a second writer racing a push it cannot beat.
+Recommended against rather than left open.
+
+Rejected (20.4): **reading the option cap from the environment**, next to the
+feed names. Decision 17's argument unchanged: a cap in the environment is a cap
+someone can raise without paying, and the failure is silent truncation.
+
+Rejected (20.4): **one `int` cap with an asset-class argument**, e.g.
+`cap_for(plan, "option")`. It keeps the singular name that was the bug's
+habitat and moves the mistake from picking a constant to passing a string.
+
+Rejected (20.6): **deleting the Basic branch of the stream budget.** A lapsed
+subscription would become a silent truncation, and `data_plan` already reads
+unknown values as Basic on purpose.
+
+Rejected (20.6): **scaling `MAX_RESPONSE_POINTS` by the 2.46× fetch ratio.**
+Already rejected where the constant lives, for a reason the upgrade does not
+touch: the ratio is a property of the intraday path, and scaling by it
+penalises the daily path, which is the default and the common one.
+
 ---
 
 ## Three rule reinterpretations, approved
@@ -870,15 +1854,61 @@ corollary/
 
 ### Feeds and budgets
 
-| Feed | Mechanism | Cadence | Scope |
-|---|---|---|---|
-| Position quotes | option WS + stock WS + `trade_updates` | push | open contracts and their underlyings |
-| Market snapshots | REST snapshots | 2s | Markets' visible universe |
-| Account / positions / activity | REST | 15s, and on demand | active account |
+**Rewritten 2026-09-14** by decisions 17 and 18. The previous table rationed
+one 30-symbol pool across both streams and polled Markets at a flat 2s; both
+are superseded.
 
-**Two token buckets, not one.** `data.alpaca.markets` and `paper-api.alpaca.markets` each carry their own 200/min. Budget: a 2s market poll is 30/min, the account trio at 15s is 12/min, chains are on demand. Comfortable headroom.
+| Feed | Mechanism | Cadence | Scope | Budget spent |
+|---|---|---|---|---|
+| Position contracts | option WS | push | every leg of every open position | option stream: ≤32 of **200 quotes** |
+| Position underlyings | stock WS | push | the underlyings behind them | equity stream: ≤8 of **30 symbols** |
+| Order and fill events | `trade_updates` WS | push | active account | its own endpoint, no symbol budget |
+| Markets, visible rows | stock WS | push | whatever rows are on screen | equity stream: the **~22** slots left over |
+| Markets, every row | REST `/v2/stocks/snapshots` | **400ms foreground / 5s background / stopped when hidden** | every quoted symbol, one request | data bucket: **150/min** at 400ms |
+| Session volume | REST `/v2/stocks/bars` | 60s TTL during a session, trading-date key when closed | every quoted symbol | data bucket: ~1/min |
+| Daily volume series, chart series | REST `/v2/stocks/bars` | once per trading date | every quoted symbol | data bucket: ~6/day |
+| Intraday chart series | REST `/v2/stocks/bars` | on demand, **no cache** | one symbol, or the table's set | data bucket: 1–5 pages per request |
+| Option chain | REST snapshots + contracts | on demand | one underlying | data bucket: 1 spot + ≥1 page; trading bucket: ≥1 |
+| Account / positions / activity | REST | 15s, and on demand | active account | trading bucket: ~12/min |
 
-**The symbol budget is enforced, not noted.** Grouped multi-leg reaches 32 option symbols at eight positions before underlyings are counted. `engine/stream.py` holds a priority-ordered subscription list — position contracts, then underlyings, then recommended trades in Phase 4 — drops the tail, logs it, and surfaces *"N symbols not streamed"* to the UI. Never silently.
+**Two token buckets, not one.** `data.alpaca.markets` and
+`paper-api.alpaca.markets` each carry their own 200/min, and
+`corollary/ratelimit.py` holds one `TokenBucket` per host for exactly that
+reason. The account trio and `/v2/options/contracts` are on the **trading**
+host; every snapshot and bar is on the **data** host. The two never compete.
+
+**The data bucket, counted rather than estimated.** `GET /api/markets/stocks`
+issues **one** Alpaca request per cycle — `stock_snapshots` puts every symbol
+in a single `symbols=` list and the endpoint is not paginated. So 400ms is
+150/min, the session-volume refresh adds ~1/min, and the daily series is a
+once-a-day cost already paid. That leaves **~49/min** for on-demand chains at
+two data-bucket requests each: roughly twenty-four chain loads a minute, which
+no human reaches. 300ms would be 200/min exactly — at the ceiling, with
+nothing left for a chain — which is why the floor is 400 and not 300.
+
+**The one line in that table bounded by a constant rather than by a cadence is
+the intraday series**, and it is bounded loosely: the regular-hours filter runs
+after the fetch, so a permitted request costs up to about five vendor pages
+rather than the two `MAX_RESPONSE_POINTS` used to claim. See *The series
+ceiling counts served points, not fetched bars* under Constraints. It is
+on-demand and cacheless, so the cost is per chart expansion; at human click
+rates it fits the ~49/min left over, and it is the first thing to reprice if
+that headroom is ever spent on something else.
+
+**Two symbol budgets, enforced separately.** `engine/stream.py` plans **one
+stream at a time**: option units against 200, equity units against 30. A unit
+never spans the two, and `plan_subscriptions` is called twice rather than
+taught to hold two budgets — see decision 17. Position contracts come first,
+then position underlyings, then Phase 4 recommendations, then Markets'
+visible rows; the tail is dropped, logged with its rule and inputs, and
+surfaced as *"N symbols not streamed"*. Never silently.
+
+**The poll is the floor and the stream is the upgrade.** Every Markets symbol
+is polled whether or not it is also streamed, so a row falling off the stream
+degrades from push to 400ms rather than to nothing, and a churning viewport
+costs freshness rather than correctness. Requesting only the un-streamed rows
+would save **zero** requests — it is one request either way — and would open a
+hole on every dropped subscription.
 
 ### Database
 
@@ -1067,6 +2097,33 @@ News page owns it.
   `Settings.tsx` still imports from `mockData`. Nothing serves the tables. Step 2 is
   complete as scoped; the sentence over-claimed.
 
+- **This spec, Constraints — the series ceiling has a fetch/serve asymmetry and
+  `1H` cannot show the open.** Added 2026-09-14 out of the regular-trading-hours
+  work: `MAX_RESPONSE_POINTS` no longer means *"two vendor pages"*, a permitted
+  intraday request can cost ~5, and an hourly session serves six points from
+  10:00 ET rather than seven. The constant was deliberately left at 20,000 and
+  `1H` deliberately left askable-but-unsuggested; both reasons are in *The
+  series ceiling counts served points, not fetched bars*, and the cadence
+  consequence is in *Feeds and budgets*. Decision 20 is where the round-trip
+  cost stops mattering.
+- **PRD §7, to be amended at Phase 4 and not before — the stream-budget
+  paragraph's *"Markets-page chains and scanner universe scans run on polled
+  snapshots"* needs one clause.** At 1000 option quotes the chain's **visible
+  rows** stream at the lowest priority (decision 20.2) while the scanner
+  universe stays polled *for a different reason than the budget* — determinism.
+  The paragraph's closing sentence, *"the polled path should remain the default
+  regardless, so the app degrades gracefully"*, needs no change: decision 20.1
+  keeps the poll as an unconditional reconciliation sweep precisely to honour
+  it. Not edited now, because PRD §7 currently describes the plan the account
+  is actually on.
+- **CLAUDE.md, to be amended at Phase 4 — *"Upgrading to Algo Trader Plus …
+  sets all three to `opra`/`sip`/`sip` and changes nothing else"* stops being
+  true.** It also sets `ALPACA_DATA_PLAN`, moves two stream caps, moves the
+  poll constants, raises the `data.` rate-limit bucket and **not** the trading
+  one, and deletes or rewrites the on-screen sentences listed in decision 20.6.
+  The sentence was accurate when the upgrade was a Phase 6 abstraction; decision
+  19 made it a Phase 4 checklist, and decision 20 is that checklist.
+
 ---
 
 ## Order of work
@@ -1084,6 +2141,65 @@ News page owns it.
 8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`. **Also persist the matcher's refusals — decision 14.** `EngineRuntime` owns the ingest loop and therefore owns `IngestResult`, which is the cheapest point to hand a rejection's rule and inputs to the API; doing it here is what lets the Activity page name a gap's cause instead of only counting it.
 9. Finnhub market cap; fixture markers.
 10. Doc amendments.
+
+
+**Phase 4 — the Algo Trader Plus upgrade (decision 20).** Lettered rather than
+numbered so that renumbering the Phase 2 list above cannot collide with it, and
+listed here rather than in a separate document so the upgrade is a checklist
+instead of a redesign. **None of this is Phase 2 work.** Order matters within
+the group: U1 and U2 are what make U3 safe.
+
+- **U1. The plan lookup returns a pair.** `corollary/engine/runtime.py` —
+  `stream_symbol_cap_for_plan` and `EngineRuntime.stream_symbol_cap` become one
+  `stream_budget_for_plan(plan) -> StreamBudget(equity, option)`, constructed
+  nowhere else. `tests/engine/test_runtime.py` gains the assertion that
+  `UNLIMITED_STREAM_SYMBOL_CAP` never reaches `.option` on any plan and that
+  `.option == 1000` on the paid one. Decision 20.4.
+- **U2. Acknowledgement reconciliation on all three sockets.** The WS
+  transport (Phase 2 step 8) compares `SubscriptionPlan.subscribed` against the
+  server's `subscription` message per channel, counts any absentee into *"N
+  symbols not streamed"*, and treats a `405` as a cap correction that lowers
+  the effective option cap and re-plans. Buildable at step 8 for near-nothing;
+  required by Phase 4. Decision 20.4.
+- **U3. Flip the four environment variables and restart.**
+  `ALPACA_OPTIONS_FEED=opra`, `ALPACA_STOCK_FEED_REALTIME=sip`,
+  `ALPACA_STOCK_FEED_HISTORICAL=sip` (unchanged), `ALPACA_DATA_PLAN=algo_trader_plus`.
+  Add nothing to `.env.example` — all four names are already there. The engine
+  comes up halted and in Paper; resume by hand after the acknowledgements match.
+  Decision 20.7.
+- **U4. The rate-limit bucket becomes plan-derived per host.**
+  `corollary/ratelimit.py` — `data.alpaca.markets` to 10,000/min on the paid
+  plan, `paper-api.alpaca.markets` **left at 200/min**. The asymmetry is the
+  whole point of the change. Decision 20.1.
+- **U5. The sweep replaces the poll.** `web/src/hooks/useMarketPoll.ts` and its
+  two constants — foreground 400ms → 5s, background 5s → 30s, hidden unchanged.
+  The server-side coalescing cache on `GET /api/markets/stocks` keeps its
+  TTL-follows-the-interval rule and gets its rationale rewritten. Add the
+  post-reconnect snapshot re-read. Decision 20.1.
+- **U6. The equity stream takes every Markets symbol**, and the viewport hint's
+  equity binding is deleted — client message, debounce, and the equity producer
+  for `MARKETS_VISIBLE`. Decision 20.1, 20.6.
+- **U7. The chain tier.** `MARKETS_VISIBLE` is re-pointed at option contracts:
+  one unit per visible chain row, in display order, fed by the viewport hint,
+  planned against the 1000-quote budget behind position contracts and
+  recommendations. Bound the recommendation tier at the endpoint that serves it.
+  Decision 20.2.
+- **U8. The vestigial sweep.** Delete, rewrite or keep per decision 20.6's
+  three lists — `web/src/components/LiveStatus.tsx` (lines 42 and 81),
+  `web/src/pages/Markets.tsx:869`, `web/src/lib/settings.ts`'s `feedWarning`,
+  `MAX_RESPONSE_POINTS`'s round-trip paragraph in
+  `corollary/api/routes/markets.py`, and the equity half of the *"30 symbols"*
+  sentences in `engine/stream.py`, `engine/runtime.py`,
+  `data/providers/interface.py`, `engine/execution/interface.py`, three hooks
+  under `web/src/hooks/`, `web/src/lib/store.ts` and `web/src/lib/mockData.ts`.
+- **U9. Measure the two things that are only measurable then** — inbound
+  message rate at the full subscription set, and OPRA's IV/greeks coverage
+  against decision 10's 19-of-100 — and revisit `_fetch_session_volumes` and
+  `UnderlyingChart`'s appended live point now that the embargo is gone.
+  Decisions 20.5, 20.7.
+- **U10. Doc amendments** — PRD §7's stream-budget paragraph and CLAUDE.md's
+  *"changes nothing else"* sentence, per *Doc amendments* above. Last, so they
+  describe what was actually built.
 
 ---
 
