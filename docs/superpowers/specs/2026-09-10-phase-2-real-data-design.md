@@ -2281,13 +2281,27 @@ chain, contracts; rate limiter, feed config.
 
 **8d. `api/routes/ws.py` — the websocket transport.** Fan quotes and
 `trade_updates` out to the browser, and give the watchdog its producers.
-- *Status:* **not written, and this is the largest remaining Phase 2 item.**
-  Proven rather than inferred: `corollary/api/routes/` contains no `ws.py`;
-  `api/routes/__init__.py` says *"Still to land: `ws`, at step 8"*; and every
-  watchdog activity recorder — `record_message`, `record_poll`,
-  `_last_activity_at`, stream open and stream close — has **zero callers outside
-  `runtime.py`**. Rule 9's dead-man's switch therefore has no producer for
-  either halt condition. Supervised is not armed.
+- *Status:* **half written — the browser half landed, the vendor half did
+  not.** The distinction is the whole point, so it is stated rather than
+  summarised:
+  - *Landed (part 1):* `corollary/api/fanout.py` and
+    `corollary/api/routes/ws.py`. One `Fanout` per app on `app.state`, one
+    `/api/ws` endpoint, the three-kind frame contract, the bounded
+    `subscribe` filter, kind-aware eviction under backlog, and rule 8 on
+    every refusal. `api/routes/__init__.py` imports `ws_router` and no
+    longer says *"Still to land: `ws`"*.
+  - *Still absent:* the **vendor sockets** — nothing subscribes to Alpaca and
+    nothing publishes into the fan-out, so the endpoint is a transport with no
+    producer — and with them **the watchdog's producers**. Every activity
+    recorder (`record_message`, `record_poll`, `_last_activity_at`,
+    `record_stream_open`, `record_stream_closed`) still has **zero callers
+    outside `runtime.py`**, so rule 9's dead-man's switch has no producer for
+    either halt condition. Supervised is not armed.
+  - *Why the browser half deliberately arms nothing:* a browser tab opening or
+    closing says nothing about whether Alpaca is connected. Wiring
+    `record_message` to `/api/ws` would arm the switch to the wrong signal — a
+    halt fired by a closed laptop lid, or a dead feed masked by a healthy
+    browser. `routes/ws.py`'s module docstring records that as a rule.
 - *Frame contract, decided 2026-09-13 and recorded here rather than in scratch:*
   the socket carries **quotes and `trade_updates` only**. Engine state and
   notifications are **polled at 15s**. Rule 9 halts *because* the socket closed,

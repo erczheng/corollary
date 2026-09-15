@@ -9,14 +9,21 @@ database, and constructs the one :class:`~corollary.engine.runtime.EngineRuntime
 **That watchdog cannot fire yet, and this is the file where that is easiest
 to misread.** Rule 9's two conditions are implemented and tested in
 ``engine/runtime.py``, but nothing in the shipped app records a message, a
-successful poll, a stream open or a stream close: there is no websocket client
-under ``corollary/`` and ``RiskManager`` has no body, so neither the
-connection condition nor the heartbeat condition has a producer. What the
-lifespan supervises today is a proven switch with no wire attached to it.
-Step 8d's ``api/routes/ws.py`` attaches the first wire; a ``RiskManager`` with
-a body attaches the second. Wiring the supervisor now is deliberate -- it is
-the part that would otherwise be written under time pressure on the day the
-transport lands -- but "supervised" must not be read as "armed".
+successful poll, a stream open or a stream close: there is no **vendor**
+websocket client under ``corollary/`` and ``RiskManager`` has no body, so
+neither the connection condition nor the heartbeat condition has a producer.
+What the lifespan supervises today is a proven switch with no wire attached to
+it.
+
+``api/routes/ws.py`` is the *browser* socket and attaches **no** wire, on
+purpose: a browser tab opening says nothing about whether Alpaca is
+connected, and recording activity from it would arm the switch to the wrong
+signal -- a halt fired by a closed laptop lid, or a dead feed masked by a
+healthy tab. The vendor sockets attach the connection condition; a
+``RiskManager`` with a body attaches the heartbeat one. Wiring the supervisor
+now is deliberate -- it is the part that would otherwise be written under time
+pressure on the day the transport lands -- but "supervised" must not be read
+as "armed".
 
 Two things about this module are constraints rather than choices.
 
@@ -59,6 +66,7 @@ from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from corollary.api.deps import ApiError, ServiceRegistry
+from corollary.api.fanout import Fanout
 from corollary.api.routes import (
     account_router,
     activity_router,
@@ -66,6 +74,7 @@ from corollary.api.routes import (
     markets_router,
     positions_router,
     settings_router,
+    ws_router,
 )
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
 from corollary.data.providers.alpaca import (
@@ -380,6 +389,14 @@ def create_app(
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
     app.state.engine_runtime = None
+    # One fan-out per app, built here rather than in the lifespan so that it
+    # exists for an app nobody started -- and per app rather than per module,
+    # so two tests cannot share one hub. It is the single place a quote
+    # reaches every connected browser: a second one would let two clients
+    # disagree about a price, which is the invariant CLAUDE.md protects on the
+    # frontend's ``underlyings`` map. The vendor sockets publish into it;
+    # ``api/routes/ws.py`` reads it and nothing else writes.
+    app.state.fanout = Fanout()
     app.state.secret_values = (
         _environment_secrets if secrets is None else (lambda: tuple(secrets))
     )
@@ -409,7 +426,7 @@ def create_app(
     app.include_router(markets_router)
     app.include_router(positions_router)
     app.include_router(settings_router)
-    # Step 8 adds ``ws`` here.
+    app.include_router(ws_router)
 
     return app
 

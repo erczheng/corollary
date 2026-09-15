@@ -101,6 +101,14 @@ __all__ = [
     "UnderlyingQuote",
     "WorkingOrder",
     "WorkingOrderType",
+    "WsClientFrame",
+    "WsErrorFrame",
+    "WsQuote",
+    "WsQuoteFrame",
+    "WsServerFrame",
+    "WsSubscribeRequest",
+    "WsTradeUpdate",
+    "WsTradeUpdateFrame",
 ]
 
 logger = logging.getLogger(__name__)
@@ -1128,3 +1136,200 @@ class HaltRequest(ApiModel):
     #: Bounded at the width of ``engine_state.halted_reason``. A longer reason
     #: is a 422 rather than a value the database silently reshapes.
     reason: str = Field(min_length=1, max_length=256)
+
+
+# --------------------------------------------------------------------------
+# Websocket frames
+# --------------------------------------------------------------------------
+#
+# The browser socket's contract, decided 2026-09-13 and recorded in the Phase
+# 2 design spec under step 8d: **the socket carries quotes and
+# ``trade_updates`` only.** Engine state and notifications are polled at 15s
+# and must never ride it. Two reasons, both load-bearing:
+#
+# * Rule 9 halts *because* the socket closed, so a halt notification cannot
+#   arrive on the thing that just died.
+# * A broken **client** socket has to stay distinguishable from a **halted
+#   engine**, or a human presses Resume on an engine that was never halted.
+#
+# So a third server frame kind is a decision, not an addition. ``error`` is
+# the only one here beyond the two, and it is not engine state: it reports
+# what *this connection* did wrong, which is what an HTTP 4xx reports and it
+# carries the same :class:`ApiErrorBody`.
+#
+# Every frame is tagged with ``type`` and nests its payload under a key named
+# after the tag, so reading the wrong payload is a missing key rather than a
+# plausible object with absent fields. ``tests/api/test_ws.py`` pins the set
+# of kinds.
+
+
+class WsQuote(ApiModel):
+    """A best bid and offer, as it leaves the vendor stream.
+
+    Mirrors :class:`~corollary.data.providers.interface.Quote` field for
+    field, because the vendor half's job is to hand this layer a domain
+    ``Quote`` and nothing else. One symbol, one price, one source -- the
+    invariant CLAUDE.md states for the frontend's ``underlyings`` map, held
+    here by the fan-out rather than by convention.
+
+    **No ``mid``.** The midpoint is a derivation the client can make from the
+    two sides it already has, and the judgement worth keeping -- a crossed
+    quote has *no* midpoint, because a bid above an ask is a data error rather
+    than a tradeable market -- lives on ``Quote.mid``, where the vendor half
+    reads it. A second copy on the wire is a second thing to disagree with the
+    first.
+    """
+
+    #: OCC for a contract, a plain ticker for an underlying. This socket
+    #: carries both; which of the two vendor sockets it arrived on is not the
+    #: browser's business.
+    symbol: str
+    #: ``None`` when that side of the book is empty. Alpaca sends ``0``, which
+    #: it documents as *"the security has no active bid"* -- a zero here would
+    #: claim someone is bidding nothing.
+    bid: JsonMoney | None
+    ask: JsonMoney | None
+    bid_size: int
+    ask_size: int
+    #: The **vendor's** observation timestamp, never the client's clock and
+    #: never the server's receive time. Design spec decision 18: the browser
+    #: resolves two writers into one quote map by comparing this, and a
+    #: receive-time stamp would make the resolution depend on which hop was
+    #: slower.
+    at: datetime
+
+
+class WsTradeUpdate(ApiModel):
+    """One ``trade_updates`` event: what happened to an order.
+
+    Alpaca's ``trade_updates`` stream, flattened. Every field below maps to
+    something the vendor sends -- the event, its timestamp, and the order it
+    concerns -- so the vendor half has nothing to invent.
+
+    Not a notification and not engine state. This is the broker telling us
+    about an order we placed; a *halt* is Corollary telling the human about
+    itself, and that goes out on the 15s poll for the reason in this section's
+    header.
+    """
+
+    #: The vendor's event name: ``new``, ``fill``, ``partial_fill``,
+    #: ``canceled``, ``rejected``, ``expired`` and a dozen more.
+    #:
+    #: **A free string, deliberately**, on the same reasoning as
+    #: :attr:`~corollary.engine.execution.interface.Order.status`: the vendor's
+    #: set is open, and a ``Literal`` that has not heard of ``calculated``
+    #: turns a real fill notice into a validation error on the way through.
+    event: str
+    #: The vendor's timestamp for the event, not our receive time.
+    at: datetime
+    order_id: str
+    #: Empty on an ``mleg`` parent, where the parent is the *structure* and
+    #: the legs are the instruments.
+    symbol: str
+    #: The order's status *after* this event. Free string, same reasoning as
+    #: :attr:`event`.
+    status: str
+    #: Corollary's four-way action, resolved server-side from the vendor's
+    #: ``position_intent``. ``None`` on an ``mleg`` parent, which carries no
+    #: intent at all -- guessing one there is how a buy-to-close gets booked
+    #: as a new lot and doubles a position the account already holds.
+    action: OrderSide | None
+    #: The order's total quantity in contracts. ``None`` where the vendor
+    #: sends none, which an ``mleg`` parent does.
+    quantity: int | None
+    #: Cumulative filled quantity, which is the figure that says whether a
+    #: partial fill is still working.
+    filled_quantity: int
+    #: This event's own execution price and size, present on a fill or a
+    #: partial fill and ``None`` on every other event.
+    fill_price: JsonMoney | None
+    fill_quantity: int | None
+    #: **Signed on an ``mleg`` parent**: a negative average fill price is a
+    #: net *credit*. The sign is the fact, not a presentation choice -- see
+    #: ``Order.filled_avg_price``.
+    filled_avg_price: JsonMoney | None
+    #: The resulting position size, signed, as the broker sees it. Carried
+    #: because rule 9 exists: reconnecting into an unverified position state
+    #: is how a bot doubles a position it already holds, and this is the
+    #: broker's own answer to what it holds.
+    position_quantity: int | None
+
+
+class WsQuoteFrame(ApiModel):
+    """A quote, tagged."""
+
+    type: Literal["quote"] = "quote"
+    quote: WsQuote
+
+
+class WsTradeUpdateFrame(ApiModel):
+    """A ``trade_updates`` event, tagged."""
+
+    type: Literal["trade_update"] = "trade_update"
+    update: WsTradeUpdate
+
+
+class WsErrorFrame(ApiModel):
+    """A stated condition on a socket that has no status code to carry one.
+
+    The body is :class:`ApiErrorBody` in the same position it occupies in
+    :class:`ApiErrorResponse`, so ``api.ts`` parses one error shape everywhere
+    and branches on one vocabulary of codes. That is the whole reason it nests
+    under ``error`` rather than flattening: over HTTP the envelope *is* the
+    response, and a client holding two error parsers uses the wrong one on the
+    day it matters.
+
+    **A refusal does not close the socket.** Closing would make a rejected
+    subscription look exactly like a dead connection, which is the confusion
+    this contract exists to prevent.
+    """
+
+    type: Literal["error"] = "error"
+    error: ApiErrorBody
+
+
+WsServerFrame: TypeAlias = Annotated[
+    WsQuoteFrame | WsTradeUpdateFrame | WsErrorFrame,
+    Field(discriminator="type"),
+]
+"""Everything the server may send on ``/api/ws``. Three kinds, discriminated.
+
+Discriminated rather than merely tagged: a client that has to infer the kind
+from which fields are present infers wrongly the first time a payload gains a
+nullable field, and one of these kinds is about money.
+"""
+
+
+class WsSubscribeRequest(ApiModel):
+    """The client naming the symbols whose **quotes** it wants.
+
+    A delivery filter on this connection and nothing more. It does **not**
+    reach the vendor sockets: which symbols Corollary streams from Alpaca is
+    decided by ``engine/stream.py``'s two budgets in priority order, and a
+    client-supplied list is admitted there at the lowest priority there is --
+    see ``markets_visible_unit``. Step 15 wires that half; a browser asking
+    for a symbol has never been a reason to spend a stream slot.
+
+    ``symbols`` has **no default**, on the same reasoning
+    ``plan_stream_subscriptions`` gives for its two lists: an omitted list is
+    a silent choice. ``null`` means *every symbol the fan-out publishes* and
+    spells itself, which reads differently from a forgotten field.
+
+    Applied **whole or not at all**. One malformed symbol refuses the entire
+    message and leaves the previous filter in place, for the reason
+    ``stream.py`` refuses a partial subscription: the client would believe it
+    is watching a list it is not watching.
+    """
+
+    type: Literal["subscribe"] = "subscribe"
+    symbols: list[str] | None
+
+
+WsClientFrame: TypeAlias = WsSubscribeRequest
+"""Everything a client may send. One kind today, and named anyway.
+
+An alias rather than a bare model, because step 15's viewport hint is a second
+client message on this socket. The name is what the transport dispatches on,
+so adding the second kind is a union here rather than a new concept in
+``routes/ws.py``.
+"""

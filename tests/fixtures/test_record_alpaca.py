@@ -371,6 +371,17 @@ PLACEHOLDER_IDENTIFIERS = frozenset(
         # other -- a test that passed only because somebody else's constant
         # happened to be redacted would prove nothing about this route.
         "PAEXAMPLE000",
+        # tests/api/test_ws.py: the websocket refusal path, which scrubs by
+        # hand because ``api/app.py``'s exception handlers never run for a
+        # socket. The secret is **forty characters on purpose** -- the echo
+        # used to cut a client value to 24 before the redactor saw it, and
+        # substitution then matched nothing and kept the prefix, so a value
+        # shorter than the cut could not have caught it. The account number
+        # is there because the refusal's *log record* carried one the frame
+        # beside it had redacted. Distinct from every value above, for the
+        # reason they are distinct from each other.
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcd",
+        "PA3Q8ZV71LKD",
     }
 )
 
