@@ -4,6 +4,11 @@
 **Status:** Approved, not yet implemented. **Amended 2026-09-10** after probing the real paper account. Three claims taken from Alpaca's published specs turned out to be wrong on this plan, and two of them leave the Markets page blocked on a decision. See *What the probe reached, and what it could not* and *Open questions*.
 
 **Amended 2026-09-14.** Five things — four decisions, 17–20, and one verified constraint. One is a **factual correction with shipped code resting on it**: the 30-symbol websocket cap is the *equity* stream only, and the option stream carries a separate 200-quote budget, so `engine/stream.py` is currently rationing a resource that is not scarce. Two are cadence decisions taken by the account holder — an adaptive 400ms/5s Markets poll alongside a push-only position feed, and pulling the Algo Trader Plus subscription forward from Phase 6 to Phase 4. **Decision 20** is what the cadence becomes on the upgraded plan, written now so the upgrade is a config change and a list of deletions rather than a redesign under time pressure; the constraint is the series ceiling's fetch/serve asymmetry and `1H`'s inability to represent the session open, both out of the regular-trading-hours work committed the same day. See *The websocket cap is two budgets, not one* and *The series ceiling counts served points, not fetched bars* under Constraints, the rewritten *Feeds and budgets*, and decisions 17 through 20.
+**Order of work rewritten 2026-09-14.** Every remaining unit is now its own
+entry with a status, its dependencies and its files, and landed steps name the
+commit that landed them. Step 8's six sub-steps and the work decisions 17 and 18
+created are tracked there rather than in `.claude/scratch/`, which `.gitignore`
+excludes from the repo. See *Order of work*.
 **Scope:** The backend (`corollary/`), and the Dashboard, Activity, Markets and Account pages
 **Phase:** 2 — Alpaca paper connected, read-only. **No order reaches a broker.**
 
@@ -288,7 +293,10 @@ dropping is the choice, because the filter's whole purpose is that no
 extended-hours print reaches the series. So `1H` stays **askable** on an
 explicit request and `_finest_timeframe_to_suggest` stops **offering** it: a
 range control that offers a timeframe which cannot show the open is a control
-that lies about the open. The estimate keeps the seventh bar anyway, since an
+that lies about the open. What a refusal suggests instead is the next
+resolution that *can* begin a bar at the open — the refusal for a year at
+`5Min` now names `1D`, which is the honest answer anyway, since a year of
+intraday bars is not a thing a ~900px chart can draw. The estimate keeps the seventh bar anyway, since an
 over-estimate is the safe direction for a ceiling.
 
 ### Not verified
@@ -600,7 +608,7 @@ options trader on both, and is the right thing to size against on both.
 
 ## Decisions
 
-Nineteen decisions, taken 2026-09-09 through 2026-09-14. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
+Twenty decisions, taken 2026-09-09 through 2026-09-14. Each records what it rules out, because the alternative is usually the thing someone reaches for later.
 
 ### 1. One process
 
@@ -2128,25 +2136,381 @@ News page owns it.
 
 ## Order of work
 
-0. ~~Check whether signing the OPRA agreement is free.~~ **Done — it is
-   paywalled.** Resolved as decision 10: derive IV and greeks, report open
-   interest absent, buy the plan at Phase 6. Markets work is unblocked.
-1. Type extraction and vite proxy — pure refactors.
-2. DB and Alembic wired; three config tables, audit log, engine state. Settings goes server-backed.
-3. `MarketDataProvider` + `AlpacaProvider`: quotes, snapshots, bars, chain, contracts. Rate limiter, feed config.
-4. `BrokerAccount` + `AlpacaBroker` read surface.
-5. Fill ingestion, FIFO matcher, `realized_trade`.
-6. Multi-leg grouping.
-7. API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets, **and Settings**. Settings was added 2026-09-12: it sizes risk ceilings against `ACCOUNT_SNAPSHOTS` fixture equity, so its raise-confirm quotes a dollar consequence computed from $100,000 of fake money rather than the real balance. It cannot place a trade and the engine enforces the true ceiling server-side regardless, so this is a misquote rather than a hole -- but rule 4's whole point is that the number a human approves is the real one. Its endpoints already exist. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
-8. WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`. **Also persist the matcher's refusals — decision 14.** `EngineRuntime` owns the ingest loop and therefore owns `IngestResult`, which is the cheapest point to hand a rejection's rule and inputs to the API; doing it here is what lets the Activity page name a gap's cause instead of only counting it.
-9. Finnhub market cap; fixture markers.
-10. Doc amendments.
+**Rewritten 2026-09-14 so that this list is the status of record.** The
+previous version hid step 8's six sub-steps behind one line and hid step 11
+entirely; their real state lived in `.claude/scratch/step8-10-orchestration.md`.
+The cost was not hypothetical — a dispatch arrived believing steps 0 through 8
+had landed when `corollary/api/routes/ws.py` had never been written, which is
+rule 9's dead-man's switch with a proven mechanism and no wire attached.
 
+**`.claude/scratch/` is not tracked, and must not be where status lives.** The
+directory is the last entry in `.gitignore`, described there as *"working
+memory, not project record"*, and that is the right scope for it. A step's
+state is project record: it has to survive a session ending, be readable by
+someone who never saw that session, and be checkable against the tree. Working
+notes, audit transcripts and hand-off details belong in scratch and should stay
+there. **What is done, what is not, and what blocks what belongs here**, changed
+in the same commit that changes the thing it describes. A status claim that
+exists only in an ignored file is a status claim nobody can review and `git log`
+cannot contradict.
 
-**Phase 4 — the Algo Trader Plus upgrade (decision 20).** Lettered rather than
-numbered so that renumbering the Phase 2 list above cannot collide with it, and
-listed here rather than in a separate document so the upgrade is a checklist
-instead of a redesign. **None of this is Phase 2 work.** Order matters within
+Each entry gives the work in one line, then **Status**, **Depends on** and
+**Files**. A landed step names the commit, so the list reads as status rather
+than as intent. Every entry is marked **Phase 2** or **Phase 4**. Numbers 0–10
+are the original sequence and keep their numbers so that older references still
+resolve; **11–15 are the work decisions 17 and 18 created**, which until now
+existed only inside those decisions and appeared in no list; U1–U10 are Phase 4
+and are unchanged.
+
+### Phase 2 — landed
+
+**0. Check whether signing the OPRA agreement is free.** *Done — it is
+paywalled*, and resolved as decision 10: derive IV and greeks, report open
+interest absent, Markets work unblocked. **The rest of that sentence is
+superseded.** This entry read *"buy the plan at Phase 6"* until 2026-09-14;
+**decision 19 moved the purchase to Phase 4**, because a scanner that ranks and
+sizes candidates crosses decision 10's own *"fine for a column and not fine for
+sizing"* boundary before any order does. The Phase 4 checklist is U1–U10 below.
+
+**1. Type extraction and vite proxy** — pure refactors.
+- *Status:* landed `2b36bf4`.
+- *Files:* `web/src/lib/types.ts`, `web/vite.config.ts`.
+
+**2. DB and Alembic wired; three config tables, audit log, engine state.**
+- *Status:* landed `f4786c9`; ledger schema `141eaec`, the `activity_id` SQL
+  guard `39aecea`, an explicit 5000ms `busy_timeout` `d3a830d`, migration 0004
+  `1824191`. Head is **0004**.
+- *Correction, kept so it is not re-derived:* this entry used to end *"Settings
+  goes server-backed"*, which over-claimed — the tables existed and nothing
+  served them. That work is step 7's. Recorded under *Doc amendments*.
+- *Files:* `corollary/db/`, `corollary/db/migrations/versions/`.
+
+**3. `MarketDataProvider` + `AlpacaProvider`** — quotes, snapshots, bars,
+chain, contracts; rate limiter, feed config.
+- *Status:* landed `508cb5a`, with vendor-neutral decode and error redaction
+  `8f746b0` and the markets-route provider surface `aa06b3a`.
+- *Files:* `corollary/data/providers/`, `corollary/wire.py`,
+  `corollary/ratelimit.py`.
+
+**4. `BrokerAccount` + `AlpacaBroker` read surface.**
+- *Status:* landed `6a08db6`; recorded trading-endpoint fixtures, with
+  redaction that sees into prose, `26dfa62`.
+- *Files:* `corollary/engine/execution/{interface,alpaca}.py`,
+  `tests/fixtures/alpaca/`.
+
+**5. Fill ingestion, FIFO matcher, `realized_trade`.**
+- *Status:* landed — the matcher `430c327`, ingestion validated against a real
+  settlement `3219403`. The reconciliation identity in *Open questions 2* is the
+  check to re-run whenever the ledger changes.
+- *Files:* `corollary/engine/{ingest,ledger}.py`.
+
+**6. Multi-leg grouping.**
+- *Status:* landed `05032bc`.
+- *Files:* `corollary/engine/grouping.py`.
+
+**7.** API routes and schemas; frontend query migration page by page — Account, Activity, Dashboard, Markets, **and Settings**. Settings was added 2026-09-12: it sizes risk ceilings against `ACCOUNT_SNAPSHOTS` fixture equity, so its raise-confirm quotes a dollar consequence computed from $100,000 of fake money rather than the real balance. It cannot place a trade and the engine enforces the true ceiling server-side regardless, so this is a misquote rather than a hole -- but rule 4's whole point is that the number a human approves is the real one. Its endpoints already exist. **Ingestion must fetch contract terms for any symbol carrying an option event — this is now load-bearing, not optional.** Added 2026-09-11 after steps 5 and 6 landed. `contracts` was described earlier in this spec as optional and touching no money; that is no longer true. The matcher takes `multiplier` per contract and **refuses to book a P&L it cannot state correctly**, so a symbol whose terms were never fetched produces no realized trade at all when it expires or is exercised. That is the same "terminal that believes you never win" failure as a wrong `net_amount`, arriving by refusal rather than by bad arithmetic — visible rather than silent, since every refusal logs its rule, inputs and timestamp, but a gap in lifetime P&L either way.
+- *Status:* landed. The HTTP layer `2713707`, the typed client and query hooks
+  `8374da1`, Account `6746e7f`, then Activity/Settings/Dashboard/Markets
+  `9462ff0`, with `fdf0616`, `733beab`, `b76cf05`, `fd53a40`, `ef4d7c4`,
+  `fe7efb9`, `ff4e766` and `36b5497` behind them.
+- *Files:* `corollary/api/routes/`, `corollary/api/schemas.py`,
+  `web/src/lib/{api,queries,types}.ts`, `web/src/pages/`.
+
+**8.** WS fan-out, `EngineRuntime`, watchdog; simplify `store.tick()`. **Also persist the matcher's refusals — decision 14.** `EngineRuntime` owns the ingest loop and therefore owns `IngestResult`, which is the cheapest point to hand a rejection's rule and inputs to the API; doing it here is what lets the Activity page name a gap's cause instead of only counting it.
+- *Status:* **partially landed — six sub-steps, two of which are not written.**
+  They are listed individually below rather than behind this one line, which is
+  the change this rewrite exists to make.
+
+**8a. `engine/stream.py` — the subscription budget, enforced rather than noted.**
+- *Status:* landed `d8cd358`, **on a premise the spec now contradicts.** It
+  rations one 30-symbol pool across both streams; decision 17 establishes that
+  the 30 is the *equity* stream alone and options carry a separate 200-quote
+  budget. Its logic is right and its inputs are wrong. Not a money bug — it
+  under-subscribes rather than over-subscribes — but a full eight-position book
+  reports position contracts as *"not streamed"* with ~170 option slots free,
+  and a stale mark looks exactly like a quiet market. **Step 11 is the fix and
+  is in flight.**
+- *Files:* `corollary/engine/stream.py`, `tests/engine/test_stream.py`.
+
+**8b. `engine/runtime.py` and the FastAPI lifespan.**
+- *Status:* landed `977c055`, with `a049596` (a late halt record names the alert
+  it belongs to) and `d3a830d` behind it. The watchdog, the halt-once rule and
+  the never-auto-resume rule are all here and tested; what it does not have is a
+  producer, which is 8d.
+- *Carries three follow-ups and one open design question*, in *Carried items*
+  below and in 8d respectively.
+- *Files:* `corollary/engine/runtime.py`, `corollary/api/app.py`.
+
+**8c-1. The `ledger_rejection` table — decision 14's persistence half.**
+- *Status:* landed `1824191`, migration 0004, plus `wire.py` gaining a separate
+  storage bound so a stored cause is not cut off mid-sentence while the log
+  keeps `ERROR_BODY_MAX`. One scrubber, two limits — never a second redactor.
+  Rows are written and **nothing serves them**; that is 8c-2.
+- *Files:* `corollary/db/models.py`, `corollary/engine/ingest.py`,
+  `corollary/engine/ledger.py`, `corollary/wire.py`,
+  `corollary/db/migrations/versions/0004_ledger_rejection.py`.
+
+**8e. `store.tick()` simplification.**
+- *Status:* **satisfied, and deliberately not by deletion. Do not dispatch it.**
+  Verified by grep rather than assumed: `store.tick()` and `store.flatten()`
+  have **zero production callers** in `web/src` — only comments in
+  `mockData.ts`, `queries.ts`, `Dashboard.tsx`, `Activity.tsx` and
+  `CommandPalette.tsx` describing what they used to do. Step 7 moved all six
+  pages onto the API, which is what the step existed to achieve: the hazard was
+  a simulated fill applied to a live position, and nothing in production calls
+  the simulator. The inert store survives to Phase 6 on the web agent's
+  reasoning, recorded in PRD's Phase 6 section — `flatten()`'s test is where
+  rule 7's halt-versus-flatten distinction is actually written down, so deleting
+  the function would take the explanation with it.
+- *Consequence to carry into step 14:* two fixture-era hooks are orphaned with
+  it. `useMarketPoll` and `useLiveTick` have no callers either, and nothing has
+  replaced their cadence.
+
+**9. Finnhub market cap; fixture markers.**
+- *Status:* landed — market cap plus regular-trading-hours series scoping
+  `6d9c196`, per-page fixture markers `96d47bf`. The same commit carries the two
+  series-ceiling findings now recorded under *Constraints*: the ~2.46× fetch/serve
+  asymmetry that makes `MAX_RESPONSE_POINTS` a byte ceiling rather than a
+  round-trip one, and `1H`'s inability to begin a bar at the open, which is why
+  it is still askable and no longer suggested.
+- *Files:* `corollary/data/providers/{finnhub,fundamentals}.py`,
+  `corollary/api/routes/markets.py`, `corollary/api/deps.py`,
+  `web/src/components/FixtureMarker.tsx`, `web/src/pages/{News,Research,Settings}.tsx`.
+
+### Phase 2 — remaining
+
+**8d. `api/routes/ws.py` — the websocket transport.** Fan quotes and
+`trade_updates` out to the browser, and give the watchdog its producers.
+- *Status:* **not written, and this is the largest remaining Phase 2 item.**
+  Proven rather than inferred: `corollary/api/routes/` contains no `ws.py`;
+  `api/routes/__init__.py` says *"Still to land: `ws`, at step 8"*; and every
+  watchdog activity recorder — `record_message`, `record_poll`,
+  `_last_activity_at`, stream open and stream close — has **zero callers outside
+  `runtime.py`**. Rule 9's dead-man's switch therefore has no producer for
+  either halt condition. Supervised is not armed.
+- *Frame contract, decided 2026-09-13 and recorded here rather than in scratch:*
+  the socket carries **quotes and `trade_updates` only**. Engine state and
+  notifications are **polled at 15s**. Rule 9 halts *because* the socket closed,
+  so a halt notification cannot ride the socket; and a broken client socket must
+  stay distinguishable from a halted engine, or a human presses Resume on an
+  engine that was never halted.
+- *Open design question this step must close — it is a rule 9 question, not a
+  bug fix.* Measured against `runtime.py` before 8d: the engine is running, the
+  feed dies for 90s, `halt()` announces, SQLite answers *"database is locked"*,
+  the feed returns within one tick, the lock clears after. Final state is
+  `halted=False`, `halted_reason=None`, one critical *"Engine halted"*
+  notification delivered, and **no human resume ever requested** — the engine
+  traded on through a connection loss that rule 9 says must end in a halt only a
+  human clears. `_retry_persist` is reachable only from the suppressed branch,
+  which requires `decision is not None`, so the healthy branch is the last place
+  that could repair the row and deliberately does not. An ablation confirmed 8b
+  neither opened nor widened this; it is pre-existing. **Needs a ruling before
+  8d lands**, because the fix is a choice about what an unpersisted halt means,
+  not a defect with one correct repair.
+- *Buildable here for near-nothing and required at Phase 4:* U2's
+  acknowledgement reconciliation — compare `SubscriptionPlan.subscribed` against
+  the server's `subscription` message per channel, count absentees into *"N
+  symbols not streamed"*, and treat a `405` as an authoritative cap correction
+  that lowers the effective option cap and re-plans.
+- *Depends on:* step 11 for the two-plan shape it subscribes. Landing 8d first
+  against today's single plan is possible and means re-pointing it afterwards.
+- *Blocks:* 12 (a second writer into the quote map arrives with this step), 15
+  (the viewport hint is a client message on this socket).
+- *Files:* new `corollary/api/routes/ws.py`; `corollary/api/schemas.py`;
+  `corollary/api/routes/__init__.py`; call sites in `corollary/engine/runtime.py`
+  — **in flight at step 11, coordinate before touching it**;
+  `web/src/lib/api.ts`, `web/src/lib/store.ts`.
+
+**8c-2. A refusal's cause reaches the screen — decision 14's reporting half.**
+- *Status:* **not done.** `1824191` touched no `api/routes/` and no `web/`.
+  Verified: `ledger_rejection` appears nowhere under `corollary/api/`, and
+  Activity's `notBooked` / `notBookedSymbols` are computed by `unbooked_closes()`
+  over fills and trades — a count and a list of symbols, **not a cause**. The
+  page can say *"N closings are missing from the figures above"* and cannot yet
+  say why, which is the half of decision 14 that makes a known-incomplete figure
+  legible instead of merely flagged.
+- *Depends on:* 8c-1 (landed). Independent of 8d.
+- *Files:* `corollary/api/routes/activity.py`, `corollary/api/schemas.py`,
+  `web/src/lib/{api,types}.ts`, `web/src/pages/Activity.tsx`.
+
+**11. The two stream budgets, and the mixed-unit refusal — decision 17.**
+Phase 2. Split `STREAM_SYMBOL_CAP` into an equity cap of 30 and an option cap of
+200, plan each stream separately, and reject a subscription unit whose symbols
+would land in two different budgets.
+- *Status:* **in flight right now**, in a concurrent dispatch.
+  `tests/engine/test_stream.py` is modified in the working tree. **Do not edit**
+  `corollary/engine/stream.py`, `corollary/engine/runtime.py`, their tests,
+  `corollary/data/providers/interface.py` or
+  `corollary/engine/execution/interface.py` while it runs.
+- *The work, from decision 17:* two named constants with the stream in the name;
+  `stream_symbol_cap_for_plan` becomes per-stream, with
+  `UNLIMITED_STREAM_SYMBOL_CAP` reaching equities only and a **real 1000** on
+  options; `plan_stream_subscriptions` returns two plans and the caller
+  subscribes each to its own socket; *"N symbols not streamed"* sums across both
+  into one number; and a unit carrying both an OCC symbol and an equity ticker
+  raises as a caller bug, because all-or-nothing cannot survive a unit split
+  across two budgets.
+- *Depends on:* nothing. It corrects 8a.
+- *Blocks:* 15, and the shape 8d subscribes.
+- *Files:* as listed above.
+
+**12. `UnderlyingQuote` provenance and the field-level merge — decision 18.**
+Phase 2. Make one quote map safe for two writers.
+- *Status:* not started. Verified: `UnderlyingQuote` in `web/src/lib/types.ts`
+  carries neither `at` nor `source`, and `change` / `changePct` are **stored on
+  the wire** today rather than derived.
+- *The work, from decision 18:* `at` is the **vendor's** observation timestamp,
+  never the client clock; `source` is `'stream' | 'poll'`; price is
+  last-observation-wins on `at` with the stream winning a tie; the merge is
+  field-level, so a stream write never blanks `previousClose`, session volume,
+  average volume or market cap and a poll write never stomps a fresher streamed
+  price; `change` and `changePct` are derived in a selector at read time;
+  `lastTickAt` and `lastPollAt` stay separate, because *"is the stream alive"*
+  and *"is the poll alive"* are different questions and collapsing them lets a
+  healthy poll hide a dead socket.
+- *Why it sits before the cadence work rather than after it:* the second writer
+  arrives with **8d**, not with step 15 — position underlyings are equity
+  symbols that the Markets table also polls. Landing the merge rules afterwards
+  means shipping the screen-flickers-backwards-in-time bug first and fixing it
+  second, on the one map CLAUDE.md spends a paragraph protecting.
+- *Depends on:* 8d for the stream half; the poll half stands alone.
+- *Blocks:* 15.
+- *Files:* `corollary/api/schemas.py`, `corollary/api/routes/markets.py`,
+  `web/src/lib/{types,api,store}.ts`.
+
+**13. The `/api/markets/stocks` coalescing cache — decision 18.** Phase 2.
+Concurrent and near-simultaneous callers share one in-flight Alpaca request,
+keyed on the requested symbol set, TTL equal to the foreground interval.
+- *Status:* not started — there is no coalescing in
+  `corollary/api/routes/markets.py`.
+- *Why it must land before the interval drops:* the browser drives the poll and
+  the API forwards it, so two tabs, a reload loop or a hot-reloading dev server
+  multiply the Alpaca rate by the number of clients — 400ms × 2 clients is
+  300/min against a 200/min ceiling. `ratelimit.py`'s bucket **waits** rather
+  than refusing, so the symptom is not an error: every Markets request simply
+  gets slower until the page looks broken for a reason nothing logs. The bucket
+  is the hard backstop; the cache is what keeps it from ever being reached.
+  Dropping the interval first ships exactly that failure.
+- *Depends on:* nothing.
+- *Blocks:* 14.
+- *Files:* `corollary/api/routes/markets.py`, `corollary/api/deps.py`.
+
+**14. The three-state cadence hook — decision 18.** Phase 2. Hidden, foreground
+and background are three states, not two.
+- *Status:* not started, and the starting point is further back than it looks:
+  **nothing refreshes Markets at all today.** There is no `refetchInterval`
+  anywhere in `web/src`, and `useMarketPoll` — which drives the *fixture* store's
+  `pollMarkets` — has had no callers since step 7 moved the pages onto the API.
+  `useLiveTick` is orphaned the same way. This is the reintroduction of live
+  refresh against a real feed, not an adjustment to a working cadence; read the
+  old hook as a fixture artefact rather than as the thing being retuned.
+- *The work, from decision 18:* **hidden** — `document.hidden` true, the poll
+  stops entirely and the first poll on return is immediate; **foreground** —
+  visible **and the Markets route mounted**, 400ms; **background** — visible,
+  Markets not mounted, 5s from one app-level hook so exactly one interval exists
+  at a time, keeping the server's session-volume and daily-series caches warm.
+  Which page is open is read from the router, never from a store flag: a flag
+  set on navigation survives a crash, a modal, or a route the author forgot.
+  400ms is 150/min of a 200/min bucket, leaving ~49/min for on-demand chains;
+  300ms is exactly at the ceiling with nothing left, which is why the floor is
+  400 and not 300.
+- *Depends on:* 13 — the server must bound the rate before the client is
+  allowed to ask for it faster.
+- *Files:* `web/src/hooks/useMarketPoll.ts` (rewrite or replace),
+  `web/src/lib/queries.ts`, `web/src/pages/Markets.tsx`, `web/src/App.tsx`.
+
+**15. The `MARKETS_VISIBLE` tier and the viewport hint — decision 18.** Phase 2.
+Spend the ~22 equity slots left after position underlyings on the Markets rows
+actually on screen.
+- *Status:* not started — `MARKETS_VISIBLE` appears nowhere in the tree.
+- *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
+  debounced client message on the existing WS that names the visible rows and is
+  sent only when the set actually differs. The server treats it as input to that
+  tier and nothing else: a client-supplied list can **never** outrank a position
+  contract or a position underlying, because a client that could evict a held
+  contract from the stream could make a position mark stale by scrolling. That
+  is rule 4's principle applied to a stream budget. Churn is harmless by
+  construction — every Markets row is polled anyway, so losing a slot costs
+  freshness, never a price.
+- *Depends on:* 11 (the equity budget and the two-plan shape), 8d (the
+  client-to-server message), 12 (it is the second writer).
+- *Files:* `corollary/engine/stream.py`, `corollary/engine/runtime.py`,
+  `corollary/api/routes/ws.py`, `web/src/pages/Markets.tsx`.
+
+**10. Doc amendments.** Phase 2, **last**, so they describe what was actually
+built.
+- *Status:* partially applied. PRD's five amendments landed 2026-09-11
+  (`53d5097`, `3f8ca60`); PRD §12 and the two-budget / Phase 4 corrections
+  landed in `073c9a6`, which also amended CLAUDE.md's cap sentences.
+- *Outstanding — CLAUDE.md's layout and vendor-surface amendment:* the vendor
+  surface gains `BrokerAccount`; the layout gains
+  `engine/{ledger,grouping,runtime,stream}.py`, `api/routes/`, `api/schemas.py`
+  and `corollary/wire.py`; `CONTRACT_MULTIPLIER` is named as a **fixture**
+  default, since it lives in `web/src/lib/mockData.ts` and nothing under
+  `corollary/` defines it; and the options level is read from the account rather
+  than hardcoded to 3. The content is factual and relaxes no rule, but **it needs
+  the repo owner's own go-ahead** — no agent message authorizes a CLAUDE.md
+  edit, and a spec plus a prior agent's note is not the owner's word.
+
+### Carried items that are not steps — Phase 2 unless stated
+
+Findings that were live only in `.claude/scratch/` and would have been lost with
+it. None blocks a step; each is small, and each is here because the reasoning
+behind it is more expensive to rebuild than to record.
+
+- **`_write_trades`'s canonical-symbol premise is unpinned.** `ledger.py` skips
+  deleting a `realized_trade` row when its symbol is in `guarded`, which is safe
+  only because `RealizedTrade.symbol` is canonical on every writer path. That is
+  true today and nothing proves it: changing either `LotMovement(...)`
+  constructor from `symbol=contract.symbol` to `symbol=activity.symbol` would
+  leave the whole suite green and reinstate the money-row deletion chain an
+  earlier audit found — a booked trade vanishing out of lifetime P&L. One test
+  closes it: drive a lower-cased or padded vendor symbol through `build_ledger`
+  and assert the resulting record is canonical. Hardening, not a defect; worth
+  doing before Phase 3 touches the matcher.
+- **Three test files still outside the `-m risk` gate.** The marker now collects
+  64 tests rather than 1 (`04e0864`), but `tests/api/test_account_mode.py`
+  (rules 1 and 5 — including the structural order-verb and vendor-SDK guards
+  applied to the API package, plus cold-start-in-Paper), `tests/db/test_risk_limit_bounds.py`
+  (rule 4 — `Decimal('Inf')`, NaN and a negative ceiling each round-tripped
+  before that file existed, and each disables the risk manager outright) and
+  `tests/db/test_money_sql.py` carry no `@pytest.mark.risk` at all. The gate that
+  runs before every engine change does not currently see them.
+- **`engine_state` and `mark_started` are persistence living in
+  `api/routes/engine.py`.** `EngineRuntime` imports them inside method bodies to
+  dodge a circular import and documents why. The right fix is to move both out
+  of the route module; the alternative — a second copy of the t₀ rule and the
+  create-if-missing rule inside `engine/` — is exactly the duplication rule 9 is
+  most vulnerable to. Do it before more code imports them lazily.
+- **`check_watchdog`'s four-state docstring table is no longer exact.** After the
+  fault-ends clearing rule, `_announced is None` has a third meaning the table
+  does not enumerate — announced, never recorded, episode ended, fault returned.
+  A reader debugging *"why did it announce twice in one outage?"* reasons from
+  the table and hunts a resume that never happened.
+- **Two sub-bar accuracy notes in the ingest path.** `ingest.py`'s `guarded`
+  comment under-counts its own inputs — `NOT_AN_OPTION` and
+  `NOT_A_LEDGER_ACTIVITY` also reject before a contract is resolved and also pass
+  `activity.symbol` verbatim — and `MISSING_FEE_AMOUNT` in `ledger.py` is a fifth
+  such rule, complete in practice only because Alpaca's `FEE` rows carry no
+  symbol.
+- **The commit trailer on this branch is not the one recent dispatches ask for.**
+  Every commit here carries `Co-Authored-By: Claude Sonnet 5`; recent dispatch
+  context names `Claude Opus 5 (1M context)`. Amending history is a human call
+  and not one to take on inference.
+- **Two web findings already logged against Phase 4** by the page migration, in
+  PRD's Phase 6 section: `Research.tsx` reads `isHalted` from the Zustand fixture
+  store while Dashboard, the command palette and both order tickets read
+  `GET /api/engine/state`, so Research can show a halted engine as running —
+  bounded while its Execute button is fixture-backed, unbounded the moment it
+  submits. And three surfaces claim *"Submits to the risk manager"* while none
+  does; consistent rather than a silent no-op, but true only once
+  `RiskManager.approve()` exists.
+
+### Phase 4 — the Algo Trader Plus upgrade (decision 20)
+
+Lettered rather than numbered so that renumbering the Phase 2 list above
+cannot collide with it, and listed here rather than in a separate document so
+the upgrade is a checklist instead of a redesign. **None of this is Phase 2 work.** Order matters within
 the group: U1 and U2 are what make U3 safe.
 
 - **U1. The plan lookup returns a pair.** `corollary/engine/runtime.py` —
