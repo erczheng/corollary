@@ -675,7 +675,8 @@ class BrokerAccount(ABC):
       ``BrokerExecution``, and it does not exist until Phase 6. See the module
       docstring for why absence rather than a stub.
     * **Streaming.** ``trade_updates`` belongs to ``engine/stream.py`` along
-      with the 30-symbol budget and its priority ordering; folding a
+      with the two websocket budgets -- equity symbols and option quotes are
+      metered separately -- and their priority ordering; folding a
       subscription in here would put budget policy behind a vendor interface.
     """
 

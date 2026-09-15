@@ -415,10 +415,12 @@ class MarketDataProvider(ABC):
 
     Not in this interface, deliberately:
 
-    * **Streaming.** The 30-symbol websocket budget manager is its own
-      component (``engine/stream.py``) with its own priority ordering and its
-      own "N symbols not streamed" surface. Folding a subscription method in
-      here would put budget policy behind a vendor interface.
+    * **Streaming.** The websocket budget manager is its own component
+      (``engine/stream.py``), holding both budgets -- 30 equity symbols and
+      200 option quotes on Basic, metered separately -- with its own priority
+      ordering and its own "N symbols not streamed" surface. Folding a
+      subscription method in here would put budget policy behind a vendor
+      interface.
     * **Anything that places an order.** Rule 1 — there is exactly one path to
       ``submit_order`` and it is not a data provider.
     """

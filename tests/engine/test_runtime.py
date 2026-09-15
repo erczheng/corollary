@@ -71,6 +71,8 @@ from corollary.db.seed import seed
 from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine.runtime import (
     HALT_EVENT,
+    PAID_OPTION_STREAM_QUOTE_CAP,
+    REPAIR_MAX_ATTEMPTS,
     UNLIMITED_STREAM_SYMBOL_CAP,
     WATCHDOG_INTERVAL_SECONDS,
     WATCHDOG_TIMEOUT_SECONDS,
@@ -78,11 +80,18 @@ from corollary.engine.runtime import (
     HaltDecision,
     HaltRule,
     Notification,
+    StreamBudget,
     Watchdog,
     data_plan,
-    stream_symbol_cap_for_plan,
+    stream_budget_for_plan,
 )
-from corollary.engine.stream import STREAM_SYMBOL_CAP, contract_unit, underlying_unit
+from corollary.engine.stream import (
+    EQUITY_STREAM_SYMBOL_CAP,
+    OPTION_STREAM_QUOTE_CAP,
+    contract_unit,
+    markets_visible_unit,
+    underlying_unit,
+)
 
 T0 = datetime(2026, 9, 13, 13, 30, 0, tzinfo=timezone.utc)
 
@@ -851,6 +860,360 @@ def test_a_fault_that_ends_clears_an_announcement_the_row_never_took(
     assert notifier.sent[1].severity == "critical"
 
 
+# --------------------------------------------------------------------------
+# The repair: a halt that was announced, refused, and outlived by its fault
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.risk
+def test_a_fault_that_ends_before_the_write_lands_still_ends_halted(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """Rule 9's hole: an announced halt that never became state.
+
+    Four steps, none of them exotic:
+
+    1. the feed dies for ninety seconds, so ``halt`` fires and announces;
+    2. SQLite answers ``database is locked``, so the write is refused;
+    3. the feed comes back inside one watchdog interval, so the *next* tick
+       takes the healthy branch rather than the suppressed one;
+    4. the lock clears afterwards.
+
+    ``_retry_persist`` cannot reach step 4: it runs only from the suppressed
+    branch, and there is no fault left to suppress. So the episode used to end
+    ``halted=False``, ``halted_reason=None``, one critical "Engine halted"
+    alert delivered, and **no human resume ever asked for** -- the engine
+    trading on through exactly the connection loss rule 9 says must end in a
+    halt only a human clears.
+
+    The repair is the healthy branch writing the halt it announced. What it
+    must never be is an auto-resume, which is why the state asserted at the
+    end of this test is halted rather than running.
+    """
+    sessions = FlakyWrites(db_engine, writable=True)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    # An ordinary running engine: a human resumed the cold-start halt this
+    # morning. That is what makes `halted=False` at the end a lie rather than
+    # a boot state.
+    resume_engine(db_engine)
+    runtime.record_message()
+
+    sessions.writable = False
+    fault_at = clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    first = runtime.check_watchdog()
+    assert first is not None
+    assert first.rule is HaltRule.CONNECTION_STALE
+    assert len(notifier.sent) == 1
+    # The hole, before the repair closes it: announced, unrecorded, running.
+    assert read_state(db_engine).halted is False
+
+    # The lock clears and the feed comes back, in either order -- both are
+    # true by the next tick, and that tick is a healthy one.
+    sessions.writable = True
+    runtime.record_message()
+    clock.advance(WATCHDOG_INTERVAL_SECONDS)
+    assert runtime.check_watchdog() is None
+
+    repaired = read_state(db_engine)
+    assert repaired.halted is True
+    assert repaired.halted_reason is not None
+    # `halted_at` is the moment of the *fault*, not of the write. A record of
+    # an outage that timestamps itself at the repair would read as an outage
+    # that happened when everything was already fine.
+    assert repaired.halted_at == fault_at
+
+
+@pytest.mark.risk
+def test_the_repaired_record_says_what_broke_and_when(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """The cost the repair is designed against: it lands after all looks well.
+
+    A critical alert arriving while the feed is visibly healthy reads as a
+    spurious bug, and the realistic human response to a spurious-looking
+    "Engine halted" is to resume it reflexively without reading. So both the
+    persisted reason and the notification have to carry rule 8's three things
+    -- the rule, the inputs, the timestamp -- in a sentence that says this is
+    the record of a real outage rather than something happening now.
+
+    ``halted_reason`` is 256 characters, so the timestamps are compact and the
+    *what* and *when* come first: if a long ``stream_closed`` detail pushes
+    the sentence past the column, what truncates is the tail, never the fault
+    and its time.
+    """
+    sessions = FlakyWrites(db_engine, writable=True)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    resume_engine(db_engine)
+    runtime.record_message()
+
+    sessions.writable = False
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+
+    sessions.writable = True
+    runtime.record_message()
+    clock.advance(WATCHDOG_INTERVAL_SECONDS)
+    assert runtime.check_watchdog() is None
+
+    reason = read_state(db_engine).halted_reason
+    assert reason is not None
+    assert len(reason) <= 256
+    # T0 is 13:30:00Z and the fault is ninety seconds later.
+    assert "2026-09-13T13:31:30Z" in reason
+    assert HaltRule.CONNECTION_STALE.value in reason
+    assert "late" in reason.lower()
+
+    # And the human hears it, with the same three things in the body.
+    assert len(notifier.sent) == 2
+    late = notifier.sent[1]
+    assert late.severity == "critical"
+    assert late.event == HALT_EVENT
+    assert "2026-09-13T13:31:30Z" in late.body
+    assert HaltRule.CONNECTION_STALE.value in late.body
+    # Joined to the alert the operator actually received, not to a new id.
+    assert late.correlation_id == notifier.sent[0].correlation_id
+
+
+@pytest.mark.risk
+def test_a_repaired_halt_stops_the_suppression_and_re_arms_the_switch(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """The repair hands the halt back to the row, and the row polices it.
+
+    Two things have to be true afterwards or the repair has traded one latch
+    for another: the engine must stay halted until a human resumes, and the
+    *next* fault after that resume must announce. The second is what the
+    healthy branch's clearing of ``_announced`` bought in the first place, and
+    a repair that kept its own memory alive would take it straight back.
+    """
+    sessions = FlakyWrites(db_engine, writable=True)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    resume_engine(db_engine)
+    runtime.record_message()
+
+    sessions.writable = False
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+
+    sessions.writable = True
+    runtime.record_message()
+    clock.advance(WATCHDOG_INTERVAL_SECONDS)
+    assert runtime.check_watchdog() is None
+    assert read_state(db_engine).halted is True
+    assert len(notifier.sent) == 2
+
+    # Healthy ticks after the repair write nothing and say nothing. The halt
+    # stands; only a human ends it.
+    for _ in range(3):
+        runtime.record_message()
+        clock.advance(WATCHDOG_INTERVAL_SECONDS)
+        assert runtime.check_watchdog() is None
+    assert read_state(db_engine).halted is True
+    assert len(notifier.sent) == 2
+
+    # The human reads it, resumes, and the feed dies again. That is a new
+    # episode and it announces the ordinary way.
+    resume_engine(db_engine)
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    again = runtime.check_watchdog()
+    assert again is not None
+    assert read_state(db_engine).halted is True
+    assert len(notifier.sent) == 3
+
+
+@pytest.mark.risk
+def test_the_repair_never_resurrects_a_halt_a_human_knowingly_cleared(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """Which wins when a repair and a resume race: the human, by construction.
+
+    The two are only ever in contention when the row *did* take our halt, and
+    the repair is dropped the instant any explained halt reaches the row --
+    from that moment the row is the record, a resume is an observation the
+    gate can act on, and there is nothing left to write. So a halt a human
+    could have knowingly cleared is one the repair no longer holds.
+
+    What remains repairable is only ever a halt **no row ever carried**, which
+    no human can have knowingly cleared: they may have received the alert, but
+    ``GET /api/engine/state`` said running throughout. That ambiguity is
+    resolved the same way
+    ``test_a_resume_the_gate_could_not_observe_ends_with_the_engine_halted``
+    resolves it -- write the missing record -- because the two readings are
+    indistinguishable from the row and the costs are not: a halt written over
+    a resume costs one more resume, and a resume honoured over a halt costs an
+    engine trading through an unrecorded outage.
+
+    Here the write lands, so the ordinary path owns it and the healthy branch
+    must keep its hands off.
+    """
+    runtime = EngineRuntime(
+        session_factory=lambda: Session(db_engine),
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    resume_engine(db_engine)
+    runtime.record_message()
+
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+    assert read_state(db_engine).halted is True
+
+    # The human reads the alert and resumes, knowing exactly what they are
+    # clearing: the row carried it.
+    resume_engine(db_engine)
+    assert read_state(db_engine).halted is False
+
+    # The feed comes back. Nothing to repair, and nothing to undo.
+    runtime.record_message()
+    clock.advance(WATCHDOG_INTERVAL_SECONDS)
+    assert runtime.check_watchdog() is None
+    assert read_state(db_engine).halted is False
+    assert len(notifier.sent) == 1
+
+
+def test_a_repair_does_not_overwrite_a_halt_somebody_else_explained(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """A manual halt in force supersedes the repair: the row keeps their words.
+
+    Bare rather than tagged, by this file's own rule: the engine is halted and
+    stays halted whichever reason the row ends up carrying, so breaking this
+    costs clarity in the record and not money. That the engine is halted at
+    all is tagged above.
+    """
+    sessions = FlakyWrites(db_engine, writable=True)
+    runtime = EngineRuntime(
+        session_factory=sessions,
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    resume_engine(db_engine)
+    runtime.record_message()
+
+    sessions.writable = False
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+
+    sessions.writable = True
+    halt_engine(db_engine, "adjusting limits")
+
+    runtime.record_message()
+    clock.advance(WATCHDOG_INTERVAL_SECONDS)
+    assert runtime.check_watchdog() is None
+
+    state = read_state(db_engine)
+    assert state.halted is True
+    assert state.halted_reason == "adjusting limits"
+    assert len(notifier.sent) == 1
+
+
+@pytest.mark.risk
+def test_a_repair_the_database_keeps_refusing_gives_up_loudly(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """The retry is bounded, and the end of it is an alert rather than silence.
+
+    A database that never mends cannot be made to hold the halt, so the repair
+    has to end somewhere: a write attempted on every healthy tick for the life
+    of the process is an unbounded retry against a fault that is not coming
+    back. It ends after :data:`REPAIR_MAX_ATTEMPTS` ticks, and it ends *loud*
+    -- the record is wrong, the engine is running, and the only thing left
+    that can fix either is a human being told.
+
+    Rule 8 is the standard the give-up is held to, same as the halt: silence
+    here would be the original defect with an extra layer of machinery on top.
+    """
+    runtime = EngineRuntime(
+        session_factory=lambda: ReadOnlySession(db_engine),
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    runtime.record_message()
+    clock.advance(WATCHDOG_TIMEOUT_SECONDS)
+    assert runtime.check_watchdog() is not None
+    assert len(notifier.sent) == 1
+
+    for _ in range(REPAIR_MAX_ATTEMPTS):
+        runtime.record_message()
+        clock.advance(WATCHDOG_INTERVAL_SECONDS)
+        assert runtime.check_watchdog() is None
+
+    assert len(notifier.sent) == 2
+    abandoned = notifier.sent[1]
+    assert abandoned.severity == "critical"
+    assert HaltRule.CONNECTION_STALE.value in abandoned.body
+    assert "2026-09-13T13:31:30Z" in abandoned.body
+
+    # And it stops trying: no second alert, however long the engine runs on.
+    for _ in range(REPAIR_MAX_ATTEMPTS * 2):
+        runtime.record_message()
+        clock.advance(WATCHDOG_INTERVAL_SECONDS)
+        assert runtime.check_watchdog() is None
+    assert len(notifier.sent) == 2
+
+
+@pytest.mark.risk
+def test_a_healthy_engine_that_never_announced_repairs_nothing(
+    db_engine: Engine, clock: Clock, notifier: SpyNotifier
+) -> None:
+    """The boundary under the repair: with nothing announced it does nothing.
+
+    The permit side of the fix. A healthy tick on an engine with no
+    unrecorded halt must leave the row exactly as it found it -- a repair that
+    halts a running engine on an ordinary tick is a false halt, which stops
+    the book trading and costs money in its own direction.
+    """
+    runtime = EngineRuntime(
+        session_factory=lambda: Session(db_engine),
+        now=clock,
+        notifier=notifier,
+        env={},
+        correlation_ids=lambda: "test-correlation-id",
+    )
+    runtime.start()
+    resume_engine(db_engine)
+
+    for _ in range(10):
+        runtime.record_message()
+        clock.advance(WATCHDOG_INTERVAL_SECONDS)
+        assert runtime.check_watchdog() is None
+
+    state = read_state(db_engine)
+    assert state.halted is False
+    assert state.halted_reason is None
+    assert notifier.sent == []
+
+
 def test_the_record_of_a_late_halt_names_the_alert_it_belongs_to(
     db_engine: Engine,
     clock: Clock,
@@ -1286,17 +1649,130 @@ def test_the_rule_the_inputs_and_the_timestamp_are_logged(
 
 
 # --------------------------------------------------------------------------
-# The stream budget: the cap is derived from the plan of record
+# The stream budgets: two caps, both derived from the plan of record
 # --------------------------------------------------------------------------
 
 
-def test_the_basic_plan_caps_the_stream_at_thirty() -> None:
-    assert stream_symbol_cap_for_plan("basic") == STREAM_SYMBOL_CAP == 30
+def test_the_basic_plan_carries_both_caps_separately() -> None:
+    budget = stream_budget_for_plan("basic")
+
+    assert budget.equity == EQUITY_STREAM_SYMBOL_CAP == 30
+    assert budget.option == OPTION_STREAM_QUOTE_CAP == 200
 
 
-def test_the_paid_plan_lifts_the_cap() -> None:
-    assert stream_symbol_cap_for_plan("algo_trader_plus") == UNLIMITED_STREAM_SYMBOL_CAP
-    assert UNLIMITED_STREAM_SYMBOL_CAP > STREAM_SYMBOL_CAP
+def test_the_paid_plan_lifts_the_equity_cap_and_raises_the_option_one() -> None:
+    """Unlimited is equities-only. The option stream gets a bigger ceiling."""
+    budget = stream_budget_for_plan("algo_trader_plus")
+
+    assert budget.equity == UNLIMITED_STREAM_SYMBOL_CAP
+    assert budget.equity > EQUITY_STREAM_SYMBOL_CAP
+    assert budget.option == PAID_OPTION_STREAM_QUOTE_CAP == 1000
+    assert budget.option > OPTION_STREAM_QUOTE_CAP
+
+
+def test_the_unlimited_sentinel_never_reaches_the_option_budget() -> None:
+    """The single most likely upgrade-day mistake, as a test.
+
+    Alpaca states *"unlimited symbols"* flatly on the paid plan, and the
+    option stream still stops at 1000. Applying the sentinel there would
+    subscribe past a limit the server enforces and be truncated silently --
+    the failure ``stream.py`` exists to prevent, arriving from the opposite
+    direction.
+
+    True of every budget written and of the fall-through as well, which is all
+    this walk claims: a label with no budget of its own reads as Basic and
+    satisfies both assertions trivially, so *detecting* an unbudgeted plan is
+    :func:`test_every_plan_the_settings_page_offers_has_a_budget_written_for_it`'s
+    job and not this one's.
+    """
+    from corollary.api.routes import settings as settings_route
+
+    plans = [*settings_route._PLAN_LABELS, "", "platinum", "ALGO_TRADER_PLUS"]
+    for plan in plans:
+        budget = stream_budget_for_plan(plan)
+        assert budget.option != UNLIMITED_STREAM_SYMBOL_CAP, plan
+        assert budget.option <= PAID_OPTION_STREAM_QUOTE_CAP, plan
+
+
+def test_every_plan_the_settings_page_offers_has_a_budget_written_for_it() -> None:
+    """A third tier is caught here, rather than on the day it is bought.
+
+    ``stream_budget_for_plan`` falls through to Basic for anything it does not
+    know, which is the right direction for a *typo* in the environment and the
+    wrong one for a plan somebody actually pays for: an "Options Pro" label
+    added to Settings would silently be capped at 30 and 200 with every other
+    test in this file still green. So the two lists are compared directly --
+    what Settings offers against what has a budget -- and neither may grow
+    without the other.
+
+    Compared as sets rather than one-way, because the reverse is a bug too: a
+    budget for a plan the app will not let you select is a branch nothing can
+    reach.
+    """
+    from corollary.api.routes import settings as settings_route
+    from corollary.engine import runtime as runtime_module
+
+    assert set(runtime_module._PLAN_BUDGETS) == set(settings_route._PLAN_LABELS)
+
+
+def test_an_unbudgeted_plan_would_be_caught_rather_than_capped_at_basic() -> None:
+    """The test above, shown failing on the case it exists for.
+
+    A label Settings offers with no budget written for it is exactly what the
+    old walk could not see: it falls through, returns Basic's two caps, and
+    satisfies every invariant asserted of it.
+    """
+    from corollary.engine import runtime as runtime_module
+
+    offered = {*runtime_module._PLAN_BUDGETS, "options_pro"}
+
+    assert set(runtime_module._PLAN_BUDGETS) != offered
+    # And the fall-through is why it needed catching: it answers, quietly.
+    fell_through = stream_budget_for_plan("options_pro")
+    assert fell_through == stream_budget_for_plan(runtime_module.BASIC_PLAN)
+
+
+def test_a_budget_refuses_an_option_cap_above_the_ceiling_at_construction() -> None:
+    """Not documented -- refused. The wrong budget cannot be built at all.
+
+    The equity field takes the sentinel, because for equities it is true.
+    """
+    permitted = StreamBudget(
+        equity=UNLIMITED_STREAM_SYMBOL_CAP, option=PAID_OPTION_STREAM_QUOTE_CAP
+    )
+    assert permitted.equity == UNLIMITED_STREAM_SYMBOL_CAP
+
+    with pytest.raises(ValueError, match="option stream"):
+        StreamBudget(
+            equity=UNLIMITED_STREAM_SYMBOL_CAP, option=UNLIMITED_STREAM_SYMBOL_CAP
+        )
+    with pytest.raises(ValueError, match="option stream"):
+        StreamBudget(
+            equity=EQUITY_STREAM_SYMBOL_CAP, option=PAID_OPTION_STREAM_QUOTE_CAP + 1
+        )
+
+
+def test_a_budget_refuses_a_negative_cap() -> None:
+    with pytest.raises(ValueError, match="cannot be negative"):
+        StreamBudget(equity=-1, option=OPTION_STREAM_QUOTE_CAP)
+    with pytest.raises(ValueError, match="cannot be negative"):
+        StreamBudget(equity=EQUITY_STREAM_SYMBOL_CAP, option=-1)
+
+
+def test_no_unqualified_cap_name_survives_in_the_runtime_either() -> None:
+    """One name for two budgets is the habitat the original bug lived in.
+
+    ``stream_symbol_cap_for_plan`` returned a single ``int`` for a two-budget
+    world, and every call site had to pick which budget it meant. Re-adding
+    either name -- as an alias, or as a convenience for "the" cap -- would
+    compile and pass everything else here.
+    """
+    from corollary.engine import runtime as runtime_module
+
+    assert not hasattr(runtime_module, "stream_symbol_cap_for_plan")
+    assert not hasattr(runtime_module, "STREAM_SYMBOL_CAP")
+    assert not hasattr(EngineRuntime, "stream_symbol_cap")
+    assert "stream_symbol_cap_for_plan" not in runtime_module.__all__
 
 
 def test_an_unknown_plan_reads_as_basic() -> None:
@@ -1372,17 +1848,57 @@ def test_the_plan_parsing_matches_the_plan_of_record() -> None:
         assert data_plan({settings_route.ALPACA_DATA_PLAN_ENV: plan}) == plan
 
 
-def test_the_runtime_plans_subscriptions_at_the_basic_cap(
+def occ(underlying: str, strike: int) -> str:
+    """A plausible OCC symbol, so the option units really are option units."""
+    return f"{underlying}261218C{strike * 1000:08d}"
+
+
+def test_the_runtime_plans_each_stream_against_its_own_budget(
     runtime: EngineRuntime,
 ) -> None:
-    units = [contract_unit(f"p{i}", [f"SYM{i}"]) for i in range(31)]
-    plan = runtime.plan_stream_subscriptions(units)
-    assert plan.cap == 30
-    assert len(plan.subscribed) == 30
-    assert plan.not_streamed == 1
+    """Thirty-one contracts fit. Thirty-one underlyings do not. One call, two caps."""
+    contracts = [contract_unit(f"p{i}", [occ("AAA", 100 + i)]) for i in range(31)]
+    underlyings = [underlying_unit(f"SYM{i}") for i in range(31)]
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=contracts, equity_units=underlyings
+    )
+
+    assert plans.option.cap == OPTION_STREAM_QUOTE_CAP == 200
+    assert len(plans.option.subscribed) == 31
+    assert plans.option.dropped == ()
+
+    assert plans.equity.cap == EQUITY_STREAM_SYMBOL_CAP == 30
+    assert len(plans.equity.subscribed) == 30
+    assert plans.equity.not_streamed == 1
 
 
-def test_an_upgraded_account_stops_dropping_symbols_at_thirty(
+def test_a_full_ordinary_book_is_streamed_whole_on_the_basic_plan(
+    runtime: EngineRuntime,
+) -> None:
+    """Eight four-leg positions: 32 contracts and 8 underlyings, nothing dropped.
+
+    The single thirty-symbol budget dropped held contracts on exactly this
+    book. This is that regression, at the layer that picks the numbers.
+    """
+    roots = [chr(ord("A") + index) * 3 for index in range(8)]
+    contracts = [
+        contract_unit(root, [occ(root, strike) for strike in (90, 95, 105, 110)])
+        for root in roots
+    ]
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=contracts,
+        equity_units=[underlying_unit(root) for root in roots],
+    )
+
+    assert len(plans.option.subscribed) == 32
+    assert len(plans.equity.subscribed) == 8
+    assert plans.not_streamed == 0
+    assert plans.message is None
+
+
+def test_an_upgraded_account_stops_dropping_equity_symbols_at_thirty(
     db_engine: Engine, clock: Clock
 ) -> None:
     runtime = EngineRuntime(
@@ -1390,18 +1906,156 @@ def test_an_upgraded_account_stops_dropping_symbols_at_thirty(
         now=clock,
         env={"ALPACA_DATA_PLAN": "algo_trader_plus"},
     )
-    units = [contract_unit(f"p{i}", [f"SYM{i}"]) for i in range(31)]
-    plan = runtime.plan_stream_subscriptions(units)
-    assert plan.cap == UNLIMITED_STREAM_SYMBOL_CAP
-    assert plan.not_streamed == 0
+    units = [underlying_unit(f"SYM{i}") for i in range(31)]
+
+    plans = runtime.plan_stream_subscriptions(option_units=[], equity_units=units)
+
+    assert plans.equity.cap == UNLIMITED_STREAM_SYMBOL_CAP
+    assert plans.equity.not_streamed == 0
+    # And the other socket did not inherit the sentinel.
+    assert plans.option.cap == PAID_OPTION_STREAM_QUOTE_CAP
 
 
-def test_a_subscription_plan_carries_the_runtime_clock_and_a_correlation_id(
+def test_the_two_plans_report_one_not_streamed_figure(
+    runtime: EngineRuntime,
+) -> None:
+    """One banner, not two: the reader asks whether anything held is unmarked.
+
+    Which socket ran out is a detail for the log record, which already carries
+    ``cap`` on every drop.
+    """
+    contracts = [
+        contract_unit(f"p{i}", [occ("AAA", 100 + i)])
+        for i in range(OPTION_STREAM_QUOTE_CAP + 2)
+    ]
+    underlyings = [
+        underlying_unit(f"SYM{i}") for i in range(EQUITY_STREAM_SYMBOL_CAP + 3)
+    ]
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=contracts, equity_units=underlyings
+    )
+
+    assert plans.option.not_streamed == 2
+    assert plans.equity.not_streamed == 3
+    assert plans.not_streamed == 5
+    assert plans.message == "5 symbols not streamed"
+
+
+def test_both_plans_of_one_call_carry_the_runtime_clock_and_one_correlation_id(
     runtime: EngineRuntime, clock: Clock
 ) -> None:
-    plan = runtime.plan_stream_subscriptions([underlying_unit("AAPL")])
-    assert plan.at == clock.now
-    assert plan.correlation_id == "test-correlation-id"
+    """Two sockets, one decision. Two ids would make it read as two."""
+    plans = runtime.plan_stream_subscriptions(
+        option_units=[contract_unit("p0", [occ("AAPL", 150)])],
+        equity_units=[underlying_unit("AAPL")],
+    )
+
+    assert plans.option.at == plans.equity.at == clock.now
+    assert plans.option.correlation_id == plans.equity.correlation_id
+    assert plans.option.correlation_id == "test-correlation-id"
+
+
+def test_an_empty_book_is_two_empty_lists_rather_than_two_omissions(
+    runtime: EngineRuntime,
+) -> None:
+    """A book with no positions is an ordinary state, and it is spelled out.
+
+    Both lists are still required: an empty book says so with two empty
+    lists, which reads differently from a caller who forgot one -- and that
+    difference is the whole point, because a forgotten list is never planned,
+    never dropped, and never counted in the one banner.
+    """
+    plans = runtime.plan_stream_subscriptions(option_units=[], equity_units=[])
+
+    assert plans.option.subscribed == ()
+    assert plans.equity.subscribed == ()
+    assert plans.not_streamed == 0
+    assert plans.message is None
+
+
+def test_neither_unit_list_may_be_omitted(runtime: EngineRuntime) -> None:
+    """The silent-choice failure ``cap`` was fixed for, one level up.
+
+    An omitted list is the only way :attr:`StreamPlans.not_streamed` can
+    under-report. Within a plan the arithmetic is sound; about a list it was
+    never handed it is silent, and the banner then says everything is
+    streaming while eight underlyings go unmarked. So there is no default,
+    the same reason ``plan_subscriptions`` has none for ``cap`` or ``stream``.
+    """
+    contracts = [contract_unit("p0", [occ("AAPL", 150)])]
+    underlyings = [underlying_unit("AAPL")]
+
+    with pytest.raises(TypeError):
+        runtime.plan_stream_subscriptions(option_units=contracts)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        runtime.plan_stream_subscriptions(equity_units=underlyings)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        runtime.plan_stream_subscriptions()  # type: ignore[call-arg]
+
+
+def test_a_unit_list_handed_to_the_wrong_socket_is_refused(
+    runtime: EngineRuntime,
+) -> None:
+    """Finding 1: two same-typed lists, and nothing checked which was which.
+
+    Five four-leg spreads filed as ``equity_units`` fit inside thirty slots
+    and were admitted -- twenty OCC symbols returned as the stock socket's
+    subscription list, ``not_streamed == 0``, ``message is None``. Alpaca's
+    equity stream never quotes them, so every leg marks at its last known
+    price while the plan states that nothing is missing. Worse than the
+    straddling unit ``stream.py`` already refused, which at least emitted
+    drop records.
+    """
+    spreads = [
+        contract_unit(f"p{index}", [occ("AAA", 100 + index), occ("AAA", 200 + index)])
+        for index in range(5)
+    ]
+    underlyings = [underlying_unit(f"SYM{index}") for index in range(8)]
+
+    with pytest.raises(ValueError, match="equity stream"):
+        runtime.plan_stream_subscriptions(option_units=[], equity_units=spreads)
+
+
+def test_the_two_lists_swapped_is_refused_rather_than_half_caught(
+    runtime: EngineRuntime,
+) -> None:
+    """The likelier form of finding 1, and it used to be only partly caught.
+
+    Swapped, eight tickers subscribed on the option socket while four
+    contracts dropped for want of room: the banner read *"4 symbols not
+    streamed"* while eight underlyings went unmarked and unreported. Either
+    list being wrong is now one refusal.
+    """
+    spreads = [contract_unit("p0", [occ("AAA", 100), occ("AAA", 105)])]
+    underlyings = [underlying_unit(f"SYM{index}") for index in range(8)]
+
+    with pytest.raises(ValueError, match="stream"):
+        runtime.plan_stream_subscriptions(
+            option_units=underlyings, equity_units=spreads
+        )
+
+
+def test_a_viewport_hint_never_evicts_a_held_contract(
+    runtime: EngineRuntime,
+) -> None:
+    """The lowest tier loses first, and a held contract is never what loses."""
+    held = occ("AAA", 100)
+    plans = runtime.plan_stream_subscriptions(
+        option_units=[
+            contract_unit("p0", [held]),
+            *[
+                markets_visible_unit(occ("ZZZ", strike))
+                for strike in range(OPTION_STREAM_QUOTE_CAP)
+            ],
+        ],
+        equity_units=[],
+    )
+
+    assert plans.option.subscribed[0] == held
+    assert len(plans.option.subscribed) == OPTION_STREAM_QUOTE_CAP
+    assert plans.option.not_streamed == 1
+    assert plans.option.dropped[0].priority.label == "markets_visible"
 
 
 # --------------------------------------------------------------------------

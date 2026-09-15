@@ -174,9 +174,12 @@ from sqlalchemy.orm import Session
 
 from corollary.db.models import NOTIFICATION_CHANNELS, NotificationRoute
 from corollary.engine.stream import (
-    STREAM_SYMBOL_CAP,
+    EQUITY_STREAM_SYMBOL_CAP,
+    OPTION_STREAM_QUOTE_CAP,
+    Stream,
     SubscriptionPlan,
     SubscriptionUnit,
+    not_streamed_message,
     plan_subscriptions,
 )
 
@@ -186,7 +189,9 @@ __all__ = [
     "DISCORD_WEBHOOK_ENV",
     "HALT_EVENT",
     "HALT_SEVERITY",
+    "PAID_OPTION_STREAM_QUOTE_CAP",
     "PAID_PLAN",
+    "REPAIR_MAX_ATTEMPTS",
     "UNLIMITED_STREAM_SYMBOL_CAP",
     "WATCHDOG_INTERVAL_SECONDS",
     "WATCHDOG_TIMEOUT_SECONDS",
@@ -196,9 +201,11 @@ __all__ = [
     "LoggingNotifier",
     "Notification",
     "Notifier",
+    "StreamBudget",
+    "StreamPlans",
     "Watchdog",
     "data_plan",
-    "stream_symbol_cap_for_plan",
+    "stream_budget_for_plan",
 ]
 
 logger = logging.getLogger(__name__)
@@ -236,12 +243,42 @@ ALPACA_DATA_PLAN_ENV: Final = "ALPACA_DATA_PLAN"
 BASIC_PLAN: Final = "basic"
 PAID_PLAN: Final = "algo_trader_plus"
 
-#: Algo Trader Plus streams every symbol -- Alpaca documents no ceiling at all.
-#: A budget still needs a number, so this is one comfortably above anything
-#: reachable: the whole US equity universe is roughly 5,000 symbols and an
-#: eight-position option book is dozens. It is not infinity; it is a real cap,
-#: large enough that ``plan_subscriptions`` never drops a unit under it.
+#: Algo Trader Plus streams every **equity** symbol -- Alpaca documents no
+#: ceiling at all on that stream. A budget still needs a number, so this is one
+#: comfortably above anything reachable: the whole US equity universe is
+#: roughly 5,000 symbols. It is not infinity; it is a real cap, large enough
+#: that ``plan_subscriptions`` never drops a unit under it.
+#:
+#: **Equities only, and :class:`StreamBudget` enforces that rather than asking
+#: for it.** The paid plan does not make options unlimited -- it raises them to
+#: :data:`PAID_OPTION_STREAM_QUOTE_CAP`, a ceiling the server enforces -- so
+#: putting this number on the option side would subscribe past a real limit and
+#: be truncated silently, which is the failure ``engine/stream.py`` exists to
+#: prevent, arriving from the opposite direction. Alpaca's own page says
+#: *"unlimited symbols"* flatly, which is what makes this the likeliest thing
+#: to be wired wrong on upgrade day.
 UNLIMITED_STREAM_SYMBOL_CAP: Final[int] = 10_000
+
+#: The **option** stream's cap on Algo Trader Plus: a thousand quotes. Named
+#: for what it is rather than treated as an absence of a limit, because it is
+#: a limit -- five times Basic's two hundred, and still a ceiling a Phase 4
+#: chain view can reach.
+PAID_OPTION_STREAM_QUOTE_CAP: Final[int] = 1000
+
+#: How many healthy watchdog ticks the repair gets before it stops trying and
+#: says so out loud. Twelve is a minute at :data:`WATCHDOG_INTERVAL_SECONDS`,
+#: and a minute is the right shape of wait: a ``database is locked`` clears in
+#: milliseconds to seconds, and a full disk or a read-only mount does not clear
+#: at all, so a longer window buys nothing but a longer silence. The bound is
+#: the requirement -- the ordinary retry in :meth:`EngineRuntime._retry_persist`
+#: is bounded by the fault ending, and a repair runs *after* the fault has
+#: ended, so nothing but a count would ever stop it.
+#:
+#: Giving up is never quiet: the last failed attempt emits a critical
+#: notification naming the halt that could not be recorded. At that point the
+#: record is wrong and the engine is running, and the only thing left that can
+#: fix either is a human being told.
+REPAIR_MAX_ATTEMPTS: Final[int] = 12
 
 #: ``engine_state.halted_reason`` is ``String(256)``. A reason is truncated
 #: rather than refused: losing the tail of a sentence is survivable, and
@@ -286,17 +323,128 @@ def data_plan(env: Mapping[str, str]) -> str:
     return raw
 
 
-def stream_symbol_cap_for_plan(plan: str) -> int:
-    """The websocket symbol budget this plan allows.
+@dataclass(frozen=True, slots=True)
+class StreamBudget:
+    """Both websocket caps, together, because neither is meaningful alone.
+
+    Alpaca meters the equity stream and the option stream **separately**, and
+    one number cannot stand for both: this engine spent a year's worth of
+    design on a single cap of thirty, which made an ordinary eight-position
+    book -- 32 contracts and 8 underlyings -- look ten symbols over budget.
+    Ten over cost *twelve* unstreamed, because a unit is refused whole and
+    spending stops at the first refusal, and four of the twelve were held
+    contracts with 170 unused option quotes sitting beside them.
+
+    A pair rather than two lookups, so that no call site ever picks *a* number
+    -- it reads the field named for the socket it is about. Reaching
+    :attr:`option` requires having typed the word, which is the point.
+
+    Constructed by :func:`stream_budget_for_plan`. Building one by hand is
+    allowed and validated: :attr:`option` above
+    :data:`PAID_OPTION_STREAM_QUOTE_CAP` is **refused**, which is what makes
+    the "unlimited applies to options too" mistake impossible rather than
+    merely documented. The symptom it would otherwise produce is the worst
+    kind -- a subscribe the server silently truncates, and marks that stop
+    updating with nothing on screen to say so.
+    """
+
+    #: Equity symbols. May be :data:`UNLIMITED_STREAM_SYMBOL_CAP`, because on
+    #: the paid plan Alpaca really does document no ceiling here.
+    equity: int
+    #: Option quotes. Never the unlimited sentinel: the highest this may be is
+    #: :data:`PAID_OPTION_STREAM_QUOTE_CAP`, enforced below.
+    option: int
+
+    def __post_init__(self) -> None:
+        if self.equity < 0 or self.option < 0:
+            raise ValueError(
+                f"a stream budget cannot be negative; got equity={self.equity} "
+                f"option={self.option}. A cap is a count of slots"
+            )
+        if self.option > PAID_OPTION_STREAM_QUOTE_CAP:
+            raise ValueError(
+                f"an option stream cap of {self.option} is above the highest "
+                f"Alpaca allows on any plan ({PAID_OPTION_STREAM_QUOTE_CAP} "
+                "quotes on Algo Trader Plus). The option stream is never "
+                "unlimited -- UNLIMITED_STREAM_SYMBOL_CAP is the equity "
+                "sentinel and belongs only on that side. Subscribing past a "
+                "server-enforced limit is truncated silently, which leaves "
+                "contracts marking at a last known price with nothing to say so"
+            )
+
+
+#: Every plan with a budget written for it, keyed the way ``ALPACA_DATA_PLAN``
+#: spells it. A mapping rather than a chain of ``if``s so that *"which plans
+#: are handled?"* is a question with an answer: a third tier added to
+#: ``api/routes/settings.py``'s ``_PLAN_LABELS`` and not to this would fall
+#: through to Basic's caps and be capped at 30 and 200 on an account that paid
+#: for more -- silently, because a symbol dropped for budget looks exactly like
+#: a symbol nobody subscribed.
+#: ``test_every_plan_the_settings_page_offers_has_a_budget_written_for_it``
+#: compares the two lists, which a walk over this function's *output* cannot
+#: do: the fall-through answers, so every invariant asserted of an unhandled
+#: plan holds trivially.
+_PLAN_BUDGETS: Final[Mapping[str, StreamBudget]] = {
+    BASIC_PLAN: StreamBudget(
+        equity=EQUITY_STREAM_SYMBOL_CAP,
+        option=OPTION_STREAM_QUOTE_CAP,
+    ),
+    PAID_PLAN: StreamBudget(
+        equity=UNLIMITED_STREAM_SYMBOL_CAP,
+        option=PAID_OPTION_STREAM_QUOTE_CAP,
+    ),
+}
+
+
+def stream_budget_for_plan(plan: str) -> StreamBudget:
+    """Both websocket budgets this plan allows. The only place they are chosen.
 
     ``engine/stream.py`` is deliberately ignorant of the environment and takes
-    the cap as an argument; this is the caller side it named. On Algo Trader
-    Plus the thirty-symbol limit does not exist, and a stream still cutting at
-    thirty while running full OPRA reports *"N symbols not streamed"* for a
-    limit that was lifted -- a banner that is wrong is worse than no banner,
-    because the next real one gets ignored.
+    each cap as an argument; this is the caller side it named. An unrecognised
+    plan reads as Basic -- the restrictive direction, the same answer
+    :func:`data_plan` gives, and the right one for a typo in the environment.
+    It is the *wrong* one for a tier somebody actually pays for, which is what
+    :data:`_PLAN_BUDGETS` exists to make checkable rather than trusted.
+
+    On Algo Trader Plus the equity limit does not exist -- a stream still
+    cutting at thirty while running full SIP reports *"N symbols not streamed"*
+    for a limit that was lifted, and a banner that is wrong is worse than no
+    banner because the next real one gets ignored. The option stream is the
+    other way about: it rises to a thousand and **stays a ceiling**, so the
+    unlimited sentinel is not the answer there and :class:`StreamBudget`
+    refuses to hold it.
     """
-    return UNLIMITED_STREAM_SYMBOL_CAP if plan == PAID_PLAN else STREAM_SYMBOL_CAP
+    return _PLAN_BUDGETS.get(plan, _PLAN_BUDGETS[BASIC_PLAN])
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPlans:
+    """One decision, two sockets. What to subscribe where, and what will not be.
+
+    Both plans come from one call, share one clock and one correlation id, and
+    are subscribed to their own stream by the caller.
+
+    :attr:`not_streamed` and :attr:`message` sum across the two, because the
+    reader's question is *"is anything I hold unmarked?"* and not *"which
+    socket ran out?"* -- that is a detail for the log record, which names the
+    ``stream`` on every drop and carries its ``cap`` beside it. The sum never
+    double-counts: a symbol is an option symbol or an equity symbol and is
+    therefore planned on exactly one of these, which ``stream.py`` enforces
+    per unit against the stream it was filed under.
+    """
+
+    option: SubscriptionPlan
+    equity: SubscriptionPlan
+
+    @property
+    def not_streamed(self) -> int:
+        """The N the UI renders, across both streams."""
+        return self.option.not_streamed + self.equity.not_streamed
+
+    @property
+    def message(self) -> str | None:
+        """One banner for both sockets, or ``None`` when everything is streaming."""
+        return not_streamed_message(self.not_streamed)
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +489,30 @@ class HaltDecision:
     #: gets grepped rather than the one that gets rendered.
     inputs: Mapping[str, Any]
     at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _UnrecordedHalt:
+    """A halt this process announced, the record refused, and the fault outlived.
+
+    Handed to :meth:`EngineRuntime._repair_unrecorded_halt` by the healthy
+    branch of :meth:`EngineRuntime.check_watchdog`. Deliberately a separate
+    field from ``_announced`` rather than an extension of it: ``_announced``
+    is bounded to one fault episode and **must** be cleared when the episode
+    ends, or one refused write suppresses every announcement afterwards. This
+    outlives the episode on purpose, because the missing record does too.
+
+    Carries the whole decision, not just the rule: a record written half an
+    hour late still has to name the condition, its inputs and its timestamp,
+    and by then the watchdog has nothing left to say about a fault that ended.
+    """
+
+    decision: HaltDecision
+    #: The announcing halt's id -- the one alert the operator actually
+    #: received for this episode. ``None`` only if the announcement somehow
+    #: carried none, which :meth:`EngineRuntime.halt` does not do.
+    correlation_id: str | None
+    announced_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +598,75 @@ def _bounded(reason: str) -> str:
     if len(reason) <= _REASON_MAX:
         return reason
     return reason[: _REASON_MAX - 1] + "…"
+
+
+def _compact_utc(moment: datetime) -> str:
+    """``2026-09-14T13:05:00Z`` -- an instant a person can read, in 20 characters.
+
+    ``halted_reason`` is 256 characters wide and a repaired halt has to spend
+    two timestamps inside them; a full ``isoformat`` is twelve characters that
+    sentence cannot afford, twice over. Structured logs keep ``isoformat``,
+    which is the machine-readable side. This is for the one column a human
+    reads.
+    """
+    return _utc(moment).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _late_reason(decision: HaltDecision, *, recorded_at: datetime) -> str:
+    """What a repaired halt writes into ``halted_reason``.
+
+    The sentence has one job beyond rule 8's record: it lands **after
+    everything already looks fine**, so a reader three minutes later has to be
+    able to tell it from a fault happening now. "Engine halted" on a visibly
+    healthy feed reads as a glitch, and the realistic response to a glitch is
+    a reflexive resume without reading -- which would end exactly where the
+    unrepaired defect ended.
+
+    So the rule and the moment of the fault come **first**, before the
+    original sentence: this column truncates from the tail, and a long
+    ``stream_closed`` detail must cost the boilerplate rather than the *what*
+    and the *when*.
+    """
+    return _bounded(
+        f"Recorded late at {_compact_utc(recorded_at)}: the engine halted for "
+        f"{decision.rule.value} at {_compact_utc(decision.at)}. {decision.reason}"
+    )
+
+
+def _late_body(decision: HaltDecision, *, recorded_at: datetime) -> str:
+    """The notification for a repaired halt. Unbounded, so it can say it all.
+
+    Same job as :func:`_late_reason` with room to finish the thought: what
+    broke, when, why the record is late, and that the halt stands. The last
+    sentence is the one that matters, because the feed being healthy again is
+    the thing that makes this alert look spurious.
+    """
+    return (
+        f"The engine halted for {decision.rule.value} at "
+        f"{_compact_utc(decision.at)} and the database refused the record at "
+        f"the time. The record has just been written, at "
+        f"{_compact_utc(recorded_at)}. The fault has since cleared, so this is "
+        "the record of a real outage rather than one happening now -- and the "
+        f"halt stands until an explicit resume. {decision.reason}"
+    )
+
+
+def _abandoned_body(decision: HaltDecision, *, attempts: int) -> str:
+    """The notification for a halt this process could not record at all.
+
+    Sent once, after :data:`REPAIR_MAX_ATTEMPTS`. It is the only remaining way
+    the fault reaches anybody: ``engine_state`` says the engine is running,
+    ``GET /api/engine/state`` will agree with it, and nothing in this process
+    can change that while the database refuses writes.
+    """
+    return (
+        f"The engine halted for {decision.rule.value} at "
+        f"{_compact_utc(decision.at)} and the database refused the record "
+        f"{attempts} times running. **engine_state does not carry this halt**, "
+        "so the engine reads as running and nothing here can correct it. Check "
+        "the database, then halt or resume deliberately. "
+        f"{decision.reason}"
+    )
 
 
 def _utc_now() -> datetime:
@@ -735,6 +976,31 @@ class EngineRuntime:
         #: decision, and every other record on this file's halt path has one.
         self._announced_correlation_id: str | None = None
         self._announced_at: datetime | None = None
+        #: The announcing halt's whole decision, carried for the same span and
+        #: cleared on the same lines as the three fields above. The rule and
+        #: the timestamp are already in two of them; what this adds is the
+        #: **reason and the inputs**, which a record written after the fault
+        #: has ended cannot get from anywhere else -- the watchdog reports
+        #: what is wrong *now*, and by then nothing is.
+        self._announced_decision: HaltDecision | None = None
+        #: A halt whose fault has **ended** with the record still missing.
+        #: Moved here out of :attr:`_announced` by the healthy branch of
+        #: :meth:`check_watchdog`, which is what lets that flag be cleared on
+        #: schedule -- see :class:`_UnrecordedHalt` for why the two cannot be
+        #: one field. Repaired on healthy ticks, at the watchdog's cadence,
+        #: for at most :data:`REPAIR_MAX_ATTEMPTS` of them.
+        #:
+        #: **Dropped the instant any explained halt reaches the row**, which
+        #: is the whole of this engine's answer to "repair or human resume,
+        #: which wins". From that moment the row is the record and a resume is
+        #: an observation the gate can act on, so there is nothing left to
+        #: write; what stays repairable is only ever a halt no row ever
+        #: carried, and therefore one no human can knowingly have cleared.
+        self._pending_repair: _UnrecordedHalt | None = None
+        #: How many healthy ticks have tried to write :attr:`_pending_repair`.
+        #: Reset with each new pending repair; bounded by
+        #: :data:`REPAIR_MAX_ATTEMPTS`.
+        self._repair_attempts = 0
         #: The rule whose halt this process wrote into ``engine_state``, for
         #: as long as a read still shows *that* halt in force -- cleared the
         #: moment a read says otherwise, because then the row is somebody
@@ -772,13 +1038,14 @@ class EngineRuntime:
         return self._opening_snapshot_ok
 
     @property
-    def stream_symbol_cap(self) -> int:
-        """The websocket budget, derived from the plan of record.
+    def stream_budget(self) -> StreamBudget:
+        """Both websocket budgets, derived from the plan of record.
 
         ``engine/stream.py`` names this as the caller's responsibility. This
-        is that caller.
+        is that caller. A pair rather than a single cap, because the equity
+        and option streams are metered separately -- see :class:`StreamBudget`.
         """
-        return stream_symbol_cap_for_plan(data_plan(self._env))
+        return stream_budget_for_plan(data_plan(self._env))
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -838,7 +1105,8 @@ class EngineRuntime:
                 ),
                 "halted": is_halted,
                 "halted_reason": reason,
-                "stream_symbol_cap": self.stream_symbol_cap,
+                "equity_stream_symbol_cap": self.stream_budget.equity,
+                "option_stream_quote_cap": self.stream_budget.option,
                 "watchdog_timeout_seconds": self._watchdog.timeout_seconds,
                 "heartbeat_armed": self._watchdog.heartbeat_armed,
                 "at": at.isoformat(),
@@ -947,22 +1215,68 @@ class EngineRuntime:
 
     def plan_stream_subscriptions(
         self,
-        units: Iterable[SubscriptionUnit],
         *,
+        option_units: Iterable[SubscriptionUnit],
+        equity_units: Iterable[SubscriptionUnit],
         correlation_id: str | None = None,
-    ) -> SubscriptionPlan:
-        """Fit the desired symbols into this account's budget.
+    ) -> StreamPlans:
+        """Fit the desired symbols into this account's two budgets.
 
-        The clock and the correlation id come from here rather than from
-        ``stream.py``, which reads neither by design: identical inputs have to
-        give an identical subscription list, and an id minted inside that
-        module would tie the plan to nothing upstream of it.
+        **One call, two plans, two sockets.** The allocation is the same
+        proven function run twice -- option units against the option quote
+        cap, equity units against the equity symbol cap -- because every
+        property it has (all-or-nothing units, free dedup, a strict prefix
+        cut, ``dropped``/``not_streamed``/``spare_capacity``) is correct at
+        any cap, and what was ever wrong was the number handed in. Teaching it
+        to hold two budgets at once would put symbol classification inside
+        allocation and turn one prefix cut into two interleaved ones.
+
+        Which units go where is the caller's to say and **not** the caller's
+        to be trusted on. These are two lists of the same type, so a book
+        filed under the wrong one type-checks: five four-leg spreads passed as
+        ``equity_units`` fit inside thirty slots and were admitted, handing
+        twenty OCC symbols to the stock socket with ``not_streamed == 0`` and
+        no banner. The equity stream never quotes them, so every leg marks at
+        a last known price while the plan states that nothing is missing --
+        worse than the straddling unit ``stream.py`` already refused, which at
+        least emitted drop records. So each list is checked against the stream
+        it was filed under, inside ``plan_subscriptions``, where the symbols
+        are already being validated and where allocation never sees the
+        answer.
+
+        Neither list has a default, for the reason ``cap`` has none: an
+        omitted list is a silent choice. It is planned against nothing,
+        dropped by nothing, and counted by nothing, and the one banner then
+        says everything is streaming while eight underlyings go unmarked. An
+        empty book is an ordinary state and spells itself ``option_units=[],
+        equity_units=[]``, which reads differently from a forgotten argument
+        and is the distinction worth keeping.
+
+        Both plans share one clock reading and one correlation id, because
+        they are one decision; two ids would make the log read as two. The
+        clock and the id come from here rather than from ``stream.py``, which
+        reads neither by design -- identical inputs have to give an identical
+        subscription list, and an id minted inside that module would tie the
+        plan to nothing upstream of it.
         """
-        return plan_subscriptions(
-            units,
-            at=_utc(self._now()),
-            correlation_id=correlation_id or self._correlation_ids(),
-            cap=self.stream_symbol_cap,
+        budget = self.stream_budget
+        at = _utc(self._now())
+        handle = correlation_id or self._correlation_ids()
+        return StreamPlans(
+            option=plan_subscriptions(
+                option_units,
+                at=at,
+                correlation_id=handle,
+                cap=budget.option,
+                stream=Stream.OPTION,
+            ),
+            equity=plan_subscriptions(
+                equity_units,
+                at=at,
+                correlation_id=handle,
+                cap=budget.equity,
+                stream=Stream.EQUITY,
+            ),
         )
 
     # -- the switch --------------------------------------------------------
@@ -1052,6 +1366,32 @@ class EngineRuntime:
         goes instead: an announcement belongs to one fault episode, and the
         episode being over is the end of it.
 
+        **A sixth state, which the table cannot show because the gate never
+        sees it: the fault ends before the write lands.** The feed dies for
+        ninety seconds, the halt fires and announces, SQLite answers
+        ``database is locked``, and the feed is back inside one interval. The
+        next tick is *this* branch rather than the suppressed one, so
+        :meth:`_retry_persist` -- which needs a decision and therefore a live
+        fault -- is unreachable, and the episode used to end with the row
+        saying **not halted**, with no ``halted_reason`` at all, one critical
+        alert delivered, and no human resume ever asked for. That is rule 9 announced and not enforced: the
+        engine trading on through a connection loss that must end in a halt
+        only a human clears.
+
+        So the healthy branch **repairs** rather than merely forgetting.
+        :meth:`_repair_unrecorded_halt` writes the halt that was announced,
+        and the engine ends up genuinely halted, awaiting the explicit resume
+        rule 9 requires. Repairing is the opposite of resuming: the only value
+        it ever writes to ``halted`` is ``True``, and there is no ordering in
+        which it clears one.
+
+        Its cost is real and is designed against rather than denied: the halt
+        lands **after everything already looks fine**, which is why
+        :func:`_late_reason` and :func:`_late_body` name the original
+        condition and its timestamp instead of saying "engine halted". A
+        critical alert on a visibly healthy feed reads as a glitch, and the
+        realistic response to a glitch is a reflexive resume without reading.
+
         The consequence is worth stating twice because it looks like a bug and
         is not: a human who resumes while the fault is still present is
         re-halted on the next tick, with a fresh notification. That is the
@@ -1067,9 +1407,25 @@ class EngineRuntime:
             # afterwards for the life of the process, which is the switch
             # disarmed. `_recorded` is deliberately untouched: it describes
             # the row, not an episode, and `_halt_is_recorded` maintains it.
+            #
+            # What the announcement *records*, though, outlives the episode,
+            # so it is handed to the repair path on the way past rather than
+            # dropped with the rest. See this method's docstring on the sixth
+            # state: an announced halt whose write was refused and whose fault
+            # then ended used to reach no path that could ever write it.
+            if self._announced is not None and self._announced_decision is not None:
+                self._pending_repair = _UnrecordedHalt(
+                    decision=self._announced_decision,
+                    correlation_id=self._announced_correlation_id,
+                    announced_at=self._announced_at,
+                )
+                self._repair_attempts = 0
             self._announced = None
             self._announced_correlation_id = None
             self._announced_at = None
+            self._announced_decision = None
+            if self._pending_repair is not None:
+                self._repair_unrecorded_halt(self._pending_repair)
             return None
         recorded = self._halt_is_recorded()
         if recorded or self._announced is not None:
@@ -1219,6 +1575,12 @@ class EngineRuntime:
             self._announced = None
             self._announced_correlation_id = None
             self._announced_at = None
+            self._announced_decision = None
+            # The earliest point at which "an explained halt is in the row"
+            # becomes observable, and therefore the earliest at which a
+            # pending repair is superseded. `_repair_unrecorded_halt` drops it
+            # again on its own branch, for the reader who arrives there first.
+            self._pending_repair = None
             if recorded_reason != self._recorded_reason:
                 self._recorded = None
                 self._recorded_reason = None
@@ -1269,7 +1631,13 @@ class EngineRuntime:
                 "correlation_id": correlation_id,
             },
         )
-        self._emit(decision, channels, correlation_id)
+        self._emit(
+            title="Engine halted",
+            body=decision.reason,
+            at=decision.at,
+            channels=channels,
+            correlation_id=correlation_id,
+        )
         # Consulted by `check_watchdog`'s gate, and never as the halt state:
         # it says the record is missing, not that the engine is running.
         #
@@ -1293,6 +1661,16 @@ class EngineRuntime:
         # timestamp that can be half an hour away, so it carries this id.
         self._announced_correlation_id = None if persisted else correlation_id
         self._announced_at = None if persisted else decision.at
+        # And the decision whole, because a repair written after the fault has
+        # ended has no other source for the reason and the inputs: the
+        # watchdog reports what is wrong *now*, and by then nothing is.
+        self._announced_decision = None if persisted else decision
+        if persisted:
+            # An explained halt is in the row, so any older halt still waiting
+            # to be repaired is superseded -- and, more to the point, a resume
+            # from here on is a resume of a record a human could actually see,
+            # which the repair must never write back over.
+            self._pending_repair = None
         # What the record now says, for `_log_ongoing` to compare the next
         # tick's fault against: the rule, and the exact sentence written
         # beside it. Both cleared when the write was refused -- there is no
@@ -1362,6 +1740,11 @@ class EngineRuntime:
         self._announced = None
         self._announced_correlation_id = None
         self._announced_at = None
+        self._announced_decision = None
+        # Same reason as `halt`: the row now carries an explained halt, so an
+        # older unwritten one is superseded and a resume from here is visible
+        # to the gate the ordinary way.
+        self._pending_repair = None
         self._recorded = decision.rule
         self._recorded_reason = _bounded(decision.reason)
         logger.warning(
@@ -1405,6 +1788,190 @@ class EngineRuntime:
             },
         )
         return True
+
+    def _repair_unrecorded_halt(self, pending: _UnrecordedHalt) -> None:
+        """Write a halt whose fault has ended and whose record never landed.
+
+        The sixth state in :meth:`check_watchdog`'s docstring, and the only
+        path that can reach it: :meth:`_retry_persist` needs a live fault to
+        be suppressed by, and there is none left here.
+
+        **Repair or human resume -- the repair wins here, and it can only ever
+        have been offered a halt no human could knowingly have cleared.** The
+        two are in contention only while some resume might have been a
+        response to this halt, and the moment any explained halt reaches the
+        row (:meth:`halt` landing it, :meth:`_retry_persist` landing it, or
+        :meth:`_halt_is_recorded` seeing one in force) :attr:`_pending_repair`
+        is dropped -- from then on the row is the record, and a resume is an
+        observation the gate acts on the ordinary way. So what survives to be
+        repaired is a halt ``engine_state`` never carried: the operator got
+        the alert, but ``GET /api/engine/state`` said *running* throughout,
+        and a resume pressed in that window cleared nothing that existed.
+
+        That leaves one genuinely ambiguous ordering -- a resume between the
+        announcement and the repair, which reads from the row exactly like our
+        write never landing, because it is the same empty row either way. It
+        is resolved the same way
+        ``test_a_resume_the_gate_could_not_observe_ends_with_the_engine_halted``
+        resolves it in the suppressed branch: write the missing record. The
+        two readings are indistinguishable and their costs are not. A halt
+        written over a resume costs one more resume, by a human who is being
+        told in the same breath what the halt was and when. A resume honoured
+        over a halt costs an engine trading through an unrecorded connection
+        loss, which is the defect this method exists to close.
+
+        **It is not, and cannot become, a resume.** The only value anything on
+        this path writes to ``halted`` is ``True``; ``_persist`` is the single
+        writer and has no branch that sets it otherwise.
+
+        **A repair that also fails is retried at the watchdog's cadence and
+        then given up on, loudly** -- see :data:`REPAIR_MAX_ATTEMPTS`. The
+        ordinary retry is bounded by the fault ending; this one runs *after*
+        the fault has ended, so a count is the only thing that could ever stop
+        it. Giving up silently would be the original defect with machinery on
+        top, so the last attempt's failure is a critical notification saying
+        the record is wrong and the engine reads as running.
+        """
+        if self._halt_is_recorded():
+            # Superseded: somebody's explained halt is in force -- a manual
+            # one, or a later automatic one that landed. The engine is halted
+            # and awaiting a human either way, and writing our older sentence
+            # over a newer record would misreport which fault is in force.
+            self._pending_repair = None
+            logger.info(
+                "a halt is already recorded; the unwritten one for %s is dropped",
+                pending.decision.rule.value,
+                extra={
+                    "event": "engine_halt_repair_superseded",
+                    "rule": pending.decision.rule.value,
+                    "reason": pending.decision.reason,
+                    "inputs": dict(pending.decision.inputs),
+                    "policy": (
+                        "a repair is dropped the moment the row carries an "
+                        "explained halt: from then on the row is the record, "
+                        "and an older sentence written over it would name the "
+                        "wrong fault"
+                    ),
+                    "at": pending.decision.at.isoformat(),
+                    "correlation_id": pending.correlation_id,
+                },
+            )
+            return
+
+        at = _utc(self._now())
+        self._repair_attempts += 1
+        reason = _late_reason(pending.decision, recorded_at=at)
+        # A fresh decision rather than the announced one, because the sentence
+        # is different: it has to say what broke, when, and that this record
+        # is late. `at` stays the moment of the *fault*, so ``halted_at`` in
+        # the row is when the engine stopped trusting the feed rather than
+        # when the database finally took the write.
+        repaired = HaltDecision(
+            rule=pending.decision.rule,
+            reason=reason,
+            inputs={
+                **pending.decision.inputs,
+                "announced_at": (
+                    pending.announced_at.isoformat()
+                    if pending.announced_at is not None
+                    else None
+                ),
+                "recorded_at": at.isoformat(),
+                "repair_attempt": self._repair_attempts,
+            },
+            at=pending.decision.at,
+        )
+        # The announcing halt's id, so the late record, the `engine_halted`
+        # line and the critical notification all read as the one event. A new
+        # id here would leave the operator's only alert joined to nothing.
+        correlation_id = pending.correlation_id or self._correlation_ids()
+
+        if self._persist(repaired):
+            # The row is the record again: nothing left to repair, and
+            # `_log_ongoing` has a rule and a sentence to compare against.
+            self._pending_repair = None
+            self._recorded = repaired.rule
+            self._recorded_reason = _bounded(reason)
+            logger.warning(
+                "the halt for %s is recorded after the fault ended; the "
+                "database had refused it",
+                repaired.rule.value,
+                extra={
+                    "event": "engine_halt_repaired",
+                    "rule": repaired.rule.value,
+                    "reason": reason,
+                    "inputs": dict(repaired.inputs),
+                    "policy": (
+                        "a halt announced and refused is written once the "
+                        "database takes it, even after the fault clears -- "
+                        "rule 9 ends at an explicit human resume, and an "
+                        "announced halt that never became state ends nowhere"
+                    ),
+                    "at": repaired.at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )
+            self._emit(
+                title="Engine halted (recorded late)",
+                body=_late_body(pending.decision, recorded_at=at),
+                at=at,
+                channels=self._channels_for(HALT_EVENT),
+                correlation_id=correlation_id,
+            )
+            return
+
+        if self._repair_attempts >= REPAIR_MAX_ATTEMPTS:
+            self._pending_repair = None
+            logger.error(
+                "the halt for %s could not be recorded in %d attempts; "
+                "engine_state does not carry it",
+                pending.decision.rule.value,
+                self._repair_attempts,
+                extra={
+                    "event": "engine_halt_repair_abandoned",
+                    "rule": pending.decision.rule.value,
+                    "reason": pending.decision.reason,
+                    "inputs": dict(repaired.inputs),
+                    "policy": (
+                        "the repair is bounded; when it cannot be done the "
+                        "operator is told, because the record is wrong and "
+                        "nothing in this process can correct it"
+                    ),
+                    "attempts": self._repair_attempts,
+                    "at": pending.decision.at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )
+            self._emit(
+                title="Engine halt could not be recorded",
+                body=_abandoned_body(pending.decision, attempts=self._repair_attempts),
+                at=at,
+                channels=self._channels_for(HALT_EVENT),
+                correlation_id=correlation_id,
+            )
+            return
+
+        logger.warning(
+            "the halt for %s is still unrecorded; retrying on the next "
+            "healthy tick (%d of %d)",
+            pending.decision.rule.value,
+            self._repair_attempts,
+            REPAIR_MAX_ATTEMPTS,
+            extra={
+                "event": "engine_halt_repair_deferred",
+                "rule": pending.decision.rule.value,
+                "reason": pending.decision.reason,
+                "attempts": self._repair_attempts,
+                "max_attempts": REPAIR_MAX_ATTEMPTS,
+                "policy": (
+                    "a failed repair announces nothing -- the operator already "
+                    "has the alert for this fault, and the record is what is "
+                    "missing"
+                ),
+                "at": pending.decision.at.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
 
     def _persist(self, decision: HaltDecision) -> bool:
         """Write the halt to ``engine_state``. False when the database refused.
@@ -1487,14 +2054,28 @@ class EngineRuntime:
         return tuple(channel for channel in NOTIFICATION_CHANNELS if channel in enabled)
 
     def _emit(
-        self, decision: HaltDecision, channels: tuple[str, ...], correlation_id: str
+        self,
+        *,
+        title: str,
+        body: str,
+        at: datetime,
+        channels: tuple[str, ...],
+        correlation_id: str,
     ) -> None:
+        """Deliver one critical notification, and log what would swallow it.
+
+        Takes the words rather than the :class:`HaltDecision`, because the two
+        callers have different ones to say. A halt announced as it happens is
+        "Engine halted" and the watchdog's own sentence; a halt recorded after
+        its fault cleared has to say so in the title and the body both, or it
+        reads as a fault happening now on a feed that is visibly fine.
+        """
         notification = Notification(
             event=HALT_EVENT,
             severity=HALT_SEVERITY,
-            title="Engine halted",
-            body=decision.reason,
-            at=decision.at,
+            title=title,
+            body=body,
+            at=at,
             correlation_id=correlation_id,
             channels=channels,
         )
@@ -1508,7 +2089,7 @@ class EngineRuntime:
                         "so a halt cannot be both silent and unrecorded"
                     ),
                     "notification_event": HALT_EVENT,
-                    "at": decision.at.isoformat(),
+                    "at": at.isoformat(),
                     "correlation_id": correlation_id,
                 },
             )
@@ -1525,7 +2106,7 @@ class EngineRuntime:
                         "reaches a log or a response"
                     ),
                     "notification_event": HALT_EVENT,
-                    "at": decision.at.isoformat(),
+                    "at": at.isoformat(),
                     "correlation_id": correlation_id,
                 },
             )

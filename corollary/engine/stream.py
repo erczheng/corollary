@@ -1,13 +1,34 @@
-"""The 30-symbol subscription budget -- pure. Desired symbols in, a plan out.
+"""The two subscription budgets -- pure. Desired symbols in, a plan out.
 
-Alpaca's Basic plan caps a websocket stream at **30 symbols**, and every option
-contract is its own symbol. Grouped multi-leg reaches 32 option symbols at
-eight positions -- the concurrent-position ceiling this account actually runs
--- before a single underlying is counted. So the cap is not a footnote that a
-large account might one day meet; it is met by a *full but ordinary* book, and
-something has to lose a slot on a routine morning.
+Alpaca caps the **equity** stream and the **option** stream separately, and
+the two numbers are not the same number: on Basic it is 30 equity symbols and
+200 option quotes. Two sockets, two budgets, never one shared pool of thirty.
+Every option contract is its own symbol, so a *full but ordinary* book -- eight
+grouped multi-leg positions, the concurrent-position ceiling this account
+actually runs -- is 32 option symbols and at most eight underlyings. Each side
+of that fits its own cap with room to spare: 168 option quotes and 22 equity
+symbols go unspent.
 
-This module decides what. It is the arbiter, not the client: it opens no
+**This module was written against one cap of thirty, and that was wrong.** The
+arithmetic said an ordinary book was ten symbols over budget -- and ten over
+cost *twelve* unstreamed, because a unit is refused whole and spending stops at
+the first refusal, so four legs of a held spread took the eight underlyings
+behind it down as well. The plan dropped position *contracts*, reported
+*"12 symbols not streamed"* and left held positions marking at a last known
+price, while 170 option quotes sat unused beside them
+(``test_the_single_budget_this_replaces_would_have_dropped_held_contracts``
+pins both numbers). The allocation was never the problem; the number handed to
+it was. Under-spending a budget is only the safe direction when the thing being
+rationed is optional, and a held contract's mark is not.
+
+So where is the scarcity now? On the equity stream, a Markets viewport wider
+than the ~22 slots a full book leaves. On the option stream, a chain view
+(Phase 4), whose rows are contracts by the hundred. And on Algo Trader Plus,
+where equities become unlimited and the option stream still stops at 1000 --
+which is where this module's arithmetic earns its keep rather than becoming
+vestigial.
+
+This module decides what loses. It is the arbiter, not the client: it opens no
 socket, imports no vendor, reads no clock and reads no configuration.
 ``alpaca`` is imported in exactly two files and neither is this one -- what
 comes back is a list of symbols a transport is then told to subscribe to, so
@@ -17,8 +38,8 @@ matters here for a second reason: a plan that reshuffles between polls churns
 the socket, and every resubscribe is a gap in the marks it was opened to
 deliver.
 
-**The failure this prevents is a silent one.** A stream that quietly accepts 30
-of the 34 symbols it was handed, or that accepts all 34 and is silently
+**The failure this prevents is a silent one.** A stream that quietly accepts
+200 of the 204 symbols it was handed, or that accepts all 204 and is silently
 truncated by the server, leaves four contracts marking at their last known
 price. Nothing errors. The position rows keep rendering, the P&L keeps
 totalling, and four of the numbers in it are stale with nothing on screen to
@@ -33,11 +54,30 @@ a dropped subscription is a rejection with the same shape.
 Priority, and what a slot is spent on
 -------------------------------------
 
-Three tiers, ordered, from the design spec: **position contracts**, then their
-**underlyings**, then **recommended trades** (Phase 4). The third has no
-producer yet and is structurally present rather than speculative -- it costs one
-enum member and one constructor, and leaving it out would mean the Phase 4
-change is to this module's *logic* rather than to its inputs.
+Four tiers, ordered, from the design spec: **position contracts**, then their
+**underlyings**, then **recommended trades** (Phase 4), then the rows a client
+says are **visible on the Markets page**. The last two have no producer yet and
+are structurally present rather than speculative -- each costs one enum member
+and one constructor, and leaving them out would mean the later change is to
+this module's *logic* rather than to its inputs.
+
+:attr:`SubscriptionPriority.MARKETS_VISIBLE` is last and can only ever be last.
+It is the one tier whose input arrives from the *client* -- a viewport hint on
+the websocket -- and a client that could outrank a position contract could make
+a held position mark stale by scrolling. That is rule 4's principle (the engine
+enforces, the UI displays) applied to a stream budget rather than to a risk
+limit. Losing the tier costs freshness and never a price: every Markets row is
+polled anyway.
+
+**A unit belongs to one stream, and the call says which stream it is.** A
+unit's symbols are all option symbols or all equity symbols, and a unit
+straddling the two is refused as a caller bug: the two budgets are two calls,
+so a mixed unit has no single budget that can answer it whole. A unit lying
+*wholly* on the other side is refused for a sharper reason -- it fits, so it
+would be **admitted**, and its symbols returned as a subscription list for a
+socket that will never quote them, with nothing dropped and nothing to report.
+That is why :func:`plan_subscriptions` requires the ``stream`` it is planning
+and checks every unit against it.
 
 Within a tier the caller's order is preserved exactly. The sort is stable and
 nothing here re-orders, so two contracts at the same priority keep the sequence
@@ -88,25 +128,51 @@ is marking live as *not streamed*, which is the module's opening failure
 pointed the other way. Two logical positions on one contract is an ordinary
 state: a roll in flight, or two lots of the same strike.
 
-The cap is one number, and where it comes from is the caller's problem
----------------------------------------------------------------------
+There are two caps, they are named for their streams, and ``cap`` has no default
+--------------------------------------------------------------------------------
 
-:data:`STREAM_SYMBOL_CAP` is the only place 30 is written, and
-:func:`plan_subscriptions` takes ``cap`` as a parameter defaulting to it, so an
-upgrade is one value changing rather than a refactor.
+:data:`EQUITY_STREAM_SYMBOL_CAP` and :data:`OPTION_STREAM_QUOTE_CAP` are the
+only places 30 and 200 are written. There is deliberately **no unqualified
+``STREAM_SYMBOL_CAP``**: one name standing for two different budgets is the
+habitat the opening bug lived in, and a reader who sees ``cap`` at a call site
+should have to say which stream they meant.
 
-It is **not** read from the environment here, and it is not the same shape as
-the three feed-name variables: those are genuinely read from
+For the same reason ``cap`` is a **required** argument of
+:func:`plan_subscriptions` rather than one defaulting to either constant. A
+default is a silent choice of stream: an option-stream caller who omitted it
+would plan 200 contracts against a budget of 30, drop 170 of them with
+``no_room``, and report held positions as unstreamed while the option socket
+sat 170 quotes below its real limit.
+
+**One call plans one stream.** The option units are fitted against one cap and
+the equity units against the other, in two calls, and the caller subscribes
+each plan to its own socket. Teaching this function two budgets at once was
+considered and rejected twice over: it would put OCC-symbol parsing -- a
+vendor-shaped concern -- into the allocation of the one module that is
+deliberately ignorant of vendors, and it would turn one prefix cut with one
+``remaining`` into two interleaved cuts whose drop ordering has to be reasoned
+about again. The symbol *shape* is read here for exactly one purpose, to refuse
+a unit that straddles both streams, and never to decide who gets a slot.
+
+Neither cap is read from the environment here, and they are not the same shape
+as the three feed-name variables: those are genuinely read from
 ``ALPACA_OPTIONS_FEED`` / ``ALPACA_STOCK_FEED_HISTORICAL`` /
-``ALPACA_STOCK_FEED_REALTIME`` inside the provider, whereas this is a literal
-with an override, and calling the two the same thing would claim a property
-this module does not have. The account's plan of record is ``ALPACA_DATA_PLAN``
-(see ``api/routes/settings.py``), and **deriving the cap from it belongs to the
+``ALPACA_STOCK_FEED_REALTIME`` inside the provider, whereas these are literals
+the caller may override, and calling the two the same thing would claim a
+property this module does not have. Feed names are genuinely per-deployment;
+these are facts about a published price list, and a cap in the environment is a
+cap that can be raised by someone who has not paid -- with silent truncation as
+the failure.
+
+The account's plan of record is ``ALPACA_DATA_PLAN`` (see
+``api/routes/settings.py``), and **deriving both caps from it belongs to the
 caller** -- ``engine/runtime.py``, which owns the plan lookup and the
-environment. Whoever writes that caller: on Algo Trader Plus the thirty-symbol
-limit does not exist, and a stream still cutting at 30 while running full OPRA
-reports *"N symbols not streamed"* for a limit that was lifted. This module
-cannot notice that, by design; it only knows the number it is handed.
+environment. Whoever reads that caller: on Algo Trader Plus the equity limit
+does not exist at all, while the option stream rises to 1000 -- a higher
+ceiling, not the absence of one. Applying an "unlimited" sentinel to the option
+cap would subscribe past a limit the server enforces, which is this module's
+opening failure arriving from the other direction. This module cannot notice
+any of that, by design; it only knows the number it is handed.
 
 The audit record is the caller's clock and the caller's id
 ----------------------------------------------------------
@@ -125,6 +191,7 @@ later against a fill.
 """
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -132,13 +199,17 @@ from enum import IntEnum, StrEnum
 from typing import Final
 
 __all__ = [
-    "STREAM_SYMBOL_CAP",
+    "EQUITY_STREAM_SYMBOL_CAP",
+    "OPTION_STREAM_QUOTE_CAP",
     "DropRule",
     "DroppedUnit",
+    "Stream",
     "SubscriptionPlan",
     "SubscriptionPriority",
     "SubscriptionUnit",
     "contract_unit",
+    "markets_visible_unit",
+    "not_streamed_message",
     "plan_subscriptions",
     "recommendation_unit",
     "underlying_unit",
@@ -146,12 +217,29 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Alpaca Basic caps a websocket stream at thirty symbols, and every option
-#: contract is one of them. Written once: :func:`plan_subscriptions` defaults
-#: to it and takes an override. Deliberately not read from the environment --
-#: see the module docstring on why deriving it from ``ALPACA_DATA_PLAN`` is
-#: the caller's job rather than this module's.
-STREAM_SYMBOL_CAP: Final[int] = 30
+#: Alpaca Basic caps the **equity** stream at thirty symbols. Spent on
+#: underlyings and on Markets rows, never on contracts. Written once, and
+#: named for its stream: see the module docstring on why no unqualified cap
+#: survives, and on why deriving the live value from ``ALPACA_DATA_PLAN``
+#: is ``engine/runtime.py``'s job rather than this module's.
+EQUITY_STREAM_SYMBOL_CAP: Final[int] = 30
+
+#: Alpaca Basic caps the **option** stream at two hundred quotes -- a separate
+#: budget from the equity one, not a share of it. Eight grouped four-leg
+#: positions are 32 of these, so an ordinary full book spends about a sixth of
+#: it; a Phase 4 chain view is what makes this scarce.
+OPTION_STREAM_QUOTE_CAP: Final[int] = 200
+
+#: An OCC symbol: root, ``YYMMDD``, ``C``/``P``, then the strike ×1000 in
+#: eight digits. The root may carry a numeric suffix (``AAPL1``) when a split
+#: or special dividend leaves the deliverable something other than 100 shares,
+#: so it is matched as alphanumeric after a leading letter.
+#:
+#: Read for **one** kind of purpose: to refuse a unit, whether its symbols
+#: straddle both budgets or sit wholly on the other one (:func:`_stream_of`).
+#: It never decides who gets a slot, which is what keeps allocation ignorant
+#: of what an instrument is.
+_OCC_SYMBOL: Final = re.compile(r"^[A-Z][A-Z0-9]{0,5}\d{6}[CP]\d{8}$")
 
 
 class SubscriptionPriority(IntEnum):
@@ -170,6 +258,13 @@ class SubscriptionPriority(IntEnum):
     #: Phase 4. No producer yet; present so that wiring one is a new caller
     #: rather than a change to this module's logic.
     RECOMMENDED_TRADE = 3
+    #: The rows a client reports as visible on the Markets page -- a viewport
+    #: hint, debounced, over the websocket. **Lowest, and structurally so.**
+    #: The only tier whose input comes from the client, and a client that
+    #: could outrank a held contract could make a position mark stale by
+    #: scrolling. Churn here is harmless: every Markets row is polled anyway,
+    #: so losing the slot costs freshness and never a price.
+    MARKETS_VISIBLE = 4
 
     @property
     def label(self) -> str:
@@ -253,11 +348,38 @@ def underlying_unit(symbol: str) -> SubscriptionUnit:
 def recommendation_unit(
     recommendation_id: str, symbols: Iterable[str]
 ) -> SubscriptionUnit:
-    """A Phase 4 recommended trade. Same all-or-nothing rule as a position."""
+    """A Phase 4 recommended trade. Same all-or-nothing rule as a position.
+
+    **One stream per unit, so Phase 4 builds a recommendation as two units:**
+    one option unit carrying its legs and one equity unit carrying its
+    underlying, both at this priority. :func:`contract_unit` and
+    :func:`underlying_unit` satisfy that by construction and this does not --
+    the symbols are whatever the caller passes -- so a recommendation named
+    with its underlying alongside its legs is refused by
+    :func:`plan_subscriptions` rather than split across two budgets. That
+    mirrors what a held position already does, where the contracts and the
+    underlying are separate units at separate priorities.
+    """
     return SubscriptionUnit(
         key=recommendation_id,
         priority=SubscriptionPriority.RECOMMENDED_TRADE,
         symbols=tuple(symbols),
+    )
+
+
+def markets_visible_unit(symbol: str) -> SubscriptionUnit:
+    """One row a client says is on screen. Keyed on the symbol, like an underlying.
+
+    One symbol per unit, because Markets rows are independent of each other:
+    a row is marked or it is not, and there is no net value spanning two of
+    them to be half-stale. Admitted at the lowest priority there is -- see
+    :attr:`SubscriptionPriority.MARKETS_VISIBLE` on why a client-supplied
+    list can never be anything else.
+    """
+    return SubscriptionUnit(
+        key=symbol,
+        priority=SubscriptionPriority.MARKETS_VISIBLE,
+        symbols=(symbol,),
     )
 
 
@@ -321,6 +443,11 @@ class SubscriptionPlan:
     #: Every unit that did not, in priority order. **Never truncated** -- a
     #: capped list of what was capped is the same bug one level up.
     dropped: tuple[DroppedUnit, ...]
+    #: Which socket this plan is for. Carried rather than inferred: two plans
+    #: of one decision share a correlation id, and telling their records apart
+    #: by recognising 30 versus 200 is inference from a number that collapses
+    #: the day the two caps coincide.
+    stream: Stream
     cap: int
     #: When the caller computed this plan, normalised to UTC.
     at: datetime
@@ -374,10 +501,25 @@ class SubscriptionPlan:
         ``None`` rather than *"0 symbols not streamed"*: a banner that is
         always present is a banner nobody reads.
         """
-        count = self.not_streamed
-        if count == 0:
-            return None
-        return f"{count} symbol{'' if count == 1 else 's'} not streamed"
+        return not_streamed_message(self.not_streamed)
+
+
+def not_streamed_message(count: int) -> str | None:
+    """The UI's sentence for ``count`` missing symbols, or ``None`` for zero.
+
+    Written once and shared, because there are now **two** plans per decision
+    and the reader gets **one** banner: the question is *"is anything I hold
+    unmarked?"*, not *"which socket ran out?"*, and which one did is named in
+    the log record -- ``stream``, with its ``cap`` beside it, on every drop. A
+    caller summing two plans and phrasing the total itself is how the two
+    sentences drift apart.
+
+    ``None`` rather than *"0 symbols not streamed"*: a banner that is always
+    present is a banner nobody reads.
+    """
+    if count == 0:
+        return None
+    return f"{count} symbol{'' if count == 1 else 's'} not streamed"
 
 
 def plan_subscriptions(
@@ -385,15 +527,30 @@ def plan_subscriptions(
     *,
     at: datetime,
     correlation_id: str,
-    cap: int = STREAM_SYMBOL_CAP,
+    cap: int,
+    stream: Stream,
 ) -> SubscriptionPlan:
     """Fit ``units`` into ``cap`` stream slots, and say what did not fit.
 
+    **One call plans one stream, and says which.** Pass the option units as
+    :attr:`Stream.OPTION` with :data:`OPTION_STREAM_QUOTE_CAP` and the equity
+    units as :attr:`Stream.EQUITY` with :data:`EQUITY_STREAM_SYMBOL_CAP` -- or
+    with whatever the account's plan allows, which ``engine/runtime.py``
+    derives. Neither ``cap`` nor ``stream`` has a default, because either
+    default would be a silent choice of which socket this is: a wrong ``cap``
+    under-spends a budget, and a wrong ``stream`` hands symbols to a socket
+    that will never quote them.
+
+    ``stream`` is checked, not trusted. Every unit's symbols must belong to
+    it, so a list filed under the wrong socket is a refusal here rather than
+    an admitted plan whose marks never arrive. It is also the label on every
+    record this plan emits.
+
     Units are taken in priority order -- position contracts, then underlyings,
-    then recommended trades -- with the caller's order preserved within each
-    tier. Each is admitted whole or refused whole, a symbol already admitted
-    costs nothing, and spending stops at the first refusal. The module
-    docstring gives the reasoning for all three.
+    then recommended trades, then visible Markets rows -- with the caller's
+    order preserved within each tier. Each is admitted whole or refused whole,
+    a symbol already admitted costs nothing, and spending stops at the first
+    refusal. The module docstring gives the reasoning for all three.
 
     ``at`` is the moment the caller computed the plan, carried onto every
     :class:`DroppedUnit` and into every log record. It is an argument rather
@@ -409,10 +566,15 @@ def plan_subscriptions(
     upstream of it.
 
     Raises ``ValueError`` on a negative ``cap``, a naive ``at``, an empty
-    ``correlation_id``, a unit with no symbols, and an empty symbol string. All
-    five are caller bugs that would otherwise fail quietly -- an empty unit is
-    admitted for free and streams nothing, and an empty symbol would be sent to
-    the transport as a subscription.
+    ``correlation_id``, a unit with no symbols, an empty symbol string, a unit
+    whose symbols straddle both streams, and a unit whose symbols belong to
+    the *other* stream. All seven are caller bugs that would otherwise fail
+    quietly -- an empty unit is admitted for free and streams nothing, an
+    empty symbol would be sent to the transport as a subscription, a mixed
+    unit would be half-admitted by one budget and half-dropped by the other,
+    which is the partly-marked position the all-or-nothing rule exists to
+    prevent, and a wrongly filed one is worse still: it fits, it is admitted,
+    and the plan reports nothing missing while the socket quotes none of it.
     """
     if cap < 0:
         raise ValueError(
@@ -427,7 +589,7 @@ def plan_subscriptions(
             "untraceable plan it exists to prevent"
         )
 
-    ordered = _ordered(units)
+    ordered = _ordered(units, stream)
 
     subscribed: dict[str, None] = {}
     admitted: list[SubscriptionUnit] = []
@@ -515,6 +677,7 @@ def plan_subscriptions(
         subscribed=tuple(subscribed),
         admitted=tuple(admitted),
         dropped=tuple(dropped),
+        stream=stream,
         cap=cap,
         at=moment,
         correlation_id=correlation_id,
@@ -543,8 +706,55 @@ def _utc(moment: datetime) -> datetime:
     return moment.astimezone(timezone.utc)
 
 
-def _ordered(units: Iterable[SubscriptionUnit]) -> Sequence[SubscriptionUnit]:
-    """Validate, then sort by priority. Stable, so a tier keeps caller order."""
+class Stream(StrEnum):
+    """Which socket a plan is for. Two sockets, two budgets, two calls.
+
+    Public because :func:`plan_subscriptions` requires it: a plan that does
+    not say which stream it is for cannot refuse a unit filed under the wrong
+    one, and cannot label its own drop records. Not a vendor concept -- OCC
+    clears the options and every vendor selling both instruments meters them
+    apart.
+
+    **Read while validating and never while allocating.** Who gets a slot does
+    not depend on what an instrument is, and keeping it that way is what lets
+    one proven function plan both streams.
+    """
+
+    OPTION = "option"
+    EQUITY = "equity"
+
+    @property
+    def label(self) -> str:
+        """The value a log record and the API carry. Stable across renames."""
+        return self.value
+
+
+def _stream_of(symbol: str) -> Stream:
+    """OCC-shaped symbols stream on the option socket; everything else does not.
+
+    OCC is the clearing corporation's format, not a vendor's, so reading it
+    here does not make this module know about Alpaca. The judgement is
+    deliberately shape-only and one-directional: anything that is not an
+    option symbol is treated as an equity symbol rather than validated as a
+    ticker, because a malformed *equity* symbol is the transport's problem to
+    report and guessing at one here would refuse subscriptions this module has
+    no business refusing.
+
+    Called by :func:`_ordered` and by nothing else: to refuse a unit that
+    straddles both streams, and to refuse one filed under the wrong stream.
+    The allocation loop never sees a :class:`Stream`.
+    """
+    return Stream.OPTION if _OCC_SYMBOL.match(symbol) else Stream.EQUITY
+
+
+def _ordered(
+    units: Iterable[SubscriptionUnit], stream: Stream
+) -> Sequence[SubscriptionUnit]:
+    """Validate against ``stream``, then sort by priority.
+
+    Stable, so a tier keeps caller order. Every symbol read here is read to
+    *refuse* a unit; nothing downstream of this asks what an instrument is.
+    """
     materialised = list(units)
     for unit in materialised:
         if not unit.symbols:
@@ -559,6 +769,31 @@ def _ordered(units: Iterable[SubscriptionUnit]) -> Sequence[SubscriptionUnit]:
                     f"subscription unit {unit.key!r} carries an empty symbol; "
                     "it would be sent to the transport as a subscription"
                 )
+        streams = {_stream_of(symbol) for symbol in unit.symbols}
+        if len(streams) > 1:
+            options = [s for s in unit.symbols if _stream_of(s) is Stream.OPTION]
+            equities = [s for s in unit.symbols if _stream_of(s) is Stream.EQUITY]
+            raise ValueError(
+                f"subscription unit {unit.key!r} spans two streams: option "
+                f"symbols {options!r} and equity symbols {equities!r}. The "
+                "option and equity budgets are separate and are planned one "
+                "call each, so a unit across both could only be half admitted "
+                "and half dropped -- the partly-marked position that "
+                "all-or-nothing exists to prevent. Build it as two units, one "
+                "per stream"
+            )
+        filed_under = streams.pop()
+        if filed_under is not stream:
+            raise ValueError(
+                f"subscription unit {unit.key!r} carries {filed_under.value} "
+                f"symbols {list(unit.symbols)!r} and was filed under the "
+                f"{stream.value} stream. Its symbols would be returned as the "
+                f"{stream.value} socket's subscription list, which will never "
+                "quote them: every one of them marks at a last known price "
+                "while the plan reports nothing missing, because the budget "
+                "it was measured against had room. Pass it to the "
+                f"{filed_under.value} call instead"
+            )
     return sorted(materialised, key=lambda unit: unit.priority)
 
 
@@ -630,6 +865,7 @@ def _log(plan: SubscriptionPlan) -> None:
             extra={
                 "event": "stream_subscription_dropped",
                 "correlation_id": plan.correlation_id,
+                "stream": plan.stream.label,
                 "rule": unit.rule.value,
                 "key": unit.key,
                 "priority": unit.priority.label,
@@ -654,6 +890,7 @@ def _log(plan: SubscriptionPlan) -> None:
         extra={
             "event": "stream_subscription_budget_exceeded",
             "correlation_id": plan.correlation_id,
+            "stream": plan.stream.label,
             "not_streamed": plan.not_streamed,
             "dropped_symbols": list(plan.dropped_symbols),
             "dropped_units": len(plan.dropped),
