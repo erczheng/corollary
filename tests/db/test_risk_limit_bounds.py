@@ -25,6 +25,20 @@ caller can only reach one of them:
   arriving as raw SQL, which is the path that skips Python entirely.
 """
 
+# Tagged ``risk`` but for two, because rule 4 is the whole subject: a ceiling
+# that is infinite, NaN, negative, zero or absurd is a risk manager that does
+# not manage risk, and both layers that refuse one -- the validator and the
+# CHECK constraint -- are money-safety controls. The permits are tagged
+# alongside the rejects, per CLAUDE.md's standard for limits: a limit that
+# refuses its own boundary stops the book trading, which costs money in the
+# other direction.
+#
+# Left bare: ``test_the_ranges_match_the_settings_page``, a consistency check
+# between a client copy and a server copy that are each tested on their own,
+# and where the server is authoritative either way; and
+# ``test_the_error_names_the_key_and_the_range``, which is about the wording
+# of a refusal that is tagged where it is made.
+
 from decimal import Decimal
 
 import pytest
@@ -50,6 +64,7 @@ DISABLING_VALUES = [
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("bad", DISABLING_VALUES, ids=str)
 def test_the_orm_refuses_a_value_that_would_disable_the_risk_manager(
     session: Session, bad: Decimal
@@ -58,6 +73,7 @@ def test_the_orm_refuses_a_value_that_would_disable_the_risk_manager(
         RiskLimit(key="max_risk_per_trade_pct", value=bad)
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("bad", DISABLING_VALUES, ids=str)
 def test_the_orm_refuses_them_on_an_edit_too(session: Session, bad: Decimal) -> None:
     """Settings edits an existing row; assignment is the common path."""
@@ -69,6 +85,7 @@ def test_the_orm_refuses_them_on_an_edit_too(session: Session, bad: Decimal) -> 
         row.value = bad
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("bad", DISABLING_VALUES, ids=str)
 def test_the_orm_refuses_them_whichever_order_the_fields_are_set(bad: Decimal) -> None:
     """``value`` before ``key`` must validate as strictly as ``key`` first."""
@@ -78,6 +95,7 @@ def test_the_orm_refuses_them_whichever_order_the_fields_are_set(bad: Decimal) -
         limit.key = "max_risk_per_trade_pct"
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("bad", DISABLING_VALUES, ids=str)
 def test_an_unknown_key_still_gets_the_universal_rules(bad: Decimal) -> None:
     """No configured range is not the same as no rules.
@@ -89,16 +107,19 @@ def test_an_unknown_key_still_gets_the_universal_rules(bad: Decimal) -> None:
         RiskLimit(key="max_vibes_pct", value=bad)
 
 
+@pytest.mark.risk
 def test_a_count_must_be_a_whole_number_of_positions() -> None:
     with pytest.raises(ValueError):
         RiskLimit(key="max_concurrent_positions", value=Decimal("8.5"))
 
 
+@pytest.mark.risk
 def test_a_percentage_may_be_fractional() -> None:
     limit = RiskLimit(key="max_risk_per_trade_pct", value=Decimal("7.5"))
     assert limit.value == Decimal("7.5")
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("key,low,high", [(k, r.low, r.high) for k, r in RISK_LIMIT_RANGES.items()])
 def test_every_limit_permits_both_ends_of_its_range(
     key: str, low: Decimal, high: Decimal
@@ -108,6 +129,7 @@ def test_every_limit_permits_both_ends_of_its_range(
     assert validate_risk_limit(key, high) is None
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("key,low,high", [(k, r.low, r.high) for k, r in RISK_LIMIT_RANGES.items()])
 def test_every_limit_rejects_just_outside_its_range(
     key: str, low: Decimal, high: Decimal
@@ -131,6 +153,7 @@ def test_the_ranges_match_the_settings_page() -> None:
     }
 
 
+@pytest.mark.risk
 def test_the_seeded_defaults_all_validate() -> None:
     from corollary.db.seed import RISK_LIMIT_DEFAULTS
 
@@ -152,6 +175,7 @@ def test_the_error_names_the_key_and_the_range() -> None:
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize(
     "raw", ["Infinity", "-Infinity", "NaN", "-7", "0", "0.00", "999999", "", "seven"],
     ids=repr,
@@ -168,6 +192,7 @@ def test_raw_sql_cannot_write_a_value_that_would_disable_the_risk_manager(
     session.rollback()
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize("raw", ["1", "7", "7.5", "20", "100", "999.999"], ids=repr)
 def test_raw_sql_accepts_a_well_formed_positive_ceiling(
     session: Session, raw: str
@@ -182,6 +207,7 @@ def test_raw_sql_accepts_a_well_formed_positive_ceiling(
     assert stored.value == Decimal(raw)
 
 
+@pytest.mark.risk
 def test_the_check_constraint_keeps_the_column_text(session: Session) -> None:
     """A bare number written by raw SQL would come back as an int or a float.
 

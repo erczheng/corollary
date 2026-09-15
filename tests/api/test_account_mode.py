@@ -11,6 +11,21 @@ and markets routes are separate dispatches. The dependency is exercised
 through a probe route, which resolves exactly as those routes will.
 """
 
+# ``uv run python -m pytest -m risk`` is the gate CLAUDE.md makes mandatory
+# before an engine change, and this file belongs under it: rules 1 and 5 both
+# land here. Tagged means *breaking this could cost money* -- whose money a
+# route is answering about, and whether a route can reach ``submit_order`` at
+# all.
+#
+# Left bare, because breaking them costs clarity rather than money and the
+# behaviour each one dresses is tagged directly:
+# ``test_the_409_names_both_missing_variables`` and
+# ``test_the_409_message_is_not_truncated`` -- the wording and the length of a
+# refusal whose *substance* (cash is refused, paper is not substituted) is
+# tagged on its own tests; ``test_the_409_uses_the_shared_error_envelope`` --
+# one JSON shape for every non-2xx; and ``test_the_broker_is_built_once_and_cached``
+# -- a cache, not a control.
+
 import inspect
 from typing import Callable
 
@@ -43,6 +58,7 @@ def build(registry: ServiceRegistry, db_engine: Engine) -> FastAPI:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_no_account_parameter_means_paper(
     registry: ServiceRegistry, db_engine: Engine
 ) -> None:
@@ -50,6 +66,7 @@ def test_no_account_parameter_means_paper(
         assert client.get("/probe").json() == {"label": "paper"}
 
 
+@pytest.mark.risk
 def test_paper_is_served_when_asked_for(
     registry: ServiceRegistry, db_engine: Engine
 ) -> None:
@@ -57,6 +74,7 @@ def test_paper_is_served_when_asked_for(
         assert client.get("/probe?account=paper").json() == {"label": "paper"}
 
 
+@pytest.mark.risk
 def test_an_unknown_account_is_a_422(
     registry: ServiceRegistry, db_engine: Engine
 ) -> None:
@@ -70,6 +88,7 @@ def test_an_unknown_account_is_a_422(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_cash_is_served_when_the_live_keys_are_present(
     make_registry: Callable[..., ServiceRegistry], db_engine: Engine
 ) -> None:
@@ -77,6 +96,7 @@ def test_cash_is_served_when_the_live_keys_are_present(
         assert client.get("/probe?account=cash").json() == {"label": "cash"}
 
 
+@pytest.mark.risk
 def test_cash_without_live_keys_is_a_409(
     registry: ServiceRegistry, db_engine: Engine
 ) -> None:
@@ -127,6 +147,7 @@ def test_the_409_uses_the_shared_error_envelope(
     assert body["error"]["code"] == "account_unavailable"
 
 
+@pytest.mark.risk
 def test_cash_without_live_keys_does_not_serve_paper(
     registry: ServiceRegistry, db_engine: Engine, paper_broker: RecordedBroker
 ) -> None:
@@ -142,6 +163,7 @@ def test_cash_without_live_keys_does_not_serve_paper(
     assert paper_broker.calls == []
 
 
+@pytest.mark.risk
 def test_missing_live_credentials_treats_blank_as_absent() -> None:
     both = dict.fromkeys(LIVE_CREDENTIAL_ENV_VARS, "")
 
@@ -152,6 +174,7 @@ def test_missing_live_credentials_treats_blank_as_absent() -> None:
     ) == LIVE_CREDENTIAL_ENV_VARS
 
 
+@pytest.mark.risk
 def test_one_missing_half_is_still_a_refusal() -> None:
     """Half a pair authenticates nothing."""
     env = {LIVE_CREDENTIAL_ENV_VARS[0]: "PKSOMETHING"}
@@ -159,6 +182,7 @@ def test_one_missing_half_is_still_a_refusal() -> None:
     assert missing_live_credentials(env) == (LIVE_CREDENTIAL_ENV_VARS[1],)
 
 
+@pytest.mark.risk
 def test_a_registry_refuses_an_inconsistent_pair(
     paper_broker: RecordedBroker, cash_broker: RecordedBroker
 ) -> None:
@@ -227,6 +251,7 @@ def test_the_broker_is_built_once_and_cached(db_engine: Engine) -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
 def test_the_broker_dependency_is_typed_as_the_read_half() -> None:
     """``BrokerAccount``, not ``AlpacaBroker`` and not ``BrokerExecution``."""
     assert (

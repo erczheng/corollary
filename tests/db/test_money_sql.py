@@ -26,6 +26,18 @@ Every line of it reads as correct code, which is exactly why it has to raise
 rather than be discouraged in a comment.
 """
 
+# Tagged ``risk``, nearly all of it. Every refusal below stops SQLite
+# answering a question about a risk ceiling with a plausible wrong number --
+# rule 4 failing silently, which is the failure mode the ``Money`` type exists
+# to make impossible. The permits are tagged too, for the reason CLAUDE.md
+# gives limits: a guard that also blocked reading and writing a ceiling would
+# leave the risk manager unable to load the numbers it enforces.
+#
+# Left bare: ``test_count_is_still_allowed`` and
+# ``test_is_null_is_still_allowed``. Both are about the guard's *breadth*, and
+# neither asks anything about a value -- counting rows and testing for NULL
+# have no representation problem to get wrong.
+
 from decimal import Decimal
 
 import pytest
@@ -49,6 +61,7 @@ def seeded(session: Session) -> Session:
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 def test_the_storage_layer_really_is_lexicographic(seeded: Session) -> None:
     """Raw SQL, deliberately bypassing every guard below.
 
@@ -79,11 +92,13 @@ def test_the_storage_layer_really_is_lexicographic(seeded: Session) -> None:
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 def test_greater_than_raises_instead_of_returning_every_row(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.execute(select(RiskLimit.key).where(RiskLimit.value > Decimal("10")))
 
 
+@pytest.mark.risk
 def test_less_than_or_equal_raises_instead_of_returning_every_row(
     seeded: Session,
 ) -> None:
@@ -91,6 +106,7 @@ def test_less_than_or_equal_raises_instead_of_returning_every_row(
         seeded.execute(select(RiskLimit.key).where(RiskLimit.value <= Decimal("8")))
 
 
+@pytest.mark.risk
 def test_the_phase_six_ceiling_query_raises(seeded: Session) -> None:
     """The exact shape from the audit: a ceiling check that reads as correct."""
     computed_risk = Decimal("35")
@@ -98,42 +114,50 @@ def test_the_phase_six_ceiling_query_raises(seeded: Session) -> None:
         seeded.execute(select(RiskLimit).where(RiskLimit.value < computed_risk))
 
 
+@pytest.mark.risk
 def test_less_than_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value < Decimal("1")
 
 
+@pytest.mark.risk
 def test_less_than_or_equal_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value <= Decimal("1")
 
 
+@pytest.mark.risk
 def test_greater_than_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value > Decimal("1")
 
 
+@pytest.mark.risk
 def test_greater_than_or_equal_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value >= Decimal("1")
 
 
+@pytest.mark.risk
 def test_between_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value.between(Decimal("1"), Decimal("2"))
 
 
+@pytest.mark.risk
 def test_equality_raises_because_seven_is_different_text_from_seven_point_zero() -> None:
     """The two Decimals are equal; the two strings are not."""
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value == Decimal("7.0")
 
 
+@pytest.mark.risk
 def test_inequality_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value != Decimal("7.0")
 
 
+@pytest.mark.risk
 def test_in_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value.in_([Decimal("7"), Decimal("20")])
@@ -145,6 +169,7 @@ def test_is_null_is_still_allowed() -> None:
     assert (RiskLimit.value == None) is not None  # noqa: E711
 
 
+@pytest.mark.risk
 def test_arithmetic_raises_because_sqlite_would_coerce_to_a_float() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value + Decimal("1")
@@ -155,31 +180,37 @@ def test_arithmetic_raises_because_sqlite_would_coerce_to_a_float() -> None:
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 def test_order_by_the_bare_column_raises(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.execute(select(RiskLimit.value).order_by(RiskLimit.value)).all()
 
 
+@pytest.mark.risk
 def test_order_by_desc_raises() -> None:
     with pytest.raises(MoneyComparisonError):
         RiskLimit.value.desc()
 
 
+@pytest.mark.risk
 def test_legacy_query_order_by_raises(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.query(RiskLimit).order_by(RiskLimit.value).all()
 
 
+@pytest.mark.risk
 def test_max_raises_instead_of_answering_eight(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.execute(select(func.max(RiskLimit.value))).scalar_one()
 
 
+@pytest.mark.risk
 def test_min_raises_instead_of_answering_twenty(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.execute(select(func.min(RiskLimit.value))).scalar_one()
 
 
+@pytest.mark.risk
 def test_sum_raises(seeded: Session) -> None:
     """SUM was only ever safe by accident.
 
@@ -191,6 +222,7 @@ def test_sum_raises(seeded: Session) -> None:
         seeded.execute(select(func.sum(RiskLimit.value))).scalar_one()
 
 
+@pytest.mark.risk
 def test_avg_raises(seeded: Session) -> None:
     with pytest.raises(MoneyComparisonError):
         seeded.execute(select(func.avg(RiskLimit.value))).scalar_one()
@@ -201,6 +233,7 @@ def test_count_is_still_allowed(seeded: Session) -> None:
     assert seeded.execute(select(func.count(RiskLimit.value))).scalar_one() == 5
 
 
+@pytest.mark.risk
 def test_selecting_and_updating_money_is_untouched(seeded: Session) -> None:
     """The guard blocks questions about ordering, not ordinary use."""
     row = seeded.get(RiskLimit, "max_risk_per_trade_pct")
@@ -219,6 +252,7 @@ def test_selecting_and_updating_money_is_untouched(seeded: Session) -> None:
 # --------------------------------------------------------------------- #
 
 
+@pytest.mark.risk
 def test_risk_limits_reads_every_ceiling_as_a_decimal(seeded: Session) -> None:
     limits = risk_limits(seeded)
     assert limits == {
@@ -231,6 +265,7 @@ def test_risk_limits_reads_every_ceiling_as_a_decimal(seeded: Session) -> None:
     assert all(type(v) is Decimal for v in limits.values())
 
 
+@pytest.mark.risk
 def test_comparing_in_python_gives_the_true_answers(seeded: Session) -> None:
     """The same five questions, answered correctly."""
     limits = risk_limits(seeded)
@@ -256,6 +291,7 @@ def test_comparing_in_python_gives_the_true_answers(seeded: Session) -> None:
     ]
 
 
+@pytest.mark.risk
 def test_the_thirty_five_percent_trade_breaches_the_per_trade_ceiling_only(
     seeded: Session,
 ) -> None:
