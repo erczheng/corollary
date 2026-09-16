@@ -87,6 +87,21 @@ ratio then come out of one response, which is the strongest form of the
 same-feed rule there is. :func:`_volume_reading` assembles it, and keeps the
 session that supplied the numerator out of its own denominator.
 
+A fourth is cached for a reason that is not about staleness at all. Every
+figure above moves slowly enough that a cache is an optimisation; the
+snapshot moves constantly and is fetched on every poll by design. What it
+is not allowed to do is scale with the number of **clients** -- the browser
+drives the cadence and this API forwards it, so two tabs, a reload loop or a
+hot-reloading dev server multiply the vendor rate by the client count, and
+decision 18's 400ms interval reaches 300/min on two of them against a hard
+200/min. :class:`CoalescingCache` keys the snapshot on the requested symbol
+set, holds a per-key lock across the fetch and serves the answer for
+:data:`STOCK_SNAPSHOT_TTL`, so callers inside one interval share one
+request. The token bucket in
+``data/providers/ratelimit.py`` stays as the hard backstop -- it *waits*
+rather than refusing, which is why reaching it looks like a slow page rather
+than an error, and why this cache exists to keep it from being reached.
+
 Two shapes of the response that are choices rather than defaults
 ----------------------------------------------------------------
 
@@ -176,11 +191,14 @@ from corollary.data.providers.fundamentals import (
 from corollary.instruments import OccSymbol, OptionType, parse_occ_symbol
 
 __all__ = [
+    "MARKETS_FOREGROUND_POLL_MS",
     "MARKET_CAP_FETCH_BUDGET_SECONDS",
     "MARKET_CAP_RETRY_TTL",
+    "STOCK_SNAPSHOT_TTL",
     "UNDERLYING_SYMBOLS",
     "UNIVERSE",
     "UNIVERSE_SYMBOLS",
+    "CoalescingCache",
     "MarketCaches",
     "router",
 ]
@@ -294,6 +312,36 @@ AVG_VOLUME_SESSIONS: Final = 30
 #: opened -- the entry is held for the trading date instead; see
 #: :func:`_session_state` and :class:`IntradayCache`.
 SESSION_VOLUME_TTL: Final = timedelta(seconds=60)
+
+#: The Markets page's **foreground** poll interval, in milliseconds.
+#:
+#: Decision 18's cadence table: 400ms is 150 requests a minute of
+#: ``data.alpaca.markets``'s 200, which leaves ~49/min for an on-demand chain.
+#: 150ms would be 400/min and 200ms 300/min, both past a hard ceiling, so the
+#: interval the account holder asked for was not adopted as asked.
+#:
+#: **The client half of this number lives in ``web/src/hooks/`` and the two
+#: are the same number by design, not by coincidence.** The cache below
+#: exists so that N clients polling at this interval cost one Alpaca request
+#: per interval rather than N; that claim is only true while the TTL and the
+#: interval are equal. Grep ``MARKETS_FOREGROUND_POLL_MS`` to find both
+#: halves -- the name is repeated in the hook for exactly that reason.
+#:
+#: Raising it is one edit in each half and nothing else: on Algo Trader Plus
+#: the table's foreground interval becomes 5s and this follows it.
+MARKETS_FOREGROUND_POLL_MS: Final = 400
+
+#: How long one symbol set's stock snapshot is shared between callers.
+#:
+#: **Equal to the foreground poll interval by construction**, per
+#: :data:`MARKETS_FOREGROUND_POLL_MS`, and that equality is the whole design:
+#: one interval of wall clock is one Alpaca request per symbol set, whoever
+#: asks. The server bounds the rate; the client only requests it.
+#:
+#: Shorter and two tabs breach the bucket again. Longer and the table freezes
+#: between polls -- a screener reporting a stale market, which is the failure
+#: the poll exists to prevent. See :class:`CoalescingCache`.
+STOCK_SNAPSHOT_TTL: Final = timedelta(milliseconds=MARKETS_FOREGROUND_POLL_MS)
 
 #: How long before a **failed** market-cap fetch is tried again.
 #:
@@ -514,6 +562,12 @@ ValueT = TypeVar("ValueT")
 
 FetchMany = Callable[[tuple[str, ...]], Awaitable[Mapping[str, ValueT]]]
 
+#: A fetch that answers for the whole key at once, taking no argument: the
+#: key is the symbol set, so :class:`CoalescingCache`'s caller has already
+#: closed over it. A per-symbol :data:`FetchMany` would be the wrong shape --
+#: there is nothing partial to ask for.
+FetchOne = Callable[[], Awaitable[ValueT]]
+
 #: Whether a cached entry can still change before the trading date rolls.
 #:
 #: Takes the **value as well as the instant it was read**, because for two of
@@ -656,6 +710,190 @@ class IntradayCache(Generic[ValueT]):
                 self._read_at.pop(symbol, None)
 
 
+@dataclass(frozen=True, slots=True)
+class _Cached(Generic[ValueT]):
+    """One answer and the instant the request that fetched it began.
+
+    ``read_at`` is the caller's ``now``, taken before the fetch rather than
+    after it, exactly as :class:`IntradayCache` records one. That is the
+    conservative direction: an entry's age counts the time the vendor spent
+    answering, so a slow response expires sooner rather than being held for a
+    full TTL past the moment it was already stale.
+    """
+
+    value: ValueT
+    read_at: datetime
+
+
+class CoalescingCache(Generic[ValueT]):
+    """One answer per **requested symbol set**, shared for a TTL. Decision 18.
+
+    The other two caches here are keyed per symbol and exist to stop a figure
+    being re-downloaded when it cannot have changed. This one is keyed on the
+    *set of symbols asked for* and exists for a different reason: to stop the
+    number of **clients** deciding the vendor request rate.
+
+    The browser drives the Markets poll and this API forwards it, so two
+    tabs, a reload loop or a hot-reloading dev server multiply the Alpaca
+    rate by the number of clients -- :data:`MARKETS_FOREGROUND_POLL_MS` times
+    two clients is 300/min against a hard 200/min.
+    ``data/providers/ratelimit.py``'s bucket **waits** rather than refusing,
+    so the symptom is not an error: every Markets request simply gets slower
+    until the page looks broken for a reason nothing logs. The bucket stays
+    as the hard backstop; this is what keeps it from being reached.
+
+    **The lock is held across the fetch on purpose, and it is per key.** The
+    second of two concurrent callers waits and is then served the first one's
+    answer rather than issuing a second request -- that is the coalescing,
+    and a cache that only stored the result would let both requests leave. It
+    is per key rather than one lock for the cache because an unrelated symbol
+    set has no reason to queue behind this one's round trip;
+    :class:`IntradayCache` can hold one lock for everything because its fetch
+    is bounded and shared, and this one fronts the request on the poll path.
+
+    **A failed fetch is never stored.** It raises to the caller that made it
+    and is recorded by :func:`_log_uncached_fetch`; any caller waiting on the
+    lock then makes its own attempt. Sharing the *exception* was the other
+    option and is worse: the two callers are two HTTP requests, the second
+    one arrived later, and it can still be answered. Caching the failure
+    would be worse again -- it would turn one timeout into a TTL of them and
+    serve an absence as data, which is the market-cap column's rule
+    (:data:`MARKET_CAP_RETRY_TTL`) arriving at a different key. The failing
+    caller still cleans up on its way out -- see :meth:`_forget_expired` --
+    since a key whose vendor call always fails is precisely the one no later
+    success will come back and tidy.
+
+    ``now`` is injected rather than read here, for the same reason
+    :class:`MarketCaches` owns the clock: "two callers inside one interval"
+    has to be a testable condition rather than a race against a wall clock.
+    """
+
+    def __init__(self, ttl: timedelta) -> None:
+        self._ttl = ttl
+        self._entries: dict[tuple[str, ...], _Cached[ValueT]] = {}
+        self._locks: dict[tuple[str, ...], asyncio.Lock] = {}
+        #: How many callers are holding *or waiting on* each key's lock.
+        #:
+        #: Incremented before the lock is awaited and decremented in a
+        #: ``finally``, so a key is in this map for exactly as long as the
+        #: lock behind it has an owner or a queue. The sweep reads it instead
+        #: of ``asyncio.Lock.locked()``, which cannot answer the question:
+        #: see :meth:`_forget_expired`.
+        self._in_use: dict[tuple[str, ...], int] = {}
+
+    async def resolve(
+        self,
+        key: tuple[str, ...],
+        *,
+        now: datetime,
+        fetch: FetchOne[ValueT],
+    ) -> ValueT:
+        """The cached answer for ``key``, or the one this call goes and gets.
+
+        ``key`` must be **normalised** by the caller -- upper-cased,
+        de-duplicated and sorted. Two tabs asking for the same names in a
+        different order are one question, and keyed on the raw query string
+        they would miss each other and the cache would do nothing for the
+        case it exists for.
+        """
+        # `setdefault` rather than a check and an insert: there is no `await`
+        # between reading the dict and claiming the key, so no other task can
+        # run in between and two callers cannot end up with two locks. The
+        # claim is what keeps this key's lock alive for as long as this
+        # caller needs it -- `locked()` cannot, see `_forget_expired`.
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        self._in_use[key] = self._in_use.get(key, 0) + 1
+        try:
+            async with lock:
+                entry = self._entries.get(key)
+                if entry is not None and now - entry.read_at < self._ttl:
+                    return entry.value
+                # Dropped before the fetch, not after it: if the fetch
+                # raises, what is gone is an entry that had already expired,
+                # and nothing stale is left behind to be served by the next
+                # caller.
+                self._entries.pop(key, None)
+                try:
+                    value = await fetch()
+                except Exception as exc:
+                    _log_uncached_fetch(key, exc)
+                    raise
+                self._entries[key] = _Cached(value=value, read_at=now)
+                return value
+        finally:
+            # In a `finally` so the failure path releases the claim and
+            # sweeps too: a key whose vendor call always fails is exactly the
+            # one no later success will come back and tidy up.
+            remaining = self._in_use[key] - 1
+            if remaining:
+                self._in_use[key] = remaining
+            else:
+                del self._in_use[key]
+            self._forget_expired(now=now)
+
+    def _forget_expired(self, *, now: datetime) -> None:
+        """Drop what nothing can be served from, so the key space stays bounded.
+
+        Every subset of the universe is a key a client may ask for, so an
+        entry read once and never again would otherwise be held for the life
+        of the process. Called from :meth:`resolve`'s ``finally``, so a fetch
+        that failed sweeps on its way out like one that succeeded.
+
+        **Not logged.** An expiry is how this cache is meant to work, and a
+        line per poll per symbol set is how a log stops being read. A
+        *failure* is logged, because that is a rejection rather than a
+        routine one -- see :func:`_log_uncached_fetch`.
+
+        **A lock is dropped only when no caller is holding or waiting on it**,
+        which is what ``self._in_use`` counts and what
+        ``asyncio.Lock.locked()`` cannot tell you. ``release()`` clears the
+        flag and *schedules* the first waiter; the waiter sets it again only
+        when it resumes, so there is a window in which the lock reads
+        unlocked while a caller is queued on it. That window is reachable on
+        the ordinary path -- a fetch slower than the 400ms TTL stores an
+        entry that is already expired (``read_at`` is taken before the fetch,
+        by design), and any unrelated key resolving in the same loop
+        iteration sweeps it. Deleting the lock there left the waiter holding
+        an orphan while the next caller built a second lock for the same key:
+        two concurrent vendor requests for one symbol set, silent, because
+        ``ratelimit.py``'s bucket waits rather than refusing. The entry goes
+        either way, since a caller inside the lock is about to replace it.
+        """
+        for cached_key in list(self._locks):
+            cached = self._entries.get(cached_key)
+            if cached is not None and now - cached.read_at < self._ttl:
+                continue
+            self._entries.pop(cached_key, None)
+            if cached_key not in self._in_use:
+                del self._locks[cached_key]
+
+
+def _log_uncached_fetch(key: Sequence[str], exc: BaseException) -> None:
+    """Record the rule, the inputs and the timestamp, then re-raise (rule 8).
+
+    The request itself is refused elsewhere -- this is the *cache* declining
+    to remember the failure, which is the decision worth being able to find
+    afterwards: it is why the vendor was asked again a moment later, and why
+    a burst of these is a vendor outage rather than a cache thrashing.
+    """
+    logger.warning(
+        "a coalesced fetch for %d symbol(s) failed and was not cached: %s",
+        len(key),
+        exc,
+        extra={
+            "event": "coalesced_fetch_failed",
+            "rule": (
+                "a failed fetch is never cached as a success -- the next "
+                "caller re-asks rather than being served an absence as data"
+            ),
+            "code": "coalesced_fetch_failed",
+            "symbols": list(key),
+            "cause": f"{type(exc).__name__}: {exc}",
+            "at": _utc_now().isoformat(),
+        },
+    )
+
+
 class MarketCaches:
     """The clock and the per-session caches these routes share.
 
@@ -687,6 +925,22 @@ class MarketCaches:
         #: what fills it.
         self.market_cap: IntradayCache[MarketCap] = IntradayCache(
             MARKET_CAP_RETRY_TTL
+        )
+        #: One stock-snapshot response per requested symbol set, shared for
+        #: one foreground poll -- decision 18.
+        #:
+        #: The only request on the ``/stocks`` path with no cache in front
+        #: of it before this: the daily series moves once a session, today's
+        #: volume cannot move faster than the feed's embargo, and a market
+        #: cap is a daily figure, so each of those already costs far less
+        #: than one request per poll. The snapshot is the live one, and
+        #: therefore the one that scaled with the number of clients.
+        #:
+        #: **The mapping it hands back is shared, so treat it as read-only.**
+        #: Two requests inside one TTL hold the same object; a route that
+        #: mutated it would be editing another request's response.
+        self.stock_snapshots: CoalescingCache[dict[str, StockSnapshot]] = (
+            CoalescingCache(STOCK_SNAPSHOT_TTL)
         )
 
     def today(self) -> date:
@@ -1659,10 +1913,18 @@ async def stocks(
 ) -> list[StockQuote]:
     """One row per symbol, in the order asked for.
 
-    One snapshot request covers the whole universe, which is what keeps the 2s
+    One snapshot request covers the whole universe, which is what keeps the
     poll at one request against ``data.alpaca.markets`` rather than one per
     name. The average-volume series behind it is fetched once a session; see
     :class:`SessionCache`.
+
+    **And one request per interval however many clients are polling.** The
+    browser drives the cadence and this route forwards it, so two tabs or a
+    hot-reloading dev server would otherwise multiply the vendor rate by the
+    client count. :class:`CoalescingCache` keys the snapshot on the
+    requested symbol set for :data:`STOCK_SNAPSHOT_TTL`, so concurrent and
+    near-simultaneous callers share one in-flight request and the rate is
+    bounded by the wall clock instead.
 
     **Volume and average volume are one measurement over two windows**, both
     out of ``stock_bars`` and therefore both on the historical feed. The
@@ -1689,7 +1951,18 @@ async def stocks(
     today = caches.today()
     now = caches.now()
 
-    snapshots = await provider.stock_snapshots(requested)
+    # Decision 18: one in-flight snapshot request per symbol set, whatever
+    # the number of clients asking for it. The key is the **sorted** set
+    # rather than the order this caller wrote it in -- two tabs asking for
+    # the same names in a different order are one question -- and the rows
+    # below are still assembled in `requested` order, which this does not
+    # touch.
+    asked_for = tuple(sorted(requested))
+    snapshots = await caches.stock_snapshots.resolve(
+        asked_for,
+        now=now,
+        fetch=lambda: provider.stock_snapshots(asked_for),
+    )
     daily = await caches.daily_volume.resolve(
         requested,
         today=today,

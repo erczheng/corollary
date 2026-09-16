@@ -25,6 +25,7 @@ documents as *"the security has no active bid"*). A chain that renders those
 as ``$0.00`` is inventing a price on half its rows.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import Callable
@@ -409,10 +410,19 @@ def test_the_daily_series_is_fetched_once_per_trading_date(
     the snapshot: 90 days for the average and today for the session so far.
     Two polls still cost one request each -- the count is 2 rather than 4 --
     and today's is what the second window's shorter life is for.
+
+    **The clock advances past the coalescing TTL between the two polls**, or
+    the second one never reaches these caches at all: decision 18's cache on
+    the snapshot would answer it whole and this test would pass without
+    testing anything. See :data:`~corollary.api.routes.markets.
+    STOCK_SNAPSHOT_TTL`.
     """
     client, transport = make_market_client(market_data_routes())
+    clock = [MARKET_DATA_RECORDED_AT]
+    client.app.state.market_caches = markets_routes.MarketCaches(now=lambda: clock[0])
 
     rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    clock[0] = MARKET_DATA_RECORDED_AT + markets_routes.STOCK_SNAPSHOT_TTL
     rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
 
     assert transport.count_for("/v2/stocks/bars") == 2
@@ -553,6 +563,478 @@ async def test_a_figure_read_after_its_session_finished_outlives_the_ttl() -> No
 
     assert (during, reread, held, still_held) == (1, 2, 2, 2)
     assert len(calls) == 2
+
+
+# --------------------------------------------------------------------------
+# The coalescing cache -- decision 18
+# --------------------------------------------------------------------------
+#
+# The browser drives the Markets poll and this API forwards it to Alpaca, so
+# two tabs, a reload loop or a hot-reloading dev server multiply the vendor
+# rate by the number of clients. `ratelimit.py`'s bucket *waits* rather than
+# refusing, so the symptom is not an error -- it is every Markets request
+# getting slower until the page looks broken for a reason nothing logs. These
+# tests are the property that stops it: the vendor rate is bounded by the
+# wall clock, not by the client count.
+
+
+class _ParkedFetch:
+    """A fetch that parks until it is released, counting how often it ran.
+
+    The count is the whole assertion, and the parking is what makes it about
+    *concurrency* rather than about a TTL: the second caller has to arrive
+    while the first request is still in flight, which is the case a
+    fetch-then-store cache would get wrong and a lock-across-the-fetch one
+    gets right.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self) -> int:
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return self.calls
+
+
+async def _yield_to_the_loop() -> None:
+    """Let a just-created task run until it blocks. No wall-clock sleep."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_callers_share_one_in_flight_fetch() -> None:
+    """The step, in one assertion: two callers, one vendor request.
+
+    The second caller arrives while the first request is still open, waits on
+    the lock, and is served the answer the first one got. A cache that only
+    stored the result would have let both requests leave.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    fetch = _ParkedFetch()
+    at = MARKET_DATA_RECORDED_AT
+
+    first = asyncio.create_task(cache.resolve(("NVDA",), now=at, fetch=fetch))
+    await fetch.started.wait()
+    second = asyncio.create_task(cache.resolve(("NVDA",), now=at, fetch=fetch))
+    await _yield_to_the_loop()
+    fetch.release.set()
+    answers = await asyncio.gather(first, second)
+
+    assert fetch.calls == 1
+    assert answers == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_two_symbol_sets_are_two_fetches() -> None:
+    """The key is the symbol set, so a different set is a different question.
+
+    Sharing across sets would serve one caller a table it did not ask for --
+    the failure the cache is not allowed to introduce while preventing the
+    other one.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    fetch = _ParkedFetch()
+    fetch.release.set()
+    at = MARKET_DATA_RECORDED_AT
+
+    nvda = await cache.resolve(("NVDA",), now=at, fetch=fetch)
+    spy = await cache.resolve(("SPY",), now=at, fetch=fetch)
+    again = await cache.resolve(("NVDA",), now=at, fetch=fetch)
+
+    assert fetch.calls == 2
+    assert (nvda, spy, again) == (1, 2, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_past_the_ttl_gets_a_fresh_fetch() -> None:
+    """Near-simultaneous is a window, and the window has to end.
+
+    One microsecond inside the TTL is still the same poll; the instant it
+    expires is the next one. Driven by an injected clock rather than by
+    sleeping, so the boundary is exact.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    fetch = _ParkedFetch()
+    fetch.release.set()
+    at = MARKET_DATA_RECORDED_AT
+    ttl = markets_routes.STOCK_SNAPSHOT_TTL
+
+    first = await cache.resolve(("NVDA",), now=at, fetch=fetch)
+    held = await cache.resolve(
+        ("NVDA",), now=at + ttl - timedelta(microseconds=1), fetch=fetch
+    )
+    expired = await cache.resolve(("NVDA",), now=at + ttl, fetch=fetch)
+
+    assert (first, held, expired) == (1, 1, 2)
+    assert fetch.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_is_not_served_to_the_next_caller(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A vendor failure is never cached as an answer, and it is logged.
+
+    Caching a raise would turn one timeout into a whole TTL of them, and --
+    worse -- a cache that stored *something* on failure would serve an
+    absence as data. The next caller re-asks, inside the same TTL, and the
+    refusal to cache records the rule, the inputs and the timestamp.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    attempts: list[int] = []
+
+    async def fetch() -> int:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            raise RuntimeError("the vendor hung up")
+        return 7
+
+    at = MARKET_DATA_RECORDED_AT
+
+    with caplog.at_level(logging.WARNING, logger="corollary.api.routes.markets"):
+        with pytest.raises(RuntimeError):
+            await cache.resolve(("NVDA", "SPY"), now=at, fetch=fetch)
+        recovered = await cache.resolve(("NVDA", "SPY"), now=at, fetch=fetch)
+
+    assert recovered == 7
+    assert attempts == [1, 2]
+    record = next(
+        r for r in caplog.records if r.__dict__.get("event") == "coalesced_fetch_failed"
+    )
+    assert record.__dict__["symbols"] == ["NVDA", "SPY"]
+    assert "never cached" in record.__dict__["rule"]
+    assert record.__dict__["at"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_does_not_strand_the_caller_waiting_on_it() -> None:
+    """The waiter is neither served the failure as data nor left holding it.
+
+    A shared in-flight *result* would hand the second caller the first one's
+    exception; a shared in-flight *lock* hands it the next attempt. The
+    second is right here, because the two callers are two HTTP requests and
+    the second one can still be answered.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    attempts: list[int] = []
+
+    async def fetch() -> int:
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            started.set()
+            await release.wait()
+            raise RuntimeError("the vendor hung up")
+        return 7
+
+    at = MARKET_DATA_RECORDED_AT
+
+    failing = asyncio.create_task(cache.resolve(("NVDA",), now=at, fetch=fetch))
+    await started.wait()
+    waiting = asyncio.create_task(cache.resolve(("NVDA",), now=at, fetch=fetch))
+    await _yield_to_the_loop()
+    release.set()
+
+    with pytest.raises(RuntimeError):
+        await failing
+    assert await waiting == 7
+    assert attempts == [1, 2]
+
+
+class _ConcurrencyProbe:
+    """Parked fetches that record the **peak** number in flight at once.
+
+    :class:`_ParkedFetch` counts how often a fetch ran, which is enough while
+    every caller shares one lock. This one counts how many were inside it at
+    the same moment, which is the property a *dropped* lock breaks: the
+    second request leaves while the first is still open, and a call count
+    cannot tell that apart from two requests a minute apart.
+    """
+
+    def __init__(self) -> None:
+        self.peak = 0
+        self._in_flight = 0
+        self.entered: dict[str, asyncio.Event] = {}
+        self.gates: dict[str, asyncio.Event] = {}
+
+    def _event(self, where: dict[str, asyncio.Event], name: str) -> asyncio.Event:
+        return where.setdefault(name, asyncio.Event())
+
+    def entering(self, name: str) -> asyncio.Event:
+        """Set the moment ``name``'s fetch starts."""
+        return self._event(self.entered, name)
+
+    def gate(self, name: str) -> asyncio.Event:
+        """Set by the test to let ``name``'s fetch return."""
+        return self._event(self.gates, name)
+
+    def fetch(self, name: str, *, counted: bool = True) -> markets_routes.FetchOne[str]:
+        async def run() -> str:
+            if counted:
+                self._in_flight += 1
+                self.peak = max(self.peak, self._in_flight)
+            self.entering(name).set()
+            await self.gate(name).wait()
+            if counted:
+                self._in_flight -= 1
+            return name
+
+        return run
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_does_not_drop_a_lock_another_caller_is_waiting_on() -> None:
+    """A waiting caller keeps its key's lock, so the coalescing survives.
+
+    ``asyncio.Lock.locked()`` is not a liveness test. ``release()`` clears the
+    flag and schedules the first waiter; the waiter sets it again only when it
+    *resumes*, so in between there is a window where the lock reads unlocked
+    while a caller is queued on it. A sweep that trusted ``locked()`` deleted
+    the lock in that window, the waiter woke holding an orphan, and the next
+    caller built a **second** lock for the same key -- two concurrent Alpaca
+    snapshot requests for one symbol set, which is the whole thing this cache
+    exists to prevent, and silent, because ``ratelimit.py``'s bucket waits
+    rather than refusing.
+
+    The interleaving below is ordinary, not contrived: ``a`` is a fetch slower
+    than the 400ms TTL, so the entry it stores (``read_at`` is taken *before*
+    the fetch, by design) is already expired when it lands; ``b`` arrives
+    mid-flight; ``c`` is an unrelated symbol set whose own sweep runs in the
+    same loop iteration. Driven by events and an injected clock -- no wall
+    clock anywhere, so the ordering is exact rather than likely.
+    """
+    cache: markets_routes.CoalescingCache[str] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    probe = _ConcurrencyProbe()
+    at = MARKET_DATA_RECORDED_AT
+    later = at + markets_routes.STOCK_SNAPSHOT_TTL + timedelta(milliseconds=100)
+
+    slow = asyncio.create_task(
+        cache.resolve(("NVDA",), now=at, fetch=probe.fetch("a"))
+    )
+    await probe.entering("a").wait()
+    unrelated = asyncio.create_task(
+        cache.resolve(("SPY",), now=later, fetch=probe.fetch("c", counted=False))
+    )
+    await probe.entering("c").wait()
+    waiter = asyncio.create_task(
+        cache.resolve(("NVDA",), now=later, fetch=probe.fetch("b"))
+    )
+    await _yield_to_the_loop()
+    lock_before = cache._locks[("NVDA",)]
+
+    # Both answers land in the same iteration: `a` stores an already-expired
+    # entry and releases the lock, then `c`'s sweep -- at a `now` past the
+    # TTL -- considers NVDA while `b` is queued but not yet resumed.
+    probe.gate("a").set()
+    probe.gate("c").set()
+    await probe.entering("b").wait()
+
+    assert cache._locks.get(("NVDA",)) is lock_before
+
+    after = asyncio.create_task(
+        cache.resolve(("NVDA",), now=later, fetch=probe.fetch("d"))
+    )
+    await _yield_to_the_loop()
+    probe.gate("b").set()
+    probe.gate("d").set()
+    await asyncio.gather(slow, waiter, unrelated, after)
+
+    assert probe.peak == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_keeps_the_lock_of_a_fetch_still_in_flight() -> None:
+    """The boundary the fix must not overshoot.
+
+    Dropping a lock that is genuinely held would hand two callers two locks
+    for one key just as surely as dropping one with a waiter does. An expired
+    entry under an open request keeps its lock; only the entry goes.
+    """
+    cache: markets_routes.CoalescingCache[str] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    probe = _ConcurrencyProbe()
+    at = MARKET_DATA_RECORDED_AT
+    later = at + markets_routes.STOCK_SNAPSHOT_TTL + timedelta(milliseconds=100)
+
+    held = asyncio.create_task(
+        cache.resolve(("NVDA",), now=at, fetch=probe.fetch("a"))
+    )
+    await probe.entering("a").wait()
+    lock_before = cache._locks[("NVDA",)]
+
+    cache._forget_expired(now=later)
+
+    assert cache._locks.get(("NVDA",)) is lock_before
+    probe.gate("a").set()
+    assert await held == "a"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_fetch_leaves_neither_an_entry_nor_a_lock_behind() -> None:
+    """The failure path sweeps too, or a failing key holds its lock forever.
+
+    Every subset of the universe is a key a client may ask for, and the
+    bookkeeping is dropped on the way out of :meth:`resolve` rather than only
+    after a successful store -- a key whose vendor call always fails is
+    exactly the key nothing will ever come back to clean up.
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+
+    async def boom() -> int:
+        raise RuntimeError("the vendor hung up")
+
+    with pytest.raises(RuntimeError):
+        await cache.resolve(("NVDA",), now=MARKET_DATA_RECORDED_AT, fetch=boom)
+
+    assert cache._locks == {}
+    assert cache._entries == {}
+
+
+@pytest.mark.asyncio
+async def test_an_expired_key_nobody_is_using_is_forgotten() -> None:
+    """The key space stays bounded, which is what the sweep is for.
+
+    A symbol set asked for once and never again would otherwise be held --
+    entry *and* lock -- for the life of the process. The live key survives
+    the same sweep, so "bounded" does not quietly mean "emptied".
+    """
+    cache: markets_routes.CoalescingCache[int] = markets_routes.CoalescingCache(
+        markets_routes.STOCK_SNAPSHOT_TTL
+    )
+    fetch = _ParkedFetch()
+    fetch.release.set()
+    at = MARKET_DATA_RECORDED_AT
+    later = at + markets_routes.STOCK_SNAPSHOT_TTL
+
+    await cache.resolve(("NVDA",), now=at, fetch=fetch)
+    await cache.resolve(("SPY",), now=later, fetch=fetch)
+
+    assert set(cache._entries) == {("SPY",)}
+    assert set(cache._locks) == {("SPY",)}
+
+
+def test_the_cache_ttl_is_the_foreground_poll_interval() -> None:
+    """Equal by construction, so the two halves cannot drift apart.
+
+    The client half is the Markets page's foreground interval -- decision
+    18's cadence table, landing in ``web/src/hooks/`` in step 14 -- and this
+    is the server half. The cache exists so that N clients polling at that
+    interval cost one Alpaca request per interval rather than N, which is a
+    claim only true while the two numbers are the same number. Grep
+    ``MARKETS_FOREGROUND_POLL_MS`` to find both.
+    """
+    assert markets_routes.MARKETS_FOREGROUND_POLL_MS == 400
+    assert markets_routes.STOCK_SNAPSHOT_TTL == timedelta(
+        milliseconds=markets_routes.MARKETS_FOREGROUND_POLL_MS
+    )
+
+
+def test_two_near_simultaneous_polls_cost_one_snapshot_request(
+    make_market_client: MarketClient,
+) -> None:
+    """Two tabs, one vendor request -- the route half of the same property.
+
+    Sequential here rather than concurrent because the interesting variable
+    is the clock, not the scheduler: both polls are inside one TTL, which is
+    what "two clients at 400ms" looks like from the server. The unit tests
+    above cover the genuinely-in-flight case.
+
+    **The clock is injected, like every neighbour here**, and the second poll
+    is placed at ``ttl - 1µs`` rather than at the same instant -- so the test
+    states the window it is asserting about instead of relying on two full
+    route calls fitting inside 400ms of *wall* clock. On a loaded machine
+    that race would read as "the cache broke", which is the one wrong
+    conclusion this file must not invite.
+    """
+    client, transport = make_market_client(market_data_routes())
+    clock = [MARKET_DATA_RECORDED_AT]
+    client.app.state.market_caches = markets_routes.MarketCaches(now=lambda: clock[0])
+
+    first = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    clock[0] = (
+        MARKET_DATA_RECORDED_AT
+        + markets_routes.STOCK_SNAPSHOT_TTL
+        - timedelta(microseconds=1)
+    )
+    second = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert transport.count_for("/v2/stocks/snapshots") == 1
+    assert first == second
+
+
+def test_the_symbol_order_does_not_decide_whether_the_cache_hits(
+    make_market_client: MarketClient,
+) -> None:
+    """Two tabs asking for the same names in a different order are one question.
+
+    The key is the normalised set, so ``NVDA,SPY`` and ``spy,nvda`` share a
+    request -- keyed on the raw query string they would miss each other and
+    the cache would do nothing for the case it exists for. Row order still
+    follows what each caller asked for.
+    """
+    client, transport = make_market_client(market_data_routes())
+
+    forwards = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    backwards = rows(client, "/api/markets/stocks", symbols="spy,nvda")
+
+    assert transport.count_for("/v2/stocks/snapshots") == 1
+    assert [row["symbol"] for row in forwards] == ["NVDA", "SPY"]
+    assert [row["symbol"] for row in backwards] == ["SPY", "NVDA"]
+
+
+def test_a_different_symbol_set_is_not_served_the_cached_one(
+    make_market_client: MarketClient,
+) -> None:
+    """A narrower question costs its own request rather than a wrong answer."""
+    client, transport = make_market_client(market_data_routes())
+
+    both = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    one = rows(client, "/api/markets/stocks", symbols="NVDA")
+
+    assert transport.count_for("/v2/stocks/snapshots") == 2
+    assert [row["symbol"] for row in both] == ["NVDA", "SPY"]
+    assert [row["symbol"] for row in one] == ["NVDA"]
+
+
+def test_a_poll_past_the_ttl_reaches_the_vendor_again(
+    make_market_client: MarketClient,
+) -> None:
+    """The cache bounds the rate; it must not freeze the table.
+
+    A price held past the interval is a screener reporting a stale market,
+    which is the failure the poll exists to prevent. The clock is driven
+    rather than slept on, so the boundary is exact and the test cannot flake.
+    """
+    client, transport = make_market_client(market_data_routes())
+    clock = [MARKET_DATA_RECORDED_AT]
+    client.app.state.market_caches = markets_routes.MarketCaches(now=lambda: clock[0])
+
+    rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+    clock[0] = MARKET_DATA_RECORDED_AT + markets_routes.STOCK_SNAPSHOT_TTL
+    rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert transport.count_for("/v2/stocks/snapshots") == 2
 
 
 def test_a_session_is_in_progress_until_its_own_close_plus_the_embargo() -> None:
