@@ -49,6 +49,7 @@ seconds is a test that gets marked slow and then gets skipped.
 # stops meaning anything.
 
 import asyncio
+import logging
 import re
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,7 @@ from corollary.db.seed import seed
 from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine.runtime import (
     HALT_EVENT,
+    MAX_MARKETS_VISIBLE_SYMBOLS,
     PAID_OPTION_STREAM_QUOTE_CAP,
     REPAIR_MAX_ATTEMPTS,
     UNLIMITED_STREAM_SYMBOL_CAP,
@@ -79,8 +81,10 @@ from corollary.engine.runtime import (
     EngineRuntime,
     HaltDecision,
     HaltRule,
+    MarketsVisibleStatus,
     Notification,
     StreamBudget,
+    StreamPlans,
     Watchdog,
     data_plan,
     stream_budget_for_plan,
@@ -88,6 +92,7 @@ from corollary.engine.runtime import (
 from corollary.engine.stream import (
     EQUITY_STREAM_SYMBOL_CAP,
     OPTION_STREAM_QUOTE_CAP,
+    SubscriptionPriority,
     contract_unit,
     markets_visible_unit,
     underlying_unit,
@@ -2140,8 +2145,372 @@ def test_a_viewport_hint_never_evicts_a_held_contract(
 
     assert plans.option.subscribed[0] == held
     assert len(plans.option.subscribed) == OPTION_STREAM_QUOTE_CAP
-    assert plans.option.not_streamed == 1
     assert plans.option.dropped[0].priority.label == "markets_visible"
+    # What lost is a client-supplied row, so the banner stays silent and the
+    # loss is counted where it belongs: nothing *held* is unmarked, which is
+    # the only question the banner answers.
+    assert plans.option.not_streamed == 0
+    assert plans.option.client_not_streamed == 1
+
+
+# --------------------------------------------------------------------------
+# The Markets viewport hint -- step 15, decision 18
+# --------------------------------------------------------------------------
+#
+# Rule 4 in one sentence: the UI displays limits, the engine enforces them,
+# and a value that arrived from the client is never trusted. Applied to a
+# stream budget rather than to a risk limit, because a client that could
+# evict a held contract from the stream could make a position mark stale by
+# scrolling. Every test below is that sentence from one angle.
+
+
+def markets_visible_symbols(plans: StreamPlans) -> tuple[str, ...]:
+    """Which symbols of a plan were admitted for the lowest tier alone."""
+    return tuple(
+        symbol
+        for unit in plans.equity.admitted
+        if unit.priority is SubscriptionPriority.MARKETS_VISIBLE
+        for symbol in unit.symbols
+    )
+
+
+def hint_refusals(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """The rule 8 records a refused viewport hint writes, in order."""
+    return [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "markets_visible_refused"
+    ]
+
+
+def test_a_viewport_hint_becomes_equity_units_at_the_lowest_tier(
+    runtime: EngineRuntime,
+) -> None:
+    """The producer this step adds: a client's set, at ``MARKETS_VISIBLE``."""
+    assert runtime.set_markets_visible(["NVDA", "TSLA"]).changed is True
+
+    plans = runtime.plan_stream_subscriptions(option_units=[], equity_units=[])
+
+    assert markets_visible_symbols(plans) == ("NVDA", "TSLA")
+    assert plans.equity.subscribed == ("NVDA", "TSLA")
+    # Every unit it produced is at the lowest tier and nowhere else.
+    assert {unit.priority for unit in runtime.markets_visible_units()} == {
+        SubscriptionPriority.MARKETS_VISIBLE
+    }
+
+
+def test_the_hint_can_never_reach_a_higher_tier(runtime: EngineRuntime) -> None:
+    """Rule 4: there is no path by which a client symbol outranks a position.
+
+    The caller hands in the book; the runtime stamps the hint itself. So a
+    caller cannot file a client symbol as a position underlying by mistake,
+    and a client cannot ask to be one.
+    """
+    runtime.set_markets_visible(["NVDA"])
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=[contract_unit("p0", [occ("AAPL", 150)])],
+        equity_units=[underlying_unit("AAPL")],
+    )
+
+    by_symbol = {
+        symbol: unit.priority
+        for unit in plans.equity.admitted
+        for symbol in unit.symbols
+    }
+    assert by_symbol["AAPL"] is SubscriptionPriority.POSITION_UNDERLYING
+    assert by_symbol["NVDA"] is SubscriptionPriority.MARKETS_VISIBLE
+
+
+def test_a_hint_naming_a_position_underlying_neither_promotes_nor_duplicates_it(
+    runtime: EngineRuntime,
+) -> None:
+    """The position's own unit is what streams it, and it is still first."""
+    runtime.set_markets_visible(["AAPL", "NVDA"])
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=[], equity_units=[underlying_unit("AAPL")]
+    )
+
+    # Subscribed once, not twice, and the position's own unit is what put it
+    # there: ``subscribed`` is in order of first admission, and the position
+    # underlying is ahead of every hint unit.
+    assert plans.equity.subscribed == ("AAPL", "NVDA")
+    assert plans.equity.admitted[0].priority is SubscriptionPriority.POSITION_UNDERLYING
+    assert plans.equity.admitted[0].symbols == ("AAPL",)
+    # The hint's own AAPL unit is admitted for free -- dedup, not promotion.
+    # It spent no slot, so three units cost two, and dropping the hint would
+    # not take AAPL off the socket.
+    assert markets_visible_symbols(plans) == ("AAPL", "NVDA")
+    assert len(plans.equity.admitted) == 3
+    assert len(plans.equity.subscribed) == 2
+    assert plans.equity.not_streamed == 0
+
+
+def test_a_hint_filling_the_whole_budget_still_evicts_nothing_above_it(
+    runtime: EngineRuntime,
+) -> None:
+    """The prefix cut runs in priority order and this tier is last.
+
+    A client naming as many rows as it is allowed to name cannot cost a
+    position underlying its slot -- which is the scrolling-makes-a-mark-stale
+    failure the tier's ordering exists to prevent.
+    """
+    runtime.set_markets_visible(
+        [f"VIS{index}" for index in range(MAX_MARKETS_VISIBLE_SYMBOLS)]
+    )
+    underlyings = [underlying_unit(f"SYM{index}") for index in range(8)]
+
+    plans = runtime.plan_stream_subscriptions(
+        option_units=[], equity_units=underlyings
+    )
+
+    assert plans.equity.subscribed[:8] == tuple(f"SYM{index}" for index in range(8))
+    assert len(plans.equity.subscribed) == EQUITY_STREAM_SYMBOL_CAP
+    assert {drop.priority for drop in plans.equity.dropped} == {
+        SubscriptionPriority.MARKETS_VISIBLE
+    }
+    # And the banner stays silent, because every symbol anything *holds* is
+    # marked. Counted, this state read "42 symbols not streamed" with eight
+    # underlyings all streaming -- churn in the lowest tier reported as a
+    # fault, which is the false alarm that teaches a reader to ignore the
+    # real one. What the viewport lost is counted where it belongs.
+    assert plans.equity.not_streamed == 0
+    assert plans.not_streamed == 0
+    assert plans.message is None
+    assert plans.equity.client_not_streamed == MAX_MARKETS_VISIBLE_SYMBOLS - (
+        EQUITY_STREAM_SYMBOL_CAP - 8
+    )
+    assert plans.client_not_streamed == plans.equity.client_not_streamed
+
+
+def test_the_hint_never_reaches_the_option_plan(runtime: EngineRuntime) -> None:
+    """It is an *equity* producer. Re-pointing it at contracts is Phase 4 (U7)."""
+    runtime.set_markets_visible(["NVDA", "TSLA"])
+
+    plans = runtime.plan_stream_subscriptions(option_units=[], equity_units=[])
+
+    assert plans.option.subscribed == ()
+    assert plans.option.admitted == ()
+
+
+def test_an_oversized_hint_is_refused_whole_and_the_previous_one_stands(
+    runtime: EngineRuntime, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unbounded client list is an unbounded allocation. Rule 8 on refusal."""
+    caplog.set_level(logging.WARNING)
+    runtime.set_markets_visible(["NVDA"])
+    asked = [f"VIS{index}" for index in range(MAX_MARKETS_VISIBLE_SYMBOLS + 1)]
+
+    assert runtime.set_markets_visible(asked).status is MarketsVisibleStatus.REFUSED
+    assert runtime.markets_visible == ("NVDA",)
+
+    records = hint_refusals(caplog)
+    assert len(records) == 1
+    assert records[0].__dict__["rule"]
+    assert records[0].__dict__["at"]
+    assert records[0].__dict__["correlation_id"]
+    assert records[0].__dict__["asked"] == len(asked)
+    assert records[0].__dict__["bound"] == MAX_MARKETS_VISIBLE_SYMBOLS
+
+
+def test_an_occ_symbol_on_the_hint_is_refused_whole(
+    runtime: EngineRuntime, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A contract on the viewport hint is a caller bug, not a chain subscription.
+
+    Step 11's mixed-unit refusal is the precedent. Re-pointing this tier at
+    option contracts is Phase 4 work (U7) and is a deliberate change with its
+    own producer, not something a client can ask for today.
+    """
+    caplog.set_level(logging.WARNING)
+
+    assert (
+        runtime.set_markets_visible(["NVDA", occ("AAPL", 150)]).status
+        is MarketsVisibleStatus.REFUSED
+    )
+    assert runtime.markets_visible == ()
+
+    records = hint_refusals(caplog)
+    assert len(records) == 1
+    assert records[0].__dict__["rule"]
+    assert records[0].__dict__["at"]
+    # Counts, never the client's strings: the log record is the durable
+    # surface and nothing client-derived is spread into it unscrubbed.
+    assert records[0].__dict__["asked"] == 2
+    assert records[0].__dict__["refused"] == 1
+
+
+def test_a_malformed_hint_symbol_is_refused_whole(
+    runtime: EngineRuntime, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The engine validates its own input even behind a validating transport."""
+    caplog.set_level(logging.WARNING)
+
+    for asked in (["NVDA", ""], ["NVDA", "nvda"], ["NVDA", "N V D A"]):
+        assert runtime.set_markets_visible(asked).status is MarketsVisibleStatus.REFUSED
+        assert runtime.markets_visible == ()
+
+    assert len(hint_refusals(caplog)) == 3
+
+
+def test_an_unchanged_hint_reports_no_change(runtime: EngineRuntime) -> None:
+    """The client sends only on a changed set; the engine answers the same way.
+
+    A re-plan costs a resubscribe, and a resubscribe is a gap in the marks.
+    """
+    assert runtime.set_markets_visible(["NVDA", "TSLA"]).changed is True
+    assert runtime.set_markets_visible(["NVDA", "TSLA"]).changed is False
+    # Order is the client's ranking, so a reordering *is* a change: it is
+    # which rows keep their slots when the tail is cut.
+    assert runtime.set_markets_visible(["TSLA", "NVDA"]).changed is True
+
+
+def test_a_hint_dedupes_and_keeps_the_clients_order(runtime: EngineRuntime) -> None:
+    """Order is the tie-break for the tail, so it is preserved, not sorted."""
+    runtime.set_markets_visible(["TSLA", "NVDA", "TSLA"])
+
+    assert runtime.markets_visible == ("TSLA", "NVDA")
+
+
+def test_an_empty_hint_clears_the_tier(runtime: EngineRuntime) -> None:
+    """Scrolling away, or leaving Markets, gives the slots back."""
+    runtime.set_markets_visible(["NVDA"])
+
+    assert runtime.set_markets_visible([]).changed is True
+    assert runtime.markets_visible == ()
+    assert runtime.markets_visible_units() == ()
+
+
+def test_a_hint_is_dropped_by_the_owner_that_set_it(runtime: EngineRuntime) -> None:
+    """A closed connection takes its own hint and nobody else's."""
+    runtime.set_markets_visible(["NVDA"], owner="ws-1")
+
+    # Somebody else's connection ending changes nothing.
+    assert runtime.clear_markets_visible(owner="ws-2") is False
+    assert runtime.markets_visible == ("NVDA",)
+
+    assert runtime.clear_markets_visible(owner="ws-1") is True
+    assert runtime.markets_visible == ()
+    # Idempotent: the same connection ending twice is not a second change.
+    assert runtime.clear_markets_visible(owner="ws-1") is False
+
+
+def test_the_hint_belongs_to_whoever_spoke_last(runtime: EngineRuntime) -> None:
+    """Two tabs take turns rather than merging, and the older one cannot
+    clear the newer one's hint on its way out."""
+    runtime.set_markets_visible(["NVDA"], owner="ws-1")
+    runtime.set_markets_visible(["TSLA"], owner="ws-2")
+
+    assert runtime.clear_markets_visible(owner="ws-1") is False
+    assert runtime.markets_visible == ("TSLA",)
+
+
+def test_an_unchanged_hint_still_moves_its_ownership(runtime: EngineRuntime) -> None:
+    """Two tabs showing the same rows: the hint follows the one that spoke last.
+
+    Otherwise it stays owned by whichever connected first, and closing that
+    one would drop a viewport the second is still looking at.
+    """
+    runtime.set_markets_visible(["NVDA"], owner="ws-1")
+    assert runtime.set_markets_visible(["NVDA"], owner="ws-2").changed is False
+
+    assert runtime.clear_markets_visible(owner="ws-1") is False
+    assert runtime.markets_visible == ("NVDA",)
+    assert runtime.clear_markets_visible(owner="ws-2") is True
+
+
+def test_a_refused_hint_is_distinguishable_from_an_unchanged_one(
+    runtime: EngineRuntime,
+) -> None:
+    """One ``bool`` carried two meanings, and the transport read the wrong one.
+
+    ``False`` meant both *"the set did not differ"* and *"the engine refused
+    the whole message"*, so ``api/routes/ws.py`` logged a refusal at INFO as
+    a successful hint with ``changed: false`` and sent the client nothing --
+    a silently ignored subscription, which looks exactly like a feed with
+    nothing to say. Three outcomes, so the caller cannot conflate two of
+    them, and the refusal carries the rule it is refused by.
+    """
+    applied = runtime.set_markets_visible(["NVDA"])
+    assert applied.status is MarketsVisibleStatus.APPLIED
+    assert applied.changed is True
+    assert applied.rule is None
+
+    unchanged = runtime.set_markets_visible(["NVDA"])
+    assert unchanged.status is MarketsVisibleStatus.UNCHANGED
+    assert unchanged.changed is False
+    assert unchanged.rule is None
+
+    refused = runtime.set_markets_visible(["NVDA", "nvda"])
+    assert refused.status is MarketsVisibleStatus.REFUSED
+    assert refused.changed is False
+    assert refused.rule
+    # Refused whole, and the previous hint stands.
+    assert runtime.markets_visible == ("NVDA",)
+
+
+def test_the_outcome_refuses_to_be_read_as_a_bare_bool(
+    runtime: EngineRuntime,
+) -> None:
+    """The regression the type exists to stop, made loud rather than possible.
+
+    Every caller that used to write ``if runtime.set_markets_visible(...)``
+    would otherwise keep type-checking and start reading every refusal as a
+    change.
+    """
+    outcome = runtime.set_markets_visible(["NVDA"])
+
+    with pytest.raises(TypeError, match="changed"):
+        bool(outcome)
+
+
+def test_a_hint_the_transport_admits_and_the_engine_does_not_is_refused(
+    runtime: EngineRuntime, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The gap between the two validators, which nothing covered.
+
+    ``ws.py``'s ``_SYMBOL`` admits 32 characters because it must also admit
+    an OCC contract for ``subscribe``; ``_EQUITY_TICKER`` admits 16, because
+    a viewport row is a ticker. Seventeen characters is therefore a value
+    the transport passes and the engine refuses, and the answer is a stated
+    refusal -- never a widened ticker, which would put an unvalidated
+    17-character string on the equity socket.
+    """
+    caplog.set_level(logging.WARNING)
+    gap_band = "ABCDEFGHIJKLMNOPQ"
+    assert len(gap_band) == 17
+
+    outcome = runtime.set_markets_visible(["NVDA", gap_band])
+
+    assert outcome.status is MarketsVisibleStatus.REFUSED
+    assert runtime.markets_visible == ()
+    records = hint_refusals(caplog)
+    assert len(records) == 1
+    assert records[0].__dict__["asked"] == 2
+    assert records[0].__dict__["refused"] == 1
+
+
+@pytest.mark.risk
+def test_a_viewport_hint_neither_halts_nor_resumes(
+    runtime: EngineRuntime, db_engine: Engine
+) -> None:
+    """Rule 9: a re-plan is not a resume, and nothing here touches the switch."""
+    runtime.start()
+    runtime.halt(
+        HaltDecision(
+            rule=HaltRule.STREAM_CLOSED,
+            reason="the market data stream closed (1006).",
+            inputs={"detail": "1006"},
+            at=T0,
+        )
+    )
+    assert read_state(db_engine).halted is True
+
+    runtime.set_markets_visible(["NVDA"])
+    runtime.plan_stream_subscriptions(option_units=[], equity_units=[])
+
+    assert read_state(db_engine).halted is True
 
 
 # --------------------------------------------------------------------------

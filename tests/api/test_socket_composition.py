@@ -56,7 +56,11 @@ from corollary.data.providers.alpaca import (
     ALPACA_STOCK_FEED_REALTIME_ENV,
 )
 from corollary.engine.execution.interface import BrokerPosition
-from corollary.engine.runtime import EngineRuntime, HaltRule
+from corollary.engine.runtime import (
+    WATCHDOG_TIMEOUT_SECONDS,
+    EngineRuntime,
+    HaltRule,
+)
 from corollary.engine.sockets import (
     EQUITY_SOCKET,
     OPTION_SOCKET,
@@ -1066,6 +1070,59 @@ async def test_being_correctly_idle_is_said_once_rather_than_never(
             if getattr(record, "event", "") == "sockets_idle"
         ]
         assert len(idle) == 1
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_viewport_hint_alone_opens_no_socket_and_arms_no_watchdog(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    clock: Clock,
+    scripted: ScriptedConnect,
+    db_engine: Engine,
+) -> None:
+    """Rule 9: a browser scrolling must not be able to halt the engine.
+
+    A flat book is ordinary -- it is every session before the first trade.
+    With nothing held, the equity plan's entire content is the client's
+    viewport hint. If that were enough to launch the equity socket, the
+    watchdog would then judge it for ninety seconds of silence on symbols
+    nobody validated against a universe: a name that never quotes on IEX, a
+    typo, or a ticker that does not exist gives ninety seconds of nothing and
+    a rule-9 halt requiring an explicit human resume. So the launch and the
+    expectation read only what the *engine* asked for.
+    """
+    supervisor = make_supervisor(broker=EmptyBook(label="empty"))
+    runtime.set_markets_visible(["NVDA", "TSLA", "SPY"])
+    try:
+        await supervisor.tick()
+        await settle(
+            lambda: runtime.watchdog.last_activity_at is not None,
+            what="the order socket authorized",
+        )
+        # A second tick withdraws the order socket's handshake expectation,
+        # which is a different condition and not what this test is about.
+        await supervisor.tick()
+
+        # The hint is planned -- it is not discarded, and it will ride a
+        # socket the book opens -- but it opens nothing by itself.
+        plans = supervisor.plans
+        assert plans is not None
+        assert plans.equity.subscribed == ("NVDA", "TSLA", "SPY")
+        assert plans.equity.engine_subscribed == ()
+        assert supervisor.held == (TRADE_SOCKET,)
+        assert EQUITY_SOCKET not in scripted.attempts
+        assert runtime.watchdog.feed_expected(EQUITY_SOCKET) is False
+        assert runtime.watchdog.feed_expected() is False
+
+        # And ninety seconds of the silence that would have followed is not
+        # a halt, because nothing armed the condition.
+        clock.advance(WATCHDOG_TIMEOUT_SECONDS + 1)
+        assert runtime.check_watchdog() is None
+        with Session(db_engine) as session:
+            assert engine_state(session).halted_reason is None
     finally:
         await supervisor.aclose()
 

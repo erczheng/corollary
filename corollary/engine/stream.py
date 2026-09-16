@@ -56,10 +56,12 @@ Priority, and what a slot is spent on
 
 Four tiers, ordered, from the design spec: **position contracts**, then their
 **underlyings**, then **recommended trades** (Phase 4), then the rows a client
-says are **visible on the Markets page**. The last two have no producer yet and
-are structurally present rather than speculative -- each costs one enum member
-and one constructor, and leaving them out would mean the later change is to
-this module's *logic* rather than to its inputs.
+says are **visible on the Markets page**. Recommended trades have no producer
+yet and are structurally present rather than speculative: the member and the
+constructor cost one line each, and leaving them out would mean the later
+change is to this module's *logic* rather than to its inputs. The Markets tier
+is produced by ``EngineRuntime.markets_visible_units``, from a viewport hint
+on ``/api/ws`` -- which is why it is the one tier whose input is a client's.
 
 :attr:`SubscriptionPriority.MARKETS_VISIBLE` is last and can only ever be last.
 It is the one tier whose input arrives from the *client* -- a viewport hint on
@@ -216,6 +218,7 @@ __all__ = [
     "reconcile_acknowledgement",
     "replan_at_cap",
     "requested_units",
+    "stream_of",
     "underlying_unit",
 ]
 
@@ -274,6 +277,25 @@ class SubscriptionPriority(IntEnum):
     def label(self) -> str:
         """The value a log record and the API carry. Stable across renames."""
         return self.name.lower()
+
+    @property
+    def client_supplied(self) -> bool:
+        """Did a browser choose this tier's symbols? Exactly one tier did.
+
+        Asked rather than assumed, in the three places the answer changes
+        what happens: a client-supplied unit is not counted by
+        :attr:`SubscriptionPlan.not_streamed`, is not warned about when it is
+        dropped, and is not part of :attr:`SubscriptionPlan.engine_subscribed`
+        -- so it can neither raise a false banner nor, one module up, open a
+        vendor socket the watchdog then judges.
+
+        A tier rather than a per-unit flag, because the priority *is* the
+        provenance: :func:`markets_visible_unit` is the only producer of this
+        value and ``EngineRuntime.markets_visible_units`` is its only caller.
+        A future client tier is a member here and a deliberate answer to this
+        property, which ``test_stream.py`` pins as a set of one.
+        """
+        return self is SubscriptionPriority.MARKETS_VISIBLE
 
 
 class DropRule(StrEnum):
@@ -471,28 +493,94 @@ class SubscriptionPlan:
     def subscribed_set(self) -> frozenset[str]:
         return frozenset(self.subscribed)
 
-    @property
-    def dropped_symbols(self) -> tuple[str, ...]:
-        """Distinct symbols that were asked for and are **not** being streamed.
+    def _missing(self, *, client_supplied: bool) -> tuple[str, ...]:
+        """Distinct symbols dropped from one provenance and not streaming.
 
-        A symbol reaching a dropped unit *and* an admitted one is streaming, so
-        it does not appear here. The distinction matters: counting dropped
+        A symbol reaching a dropped unit *and* an admitted one is streaming,
+        so it does not appear here. The distinction matters: counting dropped
         units' symbols would over-report whenever a Phase 4 recommendation
-        names a contract already held, and an inflated "not streamed" figure
-        teaches the reader to ignore it.
+        names a contract already held, and an inflated figure teaches the
+        reader to ignore it.
         """
         streaming = self.subscribed_set
         missing: dict[str, None] = {}
         for unit in self.dropped:
+            if unit.priority.client_supplied is not client_supplied:
+                continue
             for symbol in unit.symbols:
                 if symbol not in streaming:
                     missing.setdefault(symbol, None)
         return tuple(missing)
 
     @property
+    def dropped_symbols(self) -> tuple[str, ...]:
+        """Distinct symbols the **engine** asked for and is not streaming.
+
+        Client-supplied tiers are excluded, and that exclusion is the whole
+        meaning of the number above it: the reader's question is *"is
+        anything I hold unmarked?"*, and a Markets row losing its slot to the
+        cut is the design working rather than a fault -- every Markets row is
+        polled regardless, so it costs freshness and never a price. Measured
+        before the exclusion, eight held underlyings beside a full viewport
+        list reported *"42 symbols not streamed"* with every held symbol
+        marked live. A banner that is wrong is worse than no banner, because
+        the next real one gets ignored.
+
+        What the viewport lost is :attr:`client_dropped_symbols`, which is
+        counted, logged and kept out of the banner.
+        """
+        return self._missing(client_supplied=False)
+
+    @property
+    def client_dropped_symbols(self) -> tuple[str, ...]:
+        """Distinct client-supplied symbols that lost the cut. Never a banner.
+
+        Kept because "the tail was trimmed" is worth knowing and worth
+        counting; kept *separate* because it is not evidence that anything
+        held is unmarked. Symbols rather than a bare count so a test can name
+        them -- the log records a count, never these strings, since this is
+        the one tier whose values came from a browser.
+        """
+        return self._missing(client_supplied=True)
+
+    @property
     def not_streamed(self) -> int:
         """The N the UI renders as *"N symbols not streamed"*."""
         return len(self.dropped_symbols)
+
+    @property
+    def client_not_streamed(self) -> int:
+        """How many client-supplied rows lost their slots. Not the banner's N."""
+        return len(self.client_dropped_symbols)
+
+    @property
+    def engine_subscribed(self) -> tuple[str, ...]:
+        """Subscribed symbols that something the **engine** owns asked for.
+
+        The subset a socket decision may be taken on, and the reason it
+        exists is rule 9. A quote socket is launched when its plan has
+        content and is then judged by the watchdog for ninety seconds of
+        silence; if a viewport hint could be that content, a browser scrolling
+        on a flat book would open an equity socket, arm the dead-man's switch
+        against symbols nobody validated, and halt the engine when they do not
+        quote -- a self-inflicted halt, and rule 9 depends on those not
+        existing.
+
+        So the hint rides an already-open, already-expected socket or it
+        rides nothing, which is exactly what decision 18 says it is: spare
+        slots, never a reason to spend.
+
+        A symbol both the engine and a client asked for is engine-owned:
+        dedup is not a transfer of ownership, and the position's unit is
+        what put it on the socket.
+        """
+        owned = {
+            symbol
+            for unit in self.admitted
+            if not unit.priority.client_supplied
+            for symbol in unit.symbols
+        }
+        return tuple(symbol for symbol in self.subscribed if symbol in owned)
 
     @property
     def spare_capacity(self) -> int:
@@ -887,6 +975,25 @@ class Stream(StrEnum):
         return self.value
 
 
+def stream_of(symbol: str) -> Stream:
+    """Which socket one symbol belongs to. The same judgement, said in public.
+
+    :func:`_stream_of` is read while *validating a unit*, which is too late
+    for a caller that must refuse a symbol **before** it becomes one: the
+    viewport hint arrives from a browser, and an OCC symbol on it is a caller
+    bug that has to be answered with a refusal frame rather than with a
+    ``ValueError`` raised out of the planner. So the answer is exported, and
+    exported rather than reimplemented -- a second OCC regex elsewhere in the
+    tree is two definitions of what an option symbol is, and the one that
+    drifts is the one nothing plans against.
+
+    Adds no logic and reads nothing new: this module still owns exactly one
+    shape test, still reads no clock, no environment and no vendor library,
+    and still never asks what an instrument is while allocating.
+    """
+    return _stream_of(symbol)
+
+
 def _stream_of(symbol: str) -> Stream:
     """OCC-shaped symbols stream on the option socket; everything else does not.
 
@@ -898,9 +1005,10 @@ def _stream_of(symbol: str) -> Stream:
     report and guessing at one here would refuse subscriptions this module has
     no business refusing.
 
-    Called by :func:`_ordered` and by nothing else: to refuse a unit that
-    straddles both streams, and to refuse one filed under the wrong stream.
-    The allocation loop never sees a :class:`Stream`.
+    Called by :func:`_ordered`, to refuse a unit that straddles both streams
+    and to refuse one filed under the wrong stream, and by :func:`stream_of`,
+    which is the same answer for a caller that has to refuse a symbol before
+    it becomes a unit. The allocation loop never sees a :class:`Stream`.
     """
     return Stream.OPTION if _OCC_SYMBOL.match(symbol) else Stream.EQUITY
 
@@ -1054,11 +1162,30 @@ def _log(plan: SubscriptionPlan) -> None:
 
     A plan that fits logs nothing. The ordinary case is silent so that the
     extraordinary one is not.
+
+    **A client-supplied tier is summarised, not warned about, and by count.**
+    Two reasons, and either alone would be enough. It is not a fault: a
+    viewport row losing its slot costs freshness and never a price, and
+    sixty-four WARNINGs saying so in one plan is how the drop records for a
+    held contract stop being read. And this is the one tier whose symbols
+    arrived from a browser -- the shape filter that admits them also admits
+    the account-number pattern ``wire.vendor_detail`` exists to redact, and
+    this module may not import a redactor (no vendor import, no clock, no
+    environment, so that identical inputs give identical output). A count
+    needs no redaction.
     """
     if not plan.dropped:
         return
 
-    for unit in plan.dropped:
+    _log_client_tier(plan)
+
+    engine_dropped = tuple(
+        unit for unit in plan.dropped if not unit.priority.client_supplied
+    )
+    if not engine_dropped:
+        return
+
+    for unit in engine_dropped:
         logger.warning(
             "stream subscription dropped (%s): %s -- %s",
             unit.rule.value,
@@ -1088,17 +1215,63 @@ def _log(plan: SubscriptionPlan) -> None:
         len(plan.subscribed),
         plan.cap,
         len(plan.admitted),
-        len(plan.dropped),
+        len(engine_dropped),
         extra={
             "event": "stream_subscription_budget_exceeded",
             "correlation_id": plan.correlation_id,
             "stream": plan.stream.label,
             "not_streamed": plan.not_streamed,
             "dropped_symbols": list(plan.dropped_symbols),
-            "dropped_units": len(plan.dropped),
+            "dropped_units": len(engine_dropped),
+            "client_not_streamed": plan.client_not_streamed,
             "subscribed_count": len(plan.subscribed),
             "spare_capacity": plan.spare_capacity,
             "cap": plan.cap,
+            "at": plan.at.isoformat(),
+        },
+    )
+
+
+def _log_client_tier(plan: SubscriptionPlan) -> None:
+    """One INFO line for every client-supplied row the cut trimmed. Counts only.
+
+    Separate from the warnings above because it answers a different question
+    and deserves a different level: *"the viewport tail did not fit"* is the
+    budget behaving as designed, and the reader alerting on
+    ``stream_subscription_budget_exceeded`` must not be woken by it. Still
+    logged, because a tier that vanished with no record at all is the silent
+    truncation this module exists to prevent -- and a client that believes it
+    watches a list it does not watch is worth being able to reconstruct.
+
+    Nothing client-derived is in the record: units and symbols as numbers,
+    the stream, the cap, the correlation id and the timestamp.
+    """
+    trimmed = tuple(unit for unit in plan.dropped if unit.priority.client_supplied)
+    if not trimmed:
+        return
+    logger.info(
+        "%d client-supplied rows were trimmed from the %s stream's %d slots",
+        plan.client_not_streamed,
+        plan.stream.label,
+        plan.cap,
+        extra={
+            "event": "stream_client_tier_trimmed",
+            "correlation_id": plan.correlation_id,
+            "stream": plan.stream.label,
+            # Derived from the units rather than written as
+            # ``markets_visible``: there is one client tier today, and a
+            # hard-coded label would quietly misname the second one.
+            "priorities": sorted({unit.priority.label for unit in trimmed}),
+            "trimmed_units": len(trimmed),
+            "not_streamed": plan.client_not_streamed,
+            "subscribed_count": len(plan.subscribed),
+            "spare_capacity": plan.spare_capacity,
+            "cap": plan.cap,
+            "detail": (
+                "the lowest tier is client-supplied and every row it names "
+                "is polled regardless, so a trimmed tail costs freshness and "
+                "never a price; it is not counted as a symbol not streamed"
+            ),
             "at": plan.at.isoformat(),
         },
     )

@@ -57,6 +57,7 @@ from corollary.engine.stream import (
     markets_visible_unit,
     plan_subscriptions,
     recommendation_unit,
+    stream_of,
     underlying_unit,
 )
 
@@ -1080,3 +1081,196 @@ def test_the_option_socket_labels_its_own_drops(
         "option",
         "option",
     ]
+
+
+def test_stream_of_is_the_same_judgement_the_planner_refuses_on() -> None:
+    """One definition of what an option symbol is, read two ways.
+
+    ``stream_of`` exists so a caller can refuse an OCC symbol *before* it
+    becomes a unit -- the viewport hint arrives from a browser, and a
+    ``ValueError`` out of the planner is the wrong answer to a client
+    mistake. It is the public read of the judgement the planner already
+    makes, and this pins that they cannot drift: a second OCC regex
+    elsewhere in the tree would be a second definition, and the one that
+    drifted would be the one nothing plans against.
+    """
+    assert stream_of("AAPL241220C00150000") is Stream.OPTION
+    assert stream_of("AAPL") is Stream.EQUITY
+    assert stream_of("BRK.B") is Stream.EQUITY
+
+    # And the planner agrees, from the other side: filed under equity, the
+    # contract is refused rather than admitted to a socket that never quotes
+    # it.
+    with pytest.raises(ValueError, match="equity stream"):
+        plan_for(
+            [underlying_unit("AAPL241220C00150000")], cap=5, stream=Stream.EQUITY
+        )
+
+
+# --------------------------------------------------------------------------
+# The client tier -- what a browser's viewport may and may not cause
+# --------------------------------------------------------------------------
+#
+# ``MARKETS_VISIBLE`` is the one tier whose input arrives from a browser, and
+# two consequences of that were missing rather than wrong. Losing a viewport
+# slot is the *expected* outcome of the cut -- every Markets row is polled
+# anyway -- so it is neither a symbol "not streamed" nor a warning; and a
+# plan whose only equity content is a viewport hint is not evidence that the
+# engine needs an equity socket, because nothing the engine owns asked for
+# one.
+
+
+def test_a_dropped_viewport_row_is_not_counted_as_unmarked() -> None:
+    """The banner's question is *"is anything I hold unmarked?"*.
+
+    A hint that loses the tail of its list is the cut working as designed.
+    Counted, eight held underlyings and a full viewport list reported "42
+    symbols not streamed" with every held symbol marked -- a banner that is
+    wrong, which is how the next real one gets ignored.
+    """
+    plan = plan_for(
+        [
+            underlying_unit("AAPL"),
+            markets_visible_unit("NVDA"),
+            markets_visible_unit("TSLA"),
+        ],
+        cap=1,
+        stream=Stream.EQUITY,
+    )
+
+    assert plan.subscribed == ("AAPL",)
+    assert plan.not_streamed == 0
+    assert plan.message is None
+    assert plan.dropped_symbols == ()
+    # Not hidden: the drops are still there, still untruncated, and counted
+    # under the question they actually answer.
+    assert len(plan.dropped) == 2
+    assert plan.client_not_streamed == 2
+    assert plan.client_dropped_symbols == ("NVDA", "TSLA")
+
+
+def test_an_engine_drop_is_still_counted_beside_a_viewport_drop() -> None:
+    """Narrowing the count is not silencing it: a held symbol still counts."""
+    plan = plan_for(
+        [
+            underlying_unit("AAPL"),
+            underlying_unit("MSFT"),
+            markets_visible_unit("NVDA"),
+        ],
+        cap=1,
+        stream=Stream.EQUITY,
+    )
+
+    assert plan.subscribed == ("AAPL",)
+    assert plan.not_streamed == 1
+    assert plan.dropped_symbols == ("MSFT",)
+    assert plan.message == "1 symbol not streamed"
+    assert plan.client_not_streamed == 1
+
+
+def test_a_viewport_drop_logs_one_summary_rather_than_a_warning_per_row(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sixty-four rows losing their slots is one ordinary fact, not 64 faults."""
+    with caplog.at_level(logging.INFO, logger="corollary.engine.stream"):
+        plan = plan_for(
+            [underlying_unit("AAPL")]
+            + [markets_visible_unit(f"VIS{index}") for index in range(20)],
+            cap=1,
+            stream=Stream.EQUITY,
+        )
+
+    assert len(plan.dropped) == 20
+    events = [getattr(record, "event", "") for record in caplog.records]
+    assert events == ["stream_client_tier_trimmed"]
+    record = caplog.records[0]
+    assert record.levelno == logging.INFO
+    assert record.__dict__["trimmed_units"] == 20
+    assert record.__dict__["not_streamed"] == 20
+    assert record.__dict__["stream"] == "equity"
+    assert record.__dict__["correlation_id"] == CORRELATION_ID
+    assert record.__dict__["at"] == AT.isoformat()
+
+
+def test_no_client_string_reaches_a_log_record_of_a_trimmed_viewport(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rule 6's backstop, on the one tier whose symbols come from a browser.
+
+    The shape filter admits the paper account-number pattern that
+    ``wire.vendor_detail`` exists to redact, and ``engine/stream.py`` is pure
+    by design -- no vendor import, no clock, no environment -- so it may not
+    redact one. It logs counts for this tier instead, which needs no
+    redaction to be safe.
+    """
+    # Assembled rather than written out: ``test_record_alpaca.py`` scans
+    # every file in the repository for the account-number shape and this
+    # test would otherwise be the thing it finds. The value it builds is
+    # exactly that shape, which is the point -- a paper account number is a
+    # legal equity-ticker shape, so the filter that admits a viewport row
+    # admits this too.
+    looks_like_a_key = "PA" + "3XYZ12AB9Z"
+    with caplog.at_level(logging.INFO, logger="corollary.engine.stream"):
+        plan_for(
+            [underlying_unit("AAPL"), markets_visible_unit(looks_like_a_key)],
+            cap=1,
+            stream=Stream.EQUITY,
+        )
+
+    written = [
+        f"{record.getMessage()} {record.__dict__}" for record in caplog.records
+    ]
+    assert written
+    assert not any(looks_like_a_key in line for line in written)
+
+
+def test_engine_subscribed_is_what_the_engine_itself_asked_for() -> None:
+    """The subset a socket decision may be made on. Nothing client-supplied.
+
+    A socket launched because a browser scrolled is a socket the watchdog
+    then judges for ninety seconds of silence, on symbols nobody validated
+    against a universe -- a rule-9 halt a browser can cause. So the launch
+    and the expectation read this, and a viewport hint rides an
+    already-open socket or rides nothing.
+    """
+    plan = plan_for(
+        [underlying_unit("AAPL"), markets_visible_unit("NVDA")],
+        cap=5,
+        stream=Stream.EQUITY,
+    )
+
+    assert plan.subscribed == ("AAPL", "NVDA")
+    assert plan.engine_subscribed == ("AAPL",)
+
+
+def test_a_plan_of_nothing_but_a_viewport_hint_has_no_engine_subscription() -> None:
+    plan = plan_for(
+        [markets_visible_unit("NVDA"), markets_visible_unit("TSLA")],
+        cap=5,
+        stream=Stream.EQUITY,
+    )
+
+    assert plan.subscribed == ("NVDA", "TSLA")
+    assert plan.engine_subscribed == ()
+
+
+def test_a_hint_naming_a_held_underlying_leaves_it_engine_owned() -> None:
+    """Dedup is not a transfer of ownership: the position still asked for it."""
+    plan = plan_for(
+        [underlying_unit("AAPL"), markets_visible_unit("AAPL")],
+        cap=5,
+        stream=Stream.EQUITY,
+    )
+
+    assert plan.subscribed == ("AAPL",)
+    assert plan.engine_subscribed == ("AAPL",)
+
+
+def test_only_the_viewport_tier_is_client_supplied() -> None:
+    """One tier, named once, so a new tier is a deliberate answer to this."""
+    assert SubscriptionPriority.MARKETS_VISIBLE.client_supplied is True
+    assert [
+        priority
+        for priority in SubscriptionPriority
+        if priority.client_supplied
+    ] == [SubscriptionPriority.MARKETS_VISIBLE]

@@ -367,17 +367,30 @@ class SocketSupervisor:
     # -- opening -----------------------------------------------------------
 
     async def _open(self, at: datetime) -> None:
-        """Hold what should be held. Idempotent: an open socket is left alone."""
+        """Hold what should be held. Idempotent: an open socket is left alone.
+
+        **A socket is opened for what the engine asked for, never for what a
+        client asked for.** The gate reads
+        :attr:`~corollary.engine.stream.SubscriptionPlan.engine_subscribed`
+        rather than ``subscribed``, and that difference is rule 9: a socket
+        launched here is a socket :meth:`_settle_expectations` then arms the
+        ninety-second silence condition on, so a viewport hint that could
+        launch one would let a browser scrolling on a flat book halt the
+        engine on symbols nobody validated. The hint still *rides* a socket
+        the book opens -- it is in the subscribe either way -- which is
+        exactly what decision 18 says it is: spare slots, never a reason to
+        spend one.
+        """
         self._launch(TRADE_SOCKET, self._build_trade_stream)
         if self._plans is None:
             self._plans = await self._plan()
         plans = self._plans
         if plans is not None:
-            if plans.option.subscribed:
+            if plans.option.engine_subscribed:
                 self._launch(
                     OPTION_SOCKET, lambda: self._build_quote_stream(plans.option)
                 )
-            if plans.equity.subscribed:
+            if plans.equity.engine_subscribed:
                 self._launch(
                     EQUITY_SOCKET, lambda: self._build_quote_stream(plans.equity)
                 )
@@ -430,7 +443,17 @@ class SocketSupervisor:
                 "correlation_id": plans.option.correlation_id,
                 "option_symbols": len(plans.option.subscribed),
                 "equity_symbols": len(plans.equity.subscribed),
+                # What the engine itself asked for, which is what decides
+                # whether each socket opens at all and whether the watchdog
+                # judges it. Beside the totals rather than instead of them:
+                # a plan whose equity content is entirely a viewport hint
+                # reads ``equity_symbols: 3, equity_engine_symbols: 0``, and
+                # the socket that never opened is then explicable from the
+                # log rather than only from this code.
+                "option_engine_symbols": len(plans.option.engine_subscribed),
+                "equity_engine_symbols": len(plans.equity.engine_subscribed),
                 "not_streamed": plans.not_streamed,
+                "viewport_not_streamed": plans.client_not_streamed,
                 # The banner, verbatim, so the log and the UI cannot disagree
                 # about how many symbols went unsubscribed.
                 "message": plans.message,
@@ -527,8 +550,13 @@ class SocketSupervisor:
         can never fire.
 
         A quote socket is expected only while it is held **and** carries a
-        subscription -- an empty plan subscribes nothing and can never tick,
-        so judging it would halt the engine for holding no positions.
+        subscription the **engine** asked for -- an empty plan subscribes
+        nothing and can never tick, so judging it would halt the engine for
+        holding no positions, and a plan whose only content is a client's
+        viewport hint is the same thing with a browser's name on it. Reading
+        ``subscribed`` here would arm rule 9's condition on symbols that
+        arrived over ``/api/ws``, so it reads
+        :attr:`~corollary.engine.stream.SubscriptionPlan.engine_subscribed`.
         ``trade_updates``\'s *silence* is never expected at all; its
         **handshake** is, for as long as it is held open without having been
         acknowledged. See the module docstring for why those are different
@@ -541,7 +569,7 @@ class SocketSupervisor:
                 (OPTION_SOCKET, plans.option),
                 (EQUITY_SOCKET, plans.equity),
             ):
-                if name in self._streams and plan.subscribed:
+                if name in self._streams and plan.engine_subscribed:
                     expected.add(name)
         for name in _SOCKET_ORDER:
             if name in expected:

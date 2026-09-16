@@ -6,11 +6,34 @@ What this module is
 The browser half of the transport, and only that half. It accepts a
 connection, registers it with the process-wide fan-out
 (:class:`corollary.api.fanout.Fanout`), writes frames to the socket as they
-are published, reads the one message a client may send, and deregisters on the
-way out. It opens no vendor connection and imports no vendor library: CLAUDE.md
-permits ``import alpaca`` in exactly two files, ``data/providers/alpaca.py``
-and ``engine/execution/alpaca.py``, and neither of them is a route. The vendor
-sockets are a separate dispatch and they publish into the same fan-out.
+are published, reads the two messages a client may send, and deregisters on
+the way out. It opens no vendor connection and imports no vendor library:
+CLAUDE.md permits ``import alpaca`` in exactly two files,
+``data/providers/alpaca.py`` and ``engine/execution/alpaca.py``, and neither
+of them is a route. The vendor sockets are a separate dispatch and they
+publish into the same fan-out.
+
+The two client messages, and the one that is not a filter
+---------------------------------------------------------
+
+``subscribe`` decides what **this connection** is delivered. It is a filter
+over frames the fan-out already carries and it changes nothing upstream.
+
+``markets_visible`` is the Markets **viewport hint** (decision 18), and it is
+the only thing a client may say about what Corollary subscribes to *from the
+vendor*. It feeds one thing -- the lowest
+:class:`~corollary.engine.stream.SubscriptionPriority` there is -- and it can
+never feed anything else: a client that could outrank a held contract could
+make a position mark stale by scrolling, which is rule 4 (the engine
+enforces, the UI displays) applied to a stream budget rather than to a risk
+limit. The list is bounded on arrival, every entry is validated as an equity
+ticker, and :class:`~corollary.engine.runtime.EngineRuntime` re-validates all
+of it and stamps the priority itself. The hint is dropped when the connection
+that sent it goes: see :func:`_forget_viewport`.
+
+Keeping them separate is the point. Collapsing them would let scrolling the
+Markets page change what a position row is delivered, and let a delivery
+filter spend a stream slot.
 
 **Nothing here records watchdog activity, deliberately.** Rule 9's switch
 halts the engine when the *Alpaca* connection is lost, and a browser tab
@@ -86,9 +109,12 @@ from corollary.api.fanout import MAX_SUBSCRIBED_SYMBOLS, Fanout, Subscription
 from corollary.api.schemas import (
     ApiErrorBody,
     WsErrorFrame,
+    WsMarketsVisibleRequest,
     WsServerFrame,
     WsSubscribeRequest,
 )
+from corollary.engine.runtime import MAX_MARKETS_VISIBLE_SYMBOLS, EngineRuntime
+from corollary.engine.stream import Stream, stream_of
 from corollary.wire import ERROR_BODY_MAX, vendor_detail
 
 __all__ = ["WsErrorCode", "router", "stream"]
@@ -112,6 +138,18 @@ _ECHO_ITEMS: Final[int] = 5
 #: What stands in for an ``inputs`` value that is not a number. See
 #: :func:`_numbers_only`.
 _NON_NUMERIC: Final[str] = "<non-numeric input omitted>"
+
+#: Every client message, by its ``type`` tag. One table, so dispatch and
+#: validation cannot disagree about what is accepted: the refusal for an
+#: unknown tag names these keys, and the model that validates a message is
+#: the one filed under the tag it arrived with. A third kind is an entry and
+#: a handler, never a branch added to the parser.
+_CLIENT_FRAMES: Final[
+    Mapping[str, type[WsSubscribeRequest] | type[WsMarketsVisibleRequest]]
+] = {
+    "subscribe": WsSubscribeRequest,
+    "markets_visible": WsMarketsVisibleRequest,
+}
 
 #: Sent when the fan-out is missing, which means the app was constructed in a
 #: way no shipped path constructs it. 1011 is the WebSocket code for an
@@ -161,6 +199,7 @@ async def stream(websocket: WebSocket) -> None:
         await _pump(websocket, subscription)
     finally:
         fanout.unsubscribe(subscription)
+        _forget_viewport(websocket, subscription)
 
 
 async def _state_its_failure(websocket: WebSocket) -> None:
@@ -389,14 +428,15 @@ def _handle(websocket: WebSocket, subscription: Subscription, text: str) -> None
         return
 
     kind = payload.get("type")
-    if kind != "subscribe":
+    model = _CLIENT_FRAMES.get(kind) if isinstance(kind, str) else None
+    if model is None:
         _refuse(
             websocket,
             subscription,
             code="invalid_request",
             message=(
                 f"Unknown frame type {_echo(kind)}. This socket accepts "
-                "`subscribe`."
+                "`subscribe` and `markets_visible`."
             ),
             rule="an unrecognised client frame type is refused whole",
             # The tag itself is client-derived, so it goes in ``message``,
@@ -407,18 +447,21 @@ def _handle(websocket: WebSocket, subscription: Subscription, text: str) -> None
         return
 
     try:
-        request = WsSubscribeRequest.model_validate(payload)
+        request = model.model_validate(payload)
     except ValidationError as error:
         _refuse(
             websocket,
             subscription,
             code="invalid_request",
-            message=f"The subscribe message did not validate: {_fields(error)}.",
+            message=f"The {kind} message did not validate: {_fields(error)}.",
             rule="a client message validates against its schema or it is refused",
             inputs={"length": len(text)},
         )
         return
 
+    if isinstance(request, WsMarketsVisibleRequest):
+        _apply_viewport(websocket, subscription, request)
+        return
     _apply(websocket, subscription, request)
 
 
@@ -430,7 +473,9 @@ def _apply(
     The filter decides what this **connection** is sent. It does not decide
     what Corollary streams from the vendor: that is ``engine/stream.py``'s two
     budgets in priority order, where a client-supplied list is admitted at the
-    lowest priority there is. Step 15 wires that half.
+    lowest priority there is. :func:`_apply_viewport` is the message that
+    feeds *that* half, and the two are deliberately separate -- scrolling the
+    Markets page must not change what a position row is delivered.
     """
     if request.symbols is None:
         subscription.filter_to(None)
@@ -445,37 +490,18 @@ def _apply(
         )
         return
 
-    asked = request.symbols
-    if len(asked) > MAX_SUBSCRIBED_SYMBOLS:
-        _refuse(
-            websocket,
-            subscription,
-            code="subscription_refused",
-            message=(
-                f"{len(asked)} symbols is more than one connection may filter "
-                f"on; the bound is {MAX_SUBSCRIBED_SYMBOLS}. The previous "
-                "filter still stands."
-            ),
-            rule="a client-supplied list is bounded server-side",
-            inputs={"asked": len(asked), "bound": MAX_SUBSCRIBED_SYMBOLS},
-        )
-        return
-
-    malformed = tuple(symbol for symbol in asked if not _SYMBOL.match(symbol))
-    if malformed:
-        _refuse(
-            websocket,
-            subscription,
-            code="subscription_refused",
-            message=(
-                f"{len(malformed)} of {len(asked)} entries are not symbols: "
-                f"{_echo_all(malformed)}. The whole message is refused and the "
-                "previous filter still stands -- a half-applied filter watches "
-                "a list nobody asked for."
-            ),
-            rule="a subscription is applied whole or refused whole",
-            inputs={"asked": len(asked), "malformed": len(malformed)},
-        )
+    asked = _checked_symbols(
+        websocket,
+        subscription,
+        asked=request.symbols,
+        bound=MAX_SUBSCRIBED_SYMBOLS,
+        limit_clause="more than one connection may filter on",
+        unchanged=(
+            "The previous filter still stands -- a half-applied filter "
+            "watches a list nobody asked for."
+        ),
+    )
+    if asked is None:
         return
 
     subscription.filter_to(asked)
@@ -489,6 +515,233 @@ def _apply(
             "symbols": len(subscription.symbols or ()),
         },
     )
+
+
+def _checked_symbols(
+    websocket: WebSocket,
+    subscription: Subscription,
+    *,
+    asked: Sequence[str],
+    bound: int,
+    limit_clause: str,
+    unchanged: str,
+) -> tuple[str, ...] | None:
+    """Bound a client list and check every entry's shape. ``None`` if refused.
+
+    **One validator for both client messages**, because both are lists of
+    symbols arriving from a browser and both carry the same two rules: a
+    client-supplied list is bounded server-side, and the message is applied
+    whole or refused whole. Two copies would be two bounds to keep in step,
+    and the one that drifted would be the one nobody tested.
+
+    What differs between the callers is what the bound *is* and what stands
+    unchanged after a refusal, so those are the parameters and nothing else
+    is. Both strings are server-side constants: nothing client-derived is
+    ever passed in here except ``asked``, which reaches the client only
+    through ``message``, which is scrubbed.
+    """
+    if len(asked) > bound:
+        _refuse(
+            websocket,
+            subscription,
+            code="subscription_refused",
+            message=(
+                f"{len(asked)} symbols is {limit_clause}; the bound is "
+                f"{bound}. {unchanged}"
+            ),
+            rule="a client-supplied list is bounded server-side",
+            inputs={"asked": len(asked), "bound": bound},
+        )
+        return None
+
+    malformed = tuple(symbol for symbol in asked if not _SYMBOL.match(symbol))
+    if malformed:
+        _refuse(
+            websocket,
+            subscription,
+            code="subscription_refused",
+            message=(
+                f"{len(malformed)} of {len(asked)} entries are not symbols: "
+                f"{_echo_all(malformed)}. The whole message is refused. "
+                f"{unchanged}"
+            ),
+            rule="a client message is applied whole or refused whole",
+            inputs={"asked": len(asked), "malformed": len(malformed)},
+        )
+        return None
+
+    return tuple(asked)
+
+
+def _apply_viewport(
+    websocket: WebSocket,
+    subscription: Subscription,
+    request: WsMarketsVisibleRequest,
+) -> None:
+    """Hand a validated viewport hint to the engine, at the lowest tier only.
+
+    Decision 18. This is the one client message that influences what
+    Corollary subscribes to **from the vendor**, and everything about how it
+    is handled follows from rule 4 -- the engine enforces, the UI displays,
+    and a value that arrived from the client is never trusted:
+
+    * It reaches the engine through :meth:`EngineRuntime.set_markets_visible`
+      and through nothing else. There is no priority on the wire and none
+      passed here: the runtime stamps ``MARKETS_VISIBLE`` itself, so no call
+      site exists at which a client symbol could be filed as a position
+      underlying.
+    * It is bounded before it is allocated, by the shared
+      :func:`_checked_symbols`.
+    * **An OCC symbol is refused.** The hint feeds the equity stream; a
+      contract on it is a caller bug, the way a unit straddling both budgets
+      is, and re-pointing this tier at chain rows is Phase 4 work (U7) with
+      its own producer.
+    * The engine re-validates all of it. This function being correct is not
+      the reason the rule holds.
+
+    **The hint is one per engine, owned by the connection that last sent
+    it**, and it is dropped when that connection goes. Two tabs therefore
+    take turns rather than merging, which is harmless here and nowhere else:
+    this tier is last, so a hint can only ever spend slots nothing above it
+    wanted, and every Markets row is polled regardless -- losing a slot costs
+    freshness, never a price.
+
+    Nothing here halts, resumes, or touches rule 9's switch.
+    """
+    runtime = getattr(websocket.app.state, "engine_runtime", None)
+    if not isinstance(runtime, EngineRuntime):
+        _refuse(
+            websocket,
+            subscription,
+            code="stream_unavailable",
+            message=(
+                "The engine is not running in this process, so there is "
+                "nothing to spend a stream slot. The Markets table is polled "
+                "and is unaffected."
+            ),
+            rule=(
+                "a viewport hint with no engine is stated on the socket, "
+                "never raised; the polled pages must keep answering"
+            ),
+            inputs={"asked": len(request.symbols)},
+        )
+        return
+
+    asked = _checked_symbols(
+        websocket,
+        subscription,
+        asked=request.symbols,
+        bound=MAX_MARKETS_VISIBLE_SYMBOLS,
+        limit_clause="more than a viewport may name",
+        unchanged="The previous viewport hint still stands.",
+    )
+    if asked is None:
+        return
+
+    contracts = tuple(
+        symbol for symbol in asked if stream_of(symbol) is Stream.OPTION
+    )
+    if contracts:
+        _refuse(
+            websocket,
+            subscription,
+            code="subscription_refused",
+            message=(
+                f"{len(contracts)} of {len(asked)} entries are option "
+                f"contracts: {_echo_all(contracts)}. The viewport hint names "
+                "the equity rows on screen; a chain subscription is not this "
+                "message. The whole message is refused and the previous "
+                "viewport hint still stands."
+            ),
+            rule=(
+                "the viewport hint names equity tickers; an option contract "
+                "on it is a caller bug"
+            ),
+            inputs={"asked": len(asked), "contracts": len(contracts)},
+        )
+        return
+
+    outcome = runtime.set_markets_visible(asked, owner=subscription.client_id)
+    refused_by = outcome.rule
+    if refused_by is not None:
+        # The engine refused what this transport admitted, which is a real
+        # gap and not a redundancy: ``_SYMBOL`` admits 32 characters because
+        # ``subscribe`` must also admit an OCC contract, and the engine's
+        # ``_EQUITY_TICKER`` admits 16 because a viewport row is a ticker. A
+        # 17-character entry passes here and is refused there. Neither
+        # validator widens to close it -- an unvalidated 17-character string
+        # on the equity socket is the thing being prevented -- so the gap is
+        # closed by *stating* the refusal. Before this, the engine's answer
+        # was a bare ``False`` indistinguishable from "the set did not
+        # differ": no frame was sent, and the line below logged the refused
+        # hint at INFO as one that had landed.
+        #
+        # ``rule`` is a server-side constant built by the engine beside its
+        # own rule 8 record, so the two cannot disagree about why, and
+        # nothing client-derived is quoted back.
+        _refuse(
+            websocket,
+            subscription,
+            code="subscription_refused",
+            message=(
+                f"The engine refused the viewport hint: {refused_by}. The "
+                "whole message is refused and the previous viewport hint "
+                "still stands."
+            ),
+            rule=refused_by,
+            inputs={"asked": len(asked)},
+        )
+        return
+
+    logger.info(
+        "%s reports %d Markets rows on screen",
+        subscription.client_id,
+        len(asked),
+        extra={
+            "event": "ws_markets_visible",
+            "client": subscription.client_id,
+            "symbols": len(asked),
+            # Three-valued, because ``applied`` and ``unchanged`` are both
+            # successes and ``refused`` never reaches this line. The client
+            # debounces and sends only on a change, so ``unchanged`` should
+            # be rare -- and it used to be the value a refusal wore.
+            "status": outcome.status.value,
+            "changed": outcome.changed,
+        },
+    )
+
+
+def _forget_viewport(websocket: WebSocket, subscription: Subscription) -> None:
+    """Drop this connection's viewport hint when the connection ends.
+
+    A closed tab is nobody looking at anything, and a hint outliving its
+    client would hold the lowest tier's slots on rows that are not on any
+    screen. Only *this* connection's hint is dropped: the runtime keeps the
+    owner, so a second tab that has since sent its own is left alone.
+
+    Best effort by construction -- it runs on the way out of a connection
+    that may have ended in any way at all, so a failure here is recorded and
+    swallowed rather than allowed to replace the reason the socket closed.
+    """
+    runtime = getattr(websocket.app.state, "engine_runtime", None)
+    if not isinstance(runtime, EngineRuntime):
+        return
+    try:
+        runtime.clear_markets_visible(owner=subscription.client_id)
+    except Exception:
+        logger.exception(
+            "could not drop %s's viewport hint",
+            subscription.client_id,
+            extra={
+                "event": "ws_markets_visible_not_cleared",
+                "rule": (
+                    "a hint that outlives its client holds the lowest tier's "
+                    "slots on rows nobody can see"
+                ),
+                "client": subscription.client_id,
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
 
 # --------------------------------------------------------------------------

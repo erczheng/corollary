@@ -107,6 +107,7 @@ __all__ = [
     "WorkingOrderType",
     "WsClientFrame",
     "WsErrorFrame",
+    "WsMarketsVisibleRequest",
     "WsQuote",
     "WsQuoteFrame",
     "WsServerFrame",
@@ -1567,8 +1568,9 @@ class WsSubscribeRequest(ApiModel):
     reach the vendor sockets: which symbols Corollary streams from Alpaca is
     decided by ``engine/stream.py``'s two budgets in priority order, and a
     client-supplied list is admitted there at the lowest priority there is --
-    see ``markets_visible_unit``. Step 15 wires that half; a browser asking
-    for a symbol has never been a reason to spend a stream slot.
+    see :class:`WsMarketsVisibleRequest`, which is the message that feeds it.
+    A browser asking for a *delivery filter* has never been a reason to spend
+    a stream slot, and still is not.
 
     ``symbols`` has **no default**, on the same reasoning
     ``plan_stream_subscriptions`` gives for its two lists: an omitted list is
@@ -1585,11 +1587,64 @@ class WsSubscribeRequest(ApiModel):
     symbols: list[str] | None
 
 
-WsClientFrame: TypeAlias = WsSubscribeRequest
-"""Everything a client may send. One kind today, and named anyway.
+class WsMarketsVisibleRequest(ApiModel):
+    """The Markets viewport hint: which rows the client says are on screen.
 
-An alias rather than a bare model, because step 15's viewport hint is a second
-client message on this socket. The name is what the transport dispatches on,
-so adding the second kind is a union here rather than a new concept in
-``routes/ws.py``.
+    Decision 18. The engine owns the socket, so the *client* is the only
+    thing that knows which Markets rows a human is looking at, and the ~22
+    equity stream slots left after a full book of position underlyings are
+    worth spending on them. The client sends this debounced on a settled
+    viewport, and only when the set actually differs -- every resubscribe is
+    a gap in the marks.
+
+    **It is a hint, and it can only ever occupy the lowest tier.** It becomes
+    :attr:`~corollary.engine.stream.SubscriptionPriority.MARKETS_VISIBLE`
+    units and nothing else. There is no priority field and no stream field,
+    because there is no other priority or stream this could take: a client
+    that could outrank a held contract could make a position mark stale by
+    scrolling, which is rule 4 -- the engine enforces, the UI displays --
+    applied to a stream budget. Churn is harmless by construction: every
+    Markets row is polled anyway, so losing a slot costs freshness, never a
+    price.
+
+    ``symbols`` are **equity tickers**. An OCC contract here is a caller bug
+    rather than a chain subscription; pointing this tier at option contracts
+    is Phase 4 work (U7) with its own producer. The list has no default and
+    is not nullable -- an empty list is *nothing is on screen*, which is what
+    scrolling away or leaving the page means, and it spells itself. The
+    length is bounded server-side at
+    :data:`~corollary.engine.runtime.MAX_MARKETS_VISIBLE_SYMBOLS`; the bound
+    is checked in ``routes/ws.py`` rather than here so that the refusal can
+    name it, the way ``subscribe``'s does.
+
+    Applied **whole or not at all**, like ``subscribe``: one bad entry
+    refuses the message and the previous hint stands.
+
+    **A refusal is always stated, and the client must handle it.** There is
+    no acknowledgement frame -- the server frame contract has three kinds and
+    a fourth would be the thing it exists to forbid -- so silence means the
+    hint landed and an
+    :class:`WsErrorFrame` with ``code="subscription_refused"`` means it did
+    not. Both validators can produce one: the transport's shape and bound
+    checks here, and the engine's own, which are **narrower** (a viewport row
+    is an equity ticker of at most 16 characters, while this endpoint's shape
+    filter must also admit a 21-character OCC contract for ``subscribe``). A
+    client that treats no-reply as success will therefore be wrong about the
+    band between them, which is why the engine's refusal is forwarded rather
+    than logged and dropped.
+    """
+
+    type: Literal["markets_visible"] = "markets_visible"
+    symbols: list[str]
+
+
+WsClientFrame: TypeAlias = WsSubscribeRequest | WsMarketsVisibleRequest
+"""Everything a client may send. Two kinds: a delivery filter and a hint.
+
+An alias rather than a bare model, because the two are genuinely different
+questions. ``subscribe`` decides what this **connection** is delivered;
+``markets_visible`` is an input to what Corollary subscribes to **from the
+vendor**, at the lowest priority there is. The name is what the transport
+dispatches on, and conflating them would let scrolling the Markets page
+change what a position row receives.
 """

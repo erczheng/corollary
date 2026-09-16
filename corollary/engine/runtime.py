@@ -172,6 +172,7 @@ the import is local, and the alternative (a second copy of the ``t0`` rule in
 import asyncio
 import logging
 import os
+import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
@@ -190,9 +191,12 @@ from corollary.engine.stream import (
     OPTION_STREAM_QUOTE_CAP,
     Stream,
     SubscriptionPlan,
+    SubscriptionPriority,
     SubscriptionUnit,
+    markets_visible_unit,
     not_streamed_message,
     plan_subscriptions,
+    stream_of,
 )
 
 __all__ = [
@@ -201,6 +205,7 @@ __all__ = [
     "DISCORD_WEBHOOK_ENV",
     "HALT_EVENT",
     "HALT_SEVERITY",
+    "MAX_MARKETS_VISIBLE_SYMBOLS",
     "PAID_OPTION_STREAM_QUOTE_CAP",
     "PAID_PLAN",
     "REPAIR_MAX_ATTEMPTS",
@@ -211,6 +216,8 @@ __all__ = [
     "HaltDecision",
     "HaltRule",
     "LoggingNotifier",
+    "MarketsVisibleOutcome",
+    "MarketsVisibleStatus",
     "Notification",
     "Notifier",
     "StreamBudget",
@@ -276,6 +283,32 @@ UNLIMITED_STREAM_SYMBOL_CAP: Final[int] = 10_000
 #: a limit -- five times Basic's two hundred, and still a ceiling a Phase 4
 #: chain view can reach.
 PAID_OPTION_STREAM_QUOTE_CAP: Final[int] = 1000
+
+#: How many Markets rows a client may name in one viewport hint. A bound on a
+#: value that **arrived from the client** (rule 4), and the reason it exists
+#: is allocation rather than policy: an unbounded list is an unbounded
+#: allocation, one unit built per entry, driven by whatever a browser sent.
+#:
+#: Sixty-four rather than the equity cap. The cap is the wrong number twice
+#: over -- it is 30 on Basic and the unlimited sentinel on Algo Trader Plus,
+#: so binding the hint to it would refuse a legitimate viewport on the plan
+#: this account runs today and accept ten thousand entries on the plan it
+#: moves to at Phase 4. This is a bound on *the message*, and the budget is
+#: enforced separately by the plan, which cuts the tail of this tier first.
+#: Sixty-four is generous against the ~26 rows the Markets table renders and
+#: small enough that the tail is cheap to drop.
+MAX_MARKETS_VISIBLE_SYMBOLS: Final[int] = 64
+
+#: An equity ticker, shape only: upper case, dots allowed for a class share
+#: (``BRK.B``). Deliberately **not** the same question ``api/routes/ws.py``'s
+#: ``_SYMBOL`` asks -- that one asks *"could this be a symbol at all"* of an
+#: arbitrary client string and admits OCC contracts, and this one asks *"is
+#: this an equity ticker"* of a value that is about to become a subscription
+#: unit on the equity socket. The engine validates its own input even behind
+#: a transport that validates: rule 4 is that the engine enforces, and a
+#: second caller of :meth:`EngineRuntime.set_markets_visible` must not be
+#: able to get past it by not being a websocket.
+_EQUITY_TICKER: Final = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 
 #: How many healthy watchdog ticks the repair gets before it stops trying and
 #: says so out loud. Twelve is a minute at :data:`WATCHDOG_INTERVAL_SECONDS`,
@@ -443,6 +476,12 @@ class StreamPlans:
     double-counts: a symbol is an option symbol or an equity symbol and is
     therefore planned on exactly one of these, which ``stream.py`` enforces
     per unit against the stream it was filed under.
+
+    Neither figure counts a trimmed viewport row, for the same reason the
+    banner is phrased the way it is: the client tier is expected to lose the
+    tail of its list, every Markets row is polled regardless, and a count
+    that treats designed churn as a fault is a false alarm. That is
+    :attr:`client_not_streamed`, reported separately.
     """
 
     option: SubscriptionPlan
@@ -454,9 +493,95 @@ class StreamPlans:
         return self.option.not_streamed + self.equity.not_streamed
 
     @property
+    def client_not_streamed(self) -> int:
+        """Client-supplied rows the cut trimmed, across both sockets.
+
+        Never the banner and never added to it. Carried so that a viewport
+        which lost half its list is a number somebody can read, rather than
+        an absence -- and so that the thing being excluded from
+        :attr:`not_streamed` is excluded *into* somewhere.
+        """
+        return self.option.client_not_streamed + self.equity.client_not_streamed
+
+    @property
     def message(self) -> str | None:
         """One banner for both sockets, or ``None`` when everything is streaming."""
         return not_streamed_message(self.not_streamed)
+
+
+# --------------------------------------------------------------------------
+# What a viewport hint did
+# --------------------------------------------------------------------------
+
+
+class MarketsVisibleStatus(StrEnum):
+    """What :meth:`EngineRuntime.set_markets_visible` did with a hint.
+
+    **Three, because a ``bool`` was two of them.** The method used to return
+    ``False`` for *"the set did not differ"* and for *"the whole message was
+    refused"*, and ``api/routes/ws.py`` read it as the first: a refusal was
+    logged at INFO as a hint successfully applied, and the client was sent no
+    error frame at all. The browser then believed it was watching rows the
+    engine had refused -- a silently ignored subscription, which is exactly
+    what ``ws.py``'s own ``_refuse`` docstring says must never happen,
+    because it looks like a feed with nothing to say.
+    """
+
+    #: The held set changed. The caller may re-plan.
+    APPLIED = "applied"
+    #: Valid, and identical to what was already held. Nothing to re-plan --
+    #: every resubscribe is a gap in the marks.
+    UNCHANGED = "unchanged"
+    #: Refused whole, with the previous hint left standing. Logged under rule
+    #: 8 by the engine, and stated to the client by the transport.
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True, slots=True)
+class MarketsVisibleOutcome:
+    """The answer to a viewport hint: what happened, and why if it was refused."""
+
+    status: MarketsVisibleStatus
+    #: The rule that refused, a **server-side constant** -- safe to log and
+    #: safe to send to a client, because nothing client-derived is in it.
+    #: ``None`` for every status but :attr:`MarketsVisibleStatus.REFUSED`,
+    #: and never ``None`` for that one, so a caller may branch on
+    #: ``rule is not None`` and get a ``str`` the type checker believes in.
+    rule: str | None = None
+
+    def __post_init__(self) -> None:
+        refused = self.status is MarketsVisibleStatus.REFUSED
+        if refused and not self.rule:
+            raise ValueError(
+                "a refusal states the rule it was refused by; rule 8 wants "
+                "the rule, the inputs and the timestamp, and the client is "
+                "told the first of those"
+            )
+        if self.rule is not None and not refused:
+            raise ValueError(
+                f"a {self.status.value} outcome carries no rule; a rule on "
+                "one would make 'was this refused?' two questions"
+            )
+
+    @property
+    def changed(self) -> bool:
+        """Did the held set move? The only reason to re-plan the stream."""
+        return self.status is MarketsVisibleStatus.APPLIED
+
+    def __bool__(self) -> bool:
+        """Refused, deliberately. Ask :attr:`changed` or read :attr:`status`.
+
+        This type exists because one boolean answered two questions, and
+        ``if runtime.set_markets_visible(...)`` at a call site would restore
+        that silently while still type-checking -- every outcome is truthy,
+        so a refusal would read as a change. Raising here is the one thing
+        that makes the old shape fail loudly rather than quietly.
+        """
+        raise TypeError(
+            "a viewport-hint outcome is three-valued and has no truth value; "
+            "read .changed to decide whether to re-plan, or .status to tell "
+            "a refusal from an unchanged set"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1451,6 +1576,18 @@ class EngineRuntime:
         )
         self._task: asyncio.Task[None] | None = None
         self._opening_snapshot_ok = False
+        #: The Markets rows a client last said were on screen, in the order
+        #: it named them, deduped. The **only** client-supplied input this
+        #: class holds, and it feeds exactly one thing: the lowest
+        #: subscription tier. See :meth:`set_markets_visible`.
+        self._markets_visible: tuple[str, ...] = ()
+        #: Who sent the hint above -- a connection id, or ``None`` for a
+        #: caller that did not say. Held so that a closing connection can
+        #: drop *its own* hint and leave a later one alone; see
+        #: :meth:`clear_markets_visible`. Never an identity and never
+        #: authorisation: the tier is the lowest there is, so the worst a
+        #: wrong answer here can do is spend a spare slot on a stale row.
+        self._markets_visible_owner: str | None = None
         #: The halt this process announced that the record does **not**
         #: carry: ``_persist`` refused, or the row could not be read to check.
         #: Consulted by :meth:`check_watchdog`'s gate in every branch, which
@@ -1805,6 +1942,241 @@ class EngineRuntime:
 
     # -- the budget --------------------------------------------------------
 
+    @property
+    def markets_visible(self) -> tuple[str, ...]:
+        """The Markets rows a client last reported on screen. Never a ranking.
+
+        Order is the client's, preserved and not sorted, because order is the
+        tie-break for which rows keep their slots when the tail of this tier
+        is cut. It is not a claim about importance that anything above this
+        tier reads.
+        """
+        return self._markets_visible
+
+    def set_markets_visible(
+        self,
+        symbols: Iterable[str],
+        *,
+        owner: str | None = None,
+        correlation_id: str | None = None,
+    ) -> MarketsVisibleOutcome:
+        """Record a viewport hint. What happened, and why if it was refused.
+
+        Decision 18's hint, and the whole of what a client may influence
+        about the stream: a debounced list of the Markets rows on screen,
+        arriving on ``/api/ws``, which becomes
+        :attr:`~corollary.engine.stream.SubscriptionPriority.MARKETS_VISIBLE`
+        units and **nothing else**. There is no argument for a priority
+        because there is no other priority it could take: a client that could
+        outrank a held contract could make a position mark stale by scrolling,
+        which is rule 4's principle -- the engine enforces, the UI displays --
+        applied to a stream budget rather than to a risk limit.
+
+        **Applied whole or refused whole**, with the previous hint left
+        standing, for the reason a subscription is: a half-applied viewport is
+        a client believing it watches a list it does not watch. Three refusals,
+        each logged with the rule, the inputs and the timestamp (rule 8):
+
+        * more entries than :data:`MAX_MARKETS_VISIBLE_SYMBOLS` -- an
+          unbounded client list is an unbounded allocation;
+        * an OCC symbol -- the hint feeds the *equity* stream, and pointing
+          this tier at option contracts is Phase 4 work (U7) with its own
+          producer, not something a client can ask for;
+        * anything that is not an equity ticker by shape.
+
+        **Nothing client-derived reaches a refusal record's fields**: counts
+        and server-side constants only, the same rule ``api/routes/ws.py``'s
+        ``_refuse`` states at length, and :meth:`_refuse_markets_visible`
+        types it. That is a claim about *this* path and not about the hint as
+        a whole -- an **accepted** hint's symbols become
+        :func:`~corollary.engine.stream.markets_visible_unit` keys, so they
+        can still reach ``engine/stream.py``'s records. Which ones, and what
+        bounds them, is written out on :meth:`markets_visible_units`, because
+        a docstring claiming a property the code does not have is worse than
+        no docstring: the next reader stops checking.
+
+        Nothing here halts, resumes or touches the switch -- a re-plan is not
+        a resume. Nor can it *cause* a halt: a hint alone opens no socket and
+        arms no watchdog condition, which ``engine/sockets.py`` enforces by
+        reading
+        :attr:`~corollary.engine.stream.SubscriptionPlan.engine_subscribed`.
+
+        Returns a :class:`MarketsVisibleOutcome` rather than a ``bool``.
+        Applied, unchanged and refused are three answers and the caller needs
+        all three: only *applied* is worth a re-plan, since every resubscribe
+        is a gap in the marks, and only *refused* is worth an error frame.
+        Conflated, a refusal read as "unchanged" is a silently ignored
+        subscription.
+        """
+        asked = tuple(symbols)
+        at = _utc(self._now())
+        handle = correlation_id or self._correlation_ids()
+
+        if len(asked) > MAX_MARKETS_VISIBLE_SYMBOLS:
+            return self._refuse_markets_visible(
+                rule=(
+                    "a client-supplied viewport hint is bounded server-side; "
+                    "an unbounded list is an unbounded allocation"
+                ),
+                at=at,
+                correlation_id=handle,
+                inputs={
+                    "asked": len(asked),
+                    "bound": MAX_MARKETS_VISIBLE_SYMBOLS,
+                    "refused": len(asked),
+                },
+            )
+
+        contracts = sum(1 for symbol in asked if stream_of(symbol) is Stream.OPTION)
+        if contracts:
+            return self._refuse_markets_visible(
+                rule=(
+                    "the viewport hint names equity tickers; an option "
+                    "contract on it is a caller bug, and re-pointing this "
+                    "tier at contracts is Phase 4 work"
+                ),
+                at=at,
+                correlation_id=handle,
+                inputs={"asked": len(asked), "refused": contracts},
+            )
+
+        malformed = sum(1 for symbol in asked if not _EQUITY_TICKER.match(symbol))
+        if malformed:
+            return self._refuse_markets_visible(
+                rule=(
+                    "a viewport hint is applied whole or refused whole; a "
+                    "symbol that is not an equity ticker refuses the message"
+                ),
+                at=at,
+                correlation_id=handle,
+                inputs={"asked": len(asked), "refused": malformed},
+            )
+
+        # ``dict`` rather than a set: dedup that keeps the client's order,
+        # because the order is what decides which rows survive the cut.
+        held = tuple(dict.fromkeys(asked))
+        # The owner is taken even when the set is identical: the tab that
+        # spoke last is the one whose closing should drop it, and two tabs
+        # showing the same rows would otherwise leave the hint owned by
+        # whichever one happened to connect first.
+        self._markets_visible_owner = owner
+        if held == self._markets_visible:
+            return MarketsVisibleOutcome(MarketsVisibleStatus.UNCHANGED)
+
+        previous = len(self._markets_visible)
+        self._markets_visible = held
+        logger.info(
+            "the Markets viewport hint now names %d rows",
+            len(held),
+            extra={
+                "event": "markets_visible_set",
+                "correlation_id": handle,
+                "symbols": len(held),
+                "previous": previous,
+                "priority": SubscriptionPriority.MARKETS_VISIBLE.label,
+                "at": at.isoformat(),
+            },
+        )
+        return MarketsVisibleOutcome(MarketsVisibleStatus.APPLIED)
+
+    def clear_markets_visible(self, *, owner: str) -> bool:
+        """Drop the viewport hint if ``owner`` is the one who set it.
+
+        A closed browser tab is nobody looking at anything, and a hint that
+        outlived its client would hold the lowest tier's slots on rows that
+        are on no screen. Scoped to the owner so that a second connection
+        which has since sent its own hint keeps it -- the hint is one per
+        engine and belongs to whoever spoke last.
+
+        Returns whether anything changed, so the caller can re-plan only when
+        there is something to re-plan.
+        """
+        if owner != self._markets_visible_owner:
+            return False
+        self._markets_visible_owner = None
+        if not self._markets_visible:
+            return False
+        logger.info(
+            "dropped the Markets viewport hint with its client",
+            extra={
+                "event": "markets_visible_cleared",
+                "symbols": len(self._markets_visible),
+                "priority": SubscriptionPriority.MARKETS_VISIBLE.label,
+                "at": _utc(self._now()).isoformat(),
+            },
+        )
+        self._markets_visible = ()
+        return True
+
+    def _refuse_markets_visible(
+        self,
+        *,
+        rule: str,
+        at: datetime,
+        correlation_id: str,
+        inputs: Mapping[str, int],
+    ) -> MarketsVisibleOutcome:
+        """Rule 8 on a refused hint: the rule, the inputs, the timestamp.
+
+        ``inputs`` is ``Mapping[str, int]`` for the reason ``ws.py``'s is:
+        the log record is the durable, searchable surface, and a
+        client-derived string routed through it arrives unscrubbed. Counts
+        only, and mypy refuses a string at the call site.
+
+        Returns the refusal so that the record and the caller's answer are
+        built from **one** ``rule`` string. Two would be a log line and a
+        client frame free to disagree about why a message was refused, and
+        the one a human reads afterwards is the log.
+        """
+        logger.warning(
+            "refused a Markets viewport hint: %s",
+            rule,
+            extra={
+                "event": "markets_visible_refused",
+                "rule": rule,
+                "correlation_id": correlation_id,
+                "at": at.isoformat(),
+                **dict(inputs),
+            },
+        )
+        return MarketsVisibleOutcome(MarketsVisibleStatus.REFUSED, rule=rule)
+
+    def markets_visible_units(self) -> tuple[SubscriptionUnit, ...]:
+        """The held hint as subscription units. One row, one unit.
+
+        Built here rather than by the caller, and that is the rule-4
+        enforcement: the priority is stamped by the engine, so there is no
+        call site at which a client symbol could be filed as a position
+        underlying, and no argument by which a client could ask to be one.
+        Rows are independent of each other -- a row is marked or it is not --
+        so one symbol per unit, and the tail is trimmed rather than the tier
+        blanked.
+
+        **Where a client string goes from here, stated rather than assumed.**
+        The symbol becomes the unit's ``key`` and its only entry in
+        ``symbols``, so it is on the wire to the vendor -- which is the whole
+        point -- and it is reachable by ``engine/stream.py``'s records. Two
+        things bound that. The tier's routine drops are logged by **count**
+        (``stream_client_tier_trimmed``), so the sixty-four per-symbol
+        warnings a trimmed viewport used to emit no longer exist, and the
+        budget summary's ``dropped_symbols`` excludes this tier. What remains
+        is ``stream_subscription_unacknowledged``, whose ``absent`` list is
+        the symbols the vendor did not confirm: a genuine anomaly, rare, and
+        not a per-plan volume.
+
+        That is a smaller surface than it was and it is not zero, so nothing
+        here claims it is. ``engine/stream.py`` may not redact -- decision 17
+        requires it to have no vendor import, no clock read and no
+        environment read, so that identical inputs give an identical plan --
+        and the shape filters are what stand between a browser and those
+        records: :data:`_EQUITY_TICKER` here and ``_SYMBOL`` in
+        ``api/routes/ws.py``. A shape filter is not a redactor: a
+        twelve-character paper account number is a legal ticker shape. The
+        answer is that this tier's *volume* paths carry counts only, which is
+        checkable and is checked in ``test_stream.py``.
+        """
+        return tuple(markets_visible_unit(symbol) for symbol in self._markets_visible)
+
     def plan_stream_subscriptions(
         self,
         *,
@@ -1863,7 +2235,16 @@ class EngineRuntime:
                 stream=Stream.OPTION,
             ),
             equity=plan_subscriptions(
-                equity_units,
+                # The viewport hint is folded in here rather than passed by
+                # the caller, and only into the equity list. A caller cannot
+                # forget it, cannot file it under the option socket, and
+                # cannot give it a priority -- the units carry
+                # ``MARKETS_VISIBLE`` because :meth:`markets_visible_units`
+                # stamps it. Order within the list does not matter: the
+                # planner sorts by priority, so this tier is last however it
+                # arrives, and the prefix cut reaches it before anything a
+                # position needs. An empty hint adds nothing at all.
+                [*equity_units, *self.markets_visible_units()],
                 at=at,
                 correlation_id=handle,
                 cap=budget.equity,

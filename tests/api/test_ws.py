@@ -56,6 +56,8 @@ from corollary.api.schemas import (
     WsTradeUpdate,
     WsTradeUpdateFrame,
 )
+from corollary.engine.runtime import MAX_MARKETS_VISIBLE_SYMBOLS, EngineRuntime
+from corollary.engine.stream import SubscriptionPriority
 
 WS = "/api/ws"
 
@@ -511,7 +513,10 @@ def test_an_unknown_frame_type_is_refused_and_names_what_is_accepted(
 
     assert refusal["type"] == "error"
     assert refusal["error"]["code"] == "invalid_request"
+    # Both accepted tags are named, from the one dispatch table, so the
+    # refusal cannot claim a vocabulary the parser does not have.
     assert "subscribe" in refusal["error"]["message"]
+    assert "markets_visible" in refusal["error"]["message"]
 
 
 def test_malformed_json_is_refused_and_the_socket_survives(
@@ -640,6 +645,350 @@ def test_refusal_inputs_take_numbers_only() -> None:
     assert _numbers_only({"asked": 3, "bound": 256}) == {"asked": 3, "bound": 256}
     leaked: Any = {"kind": "PA3Q8ZV71LKD"}
     assert _numbers_only(leaked) == {"kind": _NON_NUMERIC}
+
+
+# --------------------------------------------------------------------------
+# The Markets viewport hint -- step 15, decision 18
+# --------------------------------------------------------------------------
+#
+# The hint is the only thing a client may say about what Corollary streams
+# *from Alpaca*, and it can only ever occupy the lowest tier. These tests are
+# the transport half: what shape arrives, what is refused, and that a refusal
+# leaves the previous hint standing. That the tier can never outrank a
+# position is the engine's half and is pinned in ``tests/engine/test_runtime``.
+#
+# **There is no acknowledgement frame, deliberately** -- the server frame
+# contract has three kinds and a fourth would be the thing the contract
+# exists to forbid. So these tests synchronise on a *refusal*, which is
+# ordered behind the message before it in the one reader loop.
+
+
+def engine_runtime(app: FastAPI) -> EngineRuntime:
+    runtime = app.state.engine_runtime
+    assert isinstance(runtime, EngineRuntime)
+    return runtime
+
+
+def test_a_viewport_hint_reaches_the_runtime_at_the_lowest_tier(
+    ws_app: FastAPI,
+) -> None:
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": ["NVDA", "TSLA"]})
+            # A refused message behind it, as the synchronisation point: one
+            # reader loop, in order, so this frame arriving proves the hint
+            # above it was handled.
+            socket.send_json({"type": "markets_visible", "symbols": ["not a ticker"]})
+            refusal = socket.receive_json()
+
+            # Read while the connection is open: the hint belongs to it and
+            # is dropped when it goes.
+            runtime = engine_runtime(ws_app)
+            held = runtime.markets_visible
+            plans = runtime.plan_stream_subscriptions(
+                option_units=[], equity_units=[]
+            )
+
+    assert refusal["error"]["code"] == "subscription_refused"
+    # Applied whole, refused whole: the good hint stands and the bad one
+    # changed nothing.
+    assert held == ("NVDA", "TSLA")
+    assert plans.equity.subscribed == ("NVDA", "TSLA")
+    assert {unit.priority for unit in plans.equity.admitted} == {
+        SubscriptionPriority.MARKETS_VISIBLE
+    }
+    # And it is an equity producer: nothing of it reaches the option socket.
+    assert plans.option.subscribed == ()
+
+
+def test_a_viewport_hint_is_not_a_delivery_filter(ws_app: FastAPI) -> None:
+    """Two different questions on one socket, and naming one is not naming the other.
+
+    ``subscribe`` says what this **connection** is sent. ``markets_visible``
+    says which Markets rows are on screen, which is an input to the lowest
+    subscription tier. A hint that quietly re-filtered the connection would
+    make scrolling change what a position row receives.
+    """
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "subscribe", "symbols": ["MSFT"]})
+            socket.send_json({"type": "markets_visible", "symbols": ["AAPL"]})
+            socket.send_json({"type": "markets_visible", "symbols": ["bad"]})
+            socket.receive_json()
+            # Deliverable only under the *old* filter, and published first:
+            # a hint that widened the filter delivers AAPL rather than MSFT.
+            publish_quote(client, AAPL_QUOTE)
+            publish_quote(client, MSFT_QUOTE)
+            frame = socket.receive_json()
+            assert engine_runtime(ws_app).markets_visible == ("AAPL",)
+
+    assert frame["quote"]["symbol"] == "MSFT"
+
+
+def test_an_oversized_viewport_hint_is_refused_and_says_why(
+    ws_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A value that arrived from the client is bounded before it is allocated."""
+    caplog.set_level(logging.WARNING)
+    asked = [f"VIS{index}" for index in range(MAX_MARKETS_VISIBLE_SYMBOLS + 1)]
+
+    with ws_client.websocket_connect(WS) as socket:
+        socket.send_json({"type": "markets_visible", "symbols": asked})
+        refusal = socket.receive_json()
+        # The refusal does not close the socket.
+        publish_quote(ws_client, MSFT_QUOTE)
+        after = socket.receive_json()
+
+    assert refusal["type"] == "error"
+    assert refusal["error"]["code"] == "subscription_refused"
+    assert str(MAX_MARKETS_VISIBLE_SYMBOLS) in refusal["error"]["message"]
+    assert after["quote"]["symbol"] == "MSFT"
+
+    records = refusals(caplog)
+    assert len(records) == 1
+    assert records[0].__dict__["rule"]
+    assert records[0].__dict__["at"]
+    assert records[0].__dict__["asked"] == len(asked)
+    assert records[0].__dict__["bound"] == MAX_MARKETS_VISIBLE_SYMBOLS
+
+
+def test_an_occ_symbol_on_the_viewport_hint_is_refused(
+    ws_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A contract on the viewport hint is a caller bug, not a chain subscription.
+
+    Step 11 refuses a unit whose symbols straddle the two budgets for the
+    same reason. Re-pointing this tier at option contracts is Phase 4 work
+    (U7) with its own producer; a browser cannot ask for it.
+    """
+    caplog.set_level(logging.WARNING)
+
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json(
+                {
+                    "type": "markets_visible",
+                    "symbols": ["AAPL", "AAPL241220C00150000"],
+                }
+            )
+            refusal = socket.receive_json()
+            # Whole or not at all: the equity ticker in the same message is
+            # not applied either.
+            assert engine_runtime(ws_app).markets_visible == ()
+
+    assert refusal["error"]["code"] == "subscription_refused"
+    assert refusals(caplog)[0].__dict__["rule"]
+    assert refusals(caplog)[0].__dict__["at"]
+
+
+def test_a_hint_the_engine_refuses_is_stated_to_the_client(
+    ws_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The gap between the two validators, which the client was never told about.
+
+    ``_SYMBOL`` admits 32 characters because ``subscribe`` must also admit an
+    OCC contract; the engine's ``_EQUITY_TICKER`` admits 16, because a
+    viewport row is a ticker. Seventeen characters passes here and is refused
+    there, and the engine's answer used to be indistinguishable from *"the
+    set did not differ"* -- so this frame was never sent, the transport
+    logged the hint at INFO as applied, and only the engine's own record
+    said otherwise. A subscription that is silently ignored looks exactly
+    like a feed that has nothing to say.
+    """
+    caplog.set_level(logging.INFO)
+    gap_band = "ABCDEFGHIJKLMNOPQ"
+    assert len(gap_band) == 17
+
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": ["NVDA"]})
+            socket.send_json(
+                {"type": "markets_visible", "symbols": ["NVDA", gap_band]}
+            )
+            # A message the *transport* refuses, behind it, as the
+            # synchronisation point: one reader loop, in order. Without it
+            # this test would block forever on the frame the bug never
+            # sends, and a hang is a worse failure than an assertion.
+            socket.send_json({"type": "markets_visible", "symbols": ["not a ticker"]})
+            refusal = socket.receive_json()
+            # Refused whole, and the hint the engine did accept still stands.
+            assert engine_runtime(ws_app).markets_visible == ("NVDA",)
+
+    assert refusal["type"] == "error"
+    assert refusal["error"]["code"] == "subscription_refused"
+    # The engine's rule, not the transport's: this frame is the answer to
+    # the message before the synchronisation point.
+    assert "equity ticker" in refusal["error"]["message"]
+    # Two rule 8 records: the engine's refusal and the transport's.
+    assert len(refusals(caplog)) == 2
+    applied = [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "ws_markets_visible"
+    ]
+    assert [record.__dict__["status"] for record in applied] == ["applied"]
+
+
+def test_a_refused_hint_does_not_echo_the_clients_string(
+    ws_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 6 on the frame the engine's refusal produces.
+
+    The reason reaches the client, and the reason is a server-side constant.
+    The client's own string is not quoted back into the log record's fields
+    -- the shape filter admits the paper account-number pattern that
+    ``vendor_detail`` exists to redact.
+    """
+    caplog.set_level(logging.INFO)
+    looks_like_a_key = "PA3XYZ12AB9ZQQQQQQQQ"
+
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json(
+                {"type": "markets_visible", "symbols": [looks_like_a_key]}
+            )
+            socket.send_json({"type": "markets_visible", "symbols": ["not a ticker"]})
+            refusal = socket.receive_json()
+
+    assert refusal["error"]["code"] == "subscription_refused"
+    assert "equity ticker" in refusal["error"]["message"]
+    written = [
+        f"{record.getMessage()} {record.__dict__}" for record in caplog.records
+    ]
+    assert not any(looks_like_a_key in line for line in written)
+
+
+def test_a_viewport_hint_needs_its_symbols_spelled_out(
+    ws_client: TestClient,
+) -> None:
+    """No default, and no extra fields. An omitted list is a silent choice."""
+    with ws_client.websocket_connect(WS) as socket:
+        socket.send_json({"type": "markets_visible"})
+        missing = socket.receive_json()
+        socket.send_json(
+            {"type": "markets_visible", "symbols": ["AAPL"], "priority": 1}
+        )
+        extra = socket.receive_json()
+
+    assert missing["error"]["code"] == "invalid_request"
+    assert "symbols" in missing["error"]["message"]
+    # There is no priority argument, because there is no other priority this
+    # could ever take.
+    assert extra["error"]["code"] == "invalid_request"
+    assert "priority" in extra["error"]["message"]
+
+
+def test_an_empty_viewport_hint_gives_the_slots_back(ws_app: FastAPI) -> None:
+    """Scrolling away, or leaving the Markets page, is a hint of nothing."""
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": ["NVDA"]})
+            socket.send_json({"type": "markets_visible", "symbols": []})
+            socket.send_json({"type": "markets_visible", "symbols": ["bad"]})
+            socket.receive_json()
+            assert engine_runtime(ws_app).markets_visible == ()
+
+
+def test_a_hint_is_dropped_with_the_connection_that_sent_it(
+    ws_app: FastAPI,
+) -> None:
+    """A closed tab is nobody looking at anything.
+
+    A hint outliving its client would hold the lowest tier's slots on rows
+    that are on no screen -- and it would never be corrected, because the
+    client only sends on a *change*.
+    """
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": ["NVDA"]})
+            socket.send_json({"type": "markets_visible", "symbols": ["bad"]})
+            socket.receive_json()
+            assert engine_runtime(ws_app).markets_visible == ("NVDA",)
+
+        assert engine_runtime(ws_app).markets_visible == ()
+
+
+def test_a_second_tabs_hint_survives_the_first_tab_closing(
+    ws_app: FastAPI,
+) -> None:
+    """The hint belongs to whoever spoke last, and only that one drops it.
+
+    Two tabs take turns rather than merging, which is harmless at this tier
+    and nowhere else: it is last in the priority order, so it can only spend
+    slots nothing above it wanted, and every Markets row is polled anyway.
+    What would *not* be harmless is a closing tab silently clearing a hint
+    the surviving one had already replaced.
+    """
+    with TestClient(ws_app) as client:
+        with client.websocket_connect(WS) as second:
+            with client.websocket_connect(WS) as first:
+                # Each hint is synchronised on its own connection's refusal,
+                # so the two are ordered against each other rather than
+                # racing two independent reader loops.
+                first.send_json({"type": "markets_visible", "symbols": ["NVDA"]})
+                first.send_json({"type": "markets_visible", "symbols": ["bad"]})
+                first.receive_json()
+
+                second.send_json({"type": "markets_visible", "symbols": ["TSLA"]})
+                second.send_json({"type": "markets_visible", "symbols": ["bad"]})
+                second.receive_json()
+                assert engine_runtime(ws_app).markets_visible == ("TSLA",)
+
+            # The first tab closed, and its hint was already superseded.
+            assert engine_runtime(ws_app).markets_visible == ("TSLA",)
+
+
+def test_a_viewport_hint_with_no_engine_states_its_failure(
+    ws_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An app with no runtime answers on the socket rather than raising.
+
+    The same standing the missing fan-out has, and for the same reason: the
+    polled pages need no engine, and ``GET /api/health`` must keep answering.
+    """
+    caplog.set_level(logging.WARNING)
+
+    with TestClient(ws_app) as client:
+        ws_app.state.engine_runtime = None
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": ["NVDA"]})
+            refusal = socket.receive_json()
+        assert client.get("/api/health").json() == {"status": "ok"}
+
+    assert refusal["error"]["code"] == "stream_unavailable"
+
+
+def test_a_refused_viewport_hint_never_quotes_a_credential(
+    ws_app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 6 on the second client message, not only on the first.
+
+    The hint echoes the entries it refused, exactly as ``subscribe`` does,
+    so it goes through the same ``_scrub`` and inherits the same ordering --
+    redaction before truncation. Forty characters, the real shape of an
+    Alpaca secret, because that is the length a truncate-first order would
+    leak the prefix of.
+    """
+    caplog.set_level(logging.WARNING)
+    secret = "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcd"
+    app = create_app(
+        registry=ws_app.state.registry,
+        db_engine=ws_app.state.db_engine,
+        secrets=(secret,),
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect(WS) as socket:
+            socket.send_json({"type": "markets_visible", "symbols": [secret]})
+            refusal = socket.receive_json()
+
+    assert refusal["error"]["code"] == "subscription_refused"
+    assert "<redacted>" in refusal["error"]["message"]
+    assert secret[:16] not in refusal["error"]["message"]
+
+    record = refusals(caplog)[0]
+    assert secret[:16] not in record.getMessage()
+    assert leaks(record, secret[:16]) == []
 
 
 # --------------------------------------------------------------------------
