@@ -2229,7 +2229,7 @@ chain, contracts; rate limiter, feed config.
   under-subscribes rather than over-subscribes — but a full eight-position book
   reports position contracts as *"not streamed"* with ~170 option slots free,
   and a stale mark looks exactly like a quiet market. **Step 11 is the fix and
-  is in flight.**
+  has landed** — `bea4190`, `56e7041`, `84e85f5`.
 - *Files:* `corollary/engine/stream.py`, `tests/engine/test_stream.py`.
 
 **8b. `engine/runtime.py` and the FastAPI lifespan.**
@@ -2279,24 +2279,44 @@ chain, contracts; rate limiter, feed config.
 
 ### Phase 2 — remaining
 
+**Entries below marked *landed* stayed in this section rather than being moved
+up.** Each one's body carries the reasoning that justified the shape it took,
+and that reasoning is read far more often than the heading it sits under;
+lifting the status line out of it would orphan the argument. Read the *Status:*
+line, not the section title.
+
+**A standing correction, recorded 2026-09-16 because it has now been violated
+twice.** Six commits — `de24ca2`, `bea4190`, `56e7041`, `84e85f5`, `f706563`,
+`fa4216c` — landed against steps 8c-2, 8d and 11 without touching this file, so
+the order of work claimed three steps were unstarted or in flight while their
+code was on the branch. **A step's status entry changes in the same commit as
+the thing it describes.** The spec's own rewrite exists because this was
+violated the first time; a status line that lags the tree is worse than no
+status line, because the next agent plans against it.
+
 **8d. `api/routes/ws.py` — the websocket transport.** Fan quotes and
 `trade_updates` out to the browser, and give the watchdog its producers.
-- *Status:* **half written — the browser half landed, the vendor half did
-  not.** The distinction is the whole point, so it is stated rather than
-  summarised:
+- *Status:* **landed.** Browser half `dc09147`; vendor half `f706563` and
+  `fa4216c`. `corollary/sockets.py` and `corollary/engine/sockets.py` exist,
+  and `record_message` / `record_stream_open` / `record_stream_closed` have
+  real callers in `corollary/data/providers/alpaca.py` and
+  `corollary/engine/execution/alpaca.py` — so rule 9's dead-man's switch has a
+  producer for both halt conditions for the first time. The two-part account
+  below is kept because the distinction it draws is a rule, not a progress
+  report:
   - *Landed (part 1):* `corollary/api/fanout.py` and
     `corollary/api/routes/ws.py`. One `Fanout` per app on `app.state`, one
     `/api/ws` endpoint, the three-kind frame contract, the bounded
     `subscribe` filter, kind-aware eviction under backlog, and rule 8 on
     every refusal. `api/routes/__init__.py` imports `ws_router` and no
     longer says *"Still to land: `ws`"*.
-  - *Still absent:* the **vendor sockets** — nothing subscribes to Alpaca and
-    nothing publishes into the fan-out, so the endpoint is a transport with no
-    producer — and with them **the watchdog's producers**. Every activity
-    recorder (`record_message`, `record_poll`, `_last_activity_at`,
-    `record_stream_open`, `record_stream_closed`) still has **zero callers
-    outside `runtime.py`**, so rule 9's dead-man's switch has no producer for
-    either halt condition. Supervised is not armed.
+  - *Landed (part 2), `f706563` and `fa4216c`:* the **vendor sockets** and with
+    them the watchdog's producers. `corollary/sockets.py` holds the vendor
+    socket supervision; `corollary/engine/sockets.py` wires it to the runtime;
+    the activity recorders are called from
+    `corollary/data/providers/alpaca.py` and
+    `corollary/engine/execution/alpaca.py`, which are the only two files
+    permitted to import `alpaca`. Supervised is armed.
   - *Why the browser half deliberately arms nothing:* a browser tab opening or
     closing says nothing about whether Alpaca is connected. Wiring
     `record_message` to `/api/ws` would arm the switch to the wrong signal — a
@@ -2336,8 +2356,10 @@ chain, contracts; rate limiter, feed config.
   `web/src/lib/api.ts`, `web/src/lib/store.ts`.
 
 **8c-2. A refusal's cause reaches the screen — decision 14's reporting half.**
-- *Status:* **not done.** `1824191` touched no `api/routes/` and no `web/`.
-  Verified: `ledger_rejection` appears nowhere under `corollary/api/`, and
+- *Status:* **landed `de24ca2`.** The account below is what the step was
+  against, kept because it states why a count without a cause is only half of
+  decision 14: `1824191` touched no `api/routes/` and no `web/`.
+  As of that commit: `ledger_rejection` appeared nowhere under `corollary/api/`, and
   Activity's `notBooked` / `notBookedSymbols` are computed by `unbooked_closes()`
   over fills and trades — a count and a list of symbols, **not a cause**. The
   page can say *"N closings are missing from the figures above"* and cannot yet
@@ -2351,11 +2373,11 @@ chain, contracts; rate limiter, feed config.
 Phase 2. Split `STREAM_SYMBOL_CAP` into an equity cap of 30 and an option cap of
 200, plan each stream separately, and reject a subscription unit whose symbols
 would land in two different budgets.
-- *Status:* **in flight right now**, in a concurrent dispatch.
-  `tests/engine/test_stream.py` is modified in the working tree. **Do not edit**
-  `corollary/engine/stream.py`, `corollary/engine/runtime.py`, their tests,
-  `corollary/data/providers/interface.py` or
-  `corollary/engine/execution/interface.py` while it runs.
+- *Status:* **landed** — `bea4190`, `56e7041`, and `84e85f5` for the Settings
+  plan table that names the option quote budget. `corollary/engine/stream.py`
+  exports `EQUITY_STREAM_SYMBOL_CAP = 30` and `OPTION_STREAM_QUOTE_CAP = 200`,
+  with the one-name-two-budgets rationale in the module docstring. This also
+  closes 8a's wrong-input status above.
 - *The work, from decision 17:* two named constants with the stream in the name;
   `stream_symbol_cap_for_plan` becomes per-stream, with
   `UNLIMITED_STREAM_SYMBOL_CAP` reaching equities only and a **real 1000** on
@@ -2370,9 +2392,49 @@ would land in two different budgets.
 
 **12. `UnderlyingQuote` provenance and the field-level merge — decision 18.**
 Phase 2. Make one quote map safe for two writers.
-- *Status:* not started. Verified: `UnderlyingQuote` in `web/src/lib/types.ts`
-  carries neither `at` nor `source`, and `change` / `changePct` are **stored on
-  the wire** today rather than derived.
+- *Status:* **server half landed; web half owed.** Rule 1's server side is in:
+  `StockQuote` and `UnderlyingQuote` in `corollary/api/schemas.py` both carry
+  `at`, a **non-null aware-UTC `datetime`** — the same kind of instant
+  `WsQuote.at` carries, which is what makes rule 2's comparison meaningful
+  rather than an offset coin-toss. So all three quote-carrying payloads now
+  state their provenance: `WsQuote` (already did, from `Quote.at`),
+  `GET /api/markets/stocks` and `GET /api/markets/underlyings`. **`/stocks` is
+  the one the shared client quote map is polled from** — `useMarketPoll` reads
+  it at 400ms and the socket pushes the same equity symbols, so those two are
+  decision 18's two writers; `/underlyings` carries `at` as well because it
+  writes the same map on the chart path and a row merged from it with no stamp
+  would be unorderable against the other two.
+  - **`at` is the vendor's observation timestamp and never a clock on this side
+    of the wire.** `markets._spot` returns the price *and* its stamp as one
+    value, walking `StockSnapshot.price`'s own fallback order once — quote mid,
+    then last print, then daily close — so the stamp can never name a different
+    observation than the price beside it. A one-sided or crossed quote prices
+    nothing and therefore stamps nothing, which is the case a second walk gets
+    wrong. A snapshot with a price and no timestamp would be **no row**, never
+    `datetime.now()`: a synthesised observation time is newer than every real
+    one by construction and would win the merge forever.
+  - No `source` field on the REST models: which endpoint a row arrived on is
+    something the client knows at the call site, and a server-asserted
+    `'poll'` would be a second copy of that fact to disagree with.
+- *Owed by the web half, and the sequencing is deliberate:* rules 2, 3 and 4
+  are the store's merge, in `web/src/lib/{types,api,store}.ts`. That commit
+  declares `at` in `types.ts`, implements the field-level merge, derives
+  `change` / `changePct` in a selector — **and only then removes `change` and
+  `changePct` from these two Python models and their TS interfaces, in the
+  same commit.** They are still on the wire on purpose: dropping them before
+  the client derives them ships a Markets page with no change column between
+  two commits. The wire is never allowed to run ahead of the client here.
+  `tests/api/test_schema_contract.py` holds `at` in `DELIBERATE_ADDITIONS` for
+  both models meanwhile; that entry is removed by the same web commit, and the
+  contract test names which side is stale in either direction.
+- *Tests, server half:* `tests/api/test_markets_routes.py` — the recorded
+  quote's `t` survives to the wire on both routes and is not the response
+  time; `at` is aware UTC and serializes with a `Z`; the stamp names the
+  source the price came from across quote-only, print-only and bar-only
+  snapshots; a one-sided and a crossed quote are stamped by the print; and
+  `_spot` is pinned against `StockSnapshot.price` over all eight combinations
+  of the three priceable members, so a change to that fallback order fails
+  here rather than quietly leaving the stamp behind.
 - *The work, from decision 18:* `at` is the **vendor's** observation timestamp,
   never the client clock; `source` is `'stream' | 'poll'`; price is
   last-observation-wins on `at` with the stream winning a tie; the merge is
@@ -2395,8 +2457,82 @@ Phase 2. Make one quote map safe for two writers.
 **13. The `/api/markets/stocks` coalescing cache — decision 18.** Phase 2.
 Concurrent and near-simultaneous callers share one in-flight Alpaca request,
 keyed on the requested symbol set, TTL equal to the foreground interval.
-- *Status:* not started — there is no coalescing in
-  `corollary/api/routes/markets.py`.
+- *Status:* **landed.** `CoalescingCache` in `corollary/api/routes/markets.py`,
+  a fourth cache on `MarketCaches` (`stock_snapshots`) alongside the three that
+  were already there, keyed on the **normalised requested symbol set** —
+  `tuple(sorted(_requested_symbols(...)))`, so two tabs asking for the same
+  names in a different order or case are one question rather than two vendor
+  requests. Per-key `asyncio.Lock`, held across the fetch: the second of two
+  concurrent callers waits and is served the first one's answer. Per key rather
+  than one lock for the cache, because this one fronts the poll path and an
+  unrelated symbol set has no reason to queue behind another's round trip.
+  - **What it wraps is the snapshot request and nothing else.** It is the only
+    call on `/stocks` with no cache in front of it: the daily series is keyed
+    on the trading date, today's volume on `SESSION_VOLUME_TTL = 60s`, and the
+    market cap on the trading date with `MARKET_CAP_RETRY_TTL`. Caching the
+    *derived response* instead would also have worked and was rejected — it
+    would have made the three existing caches unreachable on a repeat poll,
+    which is to say it would have made their tests pass without testing
+    anything (`test_the_daily_series_is_fetched_once_per_trading_date` now
+    advances an injected clock past the new TTL for exactly that reason).
+  - **The TTL constant is `STOCK_SNAPSHOT_TTL`,
+    `timedelta(milliseconds=MARKETS_FOREGROUND_POLL_MS)` with
+    `MARKETS_FOREGROUND_POLL_MS = 400`.** Step 14's client half in
+    `web/src/hooks/` **must be the same number**, and the name is written down
+    in both places so each is greppable from the other:
+    `test_the_cache_ttl_is_the_foreground_poll_interval` pins the equality on
+    this side. Both halves move together on Algo Trader Plus (400ms → 5s) and
+    neither moves alone.
+  - **A failed fetch is not cached**, re-raises to the caller that made it, and
+    is logged at WARNING with `event=coalesced_fetch_failed` plus the rule, the
+    symbols and the timestamp (rule 8). A caller waiting on the lock makes its
+    own attempt rather than being handed the exception — two HTTP requests, and
+    the later one can still be answered. Routine TTL expiry is deliberately
+    *not* logged: a line per poll per symbol set is how a log stops being read.
+    Expired entries and their idle locks are dropped **on every resolve,
+    successful or not** — the sweep runs from a `finally`, so the key space
+    (every subset of the universe a client may ask for) stays bounded even
+    for a symbol set whose vendor call always fails.
+  - **A lock is dropped only when no caller is holding *or waiting on* it,
+    and that is counted explicitly** — `CoalescingCache._in_use`, a per-key
+    count incremented before the lock is awaited and decremented in the same
+    `finally`. The first implementation guarded the sweep with
+    `asyncio.Lock.locked()` and claimed "a **held** lock is never dropped";
+    the rules audit disproved it. `release()` clears `_locked` and *schedules*
+    the first waiter, which re-sets it only when it resumes, so there is a
+    window where the lock reads unlocked **while a waiter exists**.
+    Reaching it takes nothing exotic: a fetch slower than the 400ms TTL
+    stores an entry that is already expired (`read_at` is taken pre-fetch, by
+    design), a second caller arrives mid-flight and queues, and any unrelated
+    symbol set resolving in the same loop iteration sweeps the key and
+    deletes the lock. The waiter then woke holding an orphan and the next
+    caller `setdefault`-ed a **second** lock for the same key — two
+    concurrent Alpaca snapshot requests for one symbol set, which is the
+    exact failure this step exists to prevent, and invisible, because
+    `ratelimit.py`'s bucket waits rather than refusing. With two tabs on
+    different symbol sets the sweep runs ~5×/second, so this is a load-time
+    bug in the cache that only exists for load. `locked()` is not a liveness
+    test and `Lock._waiters` is private; a count of callers is neither.
+  - *Tests:* fourteen in `tests/api/test_markets_routes.py` — concurrent
+    callers on one key issue one fetch, two keys issue two, the TTL boundary
+    at `ttl - 1µs` holds and at `ttl` refetches, a raising fetch is neither
+    cached nor served as a success (sequential and with a waiter parked on
+    the lock) and leaves neither entry nor lock behind, symbol order does not
+    decide a hit, and a poll past the TTL reaches the vendor again. Four are
+    the sweep's, which nothing covered before the audit:
+    `test_a_sweep_does_not_drop_a_lock_another_caller_is_waiting_on` replays
+    the interleaving above and fails on the `locked()` guard (the lock is
+    gone, and the peak concurrent fetches for one key is 2 rather than 1);
+    `test_a_sweep_keeps_the_lock_of_a_fetch_still_in_flight` is the boundary
+    the fix must not overshoot; and two pin the bound on the key space. The
+    clock is injected throughout and the orderings are driven by
+    `asyncio.Event`; **nothing anywhere in this step sleeps on the wall
+    clock** — including the route-level near-simultaneous test, which now
+    places its second poll at `ttl - 1µs` on an injected clock rather than
+    trusting two full route calls to fit inside 400ms of real time.
+  - `corollary/api/deps.py` was **not** touched: `market_caches`/`CachesDep`
+    already live in `routes/markets.py` and the new cache hangs off the same
+    `MarketCaches` on `app.state`, so there was nothing for `deps.py` to grow.
 - *Why it must land before the interval drops:* the browser drives the poll and
   the API forwards it, so two tabs, a reload loop or a hot-reloading dev server
   multiply the Alpaca rate by the number of clients — 400ms × 2 clients is
@@ -2411,13 +2547,97 @@ keyed on the requested symbol set, TTL equal to the foreground interval.
 
 **14. The three-state cadence hook — decision 18.** Phase 2. Hidden, foreground
 and background are three states, not two.
-- *Status:* not started, and the starting point is further back than it looks:
-  **nothing refreshes Markets at all today.** There is no `refetchInterval`
-  anywhere in `web/src`, and `useMarketPoll` — which drives the *fixture* store's
-  `pollMarkets` — has had no callers since step 7 moved the pages onto the API.
-  `useLiveTick` is orphaned the same way. This is the reintroduction of live
-  refresh against a real feed, not an adjustment to a working cadence; read the
-  old hook as a fixture artefact rather than as the thing being retuned.
+- *Status:* **done.** `useMarketPoll` is rewritten: it no longer drives the
+  *fixture* store's `pollMarkets` — that call had had no callers since step 7 —
+  and now drives the real `GET /api/markets/stocks` read through TanStack
+  Query, via a new `refetchStocks(client)` in `web/src/lib/queries.ts`.
+  `MARKETS_FOREGROUND_POLL_MS = 400` and `MARKETS_BACKGROUND_POLL_MS = 5_000`
+  live in the hook; `App.tsx` mounts the background one, `Markets.tsx` the
+  foreground one. `useLiveTick` is still orphaned — the stream half is steps 8
+  and 15, not this one.
+  - *One interval, never two:* both mounts coordinate through a module-level
+    registry in the hook and the **fastest** requested interval wins, so
+    exactly one `setInterval` exists at a time and the result does not depend
+    on mount order — a mount/unmount race can leave the app polling too slowly
+    for an instant, never too fast. Markets unmounting resumes 5s.
+  - *The hidden gate is `document.hidden`, held by hand; `refetchInterval` is
+    deliberately unused,* for three reasons. It pauses on window **focus**
+    loss under the default `refetchIntervalInBackground: false`, and focus is
+    not the question: a visible, unfocused window is how a terminal is watched
+    beside an editor, still painted and still worth refreshing — while setting
+    that flag true removes the gate entirely and polls a hidden tab, the one
+    state decision 18 stops outright. It is per-observer, so the two mounts
+    would hold two timers. And the background state has **no observer at all**,
+    Markets being unmounted, so an observer-scoped interval cannot warm the
+    cache for the page that is not open yet. `refetchOnWindowFocus` is left at
+    its default: it only refetches a *stale* query and is deduped against
+    whatever the poll has in flight. The first read on return from hidden is
+    immediate — the interval restarts and the read fires with it, in the same
+    turn, rather than the read waiting out an interval; a cadence *change*
+    deliberately does not read immediately, because a route change into
+    Markets already remounts the query observer, which fetches on its own.
+  - *The 400ms floor is structural, not conventional:* `subscribe` clamps
+    every requested interval up to `MARKETS_FOREGROUND_POLL_MS`. Before this,
+    a third call site written as `useMarketPoll(200)` would simply have won
+    the registry and produced 300/min against a hard 200/min bucket with
+    nothing failing — `ratelimit.py` *waits* rather than refusing, so the
+    overspend surfaces as latency creep that looks like it worked. The
+    constant test pins the number; the clamp pins "no subscriber may ask for
+    less than it". The `intervalMs <= 0` opt-out short-circuits before the
+    clamp, so opting out never becomes a 400ms poll.
+  - *A failed poll is staleness, not a failure.* TanStack sets
+    `status: 'error'` on **any** failed fetch and leaves the existing `data`
+    in place, so turning this query into a 150/min poll turned a non-null
+    `error` from "there is nothing to show" into, mostly, "the last of many
+    reads failed". `Markets.tsx` now splits the two the way the loading
+    branch already split them (`isPending` is *no data yet*): `RequestFailed`
+    is handed the error only when `stocksQuery.data === undefined` — *no data
+    at all* — and a failure over a good snapshot shows a `Last poll failed`
+    pill beside the `Read HH:MM:SS ET` stamp, which freezes on its own
+    because `dataUpdatedAt` only advances on success. `error`, not `bearish`;
+    a pill, not a panel; and not a live region, since it appears and clears
+    with every failed poll. Unsplit, one bad poll in ten strobed the whole
+    180-row table between prices and a red panel two or three times a second,
+    and — worse — a *background* poll that failed on a page the user was not
+    looking at greeted them with a failure panel on arrival at Markets,
+    inverting the reason the background leg exists.
+  - *`lastPollAt` is knowingly unwired, and named as such.* `store.pollMarkets`
+    was already dead before this step and the real poll does not go through
+    it, so `store.lastPollAt` now has **zero production writers** while a
+    genuine 150/min poll exists. Nothing renders it, so there is no bug yet;
+    the bug is the next stale-pill, which would find the field present,
+    correctly documented, and permanently null. It must **not** be collapsed
+    into `lastTickAt` — "is the stream alive" and "is the poll alive" are
+    different questions. It could not be wired from here: the only action
+    that writes it is the Phase 1 mock random walk, which would overwrite
+    real quotes with fixture prices, and `store.ts` belongs to step 12. A
+    `TODO(step 12, store.ts)` at the poll site in `useMarketPoll.ts` names
+    the setter to add (`markPolled(at)`, or `lastPollAt` fed from a
+    successful read's `dataUpdatedAt`) and why.
+  - *The client half of the server's number:* the constant carries the same
+    name, `MARKETS_FOREGROUND_POLL_MS`, on both sides so one grep finds both,
+    and each side comments the other. `useMarketPoll.test.tsx` now pins 400 on
+    the client the way `test_the_cache_ttl_is_the_foreground_poll_interval`
+    pins the TTL on the server — before this, the server failed loudly if it
+    moved and **nothing failed if the client did**.
+  - *Tests:* `web/src/hooks/useMarketPoll.test.tsx` — twelve, covering the two
+    constants, immediate-read-then-interval, stopped-while-hidden,
+    immediate-on-return, silence after unmount, the non-positive opt-out, the
+    clamp (a request for 200ms polls at 400) and the opt-out surviving it, one
+    interval at the faster cadence (12 reads in 5s, where two intervals would
+    be 13), no read on the cadence change itself, and the background cadence
+    resuming. `Markets.test.tsx` gains the wiring test that fails if the page
+    stops mounting the hook, since the mount *is* how "which page is open" is
+    read, plus both directions of the error split: a failed poll over a good
+    snapshot keeps all four rows and shows the pill (and clears it on the next
+    good read), a cold failure renders `RequestFailed` and **no** table, and a
+    cache primed the way a failed background poll leaves it renders the
+    snapshot on arrival rather than a panel. `serve()`'s `stocks` override
+    takes a function as well as a value, because "the third poll fails" is a
+    state a polled endpoint's fixtures have to be able to express.
+  - *Not done here, deliberately:* the quote map's provenance and merge
+    (`at`/`source`) are step 12's; `store.ts`, `types.ts` and `api.ts` were not
+    touched, and nothing about what a quote record contains changed.
 - *The work, from decision 18:* **hidden** — `document.hidden` true, the poll
   stops entirely and the first poll on return is immediate; **foreground** —
   visible **and the Markets route mounted**, 400ms; **background** — visible,
@@ -2430,13 +2650,132 @@ and background are three states, not two.
   400 and not 300.
 - *Depends on:* 13 — the server must bound the rate before the client is
   allowed to ask for it faster.
-- *Files:* `web/src/hooks/useMarketPoll.ts` (rewrite or replace),
-  `web/src/lib/queries.ts`, `web/src/pages/Markets.tsx`, `web/src/App.tsx`.
+- *Files:* `web/src/hooks/useMarketPoll.ts` (rewritten),
+  `web/src/hooks/useMarketPoll.test.tsx` (new), `web/src/lib/queries.ts`,
+  `web/src/pages/Markets.tsx`, `web/src/pages/Markets.test.tsx`,
+  `web/src/App.tsx`.
 
 **15. The `MARKETS_VISIBLE` tier and the viewport hint — decision 18.** Phase 2.
 Spend the ~22 equity slots left after position underlyings on the Markets rows
 actually on screen.
-- *Status:* not started — `MARKETS_VISIBLE` appears nowhere in the tree.
+- *Status:* **server half landed; the Markets page half is what remains.**
+  Landed: `markets_visible` is a second client message on `/api/ws`
+  (`WsMarketsVisibleRequest` in `corollary/api/schemas.py`, dispatched from one
+  `_CLIENT_FRAMES` table in `corollary/api/routes/ws.py`), bounded at
+  `MAX_MARKETS_VISIBLE_SYMBOLS = 64` on arrival, refused whole with rule 8's
+  rule/inputs/timestamp on an over-long list, an OCC symbol or a malformed
+  ticker; `EngineRuntime.set_markets_visible` / `markets_visible_units` /
+  `clear_markets_visible` hold the hint, re-validate all of it and stamp
+  `MARKETS_VISIBLE` themselves, so there is no call site at which a client
+  symbol could be filed at a higher tier; `plan_stream_subscriptions` folds
+  those units into the **equity** list on every plan, where the priority sort
+  puts them last and the prefix cut reaches them first. The hint is dropped
+  when the connection that sent it closes, and is owned by whoever spoke last —
+  two tabs take turns rather than merging, which is harmless only because this
+  tier is last and every Markets row is polled regardless.
+  `corollary/engine/stream.py` gained one export, `stream_of`, so a caller can
+  refuse an OCC symbol *before* it becomes a unit rather than take a
+  `ValueError` out of the planner; the module still reads no clock, no
+  environment and no vendor library.
+- *Four audit findings fixed on top of that server half (2026-09-16), in one
+  pass:*
+  1. **A viewport hint could open a socket the watchdog then judged, so a
+     browser could cause a rule-9 halt.** On a flat book -- every session
+     before the first trade -- the equity plan's entire content was the
+     client's hint, `SocketSupervisor._open` launched the equity socket for
+     it, and `_settle_expectations` armed the ninety-second silence condition
+     on symbols nobody had validated against a universe. A hint naming a name
+     that never quotes on IEX was then a self-inflicted halt needing a human
+     resume. Fixed by **making the hint unable to arm anything by itself**:
+     `SubscriptionPlan.engine_subscribed` is the subset of `subscribed` that a
+     non-client tier asked for, and both the launch gate and the expectation
+     gate read it. The hint still rides a socket the *book* opens and is still
+     in the subscribe -- spare slots, never a reason to spend one, which is
+     what decision 18 says it is. Provenance is a tier property,
+     `SubscriptionPriority.client_supplied`, so a future client tier is a
+     deliberate answer rather than a silent inheritance. **The rejected
+     alternative was binding the hint to a known universe** (symmetric with
+     `/api/markets/stocks`, which refuses anything outside
+     `UNIVERSE_BY_SYMBOL`): strictly more restrictive and worth doing, but
+     `UNIVERSE_BY_SYMBOL` lives in `corollary/api/routes/markets.py`, and
+     `engine/` importing from `api/routes/` is the backwards dependency this
+     spec already carries a complaint about. It needs a home `engine/` can
+     own, and that move was outside this dispatch's fence. The two are not
+     exclusive; this one holds regardless of what the universe turns out to
+     be. Recorded, not acted on (weaker): the hint deliberately fills the
+     equity budget to exactly `cap`, which is where an Alpaca 405 becomes
+     reachable and `_correct_cap` halves the cap for the session (30 to 15).
+     Positions still fit at 15. This fix does **not** change that, except on a
+     flat book, where no equity socket now opens at all.
+  2. **Routine viewport churn inflated `not_streamed` and the "N symbols not
+     streamed" banner**, whose documented question is *"is anything I hold
+     unmarked?"*. Measured: 8 position underlyings + 64 hint symbols against
+     the 30-slot cap read `not_streamed 42` with every held symbol streaming,
+     plus 42 WARNING `stream_subscription_dropped` records in one plan.
+     `SubscriptionPlan.dropped_symbols` (and so `not_streamed`, `message` and
+     `StreamPlans`' sums) now counts engine-owned drops only; what the
+     viewport lost is `client_dropped_symbols` / `client_not_streamed`,
+     carried beside it and surfaced on the `socket_plan` record as
+     `viewport_not_streamed`. `dropped` itself is still never truncated. The
+     42 warnings became **one INFO** `stream_client_tier_trimmed` record
+     carrying counts, so a reader alerting on
+     `stream_subscription_budget_exceeded` is not woken by the budget working
+     as designed.
+  3. **`set_markets_visible` returned one `bool` carrying two meanings**, so
+     `ws.py` read a refusal as "the set did not differ": it sent the client no
+     error frame and logged the refused hint at INFO as one that had landed.
+     The gap is real -- `_SYMBOL` admits 32 characters because `subscribe`
+     must admit an OCC contract, `_EQUITY_TICKER` admits 16 -- so a
+     17-character entry passed the transport, was refused by the engine, and
+     the browser was never told. It now returns `MarketsVisibleOutcome`
+     (`MarketsVisibleStatus.APPLIED | UNCHANGED | REFUSED`, plus the
+     server-side `rule` on a refusal, built beside the rule 8 record so the
+     two cannot disagree). `ws.py` forwards a refusal as an `error` frame and
+     logs `status` rather than a bare `changed`. Neither regex was widened: an
+     unvalidated 17-character string on the equity socket is the thing being
+     prevented. The outcome raises on `bool()`, because
+     `if runtime.set_markets_visible(...)` would otherwise restore the old bug
+     while still type-checking.
+  4. **An over-claiming docstring corrected.** `set_markets_visible` said
+     *"nothing client-derived reaches the log record's fields"*, true of the
+     refusal path and not true of an accepted hint: its symbols become
+     `markets_visible_unit` keys and reached every
+     `stream_subscription_dropped` record verbatim, up to 64 per plan, and the
+     shape filter admits the paper-account-number pattern `wire.vendor_detail`
+     exists to redact. Finding 2's fix removes that volume path (counts only);
+     what remains is `stream_subscription_unacknowledged`'s `absent` list, a
+     rare vendor anomaly. `markets_visible_units` now states exactly that,
+     including that a shape filter is not a redactor. `engine/stream.py`
+     imports no redactor and stays pure per decision 17 -- no vendor import,
+     no clock read, no environment read.
+- *Owed by the client half (`web/src/pages/Markets.tsx`), and nothing else:*
+  observe which rows are on screen, debounce on a settled viewport, and send
+  `{"type": "markets_visible", "symbols": [...]}` on the existing socket **only
+  when the set actually differs** — every resubscribe is a gap in the marks.
+  `symbols` is a required list of equity tickers, upper case, ≤ 64 entries; an
+  empty list is the correct way to say *nothing is on screen* (scrolled away,
+  or navigated off Markets). There is no acknowledgement frame — the server
+  frame contract has three kinds and a fourth would be the thing it exists to
+  forbid — so a refusal arrives as the ordinary `error` frame with code
+  `subscription_refused`, and the previous hint stands.
+  **The message shape did not move; the occasions on which that frame arrives
+  did.** As of finding 3 above, a hint the transport admits and the *engine*
+  refuses now also produces one, where before it produced silence. What that
+  means for `Markets.tsx`: silence still means the hint landed, but it is now
+  a reliable signal rather than an optimistic one, and `subscription_refused`
+  must not be treated as fatal -- it is one refused message on a live socket,
+  the previous hint stands, and the page is polled regardless. Send plain
+  equity tickers (at most 16 characters, upper case, dots allowed for a class
+  share); the engine refuses anything wider, including the 17-to-32 character
+  band this endpoint's shape filter admits for `subscribe`'s sake.
+- *Owed on the server, but by step 12's socket work rather than by this step:*
+  `SocketSupervisor` builds its plan **once per session** and does not
+  resubscribe mid-session, so a hint received after the open takes effect at
+  the next plan rather than immediately. `MarketsVisibleOutcome.changed`
+  answers exactly the question a re-plan trigger has to ask -- *applied*,
+  never merely *not refused* -- and the supervisor is the caller that would
+  ask it. `corollary/engine/sockets.py` is no longer untouched by this step:
+  finding 1 above changed its launch and expectation gates.
 - *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
   debounced client message on the existing WS that names the visible rows and is
   sent only when the set actually differs. The server treats it as input to that
@@ -2449,7 +2788,9 @@ actually on screen.
 - *Depends on:* 11 (the equity budget and the two-plan shape), 8d (the
   client-to-server message), 12 (it is the second writer).
 - *Files:* `corollary/engine/stream.py`, `corollary/engine/runtime.py`,
-  `corollary/api/routes/ws.py`, `web/src/pages/Markets.tsx`.
+  `corollary/engine/sockets.py`, `corollary/api/routes/ws.py`,
+  `corollary/api/schemas.py` (all landed),
+  `web/src/pages/Markets.tsx` (outstanding).
 
 **10. Doc amendments.** Phase 2, **last**, so they describe what was actually
 built.
@@ -2519,6 +2860,71 @@ behind it is more expensive to rebuild than to record.
   submits. And three surfaces claim *"Submits to the risk manager"* while none
   does; consistent rather than a silent no-op, but true only once
   `RiskManager.approve()` exists.
+
+### Carried items re-verified 2026-09-16 — five of eight are closed
+
+Checked against the tree rather than assumed, because a carried item that is
+already fixed costs the next session a dispatch to rediscover that.
+
+- **`_write_trades`'s canonical-symbol premise — CLOSED**, `8cd8a94`. Two
+  `@pytest.mark.risk` tests in `tests/engine/test_ledger.py` now drive a
+  lower-cased, padded vendor symbol through `build_ledger` and assert the
+  record is canonical, on both the close-matches-open and the expiry path.
+  (Location correction: the `guarded` logic is in `engine/ingest.py`, not
+  `ledger.py` as the original item said.)
+- **Three test files outside the `-m risk` gate — CLOSED.**
+  `tests/api/test_account_mode.py`, `tests/db/test_risk_limit_bounds.py` and
+  `tests/db/test_money_sql.py` all carry the marker now.
+- **`check_watchdog`'s four-state docstring table — CLOSED.** It enumerates
+  five states and names the pinning test.
+- **Step 8d's open rule 9 question — CLOSED, and it did not ship unresolved.**
+  `_repair_unrecorded_halt` in `runtime.py` makes the healthy branch *repair*
+  the unpersisted halt rather than forget it, so the engine ends genuinely
+  halted awaiting an explicit human resume. The only value it ever writes to
+  `halted` is `True`.
+- **Still open:** `engine_state`/`mark_started` remain persistence living in
+  `api/routes/engine.py`, imported lazily inside `EngineRuntime` method bodies
+  to dodge a circular import. **Still open:** `ingest.py`'s `guarded` comment
+  still under-counts its inputs, and `MISSING_FEE_AMOUNT` is still unnamed.
+  **Still open:** the commit trailer — every commit on this branch, including
+  today's, carries `Co-Authored-By: Claude Sonnet 5`, because the committer
+  takes the trailer from its own invocation context rather than from a
+  dispatch's claim about it. That is the correct rule and it produced a
+  discrepancy anyway. Amending history remains a human call.
+- **Amended:** the Research/`isHalted` item's framing is now wrong in detail.
+  `Research.tsx` and `ChainOrderTicket.tsx` both read `isHalted` from the
+  Zustand fixture store; `OrderTicket.tsx` reads neither, being gated by a
+  static `READ_ONLY_REASON` prop; `CommandPalette.tsx` deliberately reads
+  *both* and ORs them. Only Dashboard cleanly matches the original claim. The
+  underlying hazard is unchanged and still Phase 4's.
+
+### Two notes owed to step 12's web half — from the 2026-09-16 audit
+
+Neither blocks anything today; both are cheap to honour and expensive to
+rediscover inside a merge that is already subtle.
+
+- **An equal `at` is reachable, so the merge needs a rule for it.** A daily
+  bar's `at` is the interval's *opening* time and does not advance as the
+  close moves, so two consecutive polls of a bar-only snapshot can carry
+  different prices under an **identical** stamp. A merge written as a strict
+  `incoming.at > existing.at` would keep the first price for the rest of the
+  session while the `Read HH:MM:SS ET` header claims the row is current.
+  Poll-versus-poll on an equal stamp should take the later read; the stream
+  already wins ties against the poll, per decision 18 rule 2. Reachability is
+  low — it needs no usable quote mid, no `latestTrade`, and a daily bar — which
+  is why it is a note rather than a finding.
+- **`Markets.tsx`'s trailing chart point is still stamped with the server
+  clock** (`IntradayPoint(at=now, …)`) for the same price that now carries a
+  vendor `at` beside it. Pre-existing and not a decision 18 violation —
+  decision 18 governs the quote map, not the series — but the two disagreeing
+  inside one payload is worth closing when the series is next touched.
+- **`useMarketPoll`'s floor is total against every value except `NaN`.**
+  `useMarketPoll(NaN)` passes the `<= 0` opt-out, survives `Math.max(NaN, 400)`
+  as `NaN`, and `setInterval(fn, NaN)` runs as `0` — an unthrottled poll
+  against a bucket that waits rather than refusing, which is the exact latency
+  creep the clamp exists to prevent. Unreachable today because both call sites
+  pass module constants; it becomes reachable the moment an interval is derived
+  from config. One `Number.isFinite` guard closes it.
 
 ### Phase 4 — the Algo Trader Plus upgrade (decision 20)
 
