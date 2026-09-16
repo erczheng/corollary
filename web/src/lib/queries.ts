@@ -22,7 +22,13 @@
  * hooks cover the things that are *fetched*: balances, the ledger,
  * positions, chains, settings.
  */
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query'
 import {
   DEFAULT_HISTORY_PERIOD,
   DEFAULT_HISTORY_TIMEFRAME,
@@ -143,9 +149,16 @@ export function useAccountScope(override?: AccountMode): AccountMode {
   return override ?? selected
 }
 
-/** Market data refetches faster than balances do — the snapshot poll runs at
- * 2s against its own rate-limit bucket, while the account trio runs at 15s
- * against the trading host's. */
+/** Market data refetches faster than balances do — the snapshot poll runs on
+ * its own rate-limit bucket (400ms with Markets open, 5s otherwise; see
+ * `useMarketPoll`), while the account trio runs at 15s against the trading
+ * host's.
+ *
+ * This is **not** the poll interval and must not be confused with it: the
+ * poll fetches unconditionally, and `staleTime` only governs the refetches
+ * TanStack does on its own — on mount and on window focus. Two seconds is
+ * what makes arriving at Markets re-read rather than present a
+ * background-aged row as current. */
 const MARKET_STALE_TIME = 2_000
 
 /* -------------------------------------------------------------------------
@@ -247,6 +260,54 @@ export function useStocks(symbols?: readonly string[]) {
     queryFn: ({ signal }) => fetchStocks(symbols, { signal }),
     staleTime: MARKET_STALE_TIME,
   })
+}
+
+/** One turn of the market snapshot poll — the cadence itself lives in
+ * `useMarketPoll`, and this is the read it drives.
+ *
+ * Takes the client rather than being a hook because **the background state
+ * has no observer**: Markets is unmounted, nothing is subscribed to
+ * `queryKeys.stocks`, and the poll still has to fetch so the page that is
+ * not open yet arrives on a warm cache. `fetchQuery` writes into the same
+ * cache entry `useStocks` reads, so a mounted table re-renders from it.
+ *
+ * Two behaviours that are chosen, not incidental:
+ *
+ * - `staleTime: 0` — the poll *is* the cadence, so a staleTime here would
+ *   silently skip reads and make the interval a lie.
+ * - Errors are swallowed. A failed poll is not an exception anyone can
+ *   handle: it is already written into the cache, where `useStocks` reads
+ *   it. An unhandled rejection every 400ms would be noise in the one
+ *   console that matters.
+ *
+ *   **Read that cached error carefully.** TanStack sets `status: 'error'`
+ *   on *any* failed fetch and leaves the existing `data` in place, so
+ *   `useStocks()` can report an error and a good snapshot at the same
+ *   time. Those are two different conditions and a reader must split them:
+ *   error *with* data is **staleness** — the last poll failed, the numbers
+ *   on screen are the last ones that arrived — while error *without* data
+ *   is a failure with nothing to show. `Markets.tsx` does exactly that.
+ *   Rendering the error unconditionally strobes the whole 180-row table
+ *   between prices and a red panel on one bad poll in ten, which tells an
+ *   operator the feed is down while it is not.
+ *
+ * A fetch already in flight for this key is joined rather than duplicated,
+ * so a server slower than the interval degrades to one outstanding request
+ * instead of a pile-up. */
+export function refetchStocks(
+  client: QueryClient,
+  symbols?: readonly string[],
+): Promise<void> {
+  return client
+    .fetchQuery({
+      queryKey: queryKeys.stocks(symbols),
+      queryFn: ({ signal }) => fetchStocks(symbols, { signal }),
+      staleTime: 0,
+    })
+    .then(
+      () => undefined,
+      () => undefined,
+    )
 }
 
 /** Quoted underlyings and their series.

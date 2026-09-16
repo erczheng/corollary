@@ -6,6 +6,7 @@ import { CommandPalette } from './components/CommandPalette'
 import { useThemeSync } from './hooks/useThemeSync'
 import { useCommandPaletteShortcut } from './hooks/useCommandPaletteShortcut'
 import { useFocusModality } from './hooks/useFocusModality'
+import { MARKETS_BACKGROUND_POLL_MS, useMarketPoll } from './hooks/useMarketPoll'
 import { Dashboard } from './pages/Dashboard'
 import { Activity } from './pages/Activity'
 import { News } from './pages/News'
@@ -20,6 +21,11 @@ function AppShell() {
   useThemeSync()
   useCommandPaletteShortcut()
   useFocusModality()
+  // The background leg of decision 18's three states: 5s while the tab is
+  // visible and Markets is closed, nothing at all while it is hidden. The
+  // Markets page mounts the same hook at the foreground interval and
+  // supersedes this one — one interval exists at a time, never two.
+  useMarketPoll(MARKETS_BACKGROUND_POLL_MS)
 
   return (
     <BrowserRouter>

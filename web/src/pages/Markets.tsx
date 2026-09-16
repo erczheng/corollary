@@ -7,6 +7,11 @@ import { ChainOrderTicket } from '../components/ChainOrderTicket'
 import { UnderlyingChart } from '../components/UnderlyingChart'
 import { TableSkeleton } from '../components/Skeleton'
 import { usePagination } from '../hooks/usePagination'
+import {
+  MARKETS_BACKGROUND_POLL_MS,
+  MARKETS_FOREGROUND_POLL_MS,
+  useMarketPoll,
+} from '../hooks/useMarketPoll'
 import { useUIStore } from '../lib/store'
 import { useAccount, useChain, useStocks } from '../lib/queries'
 import { isAccountUnavailable, isApiError } from '../lib/api'
@@ -584,7 +589,15 @@ function StocksAndEtfs({
   onViewChain,
 }: {
   stocks: StockQuote[]
+  /** No snapshot **yet** — the first read is still in flight. */
   loading: boolean
+  /** No snapshot **ever**: a cold failure, with nothing to put on screen.
+   *
+   * A poll that failed *on top of* a good snapshot must not arrive here.
+   * That is staleness, not a failure, and the header reports it — replacing
+   * 180 live rows, their pagination, the search and any expanded chart with
+   * a red panel for 400ms tells an operator the market-data feed is down
+   * while it is not. See `pollFailed` in `Markets`. */
   error: unknown
   onViewChain: (symbol: string) => void
 }) {
@@ -815,6 +828,14 @@ function StocksAndEtfs({
 export function Markets() {
   const accountMode = useUIStore((s) => s.accountMode)
 
+  // Decision 18's foreground state, and *this* is where the "which page is
+  // open" term comes from: the component that consumes the data is the
+  // component that mounts the hook, so there is no navigation flag to keep
+  // in sync and nothing survives a crash, a modal, or a route somebody
+  // forgot. Mounting supersedes the app-level background interval; the
+  // app-level one resumes when this page unmounts.
+  useMarketPoll(MARKETS_FOREGROUND_POLL_MS)
+
   const stocksQuery = useStocks()
   // Equity, for the ticket's advisory risk estimate only. The engine
   // enforces the limit; this number informs.
@@ -822,6 +843,23 @@ export function Markets() {
 
   const stocks = stocksQuery.data ?? []
   const symbols = underlyingSymbols(stocks)
+
+  // **A failed poll is staleness; only a cold failure is a failure.**
+  // TanStack marks a query `error` on *any* failed fetch and leaves the last
+  // good `data` in place, so on a 400ms cadence one 503 — an Alpaca blip, an
+  // API restart — would otherwise throw the whole table away and put it back
+  // a tick later, strobing between prices and a red panel two or three times
+  // a second. Worse, a *background* poll that failed on a page the user was
+  // not even looking at would greet them with a failure panel on arrival at
+  // Markets, which inverts the reason the background leg exists.
+  //
+  // So the two conditions are split the way the loading branch already
+  // splits them (`isPending` is "no data yet"): the panel is for "no data at
+  // all", and a failure over a good snapshot is reported in the header. The
+  // `Read …` stamp freezes on its own — `dataUpdatedAt` only advances on
+  // success — and the pill beside it says why it stopped.
+  const haveSnapshot = stocksQuery.data !== undefined
+  const pollFailed = stocksQuery.isError && haveSnapshot
 
   // Nothing is chosen until you choose it: `useChain(null)` stays disabled,
   // which is the point of the null.
@@ -852,6 +890,24 @@ export function Markets() {
               'Reading the universe…'
             )}
           </span>
+          {pollFailed && (
+            // `error`, not `bearish`: a request that failed is a system
+            // condition, and a losing position is not. A pill rather than a
+            // panel, and `full` because pills read as status where a
+            // rectangle reads as a control.
+            //
+            // Deliberately **not** a live region. It appears and clears with
+            // every failed poll, and an assistive technology announcing
+            // "last poll failed" two or three times a second is the same
+            // strobe this whole branch exists to stop. The stamp beside it
+            // is the primary signal and is not live either.
+            <span
+              className="inline-flex h-6 items-center whitespace-nowrap rounded-full border border-error px-2 text-label-sm text-error"
+              title="The last snapshot request failed. The prices below are the last ones that arrived, at the time shown beside this."
+            >
+              Last poll failed
+            </span>
+          )}
           <RefreshButton
             label="Refresh market snapshots"
             // Re-reading a snapshot costs one request, not a scan.
@@ -864,10 +920,12 @@ export function Markets() {
         </div>
       </div>
       <p className="mt-2 max-w-prose text-body-md text-on-surface-variant">
-        Listed option chains and the stock universe the scanner draws from. These are snapshot
-        reads, taken when you open the page and when you refresh — every option contract is its own
-        quote, and a page of chains is far past the option stream’s 200-quote budget, so nothing
-        here streams.
+        Listed option chains and the stock universe the scanner draws from. The stock table is
+        re-read every {MARKETS_FOREGROUND_POLL_MS / 1000}s while this page is open, every{' '}
+        {MARKETS_BACKGROUND_POLL_MS / 1000}s while it is not, and not at all while the tab is
+        hidden. A chain is a snapshot read, taken when you open it and when you refresh — every
+        option contract is its own quote, and a page of chains is far past the option stream’s
+        200-quote budget, so nothing here streams.
         Trading a row opens a position in your {accountMode === 'paper' ? 'Paper' : 'Cash'} account.
       </p>
 
@@ -895,7 +953,10 @@ export function Markets() {
       <StocksAndEtfs
         stocks={stocks}
         loading={stocksQuery.isPending}
-        error={stocksQuery.error}
+        // The cold failure only, and the sibling of `isPending`: that is
+        // "no data yet", this is "no data at all". A poll that failed over
+        // a good snapshot goes to the header pill, never here.
+        error={haveSnapshot ? null : stocksQuery.error}
         onViewChain={(symbol) => {
           setUnderlying(symbol)
           // Scrolling is the point: the chain is a section above, and

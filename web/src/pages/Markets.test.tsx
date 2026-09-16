@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, within, fireEvent } from '@testing-library/react'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
+import { act, render, screen, within, fireEvent } from '@testing-library/react'
 import App from '../App'
+import { MARKETS_FOREGROUND_POLL_MS } from '../hooks/useMarketPoll'
 import { queryClient } from '../lib/queryClient'
+import { refetchStocks } from '../lib/queries'
 import { useUIStore } from '../lib/store'
 import type { AccountResponse, OptionContract, RiskLimit, StockQuote } from '../lib/types'
 
@@ -156,7 +158,10 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 interface Overrides {
-  stocks?: Response
+  /** A function rather than a value when the answer has to *change* between
+   * reads — the stock endpoint is polled, so "the third poll fails" is a
+   * state the fixtures have to be able to express. */
+  stocks?: Response | (() => Response)
   chain?: Response
   account?: Response
 }
@@ -168,7 +173,10 @@ function serve(overrides: Overrides = {}) {
     const url = String(input)
 
     if (url.includes('/markets/stocks')) {
-      return Promise.resolve(overrides.stocks ?? jsonResponse(200, STOCKS))
+      const served = overrides.stocks
+      return Promise.resolve(
+        typeof served === 'function' ? served() : (served ?? jsonResponse(200, STOCKS)),
+      )
     }
     if (url.includes('/markets/chain/')) {
       chainCalls.push(url)
@@ -469,7 +477,17 @@ describe('a book that is not configured', () => {
   })
 })
 
+/** Two directions, and they are different conditions rather than degrees of
+ * one. TanStack sets `status: 'error'` on **any** failed fetch and leaves
+ * the existing `data` in place, so once this table is polled at 400ms a
+ * non-null `error` stops meaning "there is nothing to show": most of the
+ * time it means "the last of many reads failed, and 180 good rows are still
+ * on screen". The failure panel belongs to the first case only. */
 describe('a request that fails', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('reports the stock universe failing as a system condition', async () => {
     serve({
       stocks: jsonResponse(503, {
@@ -484,5 +502,105 @@ describe('a request that fails', () => {
     const alert = await screen.findByRole('alert', {}, { timeout: 4_000 })
     expect(alert.textContent).toContain('The market data provider did not answer.')
     expect(alert.className).toContain('text-error')
+    // A cold failure: no snapshot ever arrived, so there is no table to
+    // keep and the panel is the whole answer.
+    expect(within(section('Stocks & ETFs')).queryByRole('table')).toBeNull()
+  })
+
+  /** 429 rather than 503 on purpose, twice over: it is the failure a
+   * 150/min poll against a 200/min bucket actually risks, and `shouldRetry`
+   * does not retry a 4xx, so the error state lands on the failed poll
+   * itself rather than a retry delay later. */
+  function rateLimited(): Response {
+    return jsonResponse(429, {
+      error: { code: 'rate_limited', message: 'Too many requests to the market data provider.' },
+    })
+  }
+
+  it('keeps the table when a poll fails on top of a good snapshot', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let failing = false
+    serve({ stocks: () => (failing ? rateLimited() : jsonResponse(200, STOCKS)) })
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    failing = true
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MARKETS_FOREGROUND_POLL_MS * 2)
+    })
+
+    // Every row still there: the prices are 400ms old, not absent. Blanking
+    // them for one bad poll and restoring them on the next would strobe the
+    // page two or three times a second under intermittent failure, and say
+    // the feed is down while it is not.
+    expect(bodyRows(stockTable())).toHaveLength(STOCKS.length)
+    expect(screen.queryByRole('alert')).toBeNull()
+    // The header carries it instead, beside the `Read …` stamp that has
+    // stopped advancing because `dataUpdatedAt` only moves on success.
+    expect(screen.getByText('Last poll failed')).toBeTruthy()
+
+    // And it clears on the next good read — a staleness signal that stuck
+    // would be a worse lie than none.
+    failing = false
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MARKETS_FOREGROUND_POLL_MS * 2)
+    })
+    expect(screen.queryByText('Last poll failed')).toBeNull()
+  })
+
+  it('renders the snapshot a background poll failed after, not a panel', async () => {
+    // The state a user reaches by sitting on Settings while the 5s
+    // background leg fails once, then navigating to Markets: the cache
+    // holds a good snapshot *and* an error, and before this was split the
+    // arrival rendered a failure panel caused by a fetch that happened on a
+    // page they were not looking at — inverting the reason the background
+    // leg exists at all. Primed directly rather than by driving the router,
+    // because what is under test is what Markets does on mount.
+    let failing = false
+    serve({ stocks: () => (failing ? rateLimited() : jsonResponse(200, STOCKS)) })
+    await refetchStocks(queryClient)
+    failing = true
+    await refetchStocks(queryClient)
+
+    render(<App />)
+
+    expect(await screen.findByText('NVIDIA Corp.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(await screen.findByText('Last poll failed')).toBeTruthy()
+  })
+})
+
+/** Decision 18's foreground state is wired by *this page* mounting the
+ * cadence hook — which page is open is read from the router rather than
+ * from a store flag, so the mount is the wiring and this is the test that
+ * fails if it is removed. The cadence itself is pinned in
+ * `useMarketPoll.test.tsx`; what is asserted here is only that the page
+ * mounts it rather than sitting on the 5s background interval. */
+describe('the foreground cadence', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('re-reads the stock table while Markets is open', async () => {
+    // `shouldAdvanceTime` so the interval is a fake timer from the start
+    // while RTL's real-time waits still resolve.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const fetchMock = serve()
+    const stocksReads = () =>
+      fetchMock.mock.calls.filter((c) => String(c[0]).includes('/markets/stocks')).length
+
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    const before = stocksReads()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MARKETS_FOREGROUND_POLL_MS * 3)
+    })
+
+    // Three intervals, three reads. Greater-or-equal rather than exact
+    // because `shouldAdvanceTime` also moves the clock by whatever real
+    // time the awaits above took; the background rate would produce none
+    // of them in 1.2s, which is the distinction under test.
+    expect(stocksReads() - before).toBeGreaterThanOrEqual(3)
   })
 })
