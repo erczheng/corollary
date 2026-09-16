@@ -986,3 +986,118 @@ def test_a_close_with_no_price_books_nothing_and_still_consumes_the_lot() -> Non
     (refusal,) = result.rejections
     assert refusal.rule is RejectionRule.UNPRICED_OPTION_EVENT
     assert refusal.at == at(15)
+
+
+# --------------------------------------------------------------------------
+# The lot key is the canonical symbol, not the row's spelling
+# --------------------------------------------------------------------------
+
+#: An adjusted contract taken from the recording:
+#: ``tests/fixtures/alpaca/option_contracts_adjusted.json`` carries it with
+#: ``root_symbol: "GME1"``, ``underlying_symbol: "GME"`` and -- as every live
+#: adjusted contract does -- ``multiplier: "100"``.
+GME1 = "GME1261016C00003000"
+
+#: The same contract, spelled the way it must never be keyed: lower-cased and
+#: untrimmed. ``parse_occ_symbol`` answers ``GME1`` for both, which is the
+#: whole reason :class:`~corollary.instruments.OccSymbol` carries a canonical
+#: ``symbol`` at all.
+#:
+#: Unobserved on this account -- all 15 recorded ``FILL`` rows spell the
+#: symbol canonically -- which is exactly why it needs a fixture rather than a
+#: wait. The consequence is not a formatting wobble: lots are queued per
+#: symbol, so two spellings of one contract become two queues, the close finds
+#: nothing to match, and the round trip books **no realized P&L at all**
+#: rather than reporting a refusal anyone could read.
+GME1_AS_SENT = " gme1261016c00003000 "
+
+#: The *unadjusted* GME contract at the same strike and expiry. A different
+#: contract with a different deliverable, and it must stay a different queue:
+#: canonicalisation folds case and whitespace and nothing else.
+GME_PLAIN = "GME261016C00003000"
+
+
+@pytest.mark.risk
+def test_a_close_matches_an_open_whose_row_spelled_the_symbol_differently() -> None:
+    """One contract, two spellings, one lot queue.
+
+    Keyed on the row's own ``symbol`` instead of the parsed contract's, the
+    open lands in one bucket and the close in another: the close over-closes
+    an empty queue, the open lot never closes, and lifetime P&L is short the
+    whole trade. Rule 4's failure mode arriving as silence.
+    """
+    result = build_ledger(
+        [
+            fill(GME1_AS_SENT, FillSide.BUY, 2, "3.10", when=at(14), order_id="open"),
+            fill(GME1, FillSide.SELL, 2, "4.35", when=at(15), order_id="close"),
+        ],
+        account=PAPER,
+        intents={"open": PositionIntent.BUY_TO_OPEN},
+        # Keyed canonically, because that is how the contracts endpoint sends
+        # it. A lot keyed on the raw row would not find its own multiplier
+        # either -- two wrong answers from one wrong key.
+        multipliers={GME1: Decimal(100)},
+    )
+
+    assert rules(result.rejections) == []
+    (trade,) = result.trades
+    assert trade.symbol == GME1
+    assert trade.qty == 2
+    assert trade.pnl == Decimal("250.00")
+    assert result.open_lots == ()
+    assert {movement.symbol for movement in result.movements} == {GME1}
+
+
+@pytest.mark.risk
+def test_an_expiry_closes_a_lot_whose_row_spelled_the_symbol_differently() -> None:
+    """The same invariant on the option-event path, which builds its own movement.
+
+    Both ``LotMovement`` constructors have to key on the parsed contract: this
+    one is the ``OPEXP`` branch, where a mismatch leaves a worthless lot open
+    forever and never books the loss.
+    """
+    result = build_ledger(
+        [
+            fill(GME1, FillSide.BUY, 2, "3.10", when=at(14), order_id="open"),
+            option_event("OPEXP", GME1_AS_SENT, "-2", when=at(21)),
+        ],
+        account=PAPER,
+        intents={"open": PositionIntent.BUY_TO_OPEN},
+        multipliers={GME1: Decimal(100)},
+    )
+
+    assert rules(result.rejections) == []
+    (trade,) = result.trades
+    assert trade.symbol == GME1
+    assert trade.close_kind is CloseKind.EXPIRY
+    assert trade.close_price == Decimal(0)
+    assert trade.pnl == Decimal("-620.00")
+    assert result.open_lots == ()
+
+
+@pytest.mark.risk
+def test_an_adjusted_root_is_never_folded_into_the_unadjusted_contract() -> None:
+    """The boundary on the other side: ``GME1`` and ``GME`` are two contracts.
+
+    Canonicalisation must fold case and whitespace and *stop*. Folding the
+    numeric suffix would match a close on the plain contract against a lot in
+    the adjusted one, whose deliverable is not the same -- so the refusal
+    here is the correct answer, and it names which symbol went unmatched.
+    """
+    result = build_ledger(
+        [
+            fill(GME1, FillSide.BUY, 2, "3.10", when=at(14), order_id="open"),
+            fill(GME_PLAIN, FillSide.SELL, 2, "4.35", when=at(15), order_id="close"),
+        ],
+        account=PAPER,
+        intents={"open": PositionIntent.BUY_TO_OPEN},
+        multipliers={GME1: Decimal(100), GME_PLAIN: Decimal(100)},
+    )
+
+    assert result.trades == ()
+    (refusal,) = result.rejections
+    assert refusal.rule is RejectionRule.OVER_CLOSE
+    assert refusal.symbol == GME_PLAIN
+    (lot,) = result.open_lots
+    assert lot.symbol == GME1
+    assert lot.qty == 2
