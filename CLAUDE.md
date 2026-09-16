@@ -33,7 +33,8 @@ uv run python -m pytest           # backend tests — NOT `uv run pytest`, see b
 uv run python -m pytest -m risk   # risk tests only — run before any engine change
 uv run alembic upgrade head       # migrations — wired, 0003 is head
 uv run python -m corollary.engine    # start engine
-uv run python -m uvicorn corollary.api:app --reload --env-file .env   # start API — see below
+uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
+uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
 uv run mypy corollary            # type check, must be clean
 ```
 
@@ -55,6 +56,18 @@ needs a broker returns a 503 naming `ALPACA_PAPER_API_KEY` and
 `ALPACA_PAPER_SECRET_KEY`. That is the app behaving correctly and is easy to
 misread as a credentials problem: the keys are in `.env`, the server just was
 not given them. Load the file at the launcher, never inside `create_app()`.
+
+**Two entry points, and `--reload` must use the streamless one.**
+`corollary.api:app` opens the three vendor sockets in session;
+`corollary.api:dev_app` is the same app with none. Reload cycles the process,
+and Alpaca answers a surplus concurrent trading-stream connection with a 406,
+which is a fatal stream code — so editing a file during market hours against
+`:app --reload` halts the engine once per save, each halt needing an explicit
+`POST /api/engine/resume`. The halts are correct; a halt log full of
+self-inflicted entries is the problem, because that is the log nobody reads on
+the morning it matters, and resuming reflexively is the trained reflex rule 9
+depends on not existing. Use `:dev_app` for editing work, and `:app` without
+`--reload` when the sockets or rule 9 are themselves the subject.
 
 Frontend commands run from `web/`:
 
