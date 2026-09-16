@@ -756,14 +756,35 @@ describe('data sources', () => {
     expect(within(sources).getByText(/Engine halted/)).toBeInTheDocument()
   })
 
-  it('names the plan and the two caps it determines', async () => {
+  /** Three figures, each named for what it governs. The websocket cap is two
+   * budgets and not one — an equity symbol cap and an option quote cap — and
+   * saying "30 symbols" without which stream is the error 56e7041 fixed on
+   * three screens. */
+  it('names the plan and the three caps it determines, per stream', async () => {
     stubFetch()
     render(<App />)
     const sources = section('Data sources')
 
     expect(within(sources).getByText('Basic (free)')).toBeInTheDocument()
     expect(within(sources).getByText(/30 streamed equity symbols/)).toBeInTheDocument()
+    expect(within(sources).getByText(/200 streamed option quotes/)).toBeInTheDocument()
     expect(within(sources).getByText(/200 requests per minute/)).toBeInTheDocument()
+  })
+
+  /** Unlimited is an equities-only sentinel. This branch used to read
+   * "unlimited streamed symbols", which was false for options: the paid plan
+   * raises the option budget from 200 to 1,000 rather than removing it. */
+  it('keeps a real option ceiling on Algo Trader Plus, where equities go unlimited', async () => {
+    stubFetch()
+    useUIStore.setState({ dataPlan: 'algo_trader_plus' })
+    render(<App />)
+    const sources = section('Data sources')
+
+    expect(within(sources).getByText('Algo Trader Plus')).toBeInTheDocument()
+    expect(within(sources).getByText(/unlimited streamed equity symbols/)).toBeInTheDocument()
+    expect(within(sources).getByText(/1,000 streamed option quotes/)).toBeInTheDocument()
+    expect(within(sources).queryByText(/unlimited streamed option/)).not.toBeInTheDocument()
+    expect(within(sources).queryByText(/unlimited streamed symbols/)).not.toBeInTheDocument()
   })
 
   /** Requesting OPRA on Basic returns an auth error rather than empty data, so

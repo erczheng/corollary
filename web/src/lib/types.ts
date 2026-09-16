@@ -905,9 +905,10 @@ export interface DataSourceStatus {
  *
  * This is a *fact* about the account, not a preference — you cannot select
  * your way onto OPRA. It is here because it gates which feed values are
- * legal, and because the two numbers it determines (streamed symbols,
- * requests per minute) are the reason this app has a 400ms stream scoped to
- * open positions *and* a separate 2s poll across everything else. */
+ * legal, and because the numbers it determines (equity stream symbols,
+ * option stream quotes, requests per minute) are the reason this app has a
+ * 400ms stream scoped to open positions *and* a separate 2s poll across
+ * everything else. */
 export type DataPlan = 'basic' | 'algo_trader_plus'
 
 export interface DataPlanCaps {
@@ -915,18 +916,37 @@ export interface DataPlanCaps {
   monthlyUsd: number
   /** The **equity** websocket's symbol cap, or null for unlimited.
    *
-   * Not the whole story, and deliberately named for the stream it governs:
-   * option quotes are a *separate* budget — 200 on Basic, 1,000 on Algo
-   * Trader Plus, never unlimited — which this type does not yet carry, so
-   * anything rendering it must say "equity" rather than "symbols"
-   * (CLAUDE.md). */
+   * Deliberately named for the stream it governs: the websocket cap is *two*
+   * budgets and not one, and `optionStreamQuotes` carries the other. Anything
+   * rendering either must say which stream it means — "capped at 30 symbols"
+   * was on three screens before `56e7041`, and it was describing a pool that
+   * does not exist. */
   streamSymbols: number | null
+  /** The **option** websocket's quote budget. Never null: unlimited is an
+   * equities-only sentinel, and the paid plan raises options from 200 to
+   * 1,000 rather than removing the ceiling (CLAUDE.md's Alpaca specifics;
+   * decision 17 of the Phase 2 design). Every leg of every open position
+   * spends one quote, which is why a book of positions streams and a page of
+   * chains is polled. */
+  optionStreamQuotes: number
   reqPerMin: number
 }
 
 export const DATA_PLANS: Record<DataPlan, DataPlanCaps> = {
-  basic: { label: 'Basic (free)', monthlyUsd: 0, streamSymbols: 30, reqPerMin: 200 },
-  algo_trader_plus: { label: 'Algo Trader Plus', monthlyUsd: 99, streamSymbols: null, reqPerMin: 10_000 },
+  basic: {
+    label: 'Basic (free)',
+    monthlyUsd: 0,
+    streamSymbols: 30,
+    optionStreamQuotes: 200,
+    reqPerMin: 200,
+  },
+  algo_trader_plus: {
+    label: 'Algo Trader Plus',
+    monthlyUsd: 99,
+    streamSymbols: null,
+    optionStreamQuotes: 1000,
+    reqPerMin: 10_000,
+  },
 }
 
 export type FeedKey = 'options' | 'stockHistorical' | 'stockRealtime'

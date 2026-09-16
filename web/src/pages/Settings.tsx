@@ -538,14 +538,23 @@ export function Settings() {
 
           <WriteRefused error={updateFeeds.error} what="a data feed" />
 
+          {/* Two websocket budgets, not one: the equity cap and the option
+              cap are rationed separately, and "unlimited" is an equities-only
+              sentinel — options keep a ceiling on every plan. Each figure is
+              named for the stream it governs, which is the correction in
+              56e7041. */}
           <p className="mt-4 max-w-prose text-caption text-on-surface-variant">
             This plan allows{' '}
             {plan.streamSymbols === null
               ? 'unlimited streamed equity symbols'
-              : `${plan.streamSymbols} streamed equity symbols`}{' '}
-            and {formatInteger(plan.reqPerMin)} requests per minute. Option contracts draw on a
-            separate quote budget. Together those are why open positions stream while the Markets
-            page polls — a book of positions fits comfortably, a page of chains does not.
+              : `${formatInteger(plan.streamSymbols)} streamed equity symbols`}
+            , {formatInteger(plan.optionStreamQuotes)} streamed option quotes, and{' '}
+            {formatInteger(plan.reqPerMin)} requests per minute. The two stream budgets are
+            separate, so raising one leaves the other where it was. Together they are why open
+            positions stream while the Markets page polls — every leg of every open position
+            spends one option quote and a whole book fits comfortably, while a page of chains
+            would not, and it is the equity cap that bounds how much of the stock table can be
+            live at once.
           </p>
         </SettingsSection>
 
