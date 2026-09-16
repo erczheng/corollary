@@ -6,17 +6,24 @@ database, and constructs the one :class:`~corollary.engine.runtime.EngineRuntime
 -- which writes ``t0``, supervises rule 9's watchdog, and never clears a halt
 -- then tears all three down.
 
-**That watchdog still cannot fire in the shipped app, and this is the file
-where that is easiest to misread.** Rule 9's two conditions are implemented
-and tested in ``engine/runtime.py``. The *producers* for the connection
-condition now exist -- ``AlpacaQuoteStream`` in ``data/providers/alpaca.py``
-and ``AlpacaTradeUpdateStream`` in ``engine/execution/alpaca.py``, both of
-which record a message, a stream open and a stream close from inside their
-read loops -- but **nothing in this lifespan constructs or runs one**, so
-none of those calls happens in the running process. ``RiskManager`` still has
-no body, so the heartbeat condition has no producer at all and ships unarmed
-besides. The switch is armed in the wiring and not yet turning: composing the
-sockets into the lifespan is what makes the connection condition live.
+**The connection half of that watchdog now runs.** The lifespan builds a
+:class:`~corollary.engine.sockets.SocketSupervisor`, which holds the three
+Alpaca sockets open through a market session and reports every message, open
+and close into rule 9's per-socket liveness. That is the producer this file
+spent two steps without: the condition was implemented, tested and unreachable
+because nothing in the running process ever opened a socket.
+
+**The heartbeat half still has no producer.** ``RiskManager`` has no body, so
+that condition ships unarmed -- deliberately, since armed with nothing
+heartbeating it would halt every engine ninety seconds after boot.
+
+Two things about the sockets are worth knowing here rather than one file
+away. They are held open **in session only**, from the market calendar, because
+per-socket staleness cannot tell a legitimately quiet socket from a dead one
+and the option feed is quiet all night. And the ``trade_updates`` socket is
+never judged on silence at all, because a day with no fills is silent by
+definition; losing it is detected by its close. Both decisions live in
+``engine/sockets.py``, with the reasoning.
 
 ``api/routes/ws.py`` is the *browser* socket and attaches **no** wire, on
 purpose: a browser tab opening says nothing about whether Alpaca is
@@ -68,8 +75,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from corollary.api.deps import ApiError, ServiceRegistry
-from corollary.api.fanout import Fanout
+from corollary.api.deps import AccountMode, ApiError, ServiceRegistry
+from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
 from corollary.api.routes import (
     account_router,
     activity_router,
@@ -100,9 +107,17 @@ from corollary.engine.execution.interface import (
     BrokerRateLimitedError,
 )
 from corollary.engine.runtime import EngineRuntime
+from corollary.engine.sockets import SocketSupervisor
 from corollary.wire import vendor_detail
 
-__all__ = ["SECRET_ENV_VARS", "app", "create_app"]
+__all__ = [
+    "SECRET_ENV_VARS",
+    "SocketSupervisorFactory",
+    "app",
+    "build_socket_supervisor",
+    "create_app",
+    "no_socket_supervisor",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -335,11 +350,64 @@ def _bootstrap_database(db_engine: Engine) -> None:
         )
 
 
+#: How the lifespan gets its vendor sockets. A factory rather than an object,
+#: because the supervisor needs the :class:`EngineRuntime` the lifespan
+#: builds, and a factory rather than a boolean because a test has to be able
+#: to hand in a scripted connection and a wound clock.
+SocketSupervisorFactory = Callable[
+    [EngineRuntime, Fanout, ServiceRegistry], SocketSupervisor | None
+]
+
+
+def build_socket_supervisor(
+    runtime: EngineRuntime, fanout: Fanout, registry: ServiceRegistry
+) -> SocketSupervisor:
+    """The shipped wiring: three Alpaca sockets, the Paper book, one fan-out.
+
+    This is the composition itself, and the three lines of it are the three
+    decisions:
+
+    **The Paper book, always** (rule 5). Every cold start comes up in Paper,
+    and a socket that read whichever account the UI happened to have selected
+    would stream one book's positions under the other's name. Switching to
+    Cash is an explicit, confirmed act and it does not happen here.
+
+    **The fan-out's sinks, not a second hub.** One quote reaches every
+    connected browser through the one :class:`Fanout` this app owns; a second
+    would let two tabs disagree about a price.
+
+    **The runtime as the activity recorder.** The sockets report their
+    messages, opens and closes straight into rule 9's watchdog, per socket.
+    Nothing in this call can halt or resume anything -- the supervisor's whole
+    authority over the switch is to say which feeds it is holding open.
+    """
+    return SocketSupervisor(
+        runtime=runtime,
+        broker=lambda: registry.broker(AccountMode.PAPER),
+        on_quote=quote_sink(fanout),
+        on_update=trade_update_sink(fanout),
+    )
+
+
+def no_socket_supervisor(
+    runtime: EngineRuntime, fanout: Fanout, registry: ServiceRegistry
+) -> None:
+    """No vendor sockets at all. What a route test's app is built with.
+
+    Explicit rather than a flag, and explicit rather than relying on the
+    environment: a fixture that opens a websocket to Alpaca whenever the
+    developer happens to have exported their keys is not a fixture. Route
+    suites take this; the composition root has its own suite.
+    """
+    return None
+
+
 def create_app(
     *,
     registry: ServiceRegistry | None = None,
     db_engine: Engine | None = None,
     secrets: Sequence[str] | None = None,
+    streams: SocketSupervisorFactory = no_socket_supervisor,
 ) -> FastAPI:
     """Build the application.
 
@@ -351,6 +419,23 @@ def create_app(
     ``secrets`` overrides which values are scrubbed out of error bodies. The
     default reads :data:`SECRET_ENV_VARS` from the environment on every
     failure.
+
+    ``streams`` decides which vendor sockets the lifespan runs, and it
+    **defaults to none**. The shipped app opts in --
+    ``app = create_app(streams=build_socket_supervisor)`` at the bottom of
+    this module -- so production behaviour is unchanged and every other caller
+    is safe by construction rather than by timing.
+
+    It was the other way round, and the safety of the fifteen test apps built
+    from this rested on three coincidences: the supervisor's loop sleeps
+    before its first tick, no test holds a lifespan open for five seconds, and
+    no ``tests/conftest.py`` scrubs the environment. Break any one of them --
+    ``pytest --pdb`` sitting at a breakpoint is enough -- and a test run reads
+    the real paper credentials out of ``os.environ`` and opens
+    ``wss://paper-api.alpaca.markets/stream``. Alpaca permits **one** trading
+    stream per account, so a suite run during market hours would take the slot
+    from the running engine, whose client then records a close and halts
+    itself correctly, caused by a test.
     """
 
     @asynccontextmanager
@@ -366,18 +451,52 @@ def create_app(
         # ``start`` writes ``t0`` on the first ever start and never touches
         # ``halted``; ``supervise`` puts the watchdog on its own task.
         #
-        # That watchdog has no producer yet -- see the module docstring. It
-        # ticks, evaluates and finds nothing, because nothing in this process
-        # records a message or a socket close. Step 8d attaches the transport
-        # that does.
+        # The watchdog's producers are the three vendor sockets, started
+        # below: every message, stream open and stream close they see is
+        # recorded against it per socket. An app built with
+        # ``streams=no_socket_supervisor`` -- which is the default, and what
+        # every route test takes -- has none of them, so its watchdog ticks,
+        # evaluates and finds nothing. That is rule 9 with nothing to judge,
+        # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
         runtime = EngineRuntime(session_factory=lambda: Session(db_engine))
         app.state.engine_runtime = runtime
         runtime.start()
         runtime.supervise()
+        # Rule 9's producers. Started after the watchdog is already
+        # supervising, so the first socket to open reports into a running
+        # switch rather than into one that starts a moment later.
+        #
+        # A failure here is stated, never fatal -- the same standing the
+        # database bootstrap has, for the same reason: `corollary.api:app`
+        # must never stop answering `GET /api/health`, and a vendor socket
+        # that cannot be built is not a reason for the terminal to be offline.
+        supervisor: SocketSupervisor | None = None
+        try:
+            supervisor = streams(runtime, app.state.fanout, app.state.registry)
+            if supervisor is not None:
+                supervisor.start()
+        except Exception:
+            logger.exception(
+                "the vendor sockets did not start; the app keeps serving",
+                extra={
+                    "event": "sockets_not_started",
+                    "rule": (
+                        "a vendor socket that cannot start leaves the API "
+                        "answering; rule 9 then halts on the silence"
+                    ),
+                },
+            )
+            supervisor = None
+        app.state.socket_supervisor = supervisor
         try:
             yield
         finally:
+            # Sockets first: they report into the watchdog, and a socket
+            # still reading while the supervisor it reports to is gone is a
+            # message recorded against a switch nobody is watching.
+            if supervisor is not None:
+                await supervisor.aclose()
             await runtime.aclose()
             await app.state.registry.aclose()
 
@@ -388,10 +507,19 @@ def create_app(
     )
     app.state.registry = registry
     app.state.db_engine = db_engine
+    # Which socket wiring this app was built with, recorded so that the
+    # *shipped* choice is assertable without starting a socket. The default
+    # is the safe one, which means the production opt-in is the line that can
+    # go missing -- and an app serving every route with rule 9's producers
+    # quietly absent is exactly the failure this records.
+    app.state.socket_factory = streams
     # Replaced in the lifespan. Present so that a route reading it outside a
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
     app.state.engine_runtime = None
+    # Replaced in the lifespan, for the same reason, and ``None`` there too
+    # when the app was built with no sockets or when they could not start.
+    app.state.socket_supervisor = None
     # One fan-out per app, built here rather than in the lifespan so that it
     # exists for an app nobody started -- and per app rather than per module,
     # so two tests cannot share one hub. It is the single place a quote
@@ -434,4 +562,36 @@ def create_app(
     return app
 
 
-app = create_app()
+#: The shipped app. ``uv run python -m uvicorn corollary.api:app`` starts
+#: this one, and the opt-in to the vendor sockets is here rather than in
+#: :func:`create_app`'s default so that nothing built for a test can open a
+#: real connection by forgetting an argument.
+app = create_app(streams=build_socket_supervisor)
+
+#: The same app with **no vendor sockets**, for ``--reload``.
+#:
+#: Not a convenience either. Uvicorn's reloader starts a fresh child on every
+#: save while the old one is still holding three websockets, and Alpaca
+#: answers the surplus trading-stream connection with **406** -- which is in
+#: ``FATAL_STREAM_CODES``, so it surfaces as a ``StreamProtocolError``, and
+#: the next watchdog tick halts the engine. On Windows the reloader
+#: terminates the child rather than letting the lifespan's ``aclose()`` run,
+#: so the old connection is reaped on the vendor's schedule and the new child
+#: races it.
+#:
+#: The halt is the safe direction and the right outcome for a 406 --
+#: rule 9's condition genuinely fired. The cost is the one CLAUDE.md names: a
+#: halt log full of self-inflicted entries is a log nobody reads on the
+#: morning that matters, and a developer resuming reflexively fifteen times
+#: an afternoon is precisely the trained reflex rule 9 depends on not
+#: existing. So the *editing* loop runs without the producers rather than the
+#: producers learning to forgive a close, which is the one fix that must not
+#: be made: "a close within N seconds of a start is ours" is a window in
+#: which a genuine close is discarded.
+#:
+#: Use ``uv run python -m uvicorn corollary.api:dev_app --reload --env-file
+#: .env`` for frontend and route work, and ``corollary.api:app`` -- no
+#: ``--reload`` -- whenever the sockets or rule 9 are what is being worked
+#: on. ``--env-file`` is still not optional: nothing under ``corollary/``
+#: reads ``.env``, so without it every broker route answers 503.
+dev_app = create_app()

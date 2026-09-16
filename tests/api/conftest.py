@@ -33,7 +33,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
-from corollary.api.app import create_app
+from corollary.api.app import create_app, no_socket_supervisor
 from corollary.api.deps import AccountMode, ServiceRegistry
 from corollary.api.routes.markets import MarketCaches
 from corollary.api.routes.markets import router as markets_router
@@ -323,7 +323,24 @@ def registry(make_registry: Callable[..., ServiceRegistry]) -> ServiceRegistry:
 
 @pytest.fixture
 def app(registry: ServiceRegistry, db_engine: Engine) -> FastAPI:
-    return create_app(registry=registry, db_engine=db_engine)
+    """The app these suites test: routes, database, registry -- no vendor sockets.
+
+    ``streams=no_socket_supervisor`` is not a convenience. The shipped
+    lifespan holds three Alpaca websockets open during a market session, and
+    a fixture that did that whenever the developer happened to have exported
+    their keys would make a route test's behaviour depend on the shell it ran
+    in. The composition root has its own suite:
+    ``tests/api/test_socket_composition.py`` drives it over scripted
+    connections and a wound clock.
+
+    It is also ``create_app``'s default now, so this argument is a
+    redundancy. Kept explicit all the same: what this fixture guarantees
+    should not rest on a default that a later diff could flip back, and the
+    two statements of it disagree loudly rather than quietly.
+    """
+    return create_app(
+        registry=registry, db_engine=db_engine, streams=no_socket_supervisor
+    )
 
 
 @pytest.fixture
@@ -335,7 +352,11 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 
 @pytest.fixture
 def clientless_app(registry: ServiceRegistry, unmigrated_engine: Engine) -> FastAPI:
-    return create_app(registry=registry, db_engine=unmigrated_engine)
+    return create_app(
+        registry=registry,
+        db_engine=unmigrated_engine,
+        streams=no_socket_supervisor,
+    )
 
 
 def probe_route(app: FastAPI, path: str, dependency: Any) -> None:
@@ -560,7 +581,9 @@ def make_market_client(
             fundamentals=None if fundamentals is None else (lambda: fundamentals),
             missing_live_credentials=("ALPACA_LIVE_API_KEY", "ALPACA_LIVE_SECRET_KEY"),
         )
-        app = create_app(registry=registry, db_engine=db_engine)
+        app = create_app(
+            registry=registry, db_engine=db_engine, streams=no_socket_supervisor
+        )
         # One clock for the whole request: the provider's ``now`` decides feed
         # selection and time to expiry, and the routes' decides the trading
         # date, the DTE window and which bar counts as today's. Two clocks an

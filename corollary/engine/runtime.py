@@ -481,6 +481,11 @@ class HaltRule(StrEnum):
     #: produces one until ``RiskManager`` grows a body. See the module
     #: docstring for why it ships implemented and unarmed rather than absent.
     HEARTBEAT_STALE = "heartbeat_stale"
+    #: The socket is open and has never confirmed its subscription. Distinct
+    #: from :attr:`CONNECTION_STALE`, which is a feed that *was* flowing and
+    #: stopped: this one never started, so a record that called it staleness
+    #: would send a reader looking for the message that was never there.
+    STREAM_UNCONFIRMED = "stream_unconfirmed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,6 +730,38 @@ class _SocketLiveness:
         self.close_reopened = False
 
 
+@dataclass(frozen=True, slots=True)
+class _FeedExpectation:
+    """Whether silence on one feed is evidence, and from when.
+
+    Staleness is the claim *"something should have arrived by now"*, and that
+    claim needs somebody to have expected something. Between 16:00 and 09:30
+    the option socket is silent because there is nothing to say: held to the
+    in-session standard it halts the engine every evening, and an engine that
+    halts itself every evening is one whose halts stop being read.
+
+    So the owner of the sockets -- ``corollary/engine/sockets.py``, the only
+    thing that knows which ones it is holding open -- says which feeds are
+    expected. :attr:`since` is when the expectation *began*, and staleness is
+    measured from the later of it and the last message: a socket reopened at
+    09:30 whose last quote was yesterday afternoon gets a fresh ninety
+    seconds, instead of being seventeen hours stale at the bell.
+    """
+
+    expected: bool
+    #: When the expectation began. ``None`` on the default expectation, which
+    #: no caller set and which therefore floors nothing -- a runtime with no
+    #: composition root around it behaves exactly as it did before the gate.
+    since: datetime | None
+
+
+#: What a feed nobody has spoken about is worth: expected, floored at nothing.
+#: The strict reading, deliberately -- a missing expectation halts on silence
+#: rather than waving it through, so the failure mode of forgetting to wire
+#: the gate is a visible halt and not a switch that quietly does nothing.
+_EXPECTED_BY_DEFAULT: Final = _FeedExpectation(expected=True, since=None)
+
+
 class Watchdog:
     """Rule 9's two conditions, over an injected clock. Opens no socket.
 
@@ -786,6 +823,8 @@ class Watchdog:
     """
 
     __slots__ = (
+        "_expectations",
+        "_handshakes",
         "_heartbeat_armed",
         "_last_activity_at",
         "_last_activity_source",
@@ -823,6 +862,20 @@ class Watchdog:
         #: hand-recorded close in a test -- which is tracked for its close and
         #: never for its staleness. See the class docstring.
         self._sockets: dict[str | None, _SocketLiveness] = {}
+        #: Which feeds are expected, keyed the same way :attr:`_sockets` is --
+        #: a socket name, or ``None`` for the engine as a whole. Empty by
+        #: default, and an absent key reads as
+        #: :data:`_EXPECTED_BY_DEFAULT`, so the gate changes nothing for a
+        #: caller that never mentions it. See :class:`_FeedExpectation`.
+        self._expectations: dict[str | None, _FeedExpectation] = {}
+        #: Which sockets are expected to have completed a **handshake**, keyed
+        #: by socket name only -- there is no engine-wide handshake. Empty by
+        #: default, and an absent key reads as *not expected*, which is the
+        #: opposite of :attr:`_expectations`' default and deliberately so: a
+        #: feed's silence is measurable against its last message, whereas a
+        #: handshake has nothing to measure at all until somebody says when
+        #: the socket started being held open. See :meth:`expect_handshake`.
+        self._handshakes: dict[str, _FeedExpectation] = {}
 
     # -- what the caller records ------------------------------------------
 
@@ -924,6 +977,103 @@ class Watchdog:
         """
         self._last_heartbeat_at = _utc(at)
 
+    # -- which feeds are expected -----------------------------------------
+
+    def expect_feed(self, at: datetime, *, socket: str | None = None) -> None:
+        """This feed is held open from ``at``, so silence on it is evidence.
+
+        Called by whoever owns the socket, at the moment it starts holding it
+        open -- which in this process is ``engine/sockets.py`` at the market
+        open. ``socket=None`` expects the engine-wide condition, the one a
+        REST poll also answers for.
+
+        **Calling it again while the feed is already expected is a no-op, and
+        that is a guard rather than an optimisation.** The floor is an
+        expectation's *start*; refreshed on every tick of a five-second loop
+        it would be a ninety-second condition that can never reach ninety
+        seconds. Rule 9 off, with nothing anywhere to say so. So a caller may
+        re-assert an expectation as often as it likes and the floor stays
+        where the expectation began.
+        """
+        current = self._expectations.get(socket)
+        if current is not None and current.expected:
+            return
+        self._expectations[socket] = _FeedExpectation(expected=True, since=_utc(at))
+
+    def stop_expecting_feed(self, *, socket: str | None = None) -> None:
+        """This feed is not held open, so its silence proves nothing.
+
+        The other half of the market session: out of session no socket is
+        held open, so no socket can be stale. **It disarms staleness and
+        nothing else** -- a close recorded on this socket is still reported,
+        because a drop at 15:59:50 is a lost connection whether or not the
+        tick that sees it lands after the bell, and a close we asked for
+        ourselves records nothing in the first place
+        (:meth:`corollary.sockets.VendorStream.begin_close`).
+
+        Takes no timestamp: there is nothing to measure from once nothing is
+        expected, and a stored moment nothing reads is a field that goes
+        stale without anybody noticing.
+        """
+        self._expectations[socket] = _FeedExpectation(expected=False, since=None)
+
+    def feed_expected(self, socket: str | None = None) -> bool:
+        """Is silence on this feed evidence right now? Reported, never inferred."""
+        return self._expectation(socket).expected
+
+    def _expectation(self, socket: str | None) -> _FeedExpectation:
+        return self._expectations.get(socket, _EXPECTED_BY_DEFAULT)
+
+    # -- which sockets owe a handshake -------------------------------------
+
+    def expect_handshake(self, at: datetime, *, socket: str) -> None:
+        """This socket has been held open since ``at`` and owes a handshake.
+
+        The order socket's condition. ``trade_updates`` carries fills, so on a
+        day with no fills it carries nothing and its *silence* proves nothing
+        -- which left the socket that connects and never completes its
+        handshake reporting nothing at all: no message, no close, no
+        staleness, no timer, with fills reaching the account and never
+        reaching this process. So what is expected is the handshake, and
+        unlike an absent fill an absent handshake is never legitimate.
+
+        Withdrawn by :meth:`stop_expecting_handshake` the moment the socket
+        confirms, and whenever it is given up. **Re-asserting is a no-op**,
+        for :meth:`expect_feed`'s reason: the supervisor re-asserts on a
+        five-second tick, and a refreshed floor is a ninety-second condition
+        that can never reach ninety seconds.
+        """
+        current = self._handshakes.get(socket)
+        if current is not None and current.expected:
+            return
+        self._handshakes[socket] = _FeedExpectation(expected=True, since=_utc(at))
+
+    def stop_expecting_handshake(self, *, socket: str) -> None:
+        """This socket has confirmed, or it is no longer held open.
+
+        Both cases, one method: what the condition asks is *"is a socket being
+        held open without having confirmed"*, and a socket nobody is holding
+        open is not.
+        """
+        self._handshakes[socket] = _FeedExpectation(expected=False, since=None)
+
+    def handshake_expected(self, socket: str) -> bool:
+        """Does this socket still owe a handshake? Reported, never inferred."""
+        expectation = self._handshakes.get(socket)
+        return expectation is not None and expectation.expected
+
+    def _stale_since(self, socket: str | None, last_activity: datetime) -> datetime:
+        """When this feed's silence started being measurable.
+
+        The later of the last message and the moment the feed became
+        expected. See :class:`_FeedExpectation` for the morning case the
+        second half exists for.
+        """
+        since = self._expectation(socket).since
+        if since is None or since <= last_activity:
+            return last_activity
+        return since
+
     def _record_activity(
         self, at: datetime, source: str, socket: str | None
     ) -> None:
@@ -1015,6 +1165,38 @@ class Watchdog:
                 state.clear_close()
             return decision
 
+        # After the close and before staleness. A socket that dropped mid
+        # handshake is both, and the close is the cause; a socket that never
+        # handshaked at all is reported under its own condition rather than as
+        # silence, because "no message" sends a reader looking for a message
+        # that was never coming.
+        unconfirmed = self._unconfirmed_handshake(moment)
+        if unconfirmed is not None:
+            name, elapsed = unconfirmed
+            since = self._handshakes[name].since
+            assert since is not None  # `_unconfirmed_handshake` selected on it
+            return self._decide(
+                HaltRule.STREAM_UNCONFIRMED,
+                _bounded(
+                    f"The {name} socket has been open {elapsed:.0f}s without "
+                    f"confirming its subscription, against a "
+                    f"{self._timeout_seconds:.0f}s limit. Nothing it carries "
+                    "can reach this process. The engine halted itself; "
+                    "recovery requires an explicit resume."
+                ),
+                {
+                    "socket": name,
+                    "elapsed_seconds": elapsed,
+                    "timeout_seconds": self._timeout_seconds,
+                    # When the socket started being held open, which is the
+                    # only clock this condition has: there is no message to
+                    # measure from, and that is the fault.
+                    "expected_since": since.isoformat(),
+                    "last_activity_at": self._socket_activity_at(name),
+                },
+                moment,
+            )
+
         silent = self._silent_socket(moment)
         if silent is not None:
             name, elapsed = silent
@@ -1031,13 +1213,19 @@ class Watchdog:
                     "elapsed_seconds": elapsed,
                     "timeout_seconds": self._timeout_seconds,
                     "last_activity_at": self._socket_activity_at(name),
-                    "last_activity_source": self._sockets[name].last_activity_source,
+                    "last_activity_source": self._socket_activity_source(name),
                 },
                 moment,
             )
 
-        if self._last_activity_at is not None:
-            elapsed = (moment - self._last_activity_at).total_seconds()
+        # Gated on the engine-wide expectation as well as the per-socket one.
+        # Every quote refreshes this clock too, so gating only the named
+        # sockets left the nightly halt exactly where it was -- at 16:01:30,
+        # under this rule, with ``socket: None`` in the record.
+        if self._last_activity_at is not None and self._expectation(None).expected:
+            elapsed = (
+                moment - self._stale_since(None, self._last_activity_at)
+            ).total_seconds()
             if elapsed >= self._timeout_seconds:
                 return self._decide(
                     HaltRule.CONNECTION_STALE,
@@ -1105,19 +1293,56 @@ class Watchdog:
         chosen = min(pending, key=lambda item: (item[0], item[1]))
         return chosen[2], chosen[3]
 
+    def _judged_names(self) -> list[str]:
+        """Every named socket staleness could be asked about, in a fixed order.
+
+        The **union** of the sockets that have reported something and the
+        sockets somebody is expecting, because those two sets are not the same
+        and the difference is a fault. A socket gets a liveness entry only
+        when a message, an open or a close arrives on it, so a socket that
+        fails *before its first frame* -- the connection accepted and the auth
+        frame raising -- has no entry at all. Iterating the entries alone
+        skipped exactly that socket: the one case where the feed is never
+        coming back on its own.
+
+        Unnamed sources are excluded: the poll loop is the one that matters,
+        and a poll is no evidence about any socket.
+        """
+        names = {name for name in self._sockets if name is not None}
+        names.update(
+            name
+            for name, expectation in self._expectations.items()
+            if name is not None and expectation.expected
+        )
+        return sorted(names)
+
     def _silent_socket(self, moment: datetime) -> tuple[str, float] | None:
         """The **named** socket that has been silent longest, past the limit.
 
-        Unnamed sources are skipped: the poll loop is the one that matters and
-        a poll is no evidence about a socket. A socket that has never reported
-        anything is skipped too -- it has no clock to fail, the same way the
-        engine-wide condition stays unarmed until something arrives.
+        A socket **nobody is expecting** is skipped, because its silence is
+        not evidence of anything: see :class:`_FeedExpectation`.
+
+        A socket with no message at all is measured from the moment it became
+        expected -- the clock its expectation carries, for exactly this case.
+        With neither a message nor a stated expectation there is no clock in
+        existence and the socket is skipped: the default expectation floors
+        nothing on purpose, so a runtime with no composition root around it
+        cannot halt on a feed nobody ever opened.
         """
         worst: tuple[str, float] | None = None
-        for name, state in self._sockets.items():
-            if name is None or state.last_activity_at is None:
+        for name in self._judged_names():
+            expectation = self._expectation(name)
+            if not expectation.expected:
                 continue
-            elapsed = (moment - state.last_activity_at).total_seconds()
+            state = self._sockets.get(name)
+            last_activity = state.last_activity_at if state is not None else None
+            if last_activity is None:
+                since = expectation.since
+                if since is None:
+                    continue
+            else:
+                since = self._stale_since(name, last_activity)
+            elapsed = (moment - since).total_seconds()
             if elapsed < self._timeout_seconds:
                 continue
             # Longest silence first, and the *lowest* name on a tie -- the
@@ -1130,8 +1355,39 @@ class Watchdog:
         return worst
 
     def _socket_activity_at(self, name: str) -> str | None:
-        last = self._sockets[name].last_activity_at
+        """When this socket was last heard from, or ``None`` if it never was.
+
+        ``.get``, not ``[]``: a socket judged from its expectation alone has
+        no liveness entry, and a ``KeyError`` raised while building the halt
+        record would turn a detected fault into an unhandled exception in the
+        watchdog loop.
+        """
+        state = self._sockets.get(name)
+        last = state.last_activity_at if state is not None else None
         return last.isoformat() if last is not None else None
+
+    def _socket_activity_source(self, name: str) -> str:
+        state = self._sockets.get(name)
+        return state.last_activity_source if state is not None else "none"
+
+    def _unconfirmed_handshake(self, moment: datetime) -> tuple[str, float] | None:
+        """The socket that has owed a handshake longest, past the limit.
+
+        The same tie-breaks as :meth:`_silent_socket` and
+        :meth:`_pending_close`: longest first, lowest name on a tie, so one
+        reader does not have to hold three orderings in their head.
+        """
+        worst: tuple[str, float] | None = None
+        for name in sorted(self._handshakes):
+            expectation = self._handshakes[name]
+            if not expectation.expected or expectation.since is None:
+                continue
+            elapsed = (moment - expectation.since).total_seconds()
+            if elapsed < self._timeout_seconds:
+                continue
+            if worst is None or elapsed > worst[1]:
+                worst = (name, elapsed)
+        return worst
 
     def _decide(
         self,
@@ -1471,6 +1727,54 @@ class EngineRuntime:
         self._watchdog.record_stream_closed(
             self._moment(at), socket=socket, detail=detail
         )
+
+    def expect_feed(
+        self, at: datetime | None = None, *, socket: str | None = None
+    ) -> None:
+        """A socket is now held open. Its silence is evidence from here on.
+
+        The market session's opening half, called by
+        :class:`corollary.engine.sockets.SocketSupervisor` -- the only thing
+        in this process that knows which sockets it is holding. ``at``
+        defaults to now, and re-expecting an already-expected feed is a
+        no-op: see :meth:`Watchdog.expect_feed` for why that guard is what
+        stops a five-second loop disarming a ninety-second condition.
+
+        **This is not a resume.** It arms a fault detector; it cannot clear
+        one, and nothing on this class can.
+        """
+        self._watchdog.expect_feed(self._moment(at), socket=socket)
+
+    def stop_expecting_feed(self, *, socket: str | None = None) -> None:
+        """A socket is no longer held open, so its silence proves nothing.
+
+        The closing half. Called at the session close and whenever the
+        supervisor gives a socket up -- an empty option plan, for instance,
+        subscribes to nothing and can never tick.
+
+        It disarms **staleness only**: a close already recorded still halts
+        the engine on the next tick, by name. A close of *our own* records
+        nothing at all, which is what keeps an orderly shutdown out of the
+        halt log entirely.
+        """
+        self._watchdog.stop_expecting_feed(socket=socket)
+
+    def expect_handshake(self, at: datetime | None = None, *, socket: str) -> None:
+        """A socket is held open and owes a handshake from ``at``.
+
+        The order socket's condition, and the one thing rule 9 can say about a
+        feed whose silence is legitimate. See
+        :meth:`Watchdog.expect_handshake`; re-asserting is a no-op there for
+        the reason it is for a feed.
+
+        **This is not a resume.** It arms a fault detector; it cannot clear
+        one, and nothing on this class can.
+        """
+        self._watchdog.expect_handshake(self._moment(at), socket=socket)
+
+    def stop_expecting_handshake(self, *, socket: str) -> None:
+        """The socket confirmed its handshake, or is no longer held open."""
+        self._watchdog.stop_expecting_handshake(socket=socket)
 
     def record_opening_snapshot(self, at: datetime | None = None) -> None:
         """The opening snapshot succeeded.

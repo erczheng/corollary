@@ -11,6 +11,7 @@ answer, and a test on only one of them would not notice if it stopped being.
 """
 
 import json
+import logging
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -73,11 +74,13 @@ def build(
     *,
     activity: SpyActivity | None = None,
     on_update: Any = None,
+    reconnects: list[list[Any]] | None = None,
 ) -> tuple[AlpacaTradeUpdateStream, FakeSocket, SpyActivity, list[TradeUpdate]]:
     recorder = activity or SpyActivity()
     received: list[TradeUpdate] = []
     sink = on_update if on_update is not None else received.append
     socket = FakeSocket(frames, codec=JSON_CODEC)
+    later = [FakeSocket(script, codec=JSON_CODEC) for script in reconnects or []]
     client = AlpacaTradeUpdateStream(
         credentials=AlpacaCredentials(
             key_id=KEY,
@@ -87,7 +90,7 @@ def build(
         ),
         activity=recorder,
         on_update=sink,
-        connect=FakeConnect(socket),
+        connect=FakeConnect(socket, *later),
         sleep=SpySleep(),
         now=Clock(),
     )
@@ -442,3 +445,89 @@ async def test_an_arithmetic_error_in_the_translation_costs_one_update(
     assert len(calls) == 2, "the later event was still translated"
     assert len(received) == 1, "and reached the sink"
     assert len(recorder.closes) == 1
+
+
+# --------------------------------------------------------------------------
+# The handshake, which is the only thing this socket promises to say
+# --------------------------------------------------------------------------
+
+
+async def test_a_listen_acknowledgement_for_the_stream_confirms_it() -> None:
+    """The ordinary case, and the one piece of evidence the socket works.
+
+    ``trade_updates`` is silent on a day with no fills, so its silence can
+    never be the detector. What is left is the handshake: a socket that has
+    confirmed *this* stream will deliver a fill if one happens.
+    """
+    client, _, _, _ = build([AUTHORIZED, LISTENING])
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is True
+
+
+async def test_an_acknowledgement_that_omits_the_stream_confirms_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``{"streams": []}`` is the server saying it will send nothing.
+
+    It was read as confirmation, because the frame's *name* was the only
+    thing checked -- so the one piece of evidence that could detect a
+    non-functioning order socket said "listening" about a socket listening to
+    nothing. The quote streams reconcile what was acknowledged against what
+    was requested; this one now does too, and rule 8 applies: a dropped
+    subscription is a rejection whoever dropped it.
+    """
+    client, _, _, _ = build([AUTHORIZED, {"stream": "listening", "data": {"streams": []}}])
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+
+    assert client.listening is False
+    records = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "trade_updates_listen_unconfirmed"
+    ]
+    assert len(records) == 1
+    assert records[0].requested == [TRADE_UPDATES_STREAM]
+    assert records[0].acknowledged == []
+
+
+async def test_an_acknowledgement_for_another_stream_confirms_nothing() -> None:
+    """A server listening to ``account_updates`` is not listening to fills."""
+    client, _, _, _ = build(
+        [AUTHORIZED, {"stream": "listening", "data": {"streams": ["account_updates"]}}]
+    )
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is False
+
+
+async def test_a_malformed_acknowledgement_confirms_nothing() -> None:
+    """A shape the vendor is free to change is not evidence of anything."""
+    client, _, _, _ = build([AUTHORIZED, {"stream": "listening", "data": "listening"}])
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is False
+
+
+async def test_a_new_connection_confirms_nothing_until_it_says_so() -> None:
+    """The flag belongs to the *connection*, not to the client object.
+
+    A socket that drops and reconnects has confirmed nothing on the new
+    connection. Left set from the last one, the handshake condition would be
+    disarmed for a reconnect that never completed -- which is precisely the
+    reconnect that matters.
+    """
+    client, _, _, _ = build([AUTHORIZED, LISTENING], reconnects=[[AUTHORIZED]])
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+    assert client.listening is True
+
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is False

@@ -1054,10 +1054,33 @@ class AlpacaTradeUpdateStream(VendorStream):
 
     @property
     def listening(self) -> bool:
-        """Has the server confirmed the ``listen``? Reported, never assumed."""
+        """Has the server confirmed **this** stream? Reported, never assumed.
+
+        Read by :class:`corollary.engine.sockets.SocketSupervisor`, which
+        turns it into rule 9's handshake expectation: a socket held open
+        without this is a socket nothing can reach us through, and unlike an
+        absent fill an absent handshake is never legitimate.
+
+        It is per *connection*, not per client -- :meth:`run_session` clears
+        it -- and it is set only by an acknowledgement that names
+        :data:`TRADE_UPDATES_STREAM`. Both halves matter: a flag left set
+        from the previous connection, or set by ``{"streams": []}``, is a
+        dead socket reporting healthy.
+        """
         return self._listening
 
     # -- the protocol ------------------------------------------------------
+
+    async def run_session(self) -> None:
+        """One connection, with the handshake flag belonging to it.
+
+        The reset is the whole override. A reconnect has confirmed nothing
+        until it says so, and a flag carried over from the connection that
+        just dropped would disarm the handshake condition for exactly the
+        reconnect that failed to complete.
+        """
+        self._listening = False
+        await super().run_session()
 
     def _handshake_headers(self) -> dict[str, str]:
         """Nothing. The trading stream authenticates with a message."""
@@ -1103,11 +1126,55 @@ class AlpacaTradeUpdateStream(VendorStream):
         if name == "authorization":
             await self._authorized(socket, message)
         elif name == "listening":
-            self._listening = True
+            self._confirm_listening(message)
         elif name == TRADE_UPDATES_STREAM:
             self._publish(message)
         # Anything else is a stream nobody listened to. It already counted as
         # a message, which is all rule 9 wanted from it.
+
+    def _confirm_listening(self, message: Mapping[str, Any]) -> None:
+        """Reconcile what the server says it streams against what we asked for.
+
+        The market-data sockets do this through
+        :func:`corollary.engine.stream.reconcile_acknowledgement`, which
+        compares a *plan*'s symbols against a channel's acknowledgement. There
+        is no plan here -- one named stream, no symbols, no budget -- so the
+        comparison is written out rather than a plan invented to fit the
+        helper. The standard it holds to is the same one, and so is rule 8: a
+        subscription the server dropped is a rejection whoever dropped it, and
+        it records the rule, the inputs and the timestamp.
+
+        The flag is set **only** on an acknowledgement that names
+        :data:`TRADE_UPDATES_STREAM`. ``{"streams": []}`` is the server saying
+        it will send nothing, and reading the frame's name alone turned that
+        into confirmation -- the one piece of evidence that can detect a
+        non-functioning order socket, reporting healthy about a socket
+        listening to nothing.
+        """
+        data = message.get("data")
+        streams = data.get("streams") if isinstance(data, Mapping) else None
+        acknowledged = (
+            [str(stream) for stream in streams] if isinstance(streams, list) else []
+        )
+        if TRADE_UPDATES_STREAM in acknowledged:
+            self._listening = True
+            return
+        logger.warning(
+            "the trading stream acknowledged %d stream(s) and not %s",
+            len(acknowledged),
+            TRADE_UPDATES_STREAM,
+            extra={
+                "event": "trade_updates_listen_unconfirmed",
+                "rule": (
+                    "a listen the server did not acknowledge is a stream we "
+                    "are not on; the socket stays unconfirmed so rule 9's "
+                    "handshake condition halts the engine on it"
+                ),
+                "requested": [TRADE_UPDATES_STREAM],
+                "acknowledged": acknowledged,
+                "at": self._now().isoformat(),
+            },
+        )
 
     async def _authorized(
         self, socket: VendorSocket, message: Mapping[str, Any]

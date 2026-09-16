@@ -290,6 +290,41 @@ def test_the_resume_helper_has_exactly_one_caller() -> None:
     assert callers == ["api/routes/engine.py"], callers
 
 
+@pytest.mark.risk
+def test_nothing_in_the_package_calls_the_resume_route() -> None:
+    """``resume`` is public, single-argument, and two lines from anywhere.
+
+    The grep above reads ``_clear_halt``, and the one in
+    ``tests/engine/test_runtime.py`` reads ``engine/runtime.py``. Neither
+    reaches ``resume(Session(engine))`` written in a *third* file -- which
+    passes every other guard, because the private helper is not named and the
+    literal ``halted = False`` is not written. There is no such line today.
+    What makes it worth pinning is that the socket layer is the
+    reconnect-adjacent module where one would look most reasonable, and rule 9
+    is explicit: never auto-resume on reconnect. Reconnecting into an
+    unverified position state is how a bot doubles a position it already
+    holds.
+    """
+    calls = re.compile(r"\bresume\s*\(")
+    callers = [
+        path.relative_to(PACKAGE).as_posix()
+        for path in PACKAGE.rglob("*.py")
+        if calls.search(path.read_text(encoding="utf-8"))
+    ]
+
+    # The definition itself, and nothing else in the package.
+    assert callers == ["api/routes/engine.py"], callers
+
+    imports = re.compile(r"import[^\n]*\bresume\b")
+    importers = [
+        path.relative_to(PACKAGE).as_posix()
+        for path in PACKAGE.rglob("*.py")
+        if imports.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert importers == [], importers
+
+
 # --------------------------------------------------------------------------
 # Rule 7 -- halt and flatten are distinct
 # --------------------------------------------------------------------------
