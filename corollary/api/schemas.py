@@ -1090,10 +1090,39 @@ class UnderlyingQuote(ApiModel):
     empty state is already designed -- while every other column says ``null``
     when the feed had nothing. Nulls, never zeros. See
     ``api/routes/markets.py``.
+
+    **:attr:`change` and :attr:`change_pct` are owed a removal.** Decision
+    18's rule 4 says everything derived is derived at read time, from
+    :attr:`price` and :attr:`previous_close` in a client selector -- two
+    writers storing a price and a change independently is how a row reports
+    +1.2% beside a price that is down. They stay on the wire until the client
+    derives them, because dropping them first ships a Markets page that
+    renders no change between two commits. The pair goes in step 12's web
+    commit, here and in ``types.ts`` together.
     """
 
     symbol: str
     price: JsonMoney
+    #: The **vendor's** observation timestamp for :attr:`price`: the quote,
+    #: the print or the daily bar that supplied it, whichever of the three
+    #: the snapshot had. Never the server's receive time and never the
+    #: browser's clock.
+    #:
+    #: Decision 18's rule 1. This response and the websocket both write one
+    #: quote map in the browser, and the merge decides which of two prices is
+    #: newer by comparing this against :attr:`WsQuote.at`. A receive-time
+    #: stamp would make that resolution depend on which hop was slower; a
+    #: synthesised one would win every comparison forever.
+    #:
+    #: **Aware UTC, like :attr:`WsQuote.at`** -- the comparison is meaningless
+    #: unless the two are the same kind of instant. ``America/New_York`` is a
+    #: display concern and belongs in the client.
+    #:
+    #: Non-null, and it costs nothing to be so: a row exists only where there
+    #: is a price, and every source a price can come from carries a vendor
+    #: timestamp. The two are read together, in ``markets._spot``, so the
+    #: stamp cannot end up describing a different observation than the price.
+    at: datetime
     #: Yesterday's close. The daily change is measured from here, never from
     #: the first point of the series -- a 60-session chart's left edge is two
     #: months ago, and "today" measured against it is not today.
@@ -1130,11 +1159,23 @@ class StockQuote(ApiModel):
 
     Same rule as :class:`UnderlyingQuote`: no price, no row; every other
     column is nullable and absence is served as ``null``.
+
+    **This is the payload the browser's shared quote map is polled from** --
+    the Markets poll reads ``/stocks``, the websocket pushes the same
+    symbols, and decision 18 is about the two of them writing one map. Hence
+    :attr:`at`. :attr:`change` and :attr:`change_pct` are owed the same
+    removal :class:`UnderlyingQuote` documents, for the same reason and in
+    the same commit.
     """
 
     symbol: str
     name: str
     price: JsonMoney
+    #: The **vendor's** observation timestamp for :attr:`price`, exactly as
+    #: on :attr:`UnderlyingQuote.at` and from the same helper: aware UTC,
+    #: naming the quote, print or daily bar the price came from, never a
+    #: clock on this side of the wire. Decision 18's rule 1.
+    at: datetime
     #: **Nullable, against ``types.ts``'s ``number``.** No previous daily bar
     #: means no change to state.
     change: JsonMoney | None

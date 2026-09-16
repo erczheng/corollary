@@ -57,6 +57,16 @@ DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     # succeeds and are derived where it does not, and a chain must record
     # which of the two a number came from.
     "OptionContract": frozenset({"ivSource"}),
+    # Decision 18, rule 1: the vendor's observation timestamp, so the
+    # browser's one quote map can tell a newer price from an older one when
+    # the poll and the websocket both write it. Server-side first and
+    # deliberately: the wire has to carry the stamp before the client can
+    # merge on it. **Both entries come out in step 12's web commit**, which
+    # declares `at` in types.ts and -- in the same commit, so the wire is
+    # never ahead of the client -- drops `change`/`changePct` from these two
+    # models and their TS interfaces, per rule 4.
+    "StockQuote": frozenset({"at"}),
+    "UnderlyingQuote": frozenset({"at"}),
 }
 
 #: Named TS unions this API reproduces. Values, not just names -- a dropped
@@ -140,10 +150,21 @@ def test_every_ts_field_is_served(name: str) -> None:
 
 @pytest.mark.parametrize("name", sorted(MIRRORED))
 def test_the_server_sends_nothing_undeclared(name: str) -> None:
-    extra = wire_fields(MIRRORED[name]) - ts_interface_fields(name)
+    """Both directions, because a deliberate addition is a temporary state.
 
-    assert extra == DELIBERATE_ADDITIONS.get(name, frozenset()), (
-        f"{name} sends {sorted(extra)}, which types.ts does not declare"
+    The failure that reads oddly otherwise is the *second* one: once
+    ``types.ts`` declares a field that was listed here, ``extra`` is empty
+    and the old message said the model sent nothing types.ts did not
+    declare. Naming which side is stale is what makes that a one-line fix
+    rather than a puzzle.
+    """
+    extra = wire_fields(MIRRORED[name]) - ts_interface_fields(name)
+    deliberate = DELIBERATE_ADDITIONS.get(name, frozenset())
+
+    assert extra == deliberate, (
+        f"{name} sends {sorted(extra - deliberate)}, which types.ts does not "
+        f"declare; and DELIBERATE_ADDITIONS still lists "
+        f"{sorted(deliberate - extra)}, which types.ts now declares"
     )
 
 

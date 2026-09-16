@@ -49,13 +49,23 @@ Two budgets, and why anything is cached
 ---------------------------------------
 
 ``data.alpaca.markets`` and ``paper-api.alpaca.markets`` carry **separate**
-200/min buckets. The Markets page polls ``/stocks`` every 2 seconds -- 30
-requests a minute -- and a chain is on demand, costing one request against each
-bucket plus one for spot.
+200/min buckets. The Markets page polls ``/stocks`` at
+:data:`MARKETS_FOREGROUND_POLL_MS` -- **400ms, so 150 requests a minute** --
+while it is the open page and visible; 5 seconds when it is visible but not
+the open page, and **not at all while the tab is hidden**. A chain is on
+demand on top of that, costing one request against each bucket plus one for
+spot.
+
+That is the budget, and it is close: 150 of 200 spent on the table leaves
+roughly 49/min for every on-demand chain, snapshot and series the session
+asks for. Which is why the interval is a named constant on both sides of the
+wire rather than a number in a hook, why the snapshot is coalesced so the
+rate cannot scale with the client count, and why a hidden tab stops instead
+of slowing down.
 
 What would break that budget is the *daily* series: an average daily volume
 needs 90 days of bars and an underlying's chart needs 400, and re-downloading
-either on a 2s poll multiplies 30/min by the page count. Both move once a
+either on a 400ms poll multiplies 150/min by the page count. Both move once a
 session, so both are cached with the **trading date in New York** as the key.
 The cache lives on ``app.state`` rather than in a module global, so two apps in
 one test process cannot see each other's.
@@ -65,7 +75,8 @@ the numerator of relative volume, and it has to be measured on the same feed
 as the average it is divided by -- so it is a bars request too, not the daily
 bar already sitting on the snapshot. It moves through the session, so the
 trading date is the wrong key; it also cannot move faster than the historical
-feed's fifteen-minute embargo, so re-reading it every 2s would buy nothing.
+feed's fifteen-minute embargo, so re-reading it on every 400ms poll would
+buy nothing.
 :class:`IntradayCache` holds it for :data:`SESSION_VOLUME_TTL`, and
 :func:`_fetch_session_volumes` carries the measurement.
 
@@ -303,8 +314,8 @@ AVG_VOLUME_SESSIONS: Final = 30
 #:
 #: Bounded below by the data rather than chosen for comfort: the provider
 #: resolves a historical ``end`` to fifteen minutes ago, so today's partial
-#: daily bar cannot move faster than that. Re-reading it on every 2s poll
-#: would spend 30 requests a minute against ``data.alpaca.markets``'s 200 to
+#: daily bar cannot move faster than that. Re-reading it on every 400ms poll
+#: would spend 150 requests a minute against ``data.alpaca.markets``'s 200 to
 #: return the same integer.
 #:
 #: It expires only while the figure can still move. Once the session it
@@ -1071,6 +1082,61 @@ def _refuse_symbols(
 
 
 # --------------------------------------------------------------------------
+# Provenance -- decision 18
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Spot:
+    """A price and the vendor observation it came from, as one value.
+
+    One thing rather than two because they are one fact. The browser merges
+    the poll and the websocket into a single quote map by comparing
+    observation times, so a stamp that named a different member of the
+    snapshot than the price did would put a stale price at the head of the
+    queue -- and on rule 2's last-observation-wins it would stay there,
+    beating every genuinely newer push for as long as the mismatch lasted.
+    """
+
+    price: Decimal
+    #: The vendor's stamp on whichever member supplied :attr:`price`. Aware
+    #: UTC, the same kind of instant ``WsQuote.at`` carries.
+    at: datetime
+
+
+def _spot(snapshot: StockSnapshot) -> Spot | None:
+    """The best available price and the observation that produced it.
+
+    The fallback order is :attr:`StockSnapshot.price`'s, stated once here so
+    the price and its provenance are chosen by one walk instead of two:
+    quote mid, then the last print, then the daily close. A one-sided or
+    crossed quote has no midpoint and so prices nothing and stamps nothing,
+    which is the case a second walk gets wrong -- the snapshot still *has* a
+    quote, and a stamp that stopped at "is there a quote?" would label an
+    18:00 print with a 19:06 timestamp.
+
+    ``None`` when the snapshot carries no price at all. That symbol is
+    omitted from the response and logged; see :func:`_log_unpriced`.
+
+    **Never a clock on this side of the wire.** If a snapshot ever arrives
+    with a price and no timestamp the answer is no row, not ``now()``: a
+    fabricated observation time is newer than every real one by
+    construction, so it would win the merge and hold the screen at a price
+    nobody observed.
+    """
+    quote = snapshot.latest_quote
+    if quote is not None and quote.mid is not None:
+        return Spot(price=quote.mid, at=quote.at)
+    trade = snapshot.latest_trade
+    if trade is not None:
+        return Spot(price=trade.price, at=trade.at)
+    daily = snapshot.daily_bar
+    if daily is not None:
+        return Spot(price=daily.close, at=daily.at)
+    return None
+
+
+# --------------------------------------------------------------------------
 # Arithmetic, in exact decimals
 # --------------------------------------------------------------------------
 
@@ -1746,7 +1812,7 @@ async def _fetch_intraday(
     and a cache that got that wrong would serve one as the other.
 
     The cost of not caching is bounded by what asks for this: a chart the user
-    expanded, not the 2s poll. The poll is ``/stocks``, which does not come
+    expanded, not the 400ms poll. The poll is ``/stocks``, which does not come
     here at all, and the client's own query cache is the right place for the
     rest.
 
@@ -1995,10 +2061,13 @@ async def stocks(
     unpriced: list[str] = []
     for symbol in requested:
         snapshot = snapshots.get(symbol)
-        price = snapshot.price if snapshot is not None else None
-        if snapshot is None or price is None:
+        # The price and the observation that produced it, read together --
+        # decision 18's rule 1. See `_spot`.
+        spot = _spot(snapshot) if snapshot is not None else None
+        if snapshot is None or spot is None:
             unpriced.append(symbol)
             continue
+        price = spot.price
         previous = snapshot.previous_close
         # Both halves of relative volume, from one feed. Never the snapshot's
         # daily bar, which is IEX on this plan while the series is SIP -- see
@@ -2014,6 +2083,7 @@ async def stocks(
                 symbol=symbol,
                 name=UNIVERSE_BY_SYMBOL[symbol].name,
                 price=price,
+                at=spot.at,
                 change=_change(price, previous),
                 change_pct=_change_pct(price, previous),
                 volume=measured.volume,
@@ -2148,10 +2218,13 @@ async def underlyings(
     unpriced: list[str] = []
     for symbol in requested:
         snapshot = snapshots.get(symbol)
-        price = snapshot.price if snapshot is not None else None
-        if snapshot is None or price is None:
+        # As on `/stocks`: one walk picks the price and its provenance, so
+        # the stamp cannot name a different observation than the price.
+        spot = _spot(snapshot) if snapshot is not None else None
+        if snapshot is None or spot is None:
             unpriced.append(symbol)
             continue
+        price = spot.price
         previous = snapshot.previous_close
         traded_today = _has_traded_today(snapshot, today=today)
         history = [
@@ -2176,6 +2249,7 @@ async def underlyings(
             UnderlyingQuote(
                 symbol=symbol,
                 price=price,
+                at=spot.at,
                 previous_close=previous,
                 change=_change(price, previous),
                 change_pct=_change_pct(price, previous),

@@ -31,6 +31,7 @@ import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,8 @@ from corollary.data.providers.fundamentals import (
     FundamentalsProvider,
     MarketCap,
 )
+from corollary.data.providers.interface import Bar, Quote, StockSnapshot, Trade
+from corollary.wire import as_datetime
 
 from .conftest import (
     FIXTURE_DIR,
@@ -1351,6 +1354,214 @@ def test_the_whole_universe_is_served_when_no_symbols_are_named(
 
 
 # --------------------------------------------------------------------------
+# Provenance -- decision 18
+# --------------------------------------------------------------------------
+#
+# One quote map, two writers: the websocket push and this poll. The browser
+# resolves them by comparing observation times, so a polled row has to carry
+# the same kind of instant `WsQuote.at` carries -- the **vendor's**, in UTC,
+# naming the observation the price beside it came from. A receive-time stamp
+# would make the resolution depend on which hop was slower, and a synthesised
+# one would always win.
+
+
+def observed_at(row: dict[str, Any]) -> datetime:
+    """The ``at`` a route served, parsed back into an instant."""
+    assert row["at"] is not None, row
+    return as_datetime(row["at"])
+
+
+def synthetic_snapshot(body: str) -> Route:
+    """A snapshots router serving one hand-written body.
+
+    Recorded fixtures all carry a quote, a print *and* a bar, so the fallback
+    order below cannot be exercised against them: only the first branch is
+    ever reached. These bodies are the states a halt or an outage produces.
+    """
+    return market_data_routes(snapshots=lambda _request: (200, body))
+
+
+def test_the_stock_row_carries_the_vendors_observation_time(
+    make_market_client: MarketClient,
+) -> None:
+    """``at`` is the quote's ``t``, to the microsecond.
+
+    The recorded quote is stamped 19:06:19.185166012Z and the response is
+    served at 19:10 -- four minutes later. A receive-time stamp would be a
+    plausible-looking instant and the wrong one.
+    """
+    client, _ = make_market_client(market_data_routes())
+    quote = fixture("stock_snapshots")["NVDA"]["latestQuote"]
+
+    row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert observed_at(row) == as_datetime(quote["t"])
+    assert observed_at(row) != MARKET_DATA_RECORDED_AT
+
+
+def test_an_underlying_carries_the_vendors_observation_time(
+    make_market_client: MarketClient,
+) -> None:
+    """The same stamp on the other route, from the same snapshot."""
+    client, _ = make_market_client(market_data_routes())
+    quote = fixture("stock_snapshots")["NVDA"]["latestQuote"]
+
+    row = by_symbol(rows(client, "/api/markets/underlyings", symbols="NVDA"))["NVDA"]
+
+    assert observed_at(row) == as_datetime(quote["t"])
+
+
+def test_the_observation_time_is_utc_and_comparable_with_the_stream(
+    make_market_client: MarketClient,
+) -> None:
+    """Rule 2 compares this against ``WsQuote.at``, so it has to be the same
+    kind of instant: aware, and at zero offset. A naive stamp, or one in New
+    York, makes the comparison a coin toss on the offset."""
+    client, _ = make_market_client(market_data_routes())
+
+    row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert row["at"].endswith("Z")
+    assert observed_at(row).utcoffset() == timedelta(0)
+
+
+def test_the_observation_time_names_the_source_the_price_came_from(
+    make_market_client: MarketClient,
+) -> None:
+    """Price and stamp are read together, so they cannot describe different
+    observations.
+
+    ``StockSnapshot.price`` falls back quote mid -> last print -> daily close,
+    and each of the three carries its own ``t``. A stamp picked by a second
+    walk of that order is one refactor away from labelling a daily close with
+    a quote's timestamp -- which on rule 2 is a stale price that wins every
+    comparison for the rest of the session.
+    """
+    quote_only = """
+      {"NVDA": {"latestQuote": {"bp": 10.00, "ap": 10.04, "bs": 1, "as": 1,
+                                "t": "2026-09-10T19:06:19.185166Z"}}}
+    """
+    trade_only = """
+      {"NVDA": {"latestTrade": {"p": 11.00, "s": 1,
+                                "t": "2026-09-10T18:00:00Z"}}}
+    """
+    bar_only = """
+      {"NVDA": {"dailyBar": {"o": 12.00, "h": 12.50, "l": 11.50, "c": 12.25,
+                             "v": 100, "n": 1, "vw": 12.00,
+                             "t": "2026-09-10T04:00:00Z"}}}
+    """
+    expected = {
+        quote_only: (Decimal("10.02"), "2026-09-10T19:06:19.185166Z"),
+        trade_only: (Decimal("11.00"), "2026-09-10T18:00:00Z"),
+        bar_only: (Decimal("12.25"), "2026-09-10T04:00:00Z"),
+    }
+
+    for body, (price, stamp) in expected.items():
+        client, _ = make_market_client(synthetic_snapshot(body))
+
+        row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+        assert Decimal(str(row["price"])) == price, body
+        assert observed_at(row) == as_datetime(stamp), body
+
+
+def test_a_one_sided_quote_is_stamped_by_the_print_that_priced_the_row(
+    make_market_client: MarketClient,
+) -> None:
+    """The case a second walk of the fallback order gets wrong.
+
+    A quote with no bid has no midpoint, so the price is the last print --
+    but the snapshot still *has* a quote, and a stamp that stopped at
+    "is there a quote?" would label an 18:00 print with a 19:06 quote.
+    """
+    body = """
+      {"NVDA": {"latestQuote": {"bp": 0, "ap": 10.04, "bs": 0, "as": 1,
+                                "t": "2026-09-10T19:06:19.185166Z"},
+                "latestTrade": {"p": 11.00, "s": 1,
+                                "t": "2026-09-10T18:00:00Z"}}}
+    """
+    client, _ = make_market_client(synthetic_snapshot(body))
+
+    row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert Decimal(str(row["price"])) == Decimal("11.00")
+    assert observed_at(row) == as_datetime("2026-09-10T18:00:00Z")
+
+
+def test_a_crossed_quote_is_stamped_by_the_print_too(
+    make_market_client: MarketClient,
+) -> None:
+    """A bid above an ask is a data error rather than a market, so it prices
+    nothing and stamps nothing."""
+    body = """
+      {"NVDA": {"latestQuote": {"bp": 11.00, "ap": 10.00, "bs": 1, "as": 1,
+                                "t": "2026-09-10T19:06:19.185166Z"},
+                "latestTrade": {"p": 11.00, "s": 1,
+                                "t": "2026-09-10T18:00:00Z"}}}
+    """
+    client, _ = make_market_client(synthetic_snapshot(body))
+
+    row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+
+    assert observed_at(row) == as_datetime("2026-09-10T18:00:00Z")
+
+
+def test_the_stamped_price_is_the_price_the_snapshot_states() -> None:
+    """The coupling, asserted against the domain model on every shape.
+
+    ``_spot`` walks the same fallback order ``StockSnapshot.price`` does, and
+    the point of it is that the two cannot disagree: a stamp that named a
+    different member than the price came from is exactly the provenance bug
+    rule 1 exists to prevent. Every combination of the three priceable
+    members is built here, including the empty one -- which is not a row.
+    """
+    quote = Quote(
+        symbol="NVDA",
+        bid=Decimal("10.00"),
+        ask=Decimal("10.04"),
+        bid_size=1,
+        ask_size=1,
+        at=datetime(2026, 9, 10, 19, 6, 19, tzinfo=timezone.utc),
+    )
+    trade = Trade(
+        symbol="NVDA",
+        price=Decimal("11.00"),
+        size=1,
+        at=datetime(2026, 9, 10, 18, 0, tzinfo=timezone.utc),
+    )
+    bar = Bar(
+        symbol="NVDA",
+        at=datetime(2026, 9, 10, 4, 0, tzinfo=timezone.utc),
+        open=Decimal("12.00"),
+        high=Decimal("12.50"),
+        low=Decimal("11.50"),
+        close=Decimal("12.25"),
+        volume=100,
+        trade_count=1,
+        vwap=Decimal("12.00"),
+    )
+    for has_quote, has_trade, has_bar in product([True, False], repeat=3):
+        snapshot = StockSnapshot(
+            symbol="NVDA",
+            latest_quote=quote if has_quote else None,
+            latest_trade=trade if has_trade else None,
+            minute_bar=None,
+            daily_bar=bar if has_bar else None,
+            previous_daily_bar=None,
+        )
+        shape = (has_quote, has_trade, has_bar)
+        spot = markets_routes._spot(snapshot)
+
+        if snapshot.price is None:
+            assert spot is None, shape
+            continue
+        assert spot is not None, shape
+        assert spot.price == snapshot.price, shape
+        source = quote if has_quote else trade if has_trade else bar
+        assert spot.at == source.at, shape
+
+
+# --------------------------------------------------------------------------
 # The chain -- decision 10
 # --------------------------------------------------------------------------
 
@@ -1772,6 +1983,23 @@ def test_the_module_never_names_a_feed() -> None:
 
     for literal in ('"indicative"', "'indicative'", '"opra"', "'opra'"):
         assert literal not in source
+
+
+def test_the_budget_paragraph_states_the_interval_the_code_polls_at() -> None:
+    """The paragraph someone reads when deciding whether 400ms is affordable.
+
+    It went on saying "every 2 seconds -- 30 requests a minute" for a commit
+    after :data:`MARKETS_FOREGROUND_POLL_MS` became 400, understating the
+    rate by a factor of five in the one place a reader would check it before
+    adding a request. Derived from the constant here so the next change to
+    the cadence cannot leave the reasoning behind again.
+    """
+    docstring = markets_routes.__doc__ or ""
+    per_minute = 60_000 // markets_routes.MARKETS_FOREGROUND_POLL_MS
+
+    assert f"{markets_routes.MARKETS_FOREGROUND_POLL_MS}ms" in docstring
+    assert f"{per_minute} requests a minute" in docstring
+    assert "every 2 seconds" not in docstring
 
 
 def test_no_route_here_can_reach_an_order() -> None:
