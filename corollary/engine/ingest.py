@@ -523,6 +523,7 @@ class IngestService:
         provider: MarketDataProvider,
         engine: Engine,
         account: str = "paper",
+        secrets: Sequence[str] = (),
         correlation_id: Callable[[], str] | None = None,
     ) -> None:
         if account not in ACCOUNT_MODES:
@@ -536,6 +537,24 @@ class IngestService:
         self._provider = provider
         self._engine = engine
         self._account = account
+        #: Both halves of the vendor key pair, for ``vendor_detail`` to
+        #: substitute out of a stored refusal's free text. Passed in rather
+        #: than read from the environment here: ``os.environ`` belongs to the
+        #: composition root, and an engine module that read it would also read
+        #: it inside the backtest worker rule 2 scrubs.
+        #:
+        #: **The default is empty and that is a real gap, not a safe one.**
+        #: A service built without them redacts against the paper
+        #: account-number shape alone, which is the state every pass was in
+        #: before this argument existed. It is a default because the
+        #: alternative -- a required argument -- would make the far commoner
+        #: call sites (tests, a backfill, a book with no vendor error text at
+        #: all) pass ``()`` explicitly to say nothing, and a ceremony that
+        #: usually means nothing is one people stop reading. The read path in
+        #: ``api/routes/activity.py`` re-redacts against the process's own
+        #: credentials for exactly this case, and cannot repair a cut this
+        #: pass makes: see :meth:`_rejection_values`.
+        self._secrets: tuple[str, ...] = tuple(secrets)
         self._new_correlation_id = correlation_id or (lambda: uuid4().hex)
 
         #: The vendor's page token, not a sort key. See the module docstring.
@@ -1148,6 +1167,22 @@ class IngestService:
                 "activity_types": ",".join(kinds),
                 "expiration": entry.occ.expiration.isoformat(),
                 "carries_option_event": str(event).lower(),
+                # The ticker the contracts endpoint was asked about, which is
+                # the **OCC root** and not necessarily the underlying:
+                # `_stripped_root` asks about `GME` for a `GME1` contract, and
+                # the whole reason this row exists is that nothing came back
+                # to say which. Named `root_symbol` rather than `underlying`
+                # for that reason -- `_refuse_settlement` has the contract in
+                # hand and can carry a real `underlying`, this cannot, and a
+                # key claiming the root *is* the underlying would be wrong on
+                # exactly the adjusted contracts this table is here for.
+                #
+                # `IngestRefusal.underlying` below carries the same value, but
+                # `ledger_rejection` has no column for it: without this key
+                # the root never reaches the wire on the two terms rules, and
+                # a reader holding only the OCC symbol cannot tell an
+                # adjustment from a fetch that failed.
+                "root_symbol": entry.occ.root,
             },
         )
 
@@ -1709,8 +1744,32 @@ class IngestService:
         fetch failure was present, leaving the row saying only that a
         multiplier is unknown.
 
-        **Two limits of this boundary, stated where they bite.**
+        **The credentials are substituted here, before the cut, and the
+        ordering is the point.** ``self._secrets`` goes to both calls below,
+        so ``vendor_detail`` replaces a key and *then* truncates. The other
+        order -- truncate here, redact on the read path -- reads as
+        equivalent and is not: a credential straddling ``STORED_DETAIL_MAX``
+        is cut in half in the committed row, redaction is literal
+        substitution, so the later pass matches nothing and the surviving
+        prefix is served. The audit of step 8c-2 demonstrated exactly that,
+        with the first ten characters of a key reaching the response, and it
+        is reachable from ordinary prose: :meth:`_refuse_terms` writes some
+        366 characters of our own sentence and then appends *"The contracts
+        endpoint did not answer: {failure}"*, so a 600-character vendor body
+        puts the tail of that answer past offset 1024.
 
+        ``api/routes/activity.py`` redacts again on the way out, against the
+        API process's own environment. That is defence in depth for a row
+        written by a process holding fewer credentials than the reader holds,
+        and it is **not** a substitute for this pass, because no substitution
+        can re-join an identifier already cut.
+
+        **Three limits of this boundary, stated where they bite.**
+
+        * ``secrets`` defaults to empty, and a service built that way
+          redacts against the account-number shape alone. The constructor
+          says why the default exists; what it means here is that "redacted"
+          is a property of the *caller*, not of this method.
         * ``wire._ACCOUNT_NUMBER`` matches an Alpaca **paper** account number
           (``PA`` plus ten characters). A live account number is bare digits
           and is deliberately uncovered -- no digit-run rule can tell one from
@@ -1750,9 +1809,17 @@ class IngestService:
             "symbol": symbol,
             "order_id": order_id,
             "activity_ids": ids,
-            "detail": vendor_detail(detail, limit=STORED_DETAIL_MAX),
+            # ``secrets`` on both, because both are free text and both are
+            # truncated here. Redaction happens inside ``vendor_detail`` and
+            # therefore before its cut -- the ordering is the whole fix; see
+            # this method's docstring.
+            "detail": vendor_detail(
+                detail, secrets=self._secrets, limit=STORED_DETAIL_MAX
+            ),
             "inputs": {
-                key: vendor_detail(value, limit=STORED_DETAIL_MAX)
+                key: vendor_detail(
+                    value, secrets=self._secrets, limit=STORED_DETAIL_MAX
+                )
                 for key, value in inputs.items()
             },
             "at": at,

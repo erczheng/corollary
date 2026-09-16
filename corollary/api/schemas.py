@@ -79,6 +79,9 @@ __all__ = [
     "HaltRequest",
     "IntradayPoint",
     "JsonMoney",
+    "LedgerRefusal",
+    "LedgerRefusalGroup",
+    "LedgerRefusals",
     "ManagedExit",
     "MarginClassName",
     "MarginSummary",
@@ -92,6 +95,7 @@ __all__ = [
     "Position",
     "PositionLeg",
     "PricePoint",
+    "RejectionSource",
     "RiskLimit",
     "RiskLimitKey",
     "SessionState",
@@ -603,6 +607,262 @@ class ActivityStats(ApiModel):
     #: bare count cannot be reconciled by hand; a symbol can be looked up in
     #: the log and in the broker's own history.
     not_booked_symbols: list[str] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------
+# Why the ledger is incomplete -- decision 14's reporting half
+# --------------------------------------------------------------------------
+
+
+#: Which vocabulary a refusal's ``rule`` is drawn from. Matches
+#: ``db.models.REJECTION_SOURCES``, and the two are deliberately not merged:
+#: a refusal to *fetch* and a refusal to *book* are different failures with
+#: different remedies, so ``(source, rule)`` is the pair that names a cause
+#: and ``rule`` alone is not.
+RejectionSource: TypeAlias = Literal["ledger", "ingest"]
+
+
+class LedgerRefusal(ApiModel):
+    """One thing ingestion would not book, with rule 8's three parts intact.
+
+    Rule 8: *"A rejected order records the rule that rejected it, the inputs,
+    and the timestamp."* All three are columns on ``ledger_rejection`` and all
+    three are fields here -- :attr:`rule`, :attr:`inputs` and :attr:`at`. A
+    read surface that dropped any one of them would leave the row in the
+    database and the reader no better off than with the bare
+    :attr:`ActivityStats.not_booked` count, which is the state decision 14
+    exists to end.
+
+    **Two columns are deliberately not carried.** The row's integer primary
+    key is absent because it is not a handle: the writer reconciles rather
+    than appends, so an id is stable only for as long as the refusal keeps
+    being re-derived, and a primary key on the wire invites a client to ask
+    for an endpoint that does not exist. :attr:`fingerprint` is the identity
+    instead -- stable across passes by construction, since it is what the
+    upsert matches on -- and is what a client should key a list row by.
+    """
+
+    source: RejectionSource = Field(
+        description=(
+            "Which vocabulary `rule` is drawn from. `(source, rule)` names a "
+            "cause; `rule` alone does not, because the two enums are allowed "
+            "to spell a member the same way."
+        )
+    )
+    rule: str = Field(
+        description=(
+            "The rule's `value`, never a sentence: a rule is a thing you can "
+            "count, filter and alert on. Not an enum in this schema, because "
+            "the two vocabularies are the engine's and listing today's "
+            "members here would make adding one a change in three files. "
+            "Treat it as an opaque string and render the ones you do not "
+            "recognise rather than dropping them."
+        )
+    )
+    fingerprint: str = Field(
+        description=(
+            "The row's identity, and the stable key for a client list. A "
+            "digest of the source, the rule and the subjects -- every part "
+            "of it is in the fields beside it, so it reveals nothing the "
+            "response does not already say. The row's primary key is "
+            "deliberately absent: the writer reconciles rather than appends, "
+            "so an id is stable only while the refusal keeps being "
+            "re-derived."
+        )
+    )
+    symbol: str | None = Field(
+        description=(
+            "The contract, when the refusal is about one. Null for a refusal "
+            "about an order, or about an activity that carried no symbol at "
+            "all -- so a group's `symbols` can be shorter than its `count`."
+        )
+    )
+    order_id: str | None = Field(
+        description=(
+            "The parent order, for the `mleg` refusals, which name an order "
+            "and no activities."
+        )
+    )
+    activity_ids: list[str] = Field(
+        description="Every activity this refusal concerns, sorted."
+    )
+    detail: str = Field(
+        description=(
+            "Why, in prose. Bounded and de-identified when it was stored, "
+            "and de-identified again on the way out against this process's "
+            "own credentials. May end in a truncation notice."
+        )
+    )
+    inputs: dict[str, str] = Field(
+        description=(
+            "Rule 8's 'the inputs' -- the values the rule was applied to. "
+            "KEYS ARE THE RULE'S OWN SPELLING AND ARE NOT CAMEL-CASED: an "
+            "input's name is data, not a field name, and renaming "
+            "`root_symbol` to `rootSymbol` would misreport what the rule was "
+            "applied to. VALUES ARE STRINGS, INCLUDING THE NUMERIC ONES -- "
+            "the map is untyped, so one key's value is a price (`strike`, "
+            "`net_amount`, `paired_price`) or a count (`multiplier`, `qty`) "
+            "and the next is a symbol or a date. Anything listed in "
+            "`numericInputs` must be parsed as an exact decimal before it is "
+            "compared or sorted; sorted as text, '100' < '9.5' and a filter "
+            "for strikes above $10 keeps the $9.50 one."
+        )
+    )
+    numeric_inputs: list[str] = Field(
+        description=(
+            "Which keys of `inputs` hold a number, sorted. Derived from each "
+            "served value -- a key is listed when its value parses as a "
+            "finite decimal -- rather than from a list of known money keys, "
+            "so a rule that starts emitting a new price is covered with no "
+            "vocabulary to update. This is the marker that stops a table "
+            "header sorting `inputs.strike` as text, which is the one place "
+            "neither the `Money` column type nor the engine's SQL guards can "
+            "see the value."
+        )
+    )
+    at: datetime = Field(
+        description=(
+            "Rule 8's 'the timestamp': when the refusal was recorded, "
+            "refreshed by every pass that re-derives it. NOT the activity's "
+            "-- an activity with no usable timestamp is itself something the "
+            "matcher refuses."
+        )
+    )
+    first_seen: datetime = Field(
+        description=(
+            "When this refusal was first recorded, and never updated after. "
+            "What separates a gap that opened this morning from one that has "
+            "been unexplained for a month."
+        )
+    )
+    activity_at: datetime | None = Field(
+        description=(
+            "The vendor's stamp for the activity, when it gave one. `at` "
+            "answers when did we notice; this answers when did it happen."
+        )
+    )
+    correlation_id: str = Field(
+        description=(
+            "The ingestion pass that last asserted this refusal -- the same "
+            "id on every log line that pass emitted, so a gap on screen "
+            "traces back to the run that found it."
+        )
+    )
+
+
+class LedgerRefusalGroup(ApiModel):
+    """Every refusal one rule made, with the contracts it affected.
+
+    **Grouped by ``(source, rule)`` rather than served as a flat list**,
+    because the page's question is *"why is my P&L incomplete?"* and the
+    answer to that is a cause with a size -- decision 14's own example render
+    is *"1 trade not booked -- adjusted deliverable"*, a rule and a count with
+    the symbol beneath it. A flat row dump would make the page group the rows
+    itself, and every client that ever reads this would group them again,
+    possibly differently.
+    """
+
+    source: RejectionSource = Field(
+        description="Which vocabulary `rule` is drawn from."
+    )
+    rule: str = Field(
+        description=(
+            "The rule every refusal in this group was made under. An opaque "
+            "string; see `LedgerRefusal.rule`."
+        )
+    )
+    count: int = Field(
+        description=(
+            "HOW MANY REFUSALS THIS RULE MADE. A count of refusals, not of "
+            "closings, and therefore NOT THE SAME NUMBER as "
+            "`ActivityStats.notBooked` -- that counts closings the "
+            "realized-trade table does not account for, computed from "
+            "different tables, and one refused symbol can produce several "
+            "closings or none at all. DO NOT ADD THEM and do not add this to "
+            "`LedgerRefusals.total`, which is already their sum. The two "
+            "figures join on the SYMBOL: see "
+            "`LedgerRefusals.unexplainedSymbols`."
+        )
+    )
+    symbols: list[str] = Field(
+        description=(
+            "The contracts this rule refused, once each, OCC-spelled and "
+            "sorted as text -- which is right for a symbol and would be "
+            "wrong for a number. A refusal naming no contract contributes "
+            "nothing here, so this list can be shorter than `count`, or "
+            "empty. This is the side of the join against "
+            "`ActivityStats.notBookedSymbols`."
+        )
+    )
+    latest_at: datetime = Field(
+        description="The most recent `LedgerRefusal.at` in the group."
+    )
+    first_seen: datetime = Field(
+        description=(
+            "The earliest `LedgerRefusal.firstSeen` in the group -- how long "
+            "this cause has gone unexplained."
+        )
+    )
+    refusals: list[LedgerRefusal] = Field(
+        description=(
+            "The individual refusals, newest first. Rule 8's inputs and "
+            "timestamps live here: the group states the cause and its size, "
+            "and this is what the reader expands to reconcile one contract "
+            "by hand. Nested in full rather than paged -- the table holds "
+            "the refusals still true as of the last ingestion pass, not a "
+            "history of every one ever made."
+        )
+    )
+
+
+class LedgerRefusals(ApiModel):
+    """The causes behind :attr:`ActivityStats.not_booked`, for one book.
+
+    Empty is the ordinary answer, not an error: ``not_booked`` is 0 on the
+    live account today, and a refusal that named no subject is logged rather
+    than stored, so a gap can exist with no row to explain it. The page says
+    the cause was not recorded; it must never infer one.
+
+    Not folded into ``/stats`` deliberately. The two answer different
+    questions over different tables -- *how much is missing* against
+    ``realized_trade``, *why* against ``ledger_rejection`` -- and the cards
+    are polled while this is read when somebody asks.
+
+    **The one figure a client must not compute for itself.**
+    :attr:`unexplained_symbols` is the set difference between the gap and the
+    causes, stated rather than derived. It used to be prose in this
+    docstring's neighbours and prose does not reach a generated client; the
+    audit of step 8c-2 found every field description here empty, and the
+    consumer of this response is a dispatch whose entire input is the
+    response and its schema.
+    """
+
+    total: int = Field(
+        description=(
+            "Refusals stored for this book, across every rule -- the sum of "
+            "every group's `count`. A count of REFUSALS, not of closings: it "
+            "is not comparable with `ActivityStats.notBooked` and adding the "
+            "two double-counts. One closing refused under two rules "
+            "contributes 2 here and 1 there."
+        )
+    )
+    groups: list[LedgerRefusalGroup] = Field(
+        description=(
+            "Most-affected first, then by source and rule so the order is "
+            "total. Empty is the ordinary answer, not an error."
+        )
+    )
+    unexplained_symbols: list[str] = Field(
+        description=(
+            "CONTRACTS WITH A GAP WHOSE CAUSE WAS NOT RECORDED: a symbol "
+            "behind `ActivityStats.notBooked` that appears in no group's "
+            "`symbols`. Computed here rather than left as a set difference "
+            "for the client, because the join between the two figures is by "
+            "symbol and getting it wrong is how a page ends up naming the "
+            "wrong contract. A non-empty list means say the cause was not "
+            "recorded -- never infer one, and never show it as zero causes."
+        )
+    )
 
 
 # --------------------------------------------------------------------------

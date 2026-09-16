@@ -29,6 +29,7 @@ The other four things a persistence boundary can get wrong, one test each:
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -72,6 +73,12 @@ from .test_ingest import engine as engine  # noqa: F401  -- a fixture, reused
 #: matches it. Rule 6: obviously fake, and no key material anywhere.
 FAKE_ACCOUNT = "PA0EXAMPLE00"
 
+#: Stands in for a credential the way ``app.state.secret_values`` would supply
+#: one. Deliberately not key-shaped: substitution is literal and does not care,
+#: and rule 6 forbids a real key in a test as firmly as in a log line. Long
+#: enough that a half of it is unmistakably a fragment rather than a word.
+SECRET = "not-a-real-key-000000000"
+
 
 def rejection_rows(engine: Engine) -> list[RejectionRecord]:
     with Session(engine) as session:
@@ -90,6 +97,7 @@ def service(
     provider: FakeProvider,
     *,
     broker: FakeBroker | None = None,
+    secrets: Sequence[str] = (),
 ) -> IngestService:
     """A service over the expiry history, which needs one multiplier to book.
 
@@ -104,6 +112,7 @@ def service(
         provider=provider,
         engine=engine,
         account=PAPER,
+        secrets=secrets,
     )
 
 
@@ -246,6 +255,156 @@ async def test_vendor_free_text_is_redacted_before_it_reaches_the_database(
     assert REDACTED in values["detail"]
     assert FAKE_ACCOUNT not in values["inputs"]["description"]
     assert REDACTED in values["inputs"]["description"]
+
+
+class KeyLeakingProvider(FakeProvider):
+    """A contracts endpoint whose 403 body echoes the credential it refused.
+
+    Long on purpose. ``_refuse_terms`` writes some 366 characters of our own
+    prose and then appends *"The contracts endpoint did not answer: ..."*, so a
+    vendor body of this size runs the composed detail past
+    ``STORED_DETAIL_MAX`` -- which is the only condition under which the order
+    of redaction and truncation can be observed at all.
+
+    The credential is repeated rather than placed once because the exact
+    offset of the cut is a function of our own prose, and prose gets edited. A
+    run of copies means the bound lands inside one of them wherever the
+    sentence above it moves to.
+    """
+
+    async def option_contracts(
+        self,
+        underlying: str,
+        *,
+        expiration_lte: date | None = None,
+        expiration_gte: date | None = None,
+        strike_gte: Decimal | None = None,
+        strike_lte: Decimal | None = None,
+        option_type: OptionType | None = None,
+        include_adjusted: bool = False,
+        show_deliverables: bool = False,
+        status: ContractStatus = ContractStatus.ACTIVE,
+    ) -> list[OptionContract]:
+        raise ProviderError(
+            f"contracts endpoint returned 403 while asking about {underlying}, "
+            f"echoing the request: " + " ".join([f"key={SECRET}"] * 40)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_terms_refusal_names_the_root_it_asked_about(
+    engine: Engine,
+) -> None:
+    """Rule 8's *inputs*, on the one axis the two terms rules were missing.
+
+    ``ledger_rejection`` has columns for the symbol, the order and the
+    activities and none for an underlying, so anything the refusal knows about
+    the ticker has to travel in ``inputs``. ``_refuse_settlement`` and
+    ``_refuse_ambiguous_session`` both put it there; the terms rules recorded
+    it on ``IngestRefusal.underlying`` and then dropped it at the row, which
+    left the reader of an ``unverified_deliverable`` gap unable to tell a
+    ``GME1`` adjustment from an endpoint that simply failed.
+
+    The key is ``root_symbol``, not ``underlying``: what is known here is the
+    OCC root, and on an adjusted contract those are different strings. The
+    settlement rules have the contract in hand and carry the real underlying
+    under its own name.
+    """
+    await service(engine, FakeProvider()).run()
+
+    terms = [
+        row
+        for row in rejection_rows(engine)
+        if row.rule
+        in (
+            IngestRule.CONTRACT_TERMS_UNAVAILABLE.value,
+            IngestRule.CONTRACT_TERMS_FETCH_FAILED.value,
+        )
+    ]
+    assert terms, "the pass with no provider terms must refuse the symbol"
+    for row in terms:
+        assert row.inputs["root_symbol"] == "NVDA"
+        assert row.symbol == NVDA_OTM_CALL
+
+
+@pytest.mark.risk
+def test_a_credential_astride_the_stored_bound_is_redacted_before_the_cut(
+    engine: Engine,
+) -> None:
+    """The bug step 8d part 1 shipped, at the boundary that produced it.
+
+    Both bounds are real and they are 64 characters apart: this method cuts at
+    ``STORED_DETAIL_MAX`` and the read path re-redacts at
+    ``STORED_DETAIL_MAX + 64``. Neither is wrong alone. Together, with the
+    credentials passed only to the *reader*, a key straddling offset 1024 is
+    committed in halves -- and redaction is literal substitution, so the
+    reader matches nothing and serves the surviving prefix. The audit of step
+    8c-2 demonstrated exactly that with the first ten characters of a key.
+
+    Constructed rather than sampled: the secret starts half its length before
+    the bound, so a cut-first implementation keeps precisely its first half,
+    and that half is what is asserted absent. The truncation notice is
+    asserted present too -- without it the detail was never long enough to
+    cut and every other assertion here is vacuous.
+    """
+    writer = service(engine, FakeProvider(), secrets=(SECRET,))
+    half = len(SECRET) // 2
+    astride = "x" * (STORED_DETAIL_MAX - half) + SECRET + " and a tail after it"
+
+    values = writer._rejection_values(
+        source="ingest",
+        rule=IngestRule.CONTRACT_TERMS_FETCH_FAILED.value,
+        symbol=NVDA_OTM_CALL,
+        order_id=None,
+        activity_ids=(),
+        detail=astride,
+        inputs={"request": astride},
+        activity_at=None,
+        at=datetime(2026, 9, 13, tzinfo=timezone.utc),
+        correlation="corr-astride",
+    )
+
+    for text in (str(values["detail"]), values["inputs"]["request"]):
+        assert "characters truncated" in text, "the bound was never reached"
+        assert SECRET not in text
+        # The half a truncate-first writer commits, which no later
+        # substitution can find.
+        assert SECRET[:half] not in text
+        assert REDACTED in text
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_no_fragment_of_a_credential_survives_a_real_pass(
+    engine: Engine,
+) -> None:
+    """The same rule end to end, through ``run`` rather than one method.
+
+    The unit above pins the ordering; this pins that the ordering is reached
+    from a pass an operator can actually cause -- a contracts endpoint
+    answering 403 with a long body, which is the case
+    :meth:`_refuse_terms` composes its longest detail from.
+
+    Asserted on **fragments**, not on the whole value: a leak here is by
+    definition a piece of a key, and ``SECRET not in text`` is the assertion
+    that passes while the first ten characters are being served.
+    """
+    await service(engine, KeyLeakingProvider(), secrets=(SECRET,)).run()
+    rows = rejection_rows(engine)
+    assert rows
+
+    written = " ".join(
+        text
+        for row in rows
+        for text in [row.detail, *(str(value) for value in row.inputs.values())]
+    )
+    assert any(
+        "characters truncated" in row.detail for row in rows
+    ), "no row reached the bound, so this asserts nothing about the ordering"
+    assert SECRET not in written
+    for length in range(8, len(SECRET) + 1):
+        assert SECRET[:length] not in written, length
+    assert REDACTED in written
 
 
 @pytest.mark.asyncio

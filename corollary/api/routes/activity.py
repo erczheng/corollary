@@ -45,13 +45,20 @@ What the count can and cannot say
 fully account for* -- the test is on quantity, so a wholly refused close and a
 partly matched one both land in it. That is an arithmetic fact about the two
 tables and needs no guess. It does **not** assert each one's cause.
-``RejectionRule`` is logged by
-``engine/ledger.py`` and no Phase 2 table stores it, and the adjusted
-deliverable is the case this count exists for rather than provably the only
-thing that can produce it. Attributing the reason with authority wants the
-matcher's refusals persisted -- a table this dispatch does not own. Guessing
-instead, from ``deliverables``, ``allocation_percentage``, ``size`` or a split
-factor, is exactly what open question 4 forbade.
+
+The cause comes from a different table, and from :func:`read_rejections`
+rather than from this count. Step 8c-1 persisted the matcher's and
+ingestion's refusals to ``ledger_rejection``, each with rule 8's rule, inputs
+and timestamp; :func:`refusal_groups` serves them grouped by the rule that
+made them. **The two are still not the same number and must not be added.**
+``not_booked`` counts closings, computed from ``fill`` and ``realized_trade``;
+a group's ``count`` counts refusals, and one refused symbol can produce
+several closings or none at all. They join on the **symbol**, and a gap whose
+symbol appears in no group is a gap whose cause was not recorded -- a refusal
+that named no subject is logged rather than stored. The page says so; it does
+not infer. Guessing instead, from ``deliverables``,
+``allocation_percentage``, ``size`` or a split factor, is exactly what open
+question 4 forbade.
 
 Three smaller things that are easy to get backwards
 ---------------------------------------------------
@@ -89,7 +96,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
@@ -100,22 +107,30 @@ from corollary.api.schemas import (
     ActivityItem,
     ActivityStats,
     ActivityStatus,
+    LedgerRefusal,
+    LedgerRefusalGroup,
+    LedgerRefusals,
     Page,
+    RejectionSource,
 )
-from corollary.db.models import Fill, RealizedTrade
+from corollary.db.models import Fill, RealizedTrade, RejectionRecord
 from corollary.engine.ledger import PCT_QUANTUM, summarise
 from corollary.instruments import OptionType, parse_occ_symbol
+from corollary.wire import STORED_DETAIL_MAX, vendor_detail
 
 __all__ = [
     "DEFAULT_PAGE_SIZE",
     "LedgerGap",
     "LedgerRow",
     "MAX_PAGE_SIZE",
+    "RESPONSE_DETAIL_MAX",
     "activity_items",
     "contract_label",
     "fills_query",
     "ledger_rows",
     "ledger_stats",
+    "refusal_groups",
+    "rejections_query",
     "router",
     "trades_query",
     "unbooked_closes",
@@ -685,3 +700,404 @@ def read_stats(
             },
         )
     return stats
+
+
+# --------------------------------------------------------------------------
+# Why the ledger is incomplete -- decision 14's reporting half
+# --------------------------------------------------------------------------
+
+#: The bound on free text leaving this module, wider than the
+#: ``STORED_DETAIL_MAX`` the row was written under and for one reason: the
+#: stored value may **already** carry ``vendor_detail``'s truncation notice,
+#: of at most 32 characters, and re-cutting at the same limit would splice a
+#: second notice into the middle of the first. The headroom means a row
+#: written by the current writer is never truncated twice, while a row that
+#: somehow exceeds it still is -- SQLite does not enforce ``String(1280)``,
+#: so the column width is a statement of intent rather than a guarantee.
+#:
+#: **"Never truncated twice" is all this buys, and it is not the same claim
+#: as "carries no credential fragment".** That distinction cost a bug: the
+#: headroom means *this* pass does not cut, but it cannot un-cut what the
+#: *writer* already cut, and redaction is literal substitution -- half a
+#: credential matches nothing and is served. The audit of step 8c-2
+#: demonstrated it end to end, with the first ten characters of a key
+#: reaching the response. The fix is at the write site, where
+#: :meth:`~corollary.engine.ingest.IngestService._rejection_values` now
+#: passes the process's ``secrets`` into ``vendor_detail`` so redaction
+#: precedes **that** truncation too. This pass is defence in depth against a
+#: row written before that landed, or written by a process holding fewer
+#: credentials than this one -- both real, and neither a substitute for the
+#: other.
+#:
+#: One scrubber, two limits, still. Redaction happens inside
+#: ``vendor_detail`` and therefore always **before** the cut *at each bound*:
+#: the other order leaves half a credential in the response, which is worth
+#: no less to whoever reads it.
+RESPONSE_DETAIL_MAX: Final = STORED_DETAIL_MAX + 64
+
+#: The two vocabularies, narrowed from the column's ``str``. A mapping rather
+#: than a cast, for the same reason :data:`_ACTION_FOR_SIDE` is one: an
+#: unreadable value is refused and logged, never served under a source it may
+#: not belong to. ``ck_ledger_rejection_source`` and ``RejectionRecord``'s own
+#: validator both stand between the writer and this, so a miss here means the
+#: database was edited by something that is not this application.
+_SOURCE_FOR: Final[Mapping[str, RejectionSource]] = {
+    "ledger": "ledger",
+    "ingest": "ingest",
+}
+
+
+def _redact(text: str, secrets: Sequence[str]) -> str:
+    """Rule 6, on the way out as well as on the way in.
+
+    ``IngestService`` de-identifies against its own ``secrets`` **and** the
+    paper account-number shape before the INSERT, which is where the work has
+    to happen: it is also the site of the stored truncation, and a cut that
+    runs before redaction leaves half a credential in the committed row where
+    no later substitution can find it.
+
+    This is the second pass, and it is not redundant. A row written before
+    that fix landed carries what it carries; a row written by a process
+    holding fewer credentials than this one -- a backfill, a worker with only
+    the market-data pair -- is redacted against fewer. Cheap, a handful of
+    rows, and idempotent: substitution finds nothing the second time.
+
+    Applied to the vendor's text, not to our own identifiers. ``fingerprint``
+    is a SHA-256 digest this application computes and ``correlation_id`` is a
+    UUID it generates, so neither can carry a secret it was not given.
+    """
+    return vendor_detail(text, secrets=secrets, limit=RESPONSE_DETAIL_MAX)
+
+
+def _is_numeric(value: str) -> bool:
+    """Whether a served ``inputs`` value is a number and not a word.
+
+    Derived from the **value**, not from a list of known money keys, and that
+    is the point: ``inputs`` is ``dict[str, str]`` with no per-key typing, so
+    a client cannot tell ``{"multiplier": "100"}`` from
+    ``{"root_symbol": "GME1"}`` by shape. A vocabulary list would need
+    updating every time a rule starts carrying a new price -- and the failure
+    mode of forgetting is a table header that sorts strikes as text, where
+    ``'100' < '9.5'`` and a filter for strikes above $10 keeps the $9.50 one.
+    Reading the value cannot be forgotten.
+
+    Non-finite is not numeric: ``Decimal`` accepts ``"NaN"`` and
+    ``"Infinity"``, neither of which a rule can mean, and marking a word as a
+    number is the error this exists to prevent. Run on the value **after**
+    redaction, so ``<redacted>`` is correctly not a number.
+    """
+    try:
+        parsed = Decimal(value)
+    except (ArithmeticError, ValueError):
+        return False
+    return parsed.is_finite()
+
+
+def _refusal(
+    row: RejectionRecord, source: RejectionSource, secrets: Sequence[str]
+) -> LedgerRefusal:
+    inputs = {key: _redact(value, secrets) for key, value in row.inputs.items()}
+    return LedgerRefusal(
+        source=source,
+        rule=row.rule,
+        fingerprint=row.fingerprint,
+        symbol=None if row.symbol is None else _redact(row.symbol, secrets),
+        order_id=None if row.order_id is None else _redact(row.order_id, secrets),
+        activity_ids=[_redact(value, secrets) for value in row.activity_ids],
+        detail=_redact(row.detail, secrets),
+        # The *keys* are the rule's own spelling and are left alone -- an
+        # input's name is data, and renaming it would misreport what the rule
+        # was applied to. The values are vendor text and are redacted.
+        inputs=inputs,
+        # Which of those values is a number, so the browser -- the one place
+        # neither `Money` nor `guard_money_sql` can see the value -- has
+        # something to gate a sort on.
+        numeric_inputs=sorted(key for key, value in inputs.items() if _is_numeric(value)),
+        at=row.at,
+        first_seen=row.first_seen,
+        activity_at=row.activity_at,
+        correlation_id=row.correlation_id,
+    )
+
+
+def _unreadable_source(row: RejectionRecord, correlation_id: str | None) -> None:
+    """Rule 8, applied to a refusal this module cannot read.
+
+    Dropped rather than served, and therefore absent from ``total`` as well:
+    the same choice :func:`_refuse` makes about a fill whose action cannot be
+    stated. A row asserting the wrong vocabulary is worse than a row that is
+    missing and logged, because ``rule`` means different things in the two.
+    """
+    logger.warning(
+        "stored refusal names source %r, which is neither vocabulary",
+        row.source,
+        extra={
+            "event": "activity_rejection_source_unreadable",
+            "rule": "a refusal is served under its own vocabulary or not at all",
+            "detail": (
+                "`source` says which enum `rule` belongs to -- RejectionRule "
+                "for `ledger`, IngestRule for `ingest`. A third value cannot "
+                "be resolved to either, and ck_ledger_rejection_source "
+                "should have refused it at the column"
+            ),
+            "account": row.account,
+            "source": row.source,
+            "refused_rule": row.rule,
+            "fingerprint": row.fingerprint,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "correlation_id": correlation_id,
+        },
+    )
+
+
+def refusal_groups(
+    rows: Sequence[RejectionRecord],
+    *,
+    secrets: Sequence[str] = (),
+    correlation_id: str | None = None,
+) -> list[LedgerRefusalGroup]:
+    """Stored refusals, grouped by the rule that made them.
+
+    Pure, and deterministic for a given set of rows: identical input produces
+    an identical document, whatever order the rows arrived in.
+
+    **Grouped rather than flat because the page's question is "why".** The
+    count already exists on :attr:`ActivityStats.not_booked`; what a reader
+    looking at an incomplete lifetime P&L needs next is a cause with a size
+    and the contracts under it -- decision 14's own render is *"1 trade not
+    booked -- adjusted deliverable"* with the symbol beneath. A flat row dump
+    would make every client group the rows itself, and two clients would
+    eventually group them differently.
+
+    **Ordered in Python, over values SQL can order correctly anyway.** Groups
+    go most-affected first, ties broken by source then rule; refusals inside a
+    group go newest first, tied on ``first_seen`` and then on the fingerprint,
+    which is total. Nothing here sorts on money: ``inputs`` carries
+    stringified ``strike``, ``multiplier``, ``net_amount`` and
+    ``paired_price`` as TEXT inside a JSON blob, where ``'10' < '9.5'`` and
+    neither ``Money``'s refusing comparator nor ``guard_money_sql`` can see
+    it. Those values are carried verbatim and never compared.
+    """
+    grouped: dict[tuple[RejectionSource, str], list[LedgerRefusal]] = {}
+    for row in rows:
+        source = _SOURCE_FOR.get(row.source)
+        if source is None:
+            _unreadable_source(row, correlation_id)
+            continue
+        grouped.setdefault((source, row.rule), []).append(
+            _refusal(row, source, secrets)
+        )
+
+    groups: list[LedgerRefusalGroup] = []
+    for (source, rule), refusals in grouped.items():
+        ordered = sorted(
+            refusals,
+            key=lambda refusal: (refusal.at, refusal.first_seen, refusal.fingerprint),
+            reverse=True,
+        )
+        groups.append(
+            LedgerRefusalGroup(
+                source=source,
+                rule=rule,
+                count=len(ordered),
+                # Sorted as text, which is what a symbol is. A refusal about
+                # an order or about an activity that carried no symbol at all
+                # contributes nothing, so this can be shorter than `count`.
+                symbols=sorted(
+                    {
+                        refusal.symbol
+                        for refusal in ordered
+                        if refusal.symbol is not None
+                    }
+                ),
+                latest_at=max(refusal.at for refusal in ordered),
+                first_seen=min(refusal.first_seen for refusal in ordered),
+                refusals=ordered,
+            )
+        )
+    groups.sort(key=lambda group: (-group.count, group.source, group.rule))
+    return groups
+
+
+def unexplained_symbols(
+    gap: LedgerGap, groups: Sequence[LedgerRefusalGroup]
+) -> list[str]:
+    """Contracts with a gap that no stored refusal accounts for.
+
+    **The set difference, computed once here rather than by every client.**
+    ``not_booked`` and a group's ``count`` are different numbers over
+    different tables and must not be added; what they *can* be joined on is
+    the **symbol**, and a symbol behind the gap that appears in no group is a
+    gap whose cause was not recorded. Decision 14's answer to that is to say
+    so, never to infer one.
+
+    Left as prose for a client to act on, this was a contract nobody could
+    see: the audit of step 8c-2 generated the OpenAPI document and found
+    every field description on this response empty, with the join rule living
+    only in ``#:`` comments Pydantic drops. So it is a field.
+
+    **Both sides are compared as text, which is right for a symbol** -- and
+    both sides are already stripped and upper-cased: ``LedgerGap.symbols``
+    comes from ``RealizedTrade.symbol``, which is
+    ``parse_occ_symbol(...).symbol``, and a stored refusal's symbol is folded
+    through ``ingest._canonical_symbol``. The four matcher rules that refuse
+    before a contract is resolved carry the vendor's spelling, so a vendor
+    that spells a symbol differently in two places would show here as
+    unexplained. That is the safe direction: it over-reports a missing cause
+    rather than claiming one.
+    """
+    explained = {symbol for group in groups for symbol in group.symbols}
+    return sorted(symbol for symbol in gap.symbols if symbol not in explained)
+
+
+def rejections_query(mode: AccountMode) -> Select[tuple[RejectionRecord]]:
+    """One book's stored refusals, on a **total** order.
+
+    ``at`` is a ``UtcDateTime`` column, so ``ORDER BY`` is available to it --
+    which is not true of the ``Money`` columns elsewhere in this module, and
+    is why the sort that matters here can be asked of SQL at all. The primary
+    key breaks ties, because ``at`` is refreshed on every pass that re-derives
+    a refusal and a whole pass really does share one instant.
+
+    No ``LIMIT``: the writer reconciles rather than appends, so this table
+    holds the refusals that are **still true** as of the last ingestion pass
+    rather than a history of every one ever made. Its size is bounded by the
+    size of the gap it explains, not by how long the account has existed.
+
+    Nothing here asks SQL a question about ``inputs``. A
+    ``WHERE json_extract(inputs, '$.strike') > ...`` gets SQLite's
+    lexicographic answer with no raise anywhere -- the exact failure ``Money``
+    exists to make impossible on a column.
+    """
+    return (
+        select(RejectionRecord)
+        .where(RejectionRecord.account == mode.value)
+        .order_by(RejectionRecord.at.desc(), RejectionRecord.id.desc())
+    )
+
+
+def _rejections(session: Session, mode: AccountMode) -> list[RejectionRecord]:
+    return list(session.scalars(rejections_query(mode)))
+
+
+def _secret_values(request: Request) -> Sequence[str]:
+    """The credentials in this process's environment, per ``api/app.py``.
+
+    **Refused rather than defaulted when the state is absent.** This used to
+    fall back to ``()`` the way ``routes/ws.py`` does, which reads as
+    defensive and is the wrong direction for a *redaction input*: an empty
+    secret list is not "no secrets to hide", it is "hide nothing", and the
+    response it produces is indistinguishable from a correct one. A socket
+    has reason to prefer degraded delivery to none; a read that would serve
+    vendor free text unscrubbed does not.
+
+    Only reachable by mounting this router on an app that did not run
+    ``create_app``, which is a wiring error in this codebase rather than a
+    runtime condition -- so it is loud, and it names the fix.
+    """
+    provider = getattr(request.app.state, "secret_values", None)
+    if not callable(provider):
+        raise RuntimeError(
+            "app.state.secret_values is not set, so this route has no "
+            "credentials to redact vendor free text against. Build the app "
+            "with corollary.api.app.create_app rather than mounting this "
+            "router on a bare FastAPI(): serving `detail` and `inputs` "
+            "redacted against nothing would look exactly like serving them "
+            "redacted, which is rule 6's failure mode."
+        )
+    # Annotated rather than returned straight through: `getattr` on
+    # Starlette's `State` is `Any`, and a bare `return provider()` hands mypy
+    # an `Any` under a `Sequence[str]` signature, which it reports under
+    # `no-any-return`. The annotation is where the declared type is stated;
+    # it is not a runtime check, and one hazard it therefore does not catch
+    # is a provider returning a bare `str` -- a `str` *is* a `Sequence[str]`
+    # of single characters, and `vendor_detail` would then substitute each
+    # letter of a key on its own and redact nothing recognisable.
+    # `api/app.py` returns a tuple on both of its branches.
+    values: Sequence[str] = provider()
+    return values
+
+
+@router.get("/rejections", summary="Why the ledger is incomplete")
+def read_rejections(
+    request: Request,
+    # The account boundary, as on the other two routes. Not called.
+    broker: BrokerDep,
+    mode: AccountModeDep,
+    session: SessionDep,
+) -> LedgerRefusals:
+    """The causes behind ``notBooked``, grouped by the rule that refused.
+
+    Decision 14: *"A gap with a stated cause is a decision the reader can
+    agree with; a gap without one is indistinguishable from a bug, and the
+    reader's only honest response is to stop trusting the number."* ``/stats``
+    says how many closings the lifetime figures are missing; this says why.
+
+    **Empty is the ordinary answer, not an error.** ``not_booked`` is 0 on the
+    live account today, and even when it is not, a refusal that named no
+    subject is logged rather than stored. A book with nothing to explain
+    returns zero groups and logs nothing -- nothing to explain is not a
+    warning.
+
+    **Why this route also reads ``fill`` and ``realized_trade``.** The one
+    thing a client must not work out for itself is the join between the gap
+    and its causes, and that join needs both sides:
+    :func:`unexplained_symbols` names the contracts with a gap that no stored
+    refusal accounts for. Left as a set difference against ``/stats``, the
+    rule lived in prose the client cannot see -- see that function. The cost
+    is one extra load of the book's fills and trades on a route that is read
+    when somebody asks rather than polled; ``/stats`` already folds both on
+    every poll.
+    """
+    correlation_id = str(uuid.uuid4())
+    groups = refusal_groups(
+        _rejections(session, mode),
+        secrets=_secret_values(request),
+        correlation_id=correlation_id,
+    )
+    unexplained = unexplained_symbols(
+        unbooked_closes(
+            _fills(session, mode), _trades(session, mode), correlation_id=correlation_id
+        ),
+        groups,
+    )
+    total = sum(group.count for group in groups)
+    if groups or unexplained:
+        logger.warning(
+            "lifetime realized P&L has %d recorded refusal(s) and %d "
+            "unexplained contract(s): %s",
+            total,
+            len(unexplained),
+            ", ".join(f"{group.source}/{group.rule} x{group.count}" for group in groups)
+            or "no stored cause",
+            extra={
+                "event": "activity_rejections_served",
+                "rule": "a gap in lifetime P&L states its cause, or states that it has none",
+                "detail": (
+                    "decision 14: the count says how many closings are "
+                    "missing and this says which rule refused each one"
+                ),
+                "account": mode.value,
+                # Rules, counts and symbols only. `detail` and `inputs` are
+                # the two free-text fields and neither is re-emitted here: a
+                # log record's `extra` never reaches the response scrubber,
+                # so the one place a redactor cannot be relied on is the one
+                # place vendor prose must not be put.
+                "rules": {
+                    f"{group.source}/{group.rule}": group.count for group in groups
+                },
+                "symbols": sorted(
+                    {symbol for group in groups for symbol in group.symbols}
+                ),
+                # The contracts whose gap nothing explains. A symbol, which
+                # is not free text: it is parsed from an OCC string or folded
+                # by `ingest._canonical_symbol`, and it is the one thing that
+                # makes this line actionable at 3am.
+                "unexplained_symbols": unexplained,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+    return LedgerRefusals(
+        total=total, groups=groups, unexplained_symbols=unexplained
+    )

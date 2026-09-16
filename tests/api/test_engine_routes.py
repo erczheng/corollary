@@ -329,6 +329,7 @@ SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/account/history",
     "/api/account/transfers",
     "/api/activity",
+    "/api/activity/rejections",
     "/api/activity/stats",
     "/api/engine/halt",
     "/api/engine/resume",
