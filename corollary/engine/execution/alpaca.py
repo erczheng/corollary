@@ -58,7 +58,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Final, TypeVar
+from typing import Any, Callable, Final, TypeVar
 
 import httpx
 
@@ -83,8 +83,17 @@ from corollary.engine.execution.interface import (
     PositionIntent,
     PositionSide,
     TradeActivity,
+    TradeUpdate,
 )
 from corollary.ratelimit import HostRateLimiter, default_limiter
+from corollary.sockets import (
+    JSON_CODEC,
+    SocketConnect,
+    StreamActivityRecorder,
+    VendorSocket,
+    VendorStream,
+    utcnow,
+)
 from corollary.wire import (
     ERROR_BODY_MAX,
     as_date,
@@ -874,3 +883,322 @@ class AlpacaBroker(BrokerAccount):
                 },
             )
         )
+
+
+# --------------------------------------------------------------------------
+# The ``trade_updates`` websocket
+# --------------------------------------------------------------------------
+#
+# The third vendor socket, and the only one that is not market data. It lives
+# here rather than with the two quote streams because it is an order-lifecycle
+# feed on the **trading** host: a different hostname, a separate rate-limit
+# bucket, and paper or live decided by which key pair opened it. Everything
+# transport-shaped is inherited from `corollary.sockets.VendorStream`, which
+# owns rule 9's close attribution so that the three sockets cannot answer that
+# question differently.
+#
+# Nothing here places an order. Rule 1 has exactly one path to `submit_order`
+# and it is inside `RiskManager.approve()`; this socket *listens* to what
+# happened to orders, which is the opposite direction and is what makes it
+# safe to have on the trading host at all.
+
+#: The one stream this socket listens to. Alpaca's trading websocket
+#: multiplexes by name and ``trade_updates`` is the only name Corollary wants:
+#: it is the order lifecycle. Account updates are polled.
+TRADE_UPDATES_STREAM: Final = "trade_updates"
+
+#: The path the trading websocket lives at, on whichever trading host the
+#: credentials name.
+TRADE_UPDATES_PATH: Final = "/stream"
+
+
+def trade_updates_url(credentials: AlpacaCredentials) -> str:
+    """The websocket URL for the account these credentials belong to.
+
+    Derived from :attr:`AlpacaCredentials.trading_base_url` rather than
+    selected here, which is rule 5 holding at the transport: a paper key pair
+    carries the paper host, so pointing this socket at the live account takes
+    a different key pair and not a different string literal.
+    """
+    base = credentials.trading_base_url
+    for prefix in ("https://", "http://"):
+        if base.startswith(prefix):
+            base = base[len(prefix) :]
+            break
+    return f"wss://{base.rstrip('/')}{TRADE_UPDATES_PATH}"
+
+
+def _whole(value: Decimal | None, what: str) -> int | None:
+    """A quantity as an ``int``, refusing a fractional one.
+
+    Alpaca sends quantities as strings, which parse to ``Decimal`` exactly. A
+    non-integral one is **refused**, not rounded: this book trades contracts,
+    the one asset class that fills fractionally is not traded here, and a
+    rounded quantity is a position size that is wrong with nothing on screen
+    to say so.
+    """
+    if value is None:
+        return None
+    if value != value.to_integral_value():
+        raise BrokerError(
+            f"{what} is {value}, which is not a whole number of contracts. A "
+            "fractional quantity is refused rather than rounded: a rounded "
+            "one is a position size that is wrong with nothing to say so"
+        )
+    return int(value)
+
+
+def _trade_update(payload: Any) -> TradeUpdate:
+    """One ``trade_updates`` event, as the domain object.
+
+    The ``order`` member is *"the same as the order object that is returned
+    from the REST API"*, so it goes through :func:`_order` -- the same
+    translation, the same ``position_intent`` resolution, the same signed
+    ``filled_avg_price``. A second parser for the same shape is a second
+    place for the sign of a credit to be got wrong.
+    """
+    raw = _object(payload, "a trade update")
+    order = _order(_object(raw.get("order"), "a trade update's order"))
+    return TradeUpdate(
+        event=str(raw.get("event") or ""),
+        at=_need_datetime(raw, "timestamp", "a trade update"),
+        order_id=order.id,
+        symbol=order.symbol,
+        status=order.status,
+        # The order's own ``position_intent``, and never a guess from
+        # ``side``: an ``mleg`` parent carries no intent at all, and inventing
+        # one there is how a buy-to-close is booked as a new lot and doubles a
+        # position the account already holds.
+        action=order.position_intent,
+        quantity=_whole(order.quantity, "the order quantity"),
+        filled_quantity=_whole(order.filled_quantity, "the filled quantity") or 0,
+        fill_price=_as_decimal(raw.get("price")),
+        fill_quantity=_whole(_as_decimal(raw.get("qty")), "this event's quantity"),
+        filled_avg_price=order.filled_avg_price,
+        position_quantity=_whole(
+            _as_decimal(raw.get("position_qty")), "the resulting position"
+        ),
+        order=order,
+    )
+
+
+class AlpacaTradeUpdateStream(VendorStream):
+    """The order-lifecycle socket: ``trade_updates``, and nothing else.
+
+    Authenticates with a message, listens to one stream by name, translates
+    each event into a :class:`TradeUpdate`, and hands it to a synchronous
+    sink -- which the composition root builds from ``api/fanout.py``, so this
+    module does not import the browser's wire shapes.
+
+    It is the second producer for rule 9's stream-closed condition. The
+    attribution of a close, the reconnect and the backoff are the base
+    class's, deliberately: the market-data sockets and this one have to give
+    the same answer to *"was that close ours?"*, and two copies of that
+    answer is one copy that goes wrong quietly.
+    """
+
+    def __init__(
+        self,
+        *,
+        credentials: AlpacaCredentials,
+        activity: StreamActivityRecorder,
+        on_update: Callable[[TradeUpdate], None],
+        connect: SocketConnect | None = None,
+        sleep: Callable[[float], Any] | None = None,
+        now: Callable[[], datetime] = utcnow,
+    ) -> None:
+        super().__init__(
+            # The vendor's own name for the one stream this socket listens
+            # to, which is also what rule 9's halt reason will say. Losing
+            # this feed is losing fills, not quotes, and the record has to be
+            # able to tell a reader which of the two happened.
+            name=TRADE_UPDATES_STREAM,
+            url=trade_updates_url(credentials),
+            # JSON, which Alpaca's trading stream documents alongside
+            # msgpack. The decoder reads whichever the *frame* is, because
+            # the paper host answers in binary frames -- so an upgrade of the
+            # vendor's default cannot silently stop this socket working.
+            codec=JSON_CODEC,
+            activity=activity,
+            connect=connect,
+            sleep=sleep,
+            now=now,
+            secrets=(credentials.key_id, credentials.secret_key),
+        )
+        self._credentials = credentials
+        self._on_update = on_update
+        self._listening = False
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        activity: StreamActivityRecorder,
+        on_update: Callable[[TradeUpdate], None],
+        env: Mapping[str, str] | None = None,
+        paper: bool = True,
+        **kwargs: Any,
+    ) -> "AlpacaTradeUpdateStream":
+        """The paper socket by default. Rule 5: paper is the default everywhere."""
+        credentials = (
+            AlpacaCredentials.paper_from_env(env)
+            if paper
+            else AlpacaCredentials.live_from_env(env)
+        )
+        return cls(
+            credentials=credentials,
+            activity=activity,
+            on_update=on_update,
+            **kwargs,
+        )
+
+    @property
+    def listening(self) -> bool:
+        """Has the server confirmed the ``listen``? Reported, never assumed."""
+        return self._listening
+
+    # -- the protocol ------------------------------------------------------
+
+    def _handshake_headers(self) -> dict[str, str]:
+        """Nothing. The trading stream authenticates with a message."""
+        return {}
+
+    def _auth_message(self) -> Mapping[str, Any]:
+        """The auth frame. **Never logged**, by rule 6, anywhere in this class."""
+        return {
+            "action": "auth",
+            "key": self._credentials.key_id,
+            "secret": self._credentials.secret_key,
+        }
+
+    def _messages(self, frame: str | bytes) -> list[Mapping[str, Any]]:
+        """One frame as a list of messages.
+
+        The trading stream sends one object per frame, unlike the data
+        streams' arrays. Both shapes are accepted rather than one being
+        refused: the cost is two lines and the alternative is a feed that
+        stops on a shape the vendor is free to change.
+        """
+        try:
+            decoded = self._codec.decode(frame)
+        except Exception as exc:
+            logger.warning(
+                "undecodable frame on the trade_updates stream: %s",
+                self._detail(str(exc)),
+                extra={
+                    "event": "trade_updates_frame_undecodable",
+                    "detail": self._detail(str(exc)),
+                    "at": self._now().isoformat(),
+                },
+            )
+            return []
+        if isinstance(decoded, Mapping):
+            return [decoded]
+        if isinstance(decoded, list):
+            return [item for item in decoded if isinstance(item, Mapping)]
+        return []
+
+    async def _handle(self, socket: VendorSocket, message: Mapping[str, Any]) -> None:
+        name = message.get("stream")
+        if name == "authorization":
+            await self._authorized(socket, message)
+        elif name == "listening":
+            self._listening = True
+        elif name == TRADE_UPDATES_STREAM:
+            self._publish(message)
+        # Anything else is a stream nobody listened to. It already counted as
+        # a message, which is all rule 9 wanted from it.
+
+    async def _authorized(
+        self, socket: VendorSocket, message: Mapping[str, Any]
+    ) -> None:
+        data = message.get("data")
+        status = str(data.get("status", "")) if isinstance(data, Mapping) else ""
+        if status != "authorized":
+            detail = self._detail(f"the trading stream answered {status!r}")
+            logger.error(
+                "the trade_updates stream refused our credentials: %s",
+                detail,
+                extra={
+                    "event": "trade_updates_refused",
+                    "rule": "vendor_refused",
+                    "status": status,
+                    "detail": detail,
+                    "at": self._now().isoformat(),
+                },
+            )
+            # A refusal that recurs identically on reconnect, and a lost feed
+            # all the same: rule 9's condition is recorded either way, so the
+            # engine halts rather than trading on blind.
+            self._record_stream_closed(self._now(), detail)
+            raise BrokerAuthError(
+                f"the trade_updates stream refused the credentials: {status or 'unauthorized'}"
+            )
+        # Only now: an open socket that has not authorized carries nothing.
+        self._record_stream_open(self._now())
+        await self._codec.transmit(
+            socket, {"action": "listen", "data": {"streams": [TRADE_UPDATES_STREAM]}}
+        )
+
+    def _publish(self, message: Mapping[str, Any]) -> None:
+        """Translate one event and hand it to the sink.
+
+        An event this fails on is logged and skipped rather than fatal: one
+        unreadable message must not cost every *later* fill its notification,
+        which is what a raised exception here would do. The catch is scoped to
+        the translation for that reason.
+
+        **The sink is inside the containment too**, in its own block: called
+        after the ``try``, anything it raised propagated out of ``run()`` and
+        killed the order feed with **no** ``record_stream_closed`` and no
+        reconnect -- the engine blind to its own fills while rule 9 believed
+        the socket healthy. ``api/fanout.py``'s ``wire_action`` is a ``dict``
+        lookup with no exhaustiveness checking, so a fifth ``PositionIntent``
+        member is a ``KeyError`` on this line.
+
+        **The catch names the ``ArithmeticError`` family, not a member of
+        it.** A non-finite ``Decimal`` can no longer be built out of a wire
+        value -- ``corollary.wire._decimalise`` refuses one at the decode
+        boundary -- and this is the second line of defence, because this path
+        has now been broken twice by the same family arriving from different
+        corners: ``InvalidOperation`` out of a comparison, then
+        ``OverflowError`` out of ``int(Decimal('Infinity'))``, which was *not*
+        in this tuple and so escaped every frame above it -- all of which
+        catch only ``SocketClosed`` -- and killed the socket permanently with
+        rule 9's close condition never recorded. ``ValueError`` covered its
+        sibling ``int(Decimal('NaN'))``, which is exactly what made the path
+        look covered.
+        """
+        try:
+            update = _trade_update(message.get("data"))
+        except (BrokerError, ArithmeticError, KeyError, TypeError, ValueError) as exc:
+            detail = self._detail(str(exc))
+            logger.warning(
+                "unreadable trade update: %s",
+                detail,
+                extra={
+                    "event": "trade_update_unreadable",
+                    "rule": "unreadable_event",
+                    "detail": detail,
+                    "at": self._now().isoformat(),
+                },
+            )
+            return
+        try:
+            # Synchronous by contract: `Fanout.publish` never awaits, so a
+            # slow browser tab cannot stall this socket.
+            self._on_update(update)
+        except Exception as exc:  # the sink is the composition root's code
+            detail = self._detail(str(exc))
+            logger.error(
+                "the trade_updates sink raised: %s",
+                detail,
+                extra={
+                    "event": "trade_update_sink_failed",
+                    "rule": "sink_raised",
+                    "order_id": update.order_id,
+                    "detail": detail,
+                    "at": self._now().isoformat(),
+                },
+                exc_info=True,
+            )

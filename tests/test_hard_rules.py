@@ -100,10 +100,12 @@ from pathlib import Path
 
 import pytest
 
+from corollary.data.providers.alpaca import AlpacaQuoteStream
 from corollary.engine.execution import alpaca as alpaca_module
 from corollary.engine.execution import interface as interface_module
-from corollary.engine.execution.alpaca import AlpacaBroker
+from corollary.engine.execution.alpaca import AlpacaBroker, AlpacaTradeUpdateStream
 from corollary.engine.execution.interface import BrokerAccount
+from corollary.sockets import VendorStream
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = REPO_ROOT / "corollary"
@@ -153,10 +155,41 @@ KNOWN_RECORDERS = frozenset({"record_alpaca.py", "record_finnhub.py"})
 #: in the slice still exists, so nothing raises and the guard reports success
 #: over half its scope. That is this file's own stated failure mode -- a guard
 #: whose scope has evaporated passes in silence.
+#: ``corollary/sockets.py`` is the third entry and it is a *file*, which
+#: :func:`_sources` handles. It is here because step 8d part 2 moved the
+#: actual vendor I/O out of the two directories above and into it: it holds
+#: the only code in the tree that knows what a real socket is, opens one, and
+#: writes to one. For a while that left the one module performing vendor I/O
+#: outside the scope of both write-verb guards -- the transport moved out of
+#: the guarded directories as part of the change that created it, and the
+#: behavioural assertions that replaced the file-scope check live in three
+#: other files where nothing can see that they are the whole of it.
 VENDOR_PACKAGES = (
     PACKAGE / "engine" / "execution",
     PACKAGE / "data" / "providers",
+    PACKAGE / "sockets.py",
 )
+
+#: Every ``action`` a vendor websocket may put on the wire.
+#:
+#: ``auth`` and ``listen`` carry no instruction, and a ``subscribe`` is how a
+#: *read* is scoped -- so none of the three changes anything at the vendor.
+#: The guard over this is structural and file-scoped, which is what
+#: :data:`WRITE_VERBS` cannot be for a socket: ``self._codec.transmit(...)``
+#: is a name no HTTP verb list knows, and an ``{"action": "cancel"}`` frame on
+#: the trading socket would be an order placed outside
+#: ``RiskManager.approve()`` under a green gate.
+SOCKET_ACTIONS = frozenset({"auth", "subscribe", "listen"})
+
+#: The methods a ``VendorSocket`` may be asked to perform, and the whole
+#: protocol: two directions, a read and a close.
+SOCKET_PROTOCOL = frozenset({"send_text", "send_bytes", "recv", "close"})
+
+#: What may be called on the ``websockets`` connection itself -- the library's
+#: own API, which spells its write ``send``. Pinned so the exemption in
+#: :func:`test_nothing_on_the_vendor_surface_issues_a_non_get_request` cannot
+#: quietly widen into a second write path.
+WEBSOCKET_CONNECTION_CALLS = frozenset({"send", "recv", "close"})
 
 def recorders() -> tuple[Path, ...]:
     """Every fixture recorder, with the glob's floor checked *here*.
@@ -198,6 +231,22 @@ def vendor_surface() -> tuple[Path, ...]:
 #: Verbs that change something at the other end. ``request`` and ``send`` are
 #: here because both take the method as an argument, so an audit that only
 #: looked for ``.post(`` would miss ``.request("POST", ...)``.
+#:
+#: **This list is about HTTP, and the websockets are named so that it stays
+#: that way.** Three vendor sockets landed on this surface in step 8d part 2,
+#: and a websocket has to transmit -- an ``auth`` frame, a ``subscribe``, a
+#: ``listen``. None of the three changes anything at the vendor: a subscribe
+#: is how a *read* is scoped. So ``corollary.sockets.VendorSocket`` spells its
+#: two directions ``send_text`` and ``send_bytes`` rather than overloading
+#: ``send``, which keeps ``httpx``'s method-taking ``send`` catchable here
+#: without excusing the sockets.
+#:
+#: What the sockets transmit is pinned by *behaviour* instead, which is
+#: stronger than a name check: ``tests/data/providers/test_alpaca_stream.py``
+#: asserts the market-data client's whole transmitted list is ``auth`` and
+#: ``subscribe`` frames and nothing else, and
+#: ``tests/engine/execution/test_trade_update_stream.py`` does the same for
+#: ``auth`` and ``listen``. An order placed over a socket would fail both.
 WRITE_VERBS = frozenset({"post", "put", "patch", "delete", "request", "send"})
 
 #: Fragments of a method name that would mean the broker can change something.
@@ -597,6 +646,20 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     One test rather than one per verb: the failure message names the verb and
     the line, so parametrising bought identity in the report and nothing in
     coverage, and the gate is the thing that has to stay short.
+
+    **One exemption, and it is as narrow as it can be made:**
+    ``self._connection.send(...)`` inside ``corollary/sockets.py``.
+    ``websockets`` spells a frame write ``send`` and that name cannot be
+    changed from here, while ``WRITE_VERBS`` needs ``send`` for ``httpx``,
+    whose ``send`` takes the method as an argument and would carry a POST past
+    this guard. So the exemption is keyed on the *receiver* -- the attribute
+    holding a ``ClientConnection`` -- and on the file, and it is bounded from
+    the other side by
+    :func:`test_the_websocket_connection_is_only_ever_read_written_and_closed`,
+    which enumerates everything called on that attribute and insists it is
+    the transport protocol and nothing else. A websocket frame changes nothing
+    at the vendor; what those frames may *say* is
+    :func:`test_the_vendor_sockets_transmit_no_action_but_auth_subscribe_and_listen`.
     """
     offenders = []
     for path in _sources(*vendor_surface()):
@@ -605,9 +668,126 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr in WRITE_VERBS
+                and not _is_websocket_frame_write(path, node.func)
             ):
                 offenders.append(f"{_where(path)}:{node.lineno} .{node.func.attr}()")
     assert offenders == [], f"a write verb reaches the vendor: {sorted(offenders)}"
+
+
+def _is_websocket_frame_write(path: Path, func: ast.Attribute) -> bool:
+    """``self._connection.send(...)`` in ``corollary/sockets.py``, and nothing else."""
+    return (
+        path.name == "sockets.py"
+        and func.attr == "send"
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "_connection"
+    )
+
+
+@pytest.mark.risk
+def test_the_websocket_connection_is_only_ever_read_written_and_closed() -> None:
+    """The positive form of the exemption above, keyed the same way.
+
+    ``self._client`` has one of these and the socket needs its own: the
+    transport's whole use of the ``websockets`` library is three calls, and
+    enumerating them is what makes ``.send()`` being allowed a statement about
+    frames rather than a hole. A fourth call -- anything that reconfigures the
+    connection, or a second write path -- fails here.
+    """
+    calls = set()
+    for path in _sources(*VENDOR_PACKAGES):
+        for node in ast.walk(_tree(path)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "_connection"
+            ):
+                calls.add(node.func.attr)
+    assert calls == WEBSOCKET_CONNECTION_CALLS, calls
+
+
+@pytest.mark.risk
+def test_the_vendor_sockets_transmit_no_action_but_auth_subscribe_and_listen() -> None:
+    """What the three sockets may *say*, as a file-scope invariant.
+
+    The behavioural assertions in ``tests/data/providers/test_alpaca_stream
+    .py`` and ``tests/engine/execution/test_trade_update_stream.py`` are good
+    and they stay -- they read back the whole transmitted list, which is
+    stronger than any name check for the clients they cover. What they cannot
+    do is cover a client nobody has written yet, and three counts of that gap
+    were open at once: the vendor files transmit through
+    ``self._codec.transmit(...)``, a name no guard knows;
+    :data:`WRITE_SHAPED` is applied only to discovered *brokers*, and
+    ``AlpacaTradeUpdateStream`` is a ``VendorStream`` rather than a broker; and
+    the transport had left the guarded directories entirely. So a ``cancel``
+    method transmitting ``{"action": "cancel", "order_id": ...}`` on the
+    trading socket tripped nothing.
+
+    This reads the frames instead of the call sites, which is what makes it
+    independent of how a message reaches the wire: every ``action`` key in a
+    dict literal anywhere on the vendor surface must carry one of
+    :data:`SOCKET_ACTIONS`, spelled as a literal. A non-literal value fails
+    too, deliberately -- an action assembled from a variable is exactly how
+    this guard would be got round, and there is no reason for one.
+    """
+    offenders = []
+    for path in _sources(*vendor_surface()):
+        for node in ast.walk(_tree(path)):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values):
+                if not (isinstance(key, ast.Constant) and key.value == "action"):
+                    continue
+                if isinstance(value, ast.Constant) and value.value in SOCKET_ACTIONS:
+                    continue
+                offenders.append(
+                    f"{_where(path)}:{node.lineno} action={ast.unparse(value)}"
+                )
+    assert offenders == [], f"a socket frame carries an unknown action: {offenders}"
+
+
+@pytest.mark.risk
+def test_no_vendor_socket_exposes_a_write_shaped_method() -> None:
+    """:data:`WRITE_SHAPED`, applied to the sockets as well as the brokers.
+
+    ``test_no_broker_exposes_a_write_shaped_method`` discovers ``BrokerAccount``
+    subclasses, and the three stream clients are none: they subclass
+    ``VendorStream``. So a ``cancel`` on the ``trade_updates`` client -- the
+    one socket already authenticated against the *trading* host -- was in
+    neither list. An absent method is still the only real guarantee.
+    """
+    discovered = _vendor_streams_defined_in_the_package()
+    assert AlpacaQuoteStream in discovered, "the market-data client was not discovered"
+    assert (
+        AlpacaTradeUpdateStream in discovered
+    ), "the trade_updates client was not discovered"
+
+    offenders = [
+        f"{cls.__name__}.{name}"
+        for cls in discovered
+        for name, _ in inspect.getmembers(cls, callable)
+        if not name.startswith("__") and any(word in name for word in WRITE_SHAPED)
+    ]
+    assert offenders == [], f"a vendor socket can change something: {offenders}"
+
+
+def _vendor_streams_defined_in_the_package() -> list[type]:
+    """``VendorStream`` and every implementation of it that we ship.
+
+    Same mechanism and same stated limit as
+    :func:`_brokers_defined_in_the_package`: ``__subclasses__`` sees a class
+    the day the test session imports it, so the caller asserts that the two
+    that exist *were* discovered rather than trusting an empty list.
+    """
+    seen: dict[str, type] = {}
+    stack: list[type] = [VendorStream]
+    while stack:
+        cls = stack.pop()
+        if cls.__module__.startswith("corollary.") and cls.__name__ not in seen:
+            seen[cls.__name__] = cls
+        stack.extend(cls.__subclasses__())
+    return [seen[name] for name in sorted(seen)]
 
 
 @pytest.mark.risk
@@ -620,6 +800,11 @@ def test_the_only_http_call_on_the_vendor_surface_is_get() -> None:
     because it keys on ``self._client``: a recorder owns its ``httpx`` client
     as a local, and is covered by the negative form above, which runs over
     the whole surface including every recorder.
+
+    ``corollary/sockets.py`` is inside this scope and contributes nothing to
+    the set, because it holds no HTTP client at all -- the websocket half of
+    the same question is
+    :func:`test_the_websocket_connection_is_only_ever_read_written_and_closed`.
     """
     client_calls = set()
     for path in _sources(*VENDOR_PACKAGES):

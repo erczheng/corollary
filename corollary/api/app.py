@@ -6,14 +6,17 @@ database, and constructs the one :class:`~corollary.engine.runtime.EngineRuntime
 -- which writes ``t0``, supervises rule 9's watchdog, and never clears a halt
 -- then tears all three down.
 
-**That watchdog cannot fire yet, and this is the file where that is easiest
-to misread.** Rule 9's two conditions are implemented and tested in
-``engine/runtime.py``, but nothing in the shipped app records a message, a
-successful poll, a stream open or a stream close: there is no **vendor**
-websocket client under ``corollary/`` and ``RiskManager`` has no body, so
-neither the connection condition nor the heartbeat condition has a producer.
-What the lifespan supervises today is a proven switch with no wire attached to
-it.
+**That watchdog still cannot fire in the shipped app, and this is the file
+where that is easiest to misread.** Rule 9's two conditions are implemented
+and tested in ``engine/runtime.py``. The *producers* for the connection
+condition now exist -- ``AlpacaQuoteStream`` in ``data/providers/alpaca.py``
+and ``AlpacaTradeUpdateStream`` in ``engine/execution/alpaca.py``, both of
+which record a message, a stream open and a stream close from inside their
+read loops -- but **nothing in this lifespan constructs or runs one**, so
+none of those calls happens in the running process. ``RiskManager`` still has
+no body, so the heartbeat condition has no producer at all and ships unarmed
+besides. The switch is armed in the wiring and not yet turning: composing the
+sockets into the lifespan is what makes the connection condition live.
 
 ``api/routes/ws.py`` is the *browser* socket and attaches **no** wire, on
 purpose: a browser tab opening says nothing about whether Alpaca is

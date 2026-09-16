@@ -382,6 +382,18 @@ PLACEHOLDER_IDENTIFIERS = frozenset(
         # reason they are distinct from each other.
         "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcd",
         "PA3Q8ZV71LKD",
+        # tests/data/providers/test_alpaca_stream.py: the option and stock
+        # websockets. Forty characters on purpose -- the vendor error that
+        # carries it is a 402 quoting the key pair back at us, which is the
+        # shape rule 6 cares about most, and the socket's own auth frame is
+        # the one message in this codebase that *has* to contain a secret.
+        "STREAMnotarealsecretSTREAMnotareal000000",
+        # tests/engine/execution/test_trade_update_stream.py: the trading
+        # socket. Distinct from the market-data one above for the reason every
+        # value here is distinct -- the two sockets scrub through the same
+        # helper, and one constant would let a broken scrub on one of them
+        # pass on the strength of the other's.
+        "TRADEUPDATESnotarealsecretTRADEUPDATE000",
     }
 )
 

@@ -93,6 +93,7 @@ __all__ = [
     "PositionIntent",
     "PositionSide",
     "TradeActivity",
+    "TradeUpdate",
 ]
 
 #: The composite activity id's separator. ``20260910131125598::68cda3e9-…`` is
@@ -603,6 +604,83 @@ class NonTradeActivity(_ActivityBase):
 #: than one**, and a single permissive model covering both would make
 #: ``order_id`` optional on a fill — where it is the join key.
 Activity = TradeActivity | NonTradeActivity
+
+
+# --------------------------------------------------------------------------
+# The order lifecycle, as it arrives on the websocket
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class TradeUpdate:
+    """One ``trade_updates`` event: what just happened to an order.
+
+    The vendor-neutral shape of Alpaca's ``trade_updates`` stream, which is an
+    order-lifecycle feed on the **trading** host rather than market data --
+    which is why its socket lives in ``engine/execution/alpaca.py`` and not
+    with the two quote streams.
+
+    It mirrors :class:`~corollary.api.schemas.WsTradeUpdate` field for field,
+    in the direction that keeps the layering honest: the vendor half
+    translates a message into *this*, and ``api/fanout.py`` translates this
+    into the frame. The engine does not import ``api.schemas``.
+
+    **Every quantity here is an ``int``.** Alpaca sends them as strings that
+    parse to :class:`~decimal.Decimal`, and the conversion at the boundary
+    *refuses* a fractional value rather than rounding one: this book trades
+    contracts, the one asset class that fills fractionally is not traded here,
+    and a rounded quantity is a position size that is wrong with nothing to
+    say so. Prices stay ``Decimal``, always.
+    """
+
+    #: The vendor's event name: ``new``, ``fill``, ``partial_fill``,
+    #: ``canceled``, ``rejected``, ``expired``, and a dozen more. A free
+    #: string, like :attr:`Order.status`: the vendor's set is open, and an
+    #: enum that has not heard of ``calculated`` turns a real fill notice into
+    #: a validation error on the way through.
+    event: str
+    #: The vendor's timestamp for the event, never our receive time.
+    at: datetime
+    order_id: str
+    #: Empty on an ``mleg`` parent, where the parent is the structure and the
+    #: legs are the instruments.
+    symbol: str
+    #: The order's status *after* this event. Free string, same reasoning.
+    status: str
+    #: Corollary's four-way action: the order's own ``position_intent``.
+    #: ``None`` on an ``mleg`` parent, which carries no intent -- guessing one
+    #: there is how a buy-to-close is booked as a new lot and doubles a
+    #: position the account already holds.
+    #:
+    #: :class:`PositionIntent` and **not** :class:`OrderSide`, which in this
+    #: module is the vendor's two-valued buy/sell. The wire's four-value
+    #: spelling (``BTO``/``STC``/``STO``/``BTC``) is ``api.schemas.OrderSide``
+    #: and the mapping between them lives in ``api/fanout.py``, where the
+    #: browser's vocabulary belongs.
+    action: PositionIntent | None
+    #: Total order quantity in contracts. ``None`` where the vendor sends none.
+    quantity: int | None
+    #: Cumulative filled quantity -- the figure that says whether a partial
+    #: fill is still working.
+    filled_quantity: int
+    #: This event's own execution price and size: present on a fill or a
+    #: partial fill, ``None`` on every other event.
+    fill_price: Decimal | None
+    fill_quantity: int | None
+    #: **Signed on an ``mleg`` parent**: a negative average fill price is a net
+    #: *credit*. The sign is the fact, not a presentation choice.
+    filled_avg_price: Decimal | None
+    #: The resulting position size, signed, as the broker sees it. Carried
+    #: because rule 9 exists: reconnecting into an unverified position state is
+    #: how a bot doubles a position it already holds, and this is the broker's
+    #: own answer to what it holds.
+    position_quantity: int | None
+    #: The order this event is about, in full, exactly as the REST endpoint
+    #: returns it. Kept rather than flattened away: a fill on an ``mleg`` leg
+    #: is only attributable to its parent through ``legs``, and re-fetching
+    #: the order to learn something the event already carried is a request
+    #: against a 200/min budget for data in hand.
+    order: Order
 
 
 # --------------------------------------------------------------------------

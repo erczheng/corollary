@@ -13,7 +13,21 @@ handler, every traceback holding the object that raised, and rule 9's watchdog
 path.
 """
 
-from corollary.wire import ERROR_BODY_MAX, REDACTED, vendor_detail
+from decimal import Decimal
+
+import msgpack
+import pytest
+
+from corollary.wire import (
+    ERROR_BODY_MAX,
+    REDACTED,
+    WireFormatError,
+    as_decimal,
+    as_int,
+    decode_json,
+    decode_msgpack,
+    vendor_detail,
+)
 
 #: Forty characters, the width Alpaca issues, and obviously not one of them.
 #: The width is the point: a real secret fits inside :data:`ERROR_BODY_MAX`
@@ -158,3 +172,178 @@ def test_a_straddling_secret_is_redacted_before_the_cap_too() -> None:
     detail = vendor_detail(body, secrets=(FAKE_SECRET_KEY,))
     assert FAKE_SECRET_KEY[:10] not in detail
     assert REDACTED in detail
+
+
+# --------------------------------------------------------------------------
+# msgpack, which is the option stream's only format
+# --------------------------------------------------------------------------
+
+
+def test_msgpack_floats_never_reach_the_decimal_boundary_as_floats() -> None:
+    """A price off the option stream is a ``Decimal``, not a ``float``.
+
+    The option stream is msgpack-only, and msgpack carries a price as an IEEE
+    binary float64 -- there is no text to parse the way ``decode_json`` parses
+    ``4.15``. So the decoder converts at the boundary, and the rest of the
+    codebase never sees the float.
+    """
+    frame = msgpack.packb([{"T": "q", "bp": 1.24, "ap": 1.34, "bs": 4}])
+    assert frame is not None
+    decoded = decode_msgpack(frame)
+    quote = decoded[0]
+    assert isinstance(quote["bp"], Decimal)
+    assert quote["bp"] == Decimal("1.24")
+    assert quote["ap"] == Decimal("1.34")
+    # A count stays a count: msgpack sends it as an integer and it is not money.
+    assert quote["bs"] == 4
+    assert isinstance(quote["bs"], int)
+
+
+def test_msgpack_decimals_come_from_the_shortest_repr_not_the_binary_expansion() -> None:
+    """``Decimal(1.24)`` is ``1.2399999...``; ``Decimal(str(1.24))`` is ``1.24``.
+
+    The float64 nearest ``1.24`` has exactly one shortest decimal repr that
+    round-trips to it, and that repr is the literal the vendor serialised. The
+    binary expansion is the same number and the wrong *answer*: it makes every
+    price comparison and every log line unreadable.
+    """
+    frame = msgpack.packb({"bp": 1.24})
+    assert frame is not None
+    assert decode_msgpack(frame)["bp"] == Decimal("1.24")
+    assert Decimal(1.24) != Decimal("1.24")
+
+
+def test_msgpack_conversion_reaches_nested_lists_and_maps() -> None:
+    frame = msgpack.packb({"a": [{"b": [2.5]}]})
+    assert frame is not None
+    assert decode_msgpack(frame) == {"a": [{"b": [Decimal("2.5")]}]}
+
+
+def test_msgpack_that_is_not_msgpack_raises_a_wire_error() -> None:
+    with pytest.raises(WireFormatError):
+        decode_msgpack(b"\xc1not msgpack at all")
+
+
+# --------------------------------------------------------------------------
+# Non-finite numbers, which only the binary path can manufacture
+# --------------------------------------------------------------------------
+#
+# `Decimal('Infinity')` and `Decimal('NaN')` are *successful* conversions of a
+# value that is not a number, and what they do downstream diverges by member
+# of the same exception family: `int(Decimal('NaN'))` raises `ValueError` and
+# `int(Decimal('Infinity'))` raises `OverflowError`. The first was contained
+# by every catch on the stream path and the second by none of them, so one
+# `{"bs": inf}` frame escaped `_publish`, `_handle`, `run_session` and `run`
+# -- all of which catch only `SocketClosed` -- and killed the socket with rule
+# 9's close condition never recorded. Refused here instead, at the one place
+# a non-finite `Decimal` can be manufactured from a wire value.
+
+#: Every non-finite a float64 can carry. `nan` is in the list because it is
+#: the case that *looked* covered, and covering one member of the family is
+#: how the other got through.
+NON_FINITE = (float("inf"), float("-inf"), float("nan"))
+
+
+@pytest.mark.parametrize("value", NON_FINITE)
+@pytest.mark.parametrize("field", ["bp", "ap", "bs", "as"])
+def test_a_non_finite_is_refused_wherever_a_vendor_can_put_one(
+    field: str, value: float
+) -> None:
+    """Prices *and* sizes, which is the half that was missing.
+
+    ``_price_or_none`` refused a non-finite bid; ``bs`` and ``as`` went
+    through ``as_int``, where an infinity is an ``OverflowError`` nothing on
+    the stream path caught.
+    """
+    frame = msgpack.packb([{"T": "q", "S": "AAPL241220C00150000", field: value}])
+    assert frame is not None
+    with pytest.raises(WireFormatError, match="not a finite number"):
+        decode_msgpack(frame)
+
+
+@pytest.mark.parametrize("value", NON_FINITE)
+def test_a_non_finite_nested_in_a_frame_is_refused_too(value: float) -> None:
+    """The walk is recursive, so the refusal has to be."""
+    frame = msgpack.packb({"a": [{"b": [value]}]})
+    assert frame is not None
+    with pytest.raises(WireFormatError, match="not a finite number"):
+        decode_msgpack(frame)
+
+
+def test_the_refusal_names_where_the_non_finite_was() -> None:
+    """Rule 8's standard applied to a decode: the rule, and the inputs."""
+    frame = msgpack.packb([{"S": "AAPL241220C00150000", "bs": float("inf")}])
+    assert frame is not None
+    with pytest.raises(WireFormatError) as caught:
+        decode_msgpack(frame)
+    assert "bs" in str(caught.value)
+
+
+def test_no_decoded_frame_can_reach_int_of_infinity() -> None:
+    """The escape itself, pinned. ``OverflowError`` is an ``ArithmeticError``.
+
+    The first two lines are the hazard -- an infinity survives the conversion
+    to ``Decimal`` and then raises out of the family the stream path did not
+    catch. The last is that no frame can hand one to ``as_int`` any more.
+    """
+    with pytest.raises(OverflowError):
+        int(Decimal("Infinity"))
+    assert isinstance(Decimal("Infinity"), Decimal)
+
+    frame = msgpack.packb({"S": "AAPL241220C00150000", "bs": float("inf")})
+    assert frame is not None
+    with pytest.raises(WireFormatError):
+        decode_msgpack(frame)
+
+
+def test_a_finite_frame_still_decodes() -> None:
+    """The permit beside the refusal: a guard that refuses everything passes
+    every test above and stops the feed working."""
+    frame = msgpack.packb([{"T": "q", "bp": 1.24, "bs": 4, "ap": 1.34, "as": 5}])
+    assert frame is not None
+    quote = decode_msgpack(frame)[0]
+    assert quote["bp"] == Decimal("1.24")
+    assert as_int(quote["bs"]) == 4
+
+
+@pytest.mark.parametrize("text", ["Infinity", "-Infinity", "NaN", "nan", "inf"])
+def test_a_non_finite_money_string_is_refused_as_well(text: str) -> None:
+    """The other door, and it is on the REST path rather than the socket.
+
+    Alpaca returns money as strings, and ``Decimal('Infinity')`` parses from
+    one as happily as from a float64. Refusing only at
+    :func:`decode_msgpack` would leave ``"avg_entry_price": "NaN"`` able to
+    manufacture the same value.
+    """
+    with pytest.raises(WireFormatError, match="not a finite number"):
+        as_decimal(text)
+
+
+def test_a_non_finite_decimal_is_not_a_count() -> None:
+    """``as_int`` answers the family rather than letting it out.
+
+    Reached only by a caller holding a ``Decimal`` from somewhere other than a
+    decode; the refusal costs nothing and the ``OverflowError`` cost a socket.
+    """
+    with pytest.raises(WireFormatError, match="not a finite number"):
+        as_int(Decimal("Infinity"))
+    with pytest.raises(WireFormatError, match="not a finite number"):
+        as_int(Decimal("NaN"))
+
+
+def test_json_non_finite_arrives_as_a_float_and_is_refused_by_type() -> None:
+    """Why fix A is msgpack-specific, stated as a test rather than as prose.
+
+    ``json.loads`` routes ``NaN`` and ``Infinity`` through ``parse_constant``,
+    not ``parse_float``, so the JSON path hands back a **float** -- and a
+    float at the money boundary is the deliberately-untranslated ``TypeError``
+    that every stream catch already contains. The binary path is the only one
+    that can manufacture a non-finite ``Decimal``.
+    """
+    decoded = decode_json('{"qty": NaN, "price": Infinity}')
+    assert isinstance(decoded["qty"], float)
+    assert isinstance(decoded["price"], float)
+    with pytest.raises(TypeError):
+        as_decimal(decoded["price"])
+    with pytest.raises(TypeError):
+        as_int(decoded["qty"])

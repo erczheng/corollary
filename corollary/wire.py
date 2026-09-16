@@ -84,11 +84,14 @@ rather than forking the function.
 
 import functools
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Final, TypeVar
+
+import msgpack
 
 __all__ = [
     "ERROR_BODY_MAX",
@@ -101,6 +104,7 @@ __all__ = [
     "as_int",
     "clean_params",
     "decode_json",
+    "decode_msgpack",
     "require_aware",
     "rfc3339",
     "translating",
@@ -270,6 +274,110 @@ def decode_json(text: str) -> Any:
         raise WireFormatError(f"response body is not JSON: {exc}") from exc
 
 
+def decode_msgpack(frame: bytes) -> Any:
+    """Parse a msgpack frame, converting every float to an exact ``Decimal``.
+
+    Alpaca's **option** stream is msgpack only -- *"unlike the stock and crypto
+    stream, the option stream is only available in msgpack format"* -- so this
+    is the one place in the codebase where a price arrives as an IEEE binary
+    float64 and there is no text to parse. :func:`decode_json` can ask for
+    ``parse_float=Decimal`` because JSON carries ``4.15`` as the four
+    characters ``4.15``; msgpack carries it as eight bytes that are *already*
+    the nearest double, and msgpack's unpacker offers no float hook.
+
+    So the conversion happens here, immediately, on the whole decoded
+    structure, and nothing downstream ever holds the float: ``Decimal(str(f))``
+    recovers the **shortest** decimal that round-trips to that double, which is
+    the literal the vendor serialised. ``Decimal(f)`` would be the same number
+    and the wrong answer -- ``Decimal(1.24)`` is
+    ``1.2399999999999999911182158029987476766109466552734375``, which no
+    comparison, log line or screen wants.
+
+    Integers are left alone, for :func:`decode_json`'s reason: a size, a volume
+    and an epoch stamp are counts, not money.
+
+    **A non-finite float is refused here rather than converted**, which makes
+    this the one boundary a ``Decimal('NaN')`` or ``Decimal('Infinity')``
+    cannot get past -- see :func:`_decimalise`. The refusal costs the frame,
+    logged by each client's ``_messages``, and never the socket.
+
+    ``strict_map_key=False`` is not set: Alpaca's keys are all strings, and
+    accepting non-string keys would only widen what a vendor can hand us.
+    """
+    try:
+        decoded = msgpack.unpackb(frame, raw=False)
+    except Exception as exc:  # msgpack raises several unrelated types
+        raise WireFormatError(f"frame is not msgpack: {exc}") from exc
+    return _decimalise(decoded)
+
+
+def _decimalise(value: Any, path: str = "") -> Any:
+    """Every ``float`` in a decoded msgpack structure, as a finite ``Decimal``.
+
+    Recursive and explicit rather than clever: a stream message is a short
+    array of small maps, so walking it costs nothing, and the alternative --
+    converting at each field read -- is a conversion somebody eventually
+    forgets on the one field that is a price.
+
+    ``bool`` is checked before ``int`` only in the sense that it is not
+    touched: a bool is not a float and passes through unchanged.
+
+    **A non-finite float64 is refused instead of converted, and this is the
+    place that has to do it.** ``Decimal(str(float("inf")))`` is
+    ``Decimal('Infinity')``: a *successful* conversion of a value that is not
+    a number, after which every reader of that field is a fresh chance to meet
+    an ``ArithmeticError`` from a different corner of the family. The two that
+    mattered diverged -- ``int(Decimal('NaN'))`` raises ``ValueError``, which
+    every catch on the stream path already contained, and
+    ``int(Decimal('Infinity'))`` raises ``OverflowError``, which none of them
+    did. One ``{"bs": inf}`` frame therefore escaped ``_publish``,
+    ``_handle``, ``run_session`` and ``run`` -- all of which catch only
+    ``SocketClosed`` -- so the option feed was gone permanently with rule 9's
+    close condition never recorded and no reconnect attempted.
+
+    ``_price_or_none`` in ``data/providers/alpaca.py`` had been taught this
+    same lesson once already, for prices only, which is the argument for
+    refusing *here* instead: a per-field guard protects the fields somebody
+    remembered, and the next new field arrives unguarded. Nothing downstream
+    can hold a non-finite ``Decimal`` if none is ever built.
+
+    The whole frame is refused, not the field. A field quietly dropped to
+    ``None`` would report a vendor fault as *"nobody is quoting it"*, which is
+    a legitimate market state and the one answer worse than losing the frame.
+    ``path`` names where it was, because rule 8 asks a refusal for its inputs
+    and *"a non-finite number somewhere in a frame"* is not a debuggable
+    sentence.
+
+    **JSON is not affected and does not need to be.** ``json.loads`` routes
+    ``NaN`` and ``Infinity`` through ``parse_constant`` rather than
+    ``parse_float``, so :func:`decode_json` hands back a ``float`` -- and a
+    ``float`` at the money boundary is :func:`as_decimal`'s untranslated
+    ``TypeError``, which both stream clients catch. The binary path is the
+    only one that can manufacture a non-finite ``Decimal`` from a wire
+    *number*; the other way in is a numeric *string*, refused in
+    :func:`as_decimal`.
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise WireFormatError(
+                f"{path or 'the frame'} is not a finite number: {value!r}"
+            )
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [
+            _decimalise(item, f"{path}[{index}]") for index, item in enumerate(value)
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _decimalise(item, f"{path}[{index}]") for index, item in enumerate(value)
+        )
+    if isinstance(value, dict):
+        return {
+            key: _decimalise(item, f"{path}[{key!r}]") for key, item in value.items()
+        }
+    return value
+
+
 def as_decimal(value: Any) -> Decimal | None:
     """A wire value as an exact ``Decimal``, or ``None`` if absent.
 
@@ -292,9 +400,16 @@ def as_decimal(value: Any) -> Decimal | None:
         if not stripped:
             return None
         try:
-            return Decimal(stripped)
+            parsed = Decimal(stripped)
         except ArithmeticError as exc:
             raise WireFormatError(f"{value!r} is not a number") from exc
+        # The REST half of the hazard `_decimalise` refuses on the socket:
+        # this vendor sends money as strings, and `Decimal('NaN')` parses out
+        # of `"NaN"` as happily as out of a float64. Refused here so that no
+        # wire value of any shape builds a non-finite Decimal.
+        if not parsed.is_finite():
+            raise WireFormatError(f"{value!r} is not a finite number")
+        return parsed
     if isinstance(value, float):
         raise TypeError(
             f"a float ({value!r}) reached the Decimal boundary. Responses must "
@@ -318,6 +433,15 @@ def as_int(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, Decimal):
+        # `int(Decimal('Infinity'))` is an `OverflowError` and
+        # `int(Decimal('NaN'))` a `ValueError`: two members of one family, one
+        # of which every stream catch contained and one of which took a socket
+        # down with it. Neither can arrive from a decode any more -- see
+        # `_decimalise` -- and this is the coercion answering for itself, so a
+        # caller holding a Decimal from somewhere else gets the same refusal
+        # rather than the raw arithmetic error.
+        if not value.is_finite():
+            raise WireFormatError(f"{value} is not a finite number")
         return int(value)
     if isinstance(value, str):
         stripped = value.strip()

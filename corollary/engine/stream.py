@@ -201,6 +201,7 @@ from typing import Final
 __all__ = [
     "EQUITY_STREAM_SYMBOL_CAP",
     "OPTION_STREAM_QUOTE_CAP",
+    "AcknowledgedSubscription",
     "DropRule",
     "DroppedUnit",
     "Stream",
@@ -212,6 +213,9 @@ __all__ = [
     "not_streamed_message",
     "plan_subscriptions",
     "recommendation_unit",
+    "reconcile_acknowledgement",
+    "replan_at_cap",
+    "requested_units",
     "underlying_unit",
 ]
 
@@ -292,6 +296,13 @@ class DropRule(StrEnum):
     #: classifying on that labels a permanently oversized unit transient and
     #: leaves an operator waiting out a shortage that cannot clear.
     EXCEEDS_CAP = "exceeds_cap"
+    #: The subscribe was sent and the **server** did not acknowledge this
+    #: symbol in its ``subscription`` message. Not our arithmetic: the plan
+    #: fit, the socket accepted the request, and fewer symbols came back than
+    #: went out. Its own rule because its remedy is different -- every other
+    #: rule here is answered by a smaller book or a larger cap, and this one
+    #: is answered by asking the vendor why.
+    NOT_ACKNOWLEDGED = "not_acknowledged"
     #: A higher-priority unit was already refused, so spending stopped. See
     #: the module docstring on why the leftover slots are not backfilled. Only
     #: reachable for a unit that needs a symbol it does not already have: one
@@ -520,6 +531,153 @@ def not_streamed_message(count: int) -> str | None:
     if count == 0:
         return None
     return f"{count} symbol{'' if count == 1 else 's'} not streamed"
+
+
+@dataclass(frozen=True, slots=True)
+class AcknowledgedSubscription:
+    """A plan, and what the server said it is actually streaming for us.
+
+    The subscribe goes out from :attr:`SubscriptionPlan.subscribed`; Alpaca
+    answers with a ``subscription`` message listing, **per channel**, every
+    symbol it now holds for this connection. The two lists are compared here
+    rather than assumed equal, because a socket that accepts fewer symbols
+    than it was handed is exactly the silent truncation this module exists to
+    prevent -- arriving from the server instead of from our own sums, and with
+    no ``dropped`` record to show for it.
+
+    :attr:`not_streamed` therefore sums two causes into the one figure the UI
+    renders: the symbols *we* refused for budget, and the symbols *the server*
+    did not confirm. The reader's question is *"is anything I hold unmarked?"*,
+    and answering it with only our half answers a question nobody asked.
+    """
+
+    plan: SubscriptionPlan
+    #: The subscription channel this reconciliation is about -- ``quotes``,
+    #: ``trades``, ``bars``. Required, because one ``subscription`` message
+    #: carries every channel and comparing the union against one channel's
+    #: request reports absentees that are not absent at all.
+    channel: str
+    #: Exactly what the server listed for :attr:`channel`, in its order.
+    acknowledged: tuple[str, ...]
+    at: datetime
+
+    @property
+    def acknowledged_set(self) -> frozenset[str]:
+        return frozenset(self.acknowledged)
+
+    @property
+    def absent(self) -> tuple[str, ...]:
+        """Subscribed, and not acknowledged. In the plan's order."""
+        acked = self.acknowledged_set
+        return tuple(symbol for symbol in self.plan.subscribed if symbol not in acked)
+
+    @property
+    def surplus(self) -> tuple[str, ...]:
+        """Acknowledged, and never asked for.
+
+        Reported rather than ignored: it spends a slot of the budget being
+        metered here, so an unexplained one makes every later ``no_room`` drop
+        arithmetically right and practically wrong. It is also the shape a
+        subscription left over from a previous connection would take.
+        """
+        wanted = self.plan.subscribed_set
+        return tuple(symbol for symbol in self.acknowledged if symbol not in wanted)
+
+    @property
+    def not_streamed(self) -> int:
+        """The N the UI renders, counting both causes."""
+        return self.plan.not_streamed + len(self.absent)
+
+    @property
+    def message(self) -> str | None:
+        return not_streamed_message(self.not_streamed)
+
+
+def reconcile_acknowledgement(
+    plan: SubscriptionPlan,
+    *,
+    channel: str,
+    acknowledged: Iterable[str],
+    at: datetime,
+) -> AcknowledgedSubscription:
+    """Compare what we subscribed against what the server says it streams.
+
+    Pure but for the log. Rule 8 applies -- a dropped subscription is a
+    rejection whoever dropped it -- so an absentee emits the rule, the inputs
+    and the timestamp under the plan's correlation id, which is what makes the
+    record part of the same decision that produced the plan. A reconciliation
+    with nothing missing logs nothing, for :func:`_log`'s reason: the ordinary
+    case is silent so that the extraordinary one is not.
+    """
+    if not channel:
+        raise ValueError(
+            "a reconciliation needs the channel it is about; one "
+            "subscription message carries quotes, trades and bars together, "
+            "and comparing their union against one channel's request reports "
+            "absentees that are not absent"
+        )
+    reconciled = AcknowledgedSubscription(
+        plan=plan,
+        channel=channel,
+        acknowledged=tuple(acknowledged),
+        at=_utc(at),
+    )
+    _log_acknowledgement(reconciled)
+    return reconciled
+
+
+def requested_units(plan: SubscriptionPlan) -> tuple[SubscriptionUnit, ...]:
+    """Every unit ``plan`` considered, admitted or dropped, in priority order.
+
+    A :class:`DroppedUnit` carries exactly a unit's three fields, so this is
+    lossless in content. It is *almost* lossless in order: within one priority
+    tier it lists the admitted units before the dropped ones, which differs
+    from the caller's original order only where a unit was admitted at zero
+    cost *behind* a drop. That case changes no tier, so a re-plan built from
+    this cannot invert priority -- and the alternative, a ``requested`` field
+    on the plan, is a new field on a frozen shape for a reordering that costs
+    nothing.
+    """
+    return tuple(plan.admitted) + tuple(
+        SubscriptionUnit(key=unit.key, priority=unit.priority, symbols=unit.symbols)
+        for unit in plan.dropped
+    )
+
+
+def replan_at_cap(
+    plan: SubscriptionPlan,
+    *,
+    cap: int,
+    at: datetime,
+    correlation_id: str,
+) -> SubscriptionPlan:
+    """Re-run ``plan``'s own units against a **lower** cap, on the same stream.
+
+    The 405 path. Alpaca answers a subscribe that would put the connection
+    over its symbol limit with error 405, which is the server correcting the
+    number we planned against. The correction is authoritative, so the plan is
+    recomputed rather than trimmed: all-or-nothing units stay whole and every
+    newly refused one gets its own rule-8 record, neither of which survives
+    slicing a symbol list.
+
+    **A correction only ever lowers.** Raising a cap on the strength of a
+    refusal would subscribe past a limit the server enforces silently, which
+    is the failure the budget exists to prevent, so a higher ``cap`` raises.
+    """
+    if cap > plan.cap:
+        raise ValueError(
+            f"a cap correction lowers; got {cap} against the plan's "
+            f"{plan.cap}. A 405 means the server refused what we asked for, "
+            "and a path that could widen a budget on the strength of a "
+            "refusal would subscribe past a limit the server enforces silently"
+        )
+    return plan_subscriptions(
+        requested_units(plan),
+        at=at,
+        correlation_id=correlation_id,
+        cap=cap,
+        stream=plan.stream,
+    )
 
 
 def plan_subscriptions(
@@ -836,6 +994,50 @@ def _drop(
         remaining=remaining,
         cap=cap,
         at=at,
+    )
+
+
+def _log_acknowledgement(reconciled: AcknowledgedSubscription) -> None:
+    """Rule 8 for the half of the truncation the server performs.
+
+    One record, not one per symbol: the symbols share a cause and a remedy,
+    and N lines for one server decision is the shape that teaches a reader to
+    filter the event out. A surplus acknowledgement rides the same record
+    rather than a second one, because it is the same comparison read the other
+    way about.
+    """
+    absent = reconciled.absent
+    surplus = reconciled.surplus
+    if not absent and not surplus:
+        return
+    plan = reconciled.plan
+    logger.warning(
+        "stream subscription not acknowledged (%s): %d of %d %s symbols on the "
+        "%s stream are missing from the server's list",
+        DropRule.NOT_ACKNOWLEDGED.value,
+        len(absent),
+        len(plan.subscribed),
+        reconciled.channel,
+        plan.stream.label,
+        extra={
+            "event": "stream_subscription_unacknowledged",
+            "correlation_id": plan.correlation_id,
+            "stream": plan.stream.label,
+            "rule": DropRule.NOT_ACKNOWLEDGED.value,
+            "channel": reconciled.channel,
+            "absent": list(absent),
+            "surplus": list(surplus),
+            "subscribed_count": len(plan.subscribed),
+            "acknowledged_count": len(reconciled.acknowledged),
+            "not_streamed": reconciled.not_streamed,
+            "cap": plan.cap,
+            "detail": (
+                "the subscribe was sent and the server confirmed fewer "
+                "symbols than it was handed, so these are unmarked with no "
+                "budget drop to explain them"
+            ),
+            "at": reconciled.at.isoformat(),
+        },
     )
 
 

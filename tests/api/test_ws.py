@@ -362,6 +362,58 @@ def test_the_ws_module_does_not_reach_for_engine_state() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.risk
+def test_nothing_under_the_api_package_arms_the_dead_mans_switch() -> None:
+    """Rule 9's producers are the **vendor** sockets, and only those.
+
+    Part 1 deliberately wired no watchdog recorder to this endpoint, and step
+    8d part 2 -- which armed the switch for real, from
+    ``data/providers/alpaca.py`` and ``engine/execution/alpaca.py`` -- is
+    exactly when that restraint could have been lost by being helpful. A
+    browser tab opening or closing says nothing about whether Alpaca is
+    connected: wiring ``record_message`` here would arm the switch to the
+    wrong signal, and the two failures are a halt fired by a closed laptop
+    lid and a dead feed masked by a healthy browser.
+
+    Scoped to the whole ``corollary/api`` package rather than to ``ws.py``,
+    for the reason ``tests/test_hard_rules.py`` gives: a guard named after
+    its subject covers the one module somebody thought of, and the next
+    route is covered by nobody.
+
+    Read off the parse tree -- ``ws.py``'s docstring has to be able to *say*
+    ``record_message``, and a substring test would fail on the documentation
+    that records the rule.
+    """
+    import ast
+    from pathlib import Path
+
+    import corollary.api as api_package
+
+    recorders = {
+        "record_message",
+        "record_poll",
+        "record_heartbeat",
+        "record_stream_open",
+        "record_stream_closed",
+        "record_opening_snapshot",
+    }
+    package = Path(api_package.__file__).parent
+    sources = sorted(package.rglob("*.py"))
+    assert sources, f"no sources found under {package}"
+    offenders = []
+    for path in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr in recorders:
+                    offenders.append(f"{path.name}:{node.lineno} {node.func.attr}()")
+            elif isinstance(node, ast.FunctionDef) and node.name in recorders:
+                offenders.append(f"{path.name}:{node.lineno} def {node.name}()")
+    assert offenders == [], (
+        f"a browser-side signal reaches rule 9's dead-man's switch: {offenders}"
+    )
+
+
 def test_a_subscribed_client_receives_only_its_symbols(ws_client: TestClient) -> None:
     with ws_client.websocket_connect(WS) as socket:
         socket.send_json({"type": "subscribe", "symbols": ["AAPL"]})

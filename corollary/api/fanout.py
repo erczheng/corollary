@@ -53,18 +53,32 @@ quotes it is much more consequential than.
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from itertools import count
 from typing import Final
 
-from corollary.api.schemas import WsQuoteFrame, WsServerFrame
+from corollary.api.schemas import (
+    OrderSide,
+    WsQuote,
+    WsQuoteFrame,
+    WsServerFrame,
+    WsTradeUpdate,
+    WsTradeUpdateFrame,
+)
+from corollary.data.providers.interface import Quote
+from corollary.engine.execution.interface import PositionIntent, TradeUpdate
 
 __all__ = [
     "DEFAULT_FRAME_QUEUE_SIZE",
     "MAX_SUBSCRIBED_SYMBOLS",
     "Fanout",
     "Subscription",
+    "quote_frame",
+    "quote_sink",
+    "trade_update_frame",
+    "trade_update_sink",
+    "wire_action",
 ]
 
 logger = logging.getLogger(__name__)
@@ -86,6 +100,110 @@ DEFAULT_FRAME_QUEUE_SIZE: Final[int] = 256
 #: it could hide a vendor drop behind a transport refusal, and *"N symbols not
 #: streamed"* would then be answering a different question than it claims.
 MAX_SUBSCRIBED_SYMBOLS: Final[int] = 256
+
+
+# --------------------------------------------------------------------------
+# Domain object to frame -- the vendor half's last step, and the arrow's
+# direction
+# --------------------------------------------------------------------------
+#
+# The two vendor sockets translate a message into a domain object -- a
+# `Quote` from `data/providers/interface.py`, a `TradeUpdate` from
+# `engine/execution/interface.py` -- and hand it to a sink. The sink is built
+# here, so the *frame* is assembled under `api/` and no module in `engine/`
+# or `data/` imports `api.schemas`. That is the layering part 1 established,
+# stated as code: this file already depends on the wire shapes because it
+# carries them, and adding a dependency on the two domain shapes points
+# inward. The reverse -- a provider importing a Pydantic wire model -- would
+# put the browser's contract in the engine's import graph, and a second set
+# of domain types for the transport to translate from would be a second
+# place for the same event to drift.
+
+
+def quote_frame(quote: Quote) -> WsQuoteFrame:
+    """A domain :class:`Quote` as the frame the browser reads.
+
+    Field for field, with no derivation: ``WsQuote`` deliberately carries no
+    ``mid``, because a crossed quote has none and the judgement lives on
+    ``Quote.mid`` where the vendor half can read it.
+    """
+    return WsQuoteFrame(
+        quote=WsQuote(
+            symbol=quote.symbol,
+            bid=quote.bid,
+            ask=quote.ask,
+            bid_size=quote.bid_size,
+            ask_size=quote.ask_size,
+            at=quote.at,
+        )
+    )
+
+
+#: The engine's four-way action as the wire's spelling of it. A mapping
+#: rather than string surgery, so an intent Alpaca adds arrives as a missing
+#: key -- loudly -- instead of as a plausible wrong action on a fill.
+_WIRE_ACTION: Final[dict[PositionIntent, OrderSide]] = {
+    PositionIntent.BUY_TO_OPEN: "BTO",
+    PositionIntent.BUY_TO_CLOSE: "BTC",
+    PositionIntent.SELL_TO_OPEN: "STO",
+    PositionIntent.SELL_TO_CLOSE: "STC",
+}
+
+
+def wire_action(intent: PositionIntent | None) -> OrderSide | None:
+    """``PositionIntent`` as the four-value literal the browser reads.
+
+    ``None`` stays ``None``: an ``mleg`` parent has no action, and the wire
+    field is nullable for exactly that reason.
+    """
+    if intent is None:
+        return None
+    return _WIRE_ACTION[intent]
+
+
+def trade_update_frame(update: TradeUpdate) -> WsTradeUpdateFrame:
+    """A domain :class:`TradeUpdate` as the frame the browser reads."""
+    return WsTradeUpdateFrame(
+        update=WsTradeUpdate(
+            event=update.event,
+            at=update.at,
+            order_id=update.order_id,
+            symbol=update.symbol,
+            status=update.status,
+            action=wire_action(update.action),
+            quantity=update.quantity,
+            filled_quantity=update.filled_quantity,
+            fill_price=update.fill_price,
+            fill_quantity=update.fill_quantity,
+            filled_avg_price=update.filled_avg_price,
+            position_quantity=update.position_quantity,
+        )
+    )
+
+
+def quote_sink(fanout: "Fanout") -> Callable[[Quote], None]:
+    """The callable a market-data socket is handed. Synchronous, by contract.
+
+    :meth:`Fanout.publish` never awaits, so a slow browser tab cannot stall a
+    vendor socket -- which is why the socket takes a plain callable rather
+    than a coroutine. Keeping the sink synchronous is what keeps that
+    guarantee checkable from the socket's side: there is nothing to await, so
+    there is nothing that can block.
+    """
+
+    def publish(quote: Quote) -> None:
+        fanout.publish(quote_frame(quote))
+
+    return publish
+
+
+def trade_update_sink(fanout: "Fanout") -> Callable[[TradeUpdate], None]:
+    """The callable the ``trade_updates`` socket is handed."""
+
+    def publish(update: TradeUpdate) -> None:
+        fanout.publish(trade_update_frame(update))
+
+    return publish
 
 
 def frame_kind(frame: WsServerFrame) -> str:

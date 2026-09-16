@@ -367,6 +367,92 @@ def test_a_poll_does_not_end_a_stream_close() -> None:
 
 
 @pytest.mark.risk
+def test_a_close_no_tick_observed_survives_the_reopen() -> None:
+    """The close-to-reopen window is shorter than the supervisor period.
+
+    ``reconnect_delay(1)`` is one second and the reopen is recorded as soon
+    as the new session authenticates, so an ordinary 1006 closes and reopens
+    inside 1.0-1.5s -- entirely between two ticks of a 5.0s supervisor. A
+    reopen that *cleared* the close therefore erased rule 9's condition
+    before anything evaluated it: no halt, no notification, no human resume,
+    for a connection demonstrably lost with no replay on either socket.
+
+    So a close stays pending until an ``evaluate`` has seen it. This is not a
+    latch: it is "the supervisor must see every close at least once", and the
+    test below proves it is cleared by that observation rather than by the
+    reopen.
+    """
+    watchdog = Watchdog(started_at=T0)
+    watchdog.record_message(T0)
+    watchdog.record_stream_closed(T0 + timedelta(seconds=1), detail="1006 abnormal")
+    watchdog.record_stream_open(T0 + timedelta(seconds=2))
+
+    decision = watchdog.evaluate(T0 + timedelta(seconds=5))
+    assert decision is not None
+    assert decision.rule is HaltRule.STREAM_CLOSED
+    assert "1006 abnormal" in decision.reason
+    assert decision.inputs["reconnected"] is True
+
+
+@pytest.mark.risk
+def test_an_observed_close_that_has_reopened_is_not_reported_twice() -> None:
+    """One close, one halt. The observation is what ends the condition.
+
+    The pending close must not become a second fault on the next tick: an
+    ordinary reconnect halts once, and an engine that re-announced a close
+    the socket has already recovered from would be indistinguishable from a
+    feed dropping every five seconds.
+    """
+    watchdog = Watchdog(started_at=T0)
+    watchdog.record_message(T0)
+    watchdog.record_stream_closed(T0 + timedelta(seconds=1), detail="1006")
+    watchdog.record_stream_open(T0 + timedelta(seconds=2))
+    assert watchdog.evaluate(T0 + timedelta(seconds=5)) is not None
+    assert watchdog.evaluate(T0 + timedelta(seconds=10)) is None
+    assert watchdog.evaluate(T0 + timedelta(seconds=15)) is None
+
+
+@pytest.mark.risk
+def test_a_reopen_after_the_close_was_seen_ends_it_at_once() -> None:
+    """A close the supervisor already halted on is over when the socket is back.
+
+    The pending-close rule only holds a close that *nothing* has evaluated.
+    Once a tick has seen it, a reopen ends the condition on the spot -- the
+    watchdog stops complaining about the socket, and ``engine_state.halted``
+    stays exactly where it was, which is the runtime's half of rule 9.
+    """
+    watchdog = Watchdog(started_at=T0)
+    watchdog.record_message(T0)
+    watchdog.record_stream_closed(T0 + timedelta(seconds=1), detail="1006")
+    assert watchdog.evaluate(T0 + timedelta(seconds=2)) is not None
+
+    watchdog.record_stream_open(T0 + timedelta(seconds=3))
+    assert watchdog.evaluate(T0 + timedelta(seconds=3)) is None
+
+
+@pytest.mark.risk
+def test_a_second_close_inside_one_unobserved_window_is_still_pending() -> None:
+    """Two drops between two ticks report the *second* one, and report it once.
+
+    A flapping feed can close, reopen and close again inside one supervisor
+    period. The condition that matters is the latest close, and it is still
+    unobserved, so the tick has to see it.
+    """
+    watchdog = Watchdog(started_at=T0)
+    watchdog.record_message(T0)
+    watchdog.record_stream_closed(T0 + timedelta(seconds=1), detail="1006 first")
+    watchdog.record_stream_open(T0 + timedelta(seconds=2))
+    watchdog.record_stream_closed(T0 + timedelta(seconds=3), detail="1006 second")
+
+    decision = watchdog.evaluate(T0 + timedelta(seconds=5))
+    assert decision is not None
+    assert "1006 second" in decision.reason
+    assert decision.inputs["reconnected"] is False
+    # Still shut, so it keeps being reported -- there is no latch here.
+    assert watchdog.evaluate(T0 + timedelta(seconds=10)) is not None
+
+
+@pytest.mark.risk
 def test_a_naive_datetime_is_refused() -> None:
     watchdog = Watchdog(started_at=T0)
     with pytest.raises(ValueError, match="timezone-aware"):

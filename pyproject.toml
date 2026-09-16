@@ -16,6 +16,15 @@ dependencies = [
     # Alpaca transport, not just a test client -- see the module docstring of
     # corollary/data/providers/alpaca.py for why the vendor SDK was not used.
     "httpx>=0.27",
+    # Declared directly in step 8d part 2, though it already arrived through
+    # `uvicorn[standard]`. The vendor websocket clients import it, so it is a
+    # dependency of the engine and not of the server: an install that dropped
+    # the `standard` extra would take the market-data sockets with it.
+    "websockets>=13",
+    # Alpaca's option stream is msgpack **only** -- "unlike the stock and
+    # crypto stream, the option stream is only available in msgpack format".
+    # Not a preference, so not optional.
+    "msgpack>=1.0",
 ]
 
 [dependency-groups]
@@ -60,4 +69,14 @@ strict = true
 # use -- so the untyped surface is one call and one loop, and everything
 # downstream of it is annotated.
 module = ["exchange_calendars.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# `msgpack` ships no `py.typed` marker. It is reached from exactly two places
+# -- `corollary/wire.py`'s `decode_msgpack`, which returns `Any` and converts
+# every float on the way out, and `corollary/sockets.py`'s `Codec.encode` --
+# so the untyped surface is one `unpackb` and one `packb`, and everything
+# downstream of either is annotated. Same shape of exception as
+# `exchange_calendars` above.
+module = ["msgpack.*"]
 ignore_missing_imports = true

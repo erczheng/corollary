@@ -44,34 +44,46 @@ socket has to stay distinguishable from a halted engine: collapse the two and
 a human presses Resume on an engine that was never halted, which is exactly
 the control rule 9 exists to keep explicit and human.
 
-The two conditions, and why neither can fire in the shipped app yet
-------------------------------------------------------------------
+The two conditions, and why neither fires in the shipped app yet
+---------------------------------------------------------------
 
-:class:`Watchdog` implements both of rule 9's conditions. **Neither one can
-fire in the app as shipped, for the same reason: nothing produces the events
-they measure.** Saying so here is the point -- a reader who believes the
-connection condition is live will not go looking for the missing ``record_*``
-calls.
+:class:`Watchdog` implements both of rule 9's conditions. **Neither one fires
+in the app as shipped, and the two reasons are now different ones.** Saying
+which is which here is the point -- a reader who believes the connection
+condition is live will not go looking for the missing ``record_*`` calls, and
+a reader who believes it has no producer will not look for the missing
+composition either.
 
 * **Connection loss** -- ninety seconds with no message and no successful poll,
-  or a websocket close. **No producer yet.** ``record_message``,
-  ``record_poll``, ``record_stream_open``, ``record_stream_closed`` and
-  ``record_opening_snapshot`` have no caller outside ``tests/``, and there is
-  no websocket client anywhere under ``corollary/``. Step 8d's
-  ``api/routes/ws.py`` is what attaches the transport that calls them, and
-  that is a call site rather than a new condition.
+  or a websocket close. **The producers exist and nothing runs them.**
+  ``record_message``, ``record_stream_open`` and ``record_stream_closed`` are
+  called from inside the two vendor websocket clients --
+  ``AlpacaQuoteStream`` in ``data/providers/alpaca.py`` (the option and stock
+  quote sockets) and ``AlpacaTradeUpdateStream`` in
+  ``engine/execution/alpaca.py`` (``trade_updates``) -- over the narrow
+  ``corollary.sockets.StreamActivityRecorder`` protocol that this class
+  satisfies structurally. But nothing under ``corollary/`` constructs one:
+  ``option_quote_stream``, ``stock_quote_stream`` and
+  ``AlpacaTradeUpdateStream.from_env`` have no caller outside ``tests/``, and
+  ``api/app.py``'s lifespan builds no socket. So the switch is **armed in the
+  wiring and not yet running**, which is a different state from having no
+  wire, and ``api/routes/ws.py`` is not the file that changes it -- that is
+  the *browser* socket and it deliberately records nothing.
+  ``record_poll`` and ``record_opening_snapshot`` are the REST half and still
+  have no caller outside ``tests/``.
 * **A stalled risk-manager heartbeat** -- ninety seconds without one. **No
-  producer either, and additionally unarmed by default.** ``RiskManager`` is
+  producer at all, and additionally unarmed by default.** ``RiskManager`` is
   nine lines and has no body, so armed with no producer this condition would
   halt every engine ninety seconds after boot. It ships behind
   ``heartbeat_armed=False`` so that wiring the producer is one argument rather
   than a new condition written under time pressure on the day ``RiskManager``
   grows a body.
 
-The difference between the two is only the default: the connection condition
-is armed but unfed, the heartbeat condition is unarmed *and* unfed. Both are
-tested, neither is silently missing, and until step 8d this module is a proven
-switch with no wire attached to it.
+The two therefore differ in two ways rather than one: the connection
+condition is armed and its producers are written but unconstructed, while the
+heartbeat condition is unarmed *and* has nothing that could feed it. Both are
+tested, neither is silently missing, and what this module is today is a proven
+switch whose wire is attached at one end.
 
 The connection condition is also **unarmed until something first connects**. A
 runtime that has never seen a message or a poll has no connection to have
@@ -682,6 +694,37 @@ def _new_correlation_id() -> str:
 # --------------------------------------------------------------------------
 
 
+@dataclass(slots=True)
+class _SocketLiveness:
+    """One socket's own evidence of life, and its own unreported close.
+
+    Three sockets, three of these. One shared set of these fields was fix B's
+    defect in both halves: ``record_message`` from the stock stream refreshed
+    the liveness clock the ``trade_updates`` socket was judged by, so
+    ``CONNECTION_STALE`` asked *"is any socket alive"*; and one shared close
+    slot let a reopen on one socket mark another's close *"has since
+    reconnected"* in a critical alert about a feed that was still down.
+    """
+
+    last_activity_at: datetime | None = None
+    last_activity_source: str = "none"
+    closed_at: datetime | None = None
+    closed_detail: str = ""
+    #: Whether an ``evaluate`` has seen the close in :attr:`closed_at`. A
+    #: close nothing has evaluated outlives a reopen -- see
+    #: :meth:`Watchdog.record_stream_open`.
+    close_observed: bool = False
+    #: Whether **this** socket came back while that close was still pending.
+    close_reopened: bool = False
+
+    def clear_close(self) -> None:
+        """Forget the close. Called on observation, never on a reopen alone."""
+        self.closed_at = None
+        self.closed_detail = ""
+        self.close_observed = False
+        self.close_reopened = False
+
+
 class Watchdog:
     """Rule 9's two conditions, over an injected clock. Opens no socket.
 
@@ -698,6 +741,18 @@ class Watchdog:
     :attr:`HaltRule.HEARTBEAT_STALE`. A poll arriving while the socket is
     still shut ends nothing, because the socket is still shut.
 
+    **One exception, and it is the opposite of a latch: a close is not ended
+    by a reopen that no ``evaluate`` has seen.** The supervisor asks every
+    five seconds and a reconnect takes one, so a close cleared by its own
+    reopen was a lost connection nothing ever evaluated -- rule 9's switch
+    silently not firing for the *common* case rather than a rare one. The
+    close is therefore held until the first :meth:`evaluate` reports it and
+    cleared **on that observation**, which is "the supervisor sees every close
+    at least once" and not "the close is remembered until a human acts".
+    Memory a resume cannot reach is the defect the module docstring records;
+    this memory lasts one tick, ends without anybody doing anything, and
+    cannot outlive the observation that ends it.
+
     Not re-announcing an ongoing fault is
     :meth:`EngineRuntime.check_watchdog`'s job, and it does it by reading
     ``engine_state.halted`` rather than by remembering. See the module
@@ -705,15 +760,37 @@ class Watchdog:
     silenced the switch for exactly the operator who most needed it. Keeping
     this class memoryless is what makes its view and the database's impossible
     to diverge.
+
+    **Liveness is per socket; the halt is not.** One of these serves all three
+    Alpaca sockets, and it used to serve them out of one last-activity clock
+    and one close slot -- so a chatty stock stream refreshed the clock the
+    ``trade_updates`` socket was judged by, and ``CONNECTION_STALE`` answered
+    *"is any socket alive"*. The consequence is not symmetric between the
+    three: the order socket can die while quotes keep flowing, and then the
+    book stops receiving fills with rule 9 believing the feed healthy, which
+    is the *"unverified position state"* rule 9 names with no reconnect even
+    attempted. So the **tracking** splits into one :class:`_SocketLiveness`
+    per socket and the **decision** does not: any socket ninety seconds silent
+    halts the engine, and the halt says which one. Rule 9's halt is
+    engine-wide and there is still exactly one path to it.
+
+    A caller that names no socket is filed under ``None`` and is deliberately
+    *not* held to the per-socket standard: there is no socket to put in a halt
+    reason, and the REST poll is the case that matters -- a successful poll
+    says the data host answers, which is no claim about any socket at all. It
+    still counts for the engine-wide condition, because the spec says
+    *message or poll* and a process with no stream wired yet has nothing else.
+    Every real socket names itself; ``corollary.sockets.VendorStream``
+    requires the name in its constructor so that it cannot be forgotten at one
+    call site out of five.
     """
 
     __slots__ = (
-        "_closed_at",
-        "_closed_detail",
         "_heartbeat_armed",
         "_last_activity_at",
         "_last_activity_source",
         "_last_heartbeat_at",
+        "_sockets",
         "_started_at",
         "_timeout_seconds",
     )
@@ -731,40 +808,113 @@ class Watchdog:
         #: module docstring: armed with no producer, this halts every engine
         #: ninety seconds after boot.
         self._heartbeat_armed = heartbeat_armed
+        #: The engine-wide clock: the most recent evidence of life from
+        #: **anywhere**, socket or poll. Kept alongside the per-socket clocks
+        #: rather than replaced by them, because it is what answers for a
+        #: process whose only producer is the poll loop -- the opening
+        #: snapshot and a REST poll are all a run has before a stream is
+        #: wired, and *"nothing has come through at all"* is a condition in
+        #: its own right.
         self._last_activity_at: datetime | None = None
         self._last_activity_source = "none"
         self._last_heartbeat_at: datetime | None = None
-        self._closed_at: datetime | None = None
-        self._closed_detail = ""
+        #: One record per socket, keyed by the name the socket reports itself
+        #: under. ``None`` is the unnamed source -- the poll loop, and a
+        #: hand-recorded close in a test -- which is tracked for its close and
+        #: never for its staleness. See the class docstring.
+        self._sockets: dict[str | None, _SocketLiveness] = {}
 
     # -- what the caller records ------------------------------------------
 
-    def record_message(self, at: datetime) -> None:
-        """A quote or a ``trade_updates`` message arrived."""
-        self._record_activity(at, "message")
+    def record_message(self, at: datetime, *, socket: str | None = None) -> None:
+        """A quote or a ``trade_updates`` message arrived on ``socket``.
+
+        ``socket`` is the name the client reports itself under, and it is what
+        a halt reason gets to say. Omitted, this counts only for the
+        engine-wide clock -- see the class docstring.
+        """
+        self._record_activity(at, "message", socket)
 
     def record_poll(self, at: datetime) -> None:
-        """A poll succeeded. Liveness too -- the spec says *message or poll*."""
-        self._record_activity(at, "poll")
+        """A poll succeeded. Liveness too -- the spec says *message or poll*.
 
-    def record_stream_open(self, at: datetime) -> None:
+        **Never attributed to a socket, and there is no argument for it.** A
+        successful REST call says the data host answers; it is not evidence
+        about any websocket, and treating it as such is how a dead
+        ``trade_updates`` socket stayed invisible while the poll loop ran.
+        """
+        self._record_activity(at, "poll", None)
+
+    def record_stream_open(
+        self, at: datetime, *, socket: str | None = None
+    ) -> None:
         """The socket is up again.
 
-        Ends the *close* this class reports and **nothing else**. The halt
-        in ``engine_state`` is untouched: rule 9's whole point is that the
-        socket coming back is not evidence that the position state is
-        verified, and this class could not end a halt if it wanted to -- it
-        has no database and no opinion about one.
+        Ends the *close* this class reports -- **once something has evaluated
+        it** -- and nothing else. The halt in ``engine_state`` is untouched:
+        rule 9's whole point is that the socket coming back is not evidence
+        that the position state is verified, and this class could not end a
+        halt if it wanted to -- it has no database and no opinion about one.
+
+        **A close no tick has seen yet outlives the reopen.** Clearing it
+        here unconditionally was rule 9's connection condition failing to
+        fire for the ordinary case: ``reconnect_delay(1)`` is one second and
+        the open is recorded the moment the new session authenticates, so a
+        1006 closes and reopens inside about 1.0-1.5s, entirely between two
+        ticks of the 5.0s supervisor -- and the condition was gone before
+        anything asked. The connection was lost all the same, neither socket
+        replays, and on ``trade_updates`` that is precisely the unverified
+        position state rule 9 names.
+
+        So the close is held until :meth:`evaluate` reports it, and cleared
+        **on that observation** rather than on this call. Not a latch: one
+        close, one halt, and :meth:`evaluate` is where the clearing happens.
+
+        **It ends only this socket's close.** One shared slot meant a reopen
+        here cleared -- or worse, marked *"has since reconnected"* -- a close
+        recorded by a different socket, so a critical alert could say the feed
+        was back about one that was still down.
         """
         moment = _utc(at)
-        self._closed_at = None
-        self._closed_detail = ""
-        self._record_activity(moment, "stream_open")
+        state = self._state(socket)
+        if state.closed_at is not None and not state.close_observed:
+            state.close_reopened = True
+        else:
+            state.clear_close()
+        self._record_activity(moment, "stream_open", socket)
 
-    def record_stream_closed(self, at: datetime, *, detail: str = "") -> None:
-        """The websocket closed, for the stated reason if the transport gave one."""
-        self._closed_at = _utc(at)
-        self._closed_detail = detail or "no reason given"
+    def record_stream_closed(
+        self, at: datetime, *, socket: str | None = None, detail: str = ""
+    ) -> None:
+        """The websocket closed, for the stated reason if the transport gave one.
+
+        A second close on **the same socket** inside one unobserved window
+        replaces the first: the condition is *that socket dropped*, the latest
+        drop is the one to report, and it is pending again whatever the
+        previous one's state was. A close on a *different* socket is a
+        different close and is kept beside it, so two feeds dropping at once
+        are two halts rather than one report attributed to whichever arrived
+        last.
+        """
+        state = self._state(socket)
+        state.closed_at = _utc(at)
+        state.closed_detail = detail or "no reason given"
+        state.close_observed = False
+        state.close_reopened = False
+
+    def _state(self, socket: str | None) -> _SocketLiveness:
+        """This socket's record, created on first sight.
+
+        Tracking starts when a socket first reports something, which is what
+        keeps an un-wired producer from being judged: a socket that has never
+        spoken has no liveness clock to fail, and a cold start is already
+        halted for its own reasons.
+        """
+        state = self._sockets.get(socket)
+        if state is None:
+            state = _SocketLiveness()
+            self._sockets[socket] = state
+        return state
 
     def record_heartbeat(self, at: datetime) -> None:
         """The risk manager is alive.
@@ -774,11 +924,23 @@ class Watchdog:
         """
         self._last_heartbeat_at = _utc(at)
 
-    def _record_activity(self, at: datetime, source: str) -> None:
+    def _record_activity(
+        self, at: datetime, source: str, socket: str | None
+    ) -> None:
+        """Refresh the engine-wide clock, and this source's own.
+
+        Both, always. The engine-wide one is monotonic -- an out-of-order
+        stamp never moves it backwards -- and so is each socket's, for the
+        same reason: a late frame is not evidence that the feed went quiet.
+        """
         moment = _utc(at)
         if self._last_activity_at is None or moment > self._last_activity_at:
             self._last_activity_at = moment
             self._last_activity_source = source
+        state = self._state(socket)
+        if state.last_activity_at is None or moment > state.last_activity_at:
+            state.last_activity_at = moment
+            state.last_activity_source = source
 
     # -- the question -----------------------------------------------------
 
@@ -808,19 +970,68 @@ class Watchdog:
         ``engine_state.halted``.
         """
         moment = _utc(now)
-        if self._closed_at is not None:
-            return self._decide(
+        pending = self._pending_close()
+        if pending is not None:
+            name, state = pending
+            closed_at = state.closed_at
+            assert closed_at is not None  # `_pending_close` selected on it
+            reconnected = state.close_reopened
+            label = f"The {name} stream" if name else "The market data stream"
+            decision = self._decide(
                 HaltRule.STREAM_CLOSED,
                 _bounded(
-                    f"The market data stream closed ({self._closed_detail}). The "
-                    "engine halted itself; the socket may reconnect but the halt "
-                    "does not clear without an explicit resume."
+                    f"{label} closed ({state.closed_detail}) and "
+                    "has since reconnected. The engine halted itself; the socket "
+                    "is back but the halt does not clear without an explicit "
+                    "resume."
+                    if reconnected
+                    else f"{label} closed ({state.closed_detail}). "
+                    "The engine halted itself; the socket may reconnect but the "
+                    "halt does not clear without an explicit resume."
                 ),
                 {
-                    "closed_at": self._closed_at.isoformat(),
-                    "detail": self._closed_detail,
-                    "elapsed_seconds": (moment - self._closed_at).total_seconds(),
+                    # Which feed. Losing quotes and losing fills have very
+                    # different consequences, and a record that does not say
+                    # which one cannot be read after the fact.
+                    "socket": name,
+                    "closed_at": closed_at.isoformat(),
+                    "detail": state.closed_detail,
+                    "elapsed_seconds": (moment - closed_at).total_seconds(),
                     "timeout_seconds": self._timeout_seconds,
+                    # Whether the socket is already back. The sentence above
+                    # says so too, because a critical alert on a visibly
+                    # healthy feed reads as a glitch otherwise -- the same
+                    # reason `_late_reason` names the original condition.
+                    "reconnected": reconnected,
+                },
+                moment,
+            )
+            # Observed. That is what ends a close the socket has recovered
+            # from -- see `record_stream_open`. A socket still shut keeps
+            # being reported, because nothing here latches and the fault is
+            # still present.
+            state.close_observed = True
+            if reconnected:
+                state.clear_close()
+            return decision
+
+        silent = self._silent_socket(moment)
+        if silent is not None:
+            name, elapsed = silent
+            return self._decide(
+                HaltRule.CONNECTION_STALE,
+                _bounded(
+                    f"No message on the {name} socket for {elapsed:.0f}s, "
+                    f"against a {self._timeout_seconds:.0f}s limit. Another feed "
+                    "may still be live; this one is not. The engine halted "
+                    "itself; recovery requires an explicit resume."
+                ),
+                {
+                    "socket": name,
+                    "elapsed_seconds": elapsed,
+                    "timeout_seconds": self._timeout_seconds,
+                    "last_activity_at": self._socket_activity_at(name),
+                    "last_activity_source": self._sockets[name].last_activity_source,
                 },
                 moment,
             )
@@ -837,6 +1048,10 @@ class Watchdog:
                         "explicit resume."
                     ),
                     {
+                        # No socket: this is the engine-wide condition, and
+                        # the last thing heard from may have been a poll.
+                        # Stated rather than omitted so one query reads both.
+                        "socket": None,
                         "elapsed_seconds": elapsed,
                         "timeout_seconds": self._timeout_seconds,
                         "last_activity_at": self._last_activity_at.isoformat(),
@@ -870,6 +1085,53 @@ class Watchdog:
                 )
 
         return None
+
+    def _pending_close(self) -> tuple[str | None, _SocketLiveness] | None:
+        """The oldest close no ``evaluate`` has retired yet, if there is one.
+
+        Oldest first, and the socket name breaks a tie, so two feeds dropping
+        in the same instant are reported in a fixed order rather than in
+        whatever order the dict happens to hold. One decision per tick: the
+        next tick reports the next close, and no close is cleared without
+        having been reported at least once.
+        """
+        pending: list[tuple[datetime, str, str | None, _SocketLiveness]] = []
+        for name, state in self._sockets.items():
+            closed_at = state.closed_at
+            if closed_at is not None:
+                pending.append((closed_at, name or "", name, state))
+        if not pending:
+            return None
+        chosen = min(pending, key=lambda item: (item[0], item[1]))
+        return chosen[2], chosen[3]
+
+    def _silent_socket(self, moment: datetime) -> tuple[str, float] | None:
+        """The **named** socket that has been silent longest, past the limit.
+
+        Unnamed sources are skipped: the poll loop is the one that matters and
+        a poll is no evidence about a socket. A socket that has never reported
+        anything is skipped too -- it has no clock to fail, the same way the
+        engine-wide condition stays unarmed until something arrives.
+        """
+        worst: tuple[str, float] | None = None
+        for name, state in self._sockets.items():
+            if name is None or state.last_activity_at is None:
+                continue
+            elapsed = (moment - state.last_activity_at).total_seconds()
+            if elapsed < self._timeout_seconds:
+                continue
+            # Longest silence first, and the *lowest* name on a tie -- the
+            # same order `_pending_close` uses, so one reader does not have to
+            # hold two tie-breaks in their head.
+            if worst is None or elapsed > worst[1] or (
+                elapsed == worst[1] and name < worst[0]
+            ):
+                worst = (name, elapsed)
+        return worst
+
+    def _socket_activity_at(self, name: str) -> str | None:
+        last = self._sockets[name].last_activity_at
+        return last.isoformat() if last is not None else None
 
     def _decide(
         self,
@@ -1156,9 +1418,17 @@ class EngineRuntime:
 
     # -- what the sockets and the poll loop report -------------------------
 
-    def record_message(self, at: datetime | None = None) -> None:
-        """A quote or a ``trade_updates`` message arrived."""
-        self._watchdog.record_message(self._moment(at))
+    def record_message(
+        self, at: datetime | None = None, *, socket: str | None = None
+    ) -> None:
+        """A quote or a ``trade_updates`` message arrived on ``socket``.
+
+        ``socket`` is what :class:`Watchdog` judges that feed by and what the
+        halt reason names. Every real client passes it --
+        ``corollary.sockets.VendorStream`` requires the name -- and an omitted
+        one counts for the engine-wide condition only.
+        """
+        self._watchdog.record_message(self._moment(at), socket=socket)
 
     def record_poll(self, at: datetime | None = None) -> None:
         """A poll succeeded."""
@@ -1168,21 +1438,39 @@ class EngineRuntime:
         """The risk manager is alive. **No producer yet** -- see the module docstring."""
         self._watchdog.record_heartbeat(self._moment(at))
 
-    def record_stream_open(self, at: datetime | None = None) -> None:
+    def record_stream_open(
+        self, at: datetime | None = None, *, socket: str | None = None
+    ) -> None:
         """The socket came back. **This does not resume anything.**
 
         Rule 9, verbatim: never auto-resume on reconnect. Reconnecting into an
         unverified position state is how a bot doubles a position it already
-        holds. The watchdog stops complaining about the socket; the halt in
+        holds. The watchdog stops complaining about the socket -- *after* a
+        tick has seen the close, never before one has, per
+        :meth:`Watchdog.record_stream_open` -- and the halt in
         ``engine_state`` stays exactly where it was.
+
+        It ends **this** socket's close and no other's. A reopen credited to
+        the wrong socket is an alert saying *"has since reconnected"* about a
+        feed that is still down.
         """
-        self._watchdog.record_stream_open(self._moment(at))
+        self._watchdog.record_stream_open(self._moment(at), socket=socket)
 
     def record_stream_closed(
-        self, at: datetime | None = None, *, detail: str = ""
+        self,
+        at: datetime | None = None,
+        *,
+        socket: str | None = None,
+        detail: str = "",
     ) -> None:
-        """The socket closed. The next watchdog check halts on it."""
-        self._watchdog.record_stream_closed(self._moment(at), detail=detail)
+        """The socket closed. The next watchdog check halts on it, by name.
+
+        *The next one*, whenever it comes: a reconnect in between does not
+        take the condition away. See :meth:`Watchdog.record_stream_open`.
+        """
+        self._watchdog.record_stream_closed(
+            self._moment(at), socket=socket, detail=detail
+        )
 
     def record_opening_snapshot(self, at: datetime | None = None) -> None:
         """The opening snapshot succeeded.

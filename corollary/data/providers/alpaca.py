@@ -71,6 +71,7 @@ appears in this module.
 
 import logging
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -96,6 +97,15 @@ from corollary.data.providers.interface import (
     StockSnapshot,
     Trade,
 )
+from corollary.engine.stream import (
+    AcknowledgedSubscription,
+    DropRule,
+    Stream,
+    SubscriptionPlan,
+    not_streamed_message,
+    reconcile_acknowledgement,
+    replan_at_cap,
+)
 from corollary.instruments import is_adjusted_root, parse_occ_symbol
 from corollary.pricing.blackscholes import (
     DEFAULT_DIVIDEND_YIELD,
@@ -105,6 +115,16 @@ from corollary.pricing.blackscholes import (
     CloseAt,
     derive_analytics,
     years_to_expiry,
+)
+from corollary.sockets import (
+    JSON_CODEC,
+    MSGPACK_CODEC,
+    Codec,
+    SocketConnect,
+    StreamActivityRecorder,
+    VendorSocket,
+    VendorStream,
+    utcnow,
 )
 from corollary.ratelimit import (
     ALPACA_DATA_HOST,
@@ -128,6 +148,13 @@ from corollary.wire import (
 
 __all__ = [
     "ALPACA_OPTIONS_FEED_ENV",
+    "OPTION_STREAM_URL_TEMPLATE",
+    "QUOTES_CHANNEL",
+    "STOCK_STREAM_URL_TEMPLATE",
+    "AlpacaQuoteStream",
+    "StreamProtocolError",
+    "option_quote_stream",
+    "stock_quote_stream",
     "ALPACA_STOCK_FEED_HISTORICAL_ENV",
     "ALPACA_STOCK_FEED_REALTIME_ENV",
     "AlpacaCredentials",
@@ -402,9 +429,24 @@ def _price_or_none(value: Any) -> Decimal | None:
     The distinction is the difference between "this is worth nothing" and "no
     one is quoting it", and collapsing them puts an invented mid into the
     input of a derived implied volatility.
+
+    **A non-finite value is neither, and is refused rather than read as
+    either.** ``decode_msgpack`` converts a non-finite float64 to
+    ``Decimal('NaN')`` or ``Decimal('Infinity')`` *successfully* -- the
+    conversion is exact about a value that is not a number -- and ``<=`` on a
+    NaN raises ``InvalidOperation``, an ``ArithmeticError`` that the stream's
+    publish path does not catch, so one malformed price took the whole socket
+    down. Returning ``None`` instead would be worse than raising: "nobody is
+    quoting it" is a legitimate market state, and reporting a vendor fault as
+    one hides it. Raising costs exactly the one quote, logged, via the catch
+    the publish path already has.
     """
     parsed = _as_decimal(value)
-    if parsed is None or parsed <= 0:
+    if parsed is None:
+        return None
+    if not parsed.is_finite():
+        raise ProviderError(f"price is not a finite number: {parsed}")
+    if parsed <= 0:
         return None
     return parsed
 
@@ -1302,3 +1344,596 @@ def _plain(value: Decimal | None) -> str | None:
 
 
 _clean_params = clean_params
+
+
+# --------------------------------------------------------------------------
+# The market-data websockets
+# --------------------------------------------------------------------------
+#
+# Two sockets live here and a third lives in `engine/execution/alpaca.py`.
+# The split is not filing: CLAUDE.md permits the vendor import in exactly
+# those two files, and `trade_updates` is an order-lifecycle feed on the
+# trading host rather than market data. Everything transport-shaped that all
+# three share is in `corollary/sockets.py`, which knows nothing about Alpaca.
+#
+# What this client does, in order: connect, authenticate, subscribe **from a
+# plan**, reconcile the server's acknowledgement against that plan, translate
+# each quote into a domain `Quote`, and hand it to a synchronous sink. What it
+# refuses to do is decide anything: the budget is `engine/stream.py`'s, the
+# halt is `EngineRuntime`'s, and the frame is `api/fanout.py`'s.
+
+#: The option stream. ``v1beta1`` and a feed name -- ``indicative`` on Basic,
+#: a 15-minute-delayed derivative of OPRA rather than OPRA itself.
+OPTION_STREAM_URL_TEMPLATE: Final = "wss://stream.data.alpaca.markets/v1beta1/{feed}"
+
+#: The stock stream. ``v2``, and ``iex`` on Basic -- the real-time equity feed
+#: is IEX-limited on the free plan even though *historical* equity data is
+#: SIP. Both templates take the feed from :class:`FeedConfig` and never a
+#: literal.
+STOCK_STREAM_URL_TEMPLATE: Final = "wss://stream.data.alpaca.markets/v2/{feed}"
+
+#: The one channel either socket subscribes. Quotes are what a mark is made
+#: of; trades and bars would each spend the same budget again.
+#:
+#: **Never ``"*"``.** Alpaca refuses a star subscription for option quotes --
+#: *"you cannot subscribe to ``*`` for option quotes (there are simply too
+#: many of them)"* -- and on equities it would blow the 30-symbol budget the
+#: moment it was accepted.
+QUOTES_CHANNEL: Final = "quotes"
+
+#: Alpaca's error code for *"this subscription request would put you over the
+#: limit"*. Not a failure to retry: it is the server stating a cap, which is
+#: more authoritative than the one we planned against.
+CAP_EXCEEDED_CODE: Final = 405
+
+#: Error codes that end the session rather than being retried. 400 is our own
+#: malformed request, 401-404 are authentication, 406 is the account's
+#: concurrent-connection limit, 407 is this client reading too slowly, 409 is
+#: a plan that does not include this feed and 410 is an invalid subscribe
+#: action. Every one of them recurs identically on reconnect, so a backoff
+#: loop would turn a stated problem into a silent one -- and a wrong key
+#: would look exactly like a flaky network.
+#:
+#: **406 and 407 were the two omissions worth naming**, because both are
+#: reachable and neither is transient: 406 is what a second process on the
+#: same key gets, and looping on it forever is indistinguishable from a flaky
+#: network while the *other* process holds the slot. 405 is deliberately
+#: absent -- it is the server stating a cap, which is answered by re-planning
+#: rather than by ending the session. A 500 is absent for the opposite
+#: reason: a vendor's internal error is exactly what a reconnect is for.
+FATAL_STREAM_CODES: Final = frozenset({400, 401, 402, 403, 404, 406, 407, 409, 410})
+
+
+class StreamProtocolError(ProviderError):
+    """The vendor refused the stream in a way reconnecting cannot fix.
+
+    Carries the code so a caller can branch without parsing prose. The
+    message is already through :func:`~corollary.wire.vendor_detail`: rule 6,
+    and this is the one place in the provider that interpolates text the
+    vendor wrote about a request that carried a credential.
+    """
+
+    def __init__(self, detail: str, *, code: int | None = None) -> None:
+        super().__init__(detail)
+        self.code = code
+
+
+class AlpacaQuoteStream(VendorStream):
+    """One market-data websocket: the option stream or the stock stream.
+
+    One class for both, because the protocol is identical and only three
+    things differ -- the URL's version and feed, the codec, and which budget
+    the plan came out of. Two classes would be two copies of the handshake,
+    the acknowledgement reconciliation and the 405 path, and the 405 path is
+    the one nobody would remember to change twice.
+
+    Constructed by :func:`option_quote_stream` and :func:`stock_quote_stream`,
+    which read the feed names from the environment. Everything else is
+    injected: the connection factory, the delay, and the clock, so the tests
+    neither bind a port nor wait.
+
+    **It arms rule 9 and it never disarms it.** A frame on the wire is
+    ``record_message``; a vendor close is ``record_stream_closed``; a
+    reconnect is ``record_stream_open``, which leaves ``engine_state.halted``
+    exactly where it was. Reconnecting into an unverified position state is
+    how a bot doubles a position it already holds, so recovery stays a
+    human's act.
+
+    **The reconnect does not take the close away, and that correction is the
+    point.** This said the reopen *"stops the watchdog complaining about the
+    socket"*, which it did -- it stopped a complaint nothing had heard. The
+    supervisor evaluates every ``WATCHDOG_INTERVAL_SECONDS`` and
+    ``reconnect_delay(1)`` is one second, so the ordinary 1006 closed and
+    reopened inside a single period and the condition was gone before any
+    tick asked: no halt, no notification, no resume, for a connection that
+    was genuinely lost. ``Watchdog.record_stream_open`` now holds a close no
+    ``evaluate`` has seen, so this client's job is unchanged and unchanged on
+    purpose -- it reports what happened and never when it is judged.
+    """
+
+    def __init__(
+        self,
+        *,
+        credentials: AlpacaCredentials,
+        url: str,
+        codec: Codec,
+        stream: Stream,
+        plan: SubscriptionPlan,
+        activity: StreamActivityRecorder,
+        on_quote: Callable[[Quote], None],
+        channel: str = QUOTES_CHANNEL,
+        connect: SocketConnect | None = None,
+        sleep: Callable[[float], Any] | None = None,
+        now: Callable[[], datetime] = utcnow,
+        correlation_ids: Callable[[], str] | None = None,
+    ) -> None:
+        if plan.stream is not stream:
+            raise ValueError(
+                f"a {stream.label} stream was handed a {plan.stream.label} "
+                "plan. The plan carries its own stream so that this cannot be "
+                "inferred from a cap, and a plan on the wrong socket is "
+                "admitted, subscribed and never quoted"
+            )
+        super().__init__(
+            # `option_quotes` / `equity_quotes`. Derived from the stream
+            # rather than passed in, so the two sockets cannot be constructed
+            # under one name and share a liveness clock -- and stable, because
+            # a halt reason and a log query both read it.
+            name=f"{stream.label}_quotes",
+            url=url,
+            codec=codec,
+            activity=activity,
+            connect=connect,
+            sleep=sleep,
+            now=now,
+            secrets=(credentials.key_id, credentials.secret_key),
+        )
+        self._credentials = credentials
+        self._stream = stream
+        self._plan = plan
+        self._on_quote = on_quote
+        self._channel = channel
+        self._correlation_ids = correlation_ids
+        #: The first plan's correlation id, kept because `self._plan` is
+        #: replaced by a 405 correction. See `_next_correlation_id`.
+        self._correlation_root = plan.correlation_id
+        self._replans = 0
+        self._acknowledgement: AcknowledgedSubscription | None = None
+
+    # -- what a caller can read -------------------------------------------
+
+    @property
+    def stream(self) -> Stream:
+        return self._stream
+
+    @property
+    def channel(self) -> str:
+        return self._channel
+
+    @property
+    def plan(self) -> SubscriptionPlan:
+        """The plan in force. Replaced -- never edited -- by a 405 correction."""
+        return self._plan
+
+    @property
+    def acknowledgement(self) -> AcknowledgedSubscription | None:
+        """The server's last ``subscription`` message, reconciled. ``None`` until one arrives."""
+        return self._acknowledgement
+
+    @property
+    def not_streamed(self) -> int:
+        """*"N symbols not streamed"*, counting our drops and the server's.
+
+        Falls back to the plan's own figure before the first acknowledgement:
+        until the server has answered, what we asked for is the best available
+        claim about what is streaming. It is never *lower* than the plan's
+        figure, which is what stops a stale acknowledgement flattering a
+        re-plan.
+        """
+        if self._acknowledgement is None:
+            return self._plan.not_streamed
+        return self._acknowledgement.not_streamed
+
+    @property
+    def message(self) -> str | None:
+        return not_streamed_message(self.not_streamed)
+
+    # -- the protocol ------------------------------------------------------
+
+    def _handshake_headers(self) -> dict[str, str]:
+        """What the handshake carries. The codec, and nothing else.
+
+        The data streams authenticate with a *message*, not a header, so no
+        credential rides the handshake here -- and the option stream needs
+        ``Content-Type: application/msgpack`` to negotiate the only format it
+        speaks.
+        """
+        if self._codec.binary:
+            return {"Content-Type": "application/msgpack"}
+        return {}
+
+    def _auth_message(self) -> dict[str, str]:
+        """The auth frame. **Never logged**, by rule 6, anywhere in this class."""
+        return {
+            "action": "auth",
+            "key": self._credentials.key_id,
+            "secret": self._credentials.secret_key,
+        }
+
+    def _messages(self, frame: str | bytes) -> list[Mapping[str, Any]]:
+        """One received frame as a list of vendor messages.
+
+        Alpaca's data streams send an **array** of messages per frame. A bare
+        object is accepted too rather than refused: an error emitted before
+        the stream is fully up has arrived that way, and turning the vendor's
+        explanation into a parse failure loses exactly the thing worth
+        reading.
+        """
+        try:
+            decoded = self._codec.decode(frame)
+        except Exception as exc:  # WireFormatError, and whatever msgpack raises
+            logger.warning(
+                "undecodable frame on the %s stream: %s",
+                self._stream.label,
+                self._detail(str(exc)),
+                extra={
+                    "event": "stream_frame_undecodable",
+                    "stream": self._stream.label,
+                    "codec": self._codec.name,
+                    "detail": self._detail(str(exc)),
+                    "at": self._now().isoformat(),
+                },
+            )
+            return []
+        if isinstance(decoded, Mapping):
+            return [decoded]
+        if isinstance(decoded, list):
+            return [item for item in decoded if isinstance(item, Mapping)]
+        return []
+
+    async def _handle(self, socket: VendorSocket, message: Mapping[str, Any]) -> None:
+        kind = message.get("T")
+        if kind == "q":
+            self._publish(message)
+        elif kind == "subscription":
+            self._reconcile(message)
+        elif kind == "error":
+            await self._error(socket, message)
+        elif kind == "success":
+            if message.get("msg") == "authenticated":
+                # Only now. An open socket that has not authenticated carries
+                # nothing, and `record_stream_open` is what stops the watchdog
+                # complaining about a closed one.
+                self._record_stream_open(self._now())
+                await self._subscribe(socket)
+        # Anything else -- a trade, a bar, a status -- is not subscribed here
+        # and is ignored. It already counted as a message, which is all rule 9
+        # wanted from it.
+
+    def _publish(self, message: Mapping[str, Any]) -> None:
+        """Translate one quote and hand it to the sink.
+
+        A message this fails on is logged and skipped rather than fatal: a
+        vendor field change must not cost every *other* symbol its mark. The
+        catch is scoped to the translation for that reason -- a protocol error
+        or a closed socket is not swallowed here.
+
+        **The sink is inside the containment too**, in a second block with its
+        own message. It used to be called after the ``try``, so anything it
+        raised propagated out of ``run()``: the socket died with **no**
+        ``record_stream_closed``, so rule 9's condition was lost rather than
+        fired and no reconnect was attempted either. Today's sink cannot
+        raise, but ``api/fanout.py``'s ``wire_action`` is a ``dict`` lookup
+        with no exhaustiveness checking and the composition root is where a
+        sink grows a body. Two blocks rather than one because the two
+        failures are different news: an unreadable quote is the vendor's
+        shape changing, and a failing sink is ours.
+
+        **The catch names the ``ArithmeticError`` family, not a member of
+        it.** A non-finite ``Decimal`` can no longer be built out of a wire
+        value -- ``corollary.wire._decimalise`` refuses one at the decode
+        boundary -- and this is the second line of defence, because this path
+        has now been broken twice by the same family arriving from different
+        corners: ``InvalidOperation`` out of a comparison, then
+        ``OverflowError`` out of ``int(Decimal('Infinity'))``, which was *not*
+        in this tuple and so escaped every frame above it -- all of which
+        catch only ``SocketClosed`` -- and killed the socket permanently with
+        rule 9's close condition never recorded. ``ValueError`` covered its
+        sibling ``int(Decimal('NaN'))``, which is exactly what made the path
+        look covered.
+        """
+        symbol = message.get("S")
+        try:
+            if not isinstance(symbol, str) or not symbol:
+                # Bounded *and* redacted before it is interpolated: rule 6
+                # applies to an exception message, and `{message!r}` on a
+                # whole vendor frame is exactly the unbounded text
+                # `ERROR_BODY_MAX` exists to cut.
+                raise ProviderError(
+                    f"quote message has no symbol: {self._detail(repr(message))}"
+                )
+            quote = _quote(symbol, message)
+        except (ProviderError, ArithmeticError, KeyError, TypeError, ValueError) as exc:
+            detail = self._detail(str(exc))
+            logger.warning(
+                "unreadable quote on the %s stream: %s",
+                self._stream.label,
+                detail,
+                extra={
+                    "event": "stream_quote_unreadable",
+                    "stream": self._stream.label,
+                    "symbol": symbol if isinstance(symbol, str) else None,
+                    "detail": detail,
+                    "at": self._now().isoformat(),
+                },
+            )
+            return
+        if quote is None:
+            return
+        try:
+            # Synchronous by contract: `Fanout.publish` never awaits, so a
+            # slow browser tab cannot stall this socket.
+            self._on_quote(quote)
+        except Exception as exc:  # the sink is the composition root's code
+            detail = self._detail(str(exc))
+            logger.error(
+                "the %s stream's quote sink raised: %s",
+                self._stream.label,
+                detail,
+                extra={
+                    "event": "stream_sink_failed",
+                    "rule": "sink_raised",
+                    "stream": self._stream.label,
+                    "symbol": quote.symbol,
+                    "detail": detail,
+                    "at": self._now().isoformat(),
+                },
+                exc_info=True,
+            )
+
+    async def _subscribe(self, socket: VendorSocket) -> None:
+        """Send the plan's symbols, and nothing that is not in the plan."""
+        symbols = list(self._plan.subscribed)
+        # A new subscribe invalidates the old acknowledgement: until the
+        # server answers this one, the plan's own figure is the honest claim.
+        self._acknowledgement = None
+        if not symbols:
+            logger.info(
+                "nothing to subscribe on the %s stream",
+                self._stream.label,
+                extra={
+                    "event": "stream_subscribe_empty",
+                    "stream": self._stream.label,
+                    "channel": self._channel,
+                    "correlation_id": self._plan.correlation_id,
+                    "cap": self._plan.cap,
+                    "not_streamed": self._plan.not_streamed,
+                    "detail": (
+                        "an empty book is an ordinary state; an empty "
+                        "subscribe is a 400 and a star subscribe is refused "
+                        "for option quotes"
+                    ),
+                    "at": self._now().isoformat(),
+                },
+            )
+            return
+        await self._codec.transmit(
+            socket, {"action": "subscribe", self._channel: symbols}
+        )
+
+    def _reconcile(self, message: Mapping[str, Any]) -> None:
+        """Compare the server's list against the plan, per channel."""
+        acknowledged = message.get(self._channel)
+        symbols = (
+            [str(symbol) for symbol in acknowledged]
+            if isinstance(acknowledged, list)
+            else []
+        )
+        self._acknowledgement = reconcile_acknowledgement(
+            self._plan,
+            channel=self._channel,
+            acknowledged=symbols,
+            at=self._now(),
+        )
+
+    async def _error(self, socket: VendorSocket, message: Mapping[str, Any]) -> None:
+        code = message.get("code")
+        code = int(code) if isinstance(code, (int, Decimal)) else None
+        detail = self._detail(str(message.get("msg", "")))
+        if code == CAP_EXCEEDED_CODE:
+            await self._correct_cap(socket, detail=detail)
+            return
+        if code in FATAL_STREAM_CODES:
+            logger.error(
+                "the %s stream was refused (%s): %s",
+                self._stream.label,
+                code,
+                detail,
+                extra={
+                    "event": "stream_refused",
+                    "stream": self._stream.label,
+                    "rule": "vendor_refused",
+                    "code": code,
+                    "detail": detail,
+                    "channel": self._channel,
+                    "correlation_id": self._plan.correlation_id,
+                    "at": self._now().isoformat(),
+                },
+            )
+            # The feed is gone and reconnecting will not bring it back, but it
+            # is gone all the same: rule 9's condition is recorded either way,
+            # so the engine halts rather than trading on blind.
+            self._record_stream_closed(self._now(), detail)
+            raise StreamProtocolError(
+                f"the {self._stream.label} stream was refused ({code}): {detail}",
+                code=code,
+            )
+        logger.warning(
+            "the %s stream reported an error (%s): %s",
+            self._stream.label,
+            code,
+            detail,
+            extra={
+                "event": "stream_vendor_error",
+                "stream": self._stream.label,
+                "code": code,
+                "detail": detail,
+                "at": self._now().isoformat(),
+            },
+        )
+
+    async def _correct_cap(self, socket: VendorSocket, *, detail: str) -> None:
+        """Take the server's word for the cap, re-plan, and re-subscribe.
+
+        The corrected cap is the count of symbols the server has actually
+        acknowledged on this channel **and that we asked for**, because that
+        is its own figure rather than our guess. With nothing acknowledged yet
+        there is no figure to take, so the cap halves -- bounded, logged, and
+        always strictly below what was just refused, so the correction cannot
+        loop.
+
+        The surplus is subtracted for a reason worth stating: a symbol the
+        server acknowledged that is not in our plan is not room we have, so
+        counting it overstates the cap by the surplus count. The old figure
+        still converged and could never widen, which is why this was a
+        wrinkle rather than a fault -- but ``AcknowledgedSubscription.surplus``
+        exists precisely to name that case, so it is used.
+        """
+        previous = self._plan.cap
+        acknowledged = (
+            len(self._acknowledgement.acknowledged)
+            - len(self._acknowledgement.surplus)
+            if self._acknowledgement is not None
+            else 0
+        )
+        cap = _corrected_cap(previous, acknowledged)
+        logger.warning(
+            "the %s stream capped us at %d symbols (was %d): %s",
+            self._stream.label,
+            cap,
+            previous,
+            detail,
+            extra={
+                "event": "stream_cap_corrected",
+                "stream": self._stream.label,
+                "rule": DropRule.NOT_ACKNOWLEDGED.value,
+                "code": CAP_EXCEEDED_CODE,
+                "cap": cap,
+                "previous_cap": previous,
+                "acknowledged_count": acknowledged,
+                "channel": self._channel,
+                "correlation_id": self._plan.correlation_id,
+                "detail": detail,
+                "at": self._now().isoformat(),
+            },
+        )
+        self._plan = replan_at_cap(
+            self._plan,
+            cap=cap,
+            at=self._now(),
+            correlation_id=self._next_correlation_id(),
+        )
+        await self._subscribe(socket)
+
+    def _next_correlation_id(self) -> str:
+        """A fresh handle for a re-planned subscription.
+
+        With a generator injected, that generator. Without one -- which is the
+        **production** path, since ``correlation_ids`` defaults to ``None`` in
+        both factories -- this used to return the original plan's id, so the
+        pre-405 and post-405 ``not_streamed`` summaries sat under one handle,
+        saying different things, with nothing to order them by. The fallback
+        keeps the original as a prefix so a scan is still findable by it, and
+        numbers the re-plans from the *root* rather than from the plan in
+        force, so a second correction does not nest a suffix inside a suffix.
+        """
+        if self._correlation_ids is not None:
+            return self._correlation_ids()
+        self._replans += 1
+        return f"{self._correlation_root}#replan-{self._replans}"
+
+def _corrected_cap(previous: int, acknowledged: int) -> int:
+    """The effective cap after a 405, always strictly below ``previous``.
+
+    Pure, so the two branches are testable without a socket: the server's own
+    acknowledged count where there is one, a halving where there is not, and
+    never above ``previous - 1`` so that a correction cannot be a no-op and
+    the re-subscribe cannot loop. Zero is a legitimate answer -- it means the
+    socket streams nothing and every symbol counts into *"N symbols not
+    streamed"*, which is loud, whereas a subscribe the server keeps refusing
+    is not.
+    """
+    candidate = acknowledged if acknowledged > 0 else previous // 2
+    return max(0, min(candidate, previous - 1))
+
+
+def option_quote_stream(
+    *,
+    plan: SubscriptionPlan,
+    activity: StreamActivityRecorder,
+    on_quote: Callable[[Quote], None],
+    env: Mapping[str, str] | None = None,
+    credentials: AlpacaCredentials | None = None,
+    feeds: FeedConfig | None = None,
+    connect: SocketConnect | None = None,
+    sleep: Callable[[float], Any] | None = None,
+    now: Callable[[], datetime] = utcnow,
+    correlation_ids: Callable[[], str] | None = None,
+) -> AlpacaQuoteStream:
+    """The option quote stream, on the feed the environment names.
+
+    msgpack, because the option stream has no other format. ``indicative`` on
+    Basic, which is a 15-minute-delayed derivative of OPRA -- the delay is a
+    property of the plan and not of this code, and it is why a Phase 4 chain
+    view is polled rather than streamed.
+    """
+    config = feeds or FeedConfig.from_env(env)
+    return AlpacaQuoteStream(
+        credentials=credentials or AlpacaCredentials.paper_from_env(env),
+        url=OPTION_STREAM_URL_TEMPLATE.format(feed=config.options),
+        codec=MSGPACK_CODEC,
+        stream=Stream.OPTION,
+        plan=plan,
+        activity=activity,
+        on_quote=on_quote,
+        connect=connect,
+        sleep=sleep,
+        now=now,
+        correlation_ids=correlation_ids,
+    )
+
+
+def stock_quote_stream(
+    *,
+    plan: SubscriptionPlan,
+    activity: StreamActivityRecorder,
+    on_quote: Callable[[Quote], None],
+    env: Mapping[str, str] | None = None,
+    credentials: AlpacaCredentials | None = None,
+    feeds: FeedConfig | None = None,
+    connect: SocketConnect | None = None,
+    sleep: Callable[[float], Any] | None = None,
+    now: Callable[[], datetime] = utcnow,
+    correlation_ids: Callable[[], str] | None = None,
+) -> AlpacaQuoteStream:
+    """The stock quote stream, on the **real-time** feed the environment names.
+
+    ``ALPACA_STOCK_FEED_REALTIME`` -- ``iex`` on Basic -- and deliberately not
+    the historical one. Historical equity data is SIP even on Basic and this
+    is the one place where that does *not* apply: the live stream is
+    IEX-limited, so the two variables exist and this socket reads the second.
+    """
+    config = feeds or FeedConfig.from_env(env)
+    return AlpacaQuoteStream(
+        credentials=credentials or AlpacaCredentials.paper_from_env(env),
+        url=STOCK_STREAM_URL_TEMPLATE.format(feed=config.stock_realtime),
+        codec=JSON_CODEC,
+        stream=Stream.EQUITY,
+        plan=plan,
+        activity=activity,
+        on_quote=on_quote,
+        connect=connect,
+        sleep=sleep,
+        now=now,
+        correlation_ids=correlation_ids,
+    )
