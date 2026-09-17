@@ -2392,7 +2392,58 @@ would land in two different budgets.
 
 **12. `UnderlyingQuote` provenance and the field-level merge — decision 18.**
 Phase 2. Make one quote map safe for two writers.
-- *Status:* **server half landed; web half owed.** Rule 1's server side is in:
+- *Status:* **landed, wire cleanup included.** Rules 1-4 are in on both
+  sides, and `change` / `change_pct` are off `StockQuote` and
+  `UnderlyingQuote` in `corollary/api/schemas.py` and off both TS
+  interfaces, in the same commit that put `previous_close` on `StockQuote`
+  and relocated the derivation to a client selector. Web half: `web/src/lib/quotes.ts` is the merge,
+  pure and tested without rendering (`quotes.test.ts`, 29 cases) the way
+  `orders.ts` and `markets.ts` are -- `mergeQuote` with the full tie table
+  written out where the comparison lives, `mergeQuotes` over the map,
+  `liveFromStockQuote` / `liveFromUnderlyingQuote` / `streamedQuote` as the
+  producers, and `changeOf` / `changePctOf` as rule 4's read-time selectors.
+  - **The live map is `store.quotes`, a new slice, empty on a cold start --
+    not `underlyings`.** `underlyings` ships *pre-seeded* with `MARKET_QUOTES`
+    fixture prices and is moved by the Phase 1 mock walks, so writing server
+    quotes into it would leave every never-polled symbol rendering an
+    invented price indistinguishable from a real one (PRD 8.5's *"a table of
+    invented numbers reads as invented"*, arriving one row at a time). There
+    is still exactly one *live* map, which is what CLAUDE.md's one-map rule
+    protects; the fixture map stays inert until Phase 6 deletes it. **A
+    symbol with no entry is a symbol with no live quote** and the caller
+    renders its own query row.
+  - **The equal-`at` cell is implemented as the 2026-09-16 audit asked**:
+    newer wins; older is discarded for price and applied for every other
+    field; on an equal stamp the incoming price wins *unless* it is a poll
+    arriving over a streamed entry. One test per cell. An unparseable stamp
+    never beats a parseable one, for the same reason the server serves no
+    row rather than `datetime.now()`.
+  - **`lastPollAt` now has a production writer**, which it did not while a
+    real 150/min poll existed: `useMarketPoll` calls `applyPolledQuotes` and
+    `markPolled` on a **successful** read only -- `refetchStocks` resolves
+    with the rows or `null` rather than rejecting -- and touches neither
+    `lastTickAt` nor the mock `tick()` / `pollMarkets()`.
+  - **`StockQuote` now carries `previousClose` outright, and recovering it
+    as `price - change` was measurably wrong.** The interim implementation
+    did exactly that, on the reasoning that the server's own `change` *is*
+    `price - previous_close` so the subtraction invents nothing. It does
+    invent something: `JsonMoney` serializes each `Decimal` independently,
+    so price and change are each rounded on the way out and the client's
+    subtraction is a third rounding. The 2026-09-16 audit measured it —
+    **~48% of half-cent-change rows render a different cent than the
+    server's own figure, and ~0.14% render `+$0.00` in `text-bullish`**,
+    the exact string `SignedCell`'s docstring forbids. The repo's own SPY
+    fixture was the demonstration: server `+$6.42`, table `+$6.41`. So the
+    field went on the wire rather than being reconstructed, and the removal
+    of `change` / `change_pct` *is* that fix rather than a tidy-up that
+    followed it. `UnderlyingQuote` already carried `previousClose`.
+  - The fixtures grew `MARKET_QUOTE_AT` -- a fixed instant inside
+    `MARKET_TODAY`'s session, never a clock read, so the merge's ordering
+    cannot depend on when the suite ran.
+  - `DELIBERATE_ADDITIONS`' two `at` entries came out with this commit, as
+    planned: once `types.ts` declares the field,
+    `test_the_server_sends_nothing_undeclared` fails on the stale listing.
+  Server half, landed earlier in `86a239f`: rule 1's server side is in:
   `StockQuote` and `UnderlyingQuote` in `corollary/api/schemas.py` both carry
   `at`, a **non-null aware-UTC `datetime`** — the same kind of instant
   `WsQuote.at` carries, which is what makes rule 2's comparison meaningful
@@ -2416,17 +2467,29 @@ Phase 2. Make one quote map safe for two writers.
   - No `source` field on the REST models: which endpoint a row arrived on is
     something the client knows at the call site, and a server-asserted
     `'poll'` would be a second copy of that fact to disagree with.
-- *Owed by the web half, and the sequencing is deliberate:* rules 2, 3 and 4
-  are the store's merge, in `web/src/lib/{types,api,store}.ts`. That commit
+- *Done by the web half, and the sequencing was deliberate:* rules 2, 3 and 4
+  are the store's merge, in `web/src/lib/{types,store,quotes}.ts`. One commit
   declares `at` in `types.ts`, implements the field-level merge, derives
-  `change` / `changePct` in a selector — **and only then removes `change` and
-  `changePct` from these two Python models and their TS interfaces, in the
-  same commit.** They are still on the wire on purpose: dropping them before
-  the client derives them ships a Markets page with no change column between
-  two commits. The wire is never allowed to run ahead of the client here.
-  `tests/api/test_schema_contract.py` holds `at` in `DELIBERATE_ADDITIONS` for
-  both models meanwhile; that entry is removed by the same web commit, and the
-  contract test names which side is stale in either direction.
+  `change` / `changePct` in a selector, **and only then removes `change` and
+  `changePct` from these two Python models and their TS interfaces.** They
+  stayed on the wire on purpose until that moment: dropping them before the
+  client derived them would ship a Markets page with no change column between
+  two commits, and the wire is never allowed to run ahead of the client here.
+  `tests/api/test_schema_contract.py`'s two `at` entries in
+  `DELIBERATE_ADDITIONS` came out with the same commit — the removal itself
+  needed no `DELIBERATE_ADDITIONS` edit, since the contract test reads the
+  models rather than a listing of what was dropped.
+  - **The guard that used to live on the server moved with the derivation.**
+    `test_the_change_is_measured_from_the_previous_close` asserted a field
+    that no longer exists, and was relocated rather than deleted:
+    `tests/api/test_markets_routes.py` now pins the *basis*
+    (`test_the_previous_close_is_yesterdays_settle_not_a_point_of_the_series`)
+    and `web/src/lib/quotes.test.ts` pins the *subtraction*. The reason the
+    guard is worth two tests is the one its original docstring gave — NVDA
+    is down 5.95 on the recording, and the three plausible wrong bases
+    (series open 206.64, series close 225.16, today's partial bar 217.90)
+    each yield a confident-looking number that nothing downstream could
+    flag. The route test now excludes all three by name.
 - *Tests, server half:* `tests/api/test_markets_routes.py` — the recorded
   quote's `t` survives to the wire on both routes and is not the response
   time; `at` is aware UTC and serializes with a `Z`; the stamp names the
@@ -2452,7 +2515,10 @@ Phase 2. Make one quote map safe for two writers.
 - *Depends on:* 8d for the stream half; the poll half stands alone.
 - *Blocks:* 15.
 - *Files:* `corollary/api/schemas.py`, `corollary/api/routes/markets.py`,
-  `web/src/lib/{types,api,store}.ts`.
+  `tests/api/{test_schema_contract,test_markets_routes}.py`,
+  `web/src/lib/{types,store,quotes,queries,markets,mockData}.ts`,
+  `web/src/hooks/useMarketPoll.ts`, `web/src/pages/Markets.tsx`,
+  `web/src/components/{PositionRow,PositionChart}.tsx`, and their tests.
 
 **13. The `/api/markets/stocks` coalescing cache — decision 18.** Phase 2.
 Concurrent and near-simultaneous callers share one in-flight Alpaca request,
@@ -2658,7 +2724,9 @@ and background are three states, not two.
 **15. The `MARKETS_VISIBLE` tier and the viewport hint — decision 18.** Phase 2.
 Spend the ~22 equity slots left after position underlyings on the Markets rows
 actually on screen.
-- *Status:* **server half landed; the Markets page half is what remains.**
+- *Status:* **server half landed in full, mid-session re-plan included.
+  The Markets page half is what remains, and it is bigger than this entry
+  originally implied** — see *What the browser half actually needs* below.
   Landed: `markets_visible` is a second client message on `/api/ws`
   (`WsMarketsVisibleRequest` in `corollary/api/schemas.py`, dispatched from one
   `_CLIENT_FRAMES` table in `corollary/api/routes/ws.py`), bounded at
@@ -2768,14 +2836,198 @@ actually on screen.
   equity tickers (at most 16 characters, upper case, dots allowed for a class
   share); the engine refuses anything wider, including the 17-to-32 character
   band this endpoint's shape filter admits for `subscribe`'s sake.
-- *Owed on the server, but by step 12's socket work rather than by this step:*
-  `SocketSupervisor` builds its plan **once per session** and does not
-  resubscribe mid-session, so a hint received after the open takes effect at
-  the next plan rather than immediately. `MarketsVisibleOutcome.changed`
-  answers exactly the question a re-plan trigger has to ask -- *applied*,
-  never merely *not refused* -- and the supervisor is the caller that would
-  ask it. `corollary/engine/sockets.py` is no longer untouched by this step:
-  finding 1 above changed its launch and expectation gates.
+- *The mid-session re-plan trigger, landed 2026-09-16.* `SocketSupervisor`
+  used to build its plan once per session, so a hint that arrived at 10:05 did
+  nothing until the next open. It now re-folds the hint on any in-session tick
+  where the held set has moved, and the gate is the held tuple itself rather
+  than a forwarded outcome: `set_markets_visible` leaves it untouched on a
+  refusal and equal on an unchanged list, so comparing it against what was
+  planned around asks precisely what `MarketsVisibleOutcome.changed` asks --
+  *applied*, never merely *not refused* -- and cannot be forgotten by a
+  caller. **Pulled from the runtime on the supervisor's own five-second tick
+  rather than pushed from `api/routes/ws.py`**: a burst of hints between two
+  ticks is then one re-plan rather than one per message, and `engine/` holds
+  no callback into the transport. Four properties, each with a test in
+  `tests/api/test_socket_composition.py`:
+  - **No broker call.** The book's units are cached from the session's plan
+    (`_book_units`); only the hint has moved. The option list is passed empty
+    and the previous option plan is carried across **by reference**, so an
+    equity-only change does not touch the option socket, not on the wire and
+    not in what `supervisor.plans` reports. Rebuilding it would re-emit its
+    drop records once per viewport settle. `StreamPlans`' docstring records
+    that such a pair holds two correlation ids on purpose.
+  - **Finding 1 holds at the one moment a re-plan makes newly reachable.** A
+    flat book re-planned around a hint still opens no equity socket and arms
+    no watchdog condition: both gates read `engine_subscribed`, and the hint
+    is the lowest tier against a strict prefix cut, so a re-plan cannot widen
+    it.
+  - **Convergence, not resubscription.** `AlpacaQuoteStream.apply_plan`
+    sends an `unsubscribe` for what left and a `subscribe` for what arrived,
+    under one lock so nothing interleaves between them, and sends nothing at
+    all when the symbol set is unchanged. `VendorStream._transmit` is that
+    lock -- two tasks can now reach one connection, and a revision landing
+    mid-handshake would otherwise subscribe before auth is answered, which
+    Alpaca answers with a fatal code. `_subscribed` is per connection, the
+    same shape as `AlpacaTradeUpdateStream.listening` and for the same
+    reason. `SOCKET_ACTIONS` in `tests/test_hard_rules.py` gains
+    `unsubscribe`, which narrows a read and can place nothing.
+  - **Finding 2's volume, re-checked.** One INFO `socket_replan` per re-plan
+    carrying counts only, beside the one INFO `stream_client_tier_trimmed`
+    the plan already emitted; zero `stream_subscription_dropped` and zero
+    `stream_subscription_budget_exceeded` for a 64-row viewport against 30
+    slots, and `not_streamed` still 0.
+  *Found while testing it, and fixed in the same change:* the `socket_plan`
+  record carried its banner under the key `message`, which is **reserved on a
+  `LogRecord`** -- `makeRecord` raises `KeyError`. Invisible for as long as
+  nothing enabled INFO, since `Logger.info` returns before building the
+  record, and fatal the moment something did: the raise lands inside `_plan`,
+  the supervisor logs it as one bad tick and retries, and the quote sockets
+  never open. Both records now say `banner`, with a test that reads them at
+  INFO.
+- *The mid-session re-plan, landed 2026-09-17.* The trigger existed; what
+  `AlpacaQuoteStream.apply_plan` did with it was incomplete in three ways,
+  each found by a test written before its implementation.
+  1. **A revision may not widen a cap the server lowered.** Alpaca answers
+     an over-large subscribe with a `405` carrying its own figure for what
+     this connection may hold, and `_correct_cap` lowers the plan to it.
+     But `_replan_for_viewport` built every revision from the *account's*
+     budget, so one viewport settle re-subscribed at 30, re-405'd, and
+     ratcheted by halving to 15 instead of holding at the figure the server
+     actually stated — and paid a full resubscribe, which is a lost mark on
+     every position underlying, per scroll. Fixed at **both** doors:
+     `apply_plan` raises `ValueError` if a revision's cap exceeds the cap in
+     force, before the plan is swapped and before anything reaches the wire;
+     and `plan_stream_subscriptions` grew an `equity_cap` that **narrows
+     only**, which `_replan_for_viewport` passes as
+     `min(plans.equity.cap, client.plan.cap)`. `replan_at_cap` already
+     refused to raise a cap on the strength of a refusal; this is the same
+     guard at the other two doors. **A cap correction now survives a
+     viewport scroll**, pinned by a risk-marked test.
+  2. **The vendor's reply to the unsubscribe is not a drop.** Alpaca answers
+     *each* frame with the connection's full current set, so the reply to
+     the unsubscribe lists neither what just left nor what has not been
+     asked for yet. Reconciled against the plan already in force it read as
+     *"the server refused everything we added"*, which produced — once per
+     viewport scroll — a rule-8 WARNING whose `absent` list carried
+     **browser-supplied viewport strings verbatim** (a shape filter is not a
+     redactor) and client-tier symbols counted into the *"N symbols not
+     streamed"* banner that `client_not_streamed` exists to keep them out
+     of. A rare anomaly path turned hot path, which is the one thing
+     `markets_visible_units`' docstring promised it would not become.
+     Suppressed per **outstanding frame**, not once: a reconnect whose
+     handshake reply is still in flight when a revision goes out leaves
+     three replies owed, and the first two are silent. The other side of
+     it is pinned too: a server that answers the *subscribe* without the
+     added symbol has genuinely refused it, and that WARNING still fires
+     whole. Suppression is bounded by what is owed, never a mute button.
+  3. **The supervisor's record and the socket's plan cannot disagree.**
+     `self._plans` is assigned after `apply_plan` rather than before it,
+     and the two failure paths are deliberately different because the
+     client's own state differs between them. The cap guard raises
+     *before* `apply_plan` swaps anything, so that path returns and leaves
+     the plan in force. A `SocketClosed` on the wire raises *after* the
+     swap, so that path **falls through** and assigns — which is what
+     matches the client, and what stops the supervisor describing a plan
+     no socket holds for the rest of the session. The guard's `ValueError` is
+     caught into one `socket_replan_refused` WARNING carrying counts only —
+     never the offending symbols — so a browser can never take a tick down
+     with the order socket on it. `_planned_hint` is deliberately *not*
+     rolled back, so an offending hint is refused once rather than once per
+     tick.
+- *Decision recorded, because two plausible designs are both wrong and
+  someone will propose one of them:* the suppression matches on the reply's
+  **content**, and neither a boolean nor a counter can. Both of those are
+  counts of outstanding frames, and a count cannot tell which frame a reply
+  answers. A bare flag is spent by whatever `subscription` message arrives
+  first — including one already in flight when the revision was dispatched,
+  which is reachable on an ordinary reconnect: `_subscribe` sets
+  `_subscribed` before the send, and the supervisor's five-second tick can
+  land inside that one round trip with a moved hint. The handshake's reply
+  then eats the suppression and the genuine interim reconciles against the
+  swapped plan, writing the viewport hint's symbols verbatim into `absent`.
+  That is the rule 6 leak this work exists to close, arriving by a shorter
+  path than the one it closed. A counter fails the same way and adds a
+  second: a frame answered with an `error` frame rather than a
+  `subscription` leaves it permanently elevated, which mutes rule 8 — and
+  the mute is not confined to browser rows, because `absent` is computed
+  over the whole plan and so covers **position underlyings**. *"Is anything
+  I hold unmarked?"* would answer no when the answer is yes, which is the
+  quiet-and-wrong failure, on the log nobody reads on the morning it
+  matters. **A single expectation slot holding `was − removed` does not fix
+  it either** — it relocates the leak from the interim to the in-flight
+  reply and doubles it, because a mismatched reply is both cleared *and*
+  reconciled. So the state is `_pending_replies`, an ordered tuple of the
+  symbol set this connection should hold after each sent frame whose reply
+  is unread. A reply is suppressed only when it equals the head *and* a
+  later frame is still owed an answer; anything else clears the list and is
+  read as news. `_error` clears it, which is the error-frame case directly.
+  Bounded at `PENDING_REPLIES_MAX = 16`, overflow dropping the oldest, so a
+  silent server cannot grow it and the dropped entries reconcile loudly
+  rather than quietly. **The rule is that a reply is news only if it answers
+  the last frame we sent**, and the residual is deliberately on the loud
+  side: an unmatched reply is reconciled rather than carried, because
+  carrying an expectation across a non-match is the mute.
+- *And loud is not enough on its own, which took a third pass to see.* A
+  reply that predates the frame carrying a symbol is not evidence about
+  that symbol — but reconciling it against the plan already in force said
+  it was, so an unmatched reply named symbols sent microseconds earlier as
+  *refused* and wrote them into `absent`. Loud, wrong, and carrying
+  browser strings, which is rule 6 again by a narrower door. Two pieces
+  close it, and both are counts rather than expectations so that neither
+  can mute anything by content: `_unanswered_frames`, how many frames are
+  still owed an answer, decremented by **every** reply including the
+  suppressed ones; and `_unanswered_additions`, the symbols a revision
+  added whose subscribe frame has not been answered yet.
+  `AcknowledgedSubscription.absent` now **excludes** those, a new
+  `unanswered` carries them, and a reconciliation that happens while
+  frames are outstanding emits `stream_subscription_out_of_step` — a
+  WARNING carrying **counts only**, no `absent`, no `surplus`, no symbol
+  list anywhere on the path. Being out of step with the server is what is
+  actually known at that moment; a refusal is not.
+- *`not_streamed` counts the unanswered, and that direction is chosen.*
+  The banner asks *"is anything I hold unmarked?"*, and a symbol whose
+  subscribe has not been answered is not marking yet. Over-reporting a gap
+  is recoverable in a way that under-reporting is not: the failure mode of
+  the safe direction is a banner that clears a moment later, and the
+  failure mode of the other is `0 not streamed` printed over a real one.
+- *One ambiguity is resolved as a mute, deliberately, and it is pinned.* A
+  coalesced reply whose content equals the interim state exactly is
+  indistinguishable from an answer to the first frame alone, and reading
+  it as news would put a false refusal on every ordinary revision. It is
+  suppressed. The bound is what makes that defensible: a match on the
+  interim state means every symbol that survived the revision *is*
+  acknowledged, so the only thing the mute can hide is a symbol the
+  revision itself added, and only until the next reply or revision.
+  `test_a_coalesced_reply_equal_to_the_interim_state_is_the_surviving_mute`
+  pins the mute **and** its healing, so it is a decided property rather
+  than an accident.
+- *A trap in the test doubles, recorded so it is not rediscovered:*
+  `ScriptedSocket.push` in `tests/api/test_socket_composition.py` **cannot
+  deliver a mid-session frame.** Its `recv` parks on `_released.wait()` and
+  then raises `SocketClosed`, so a `push` onto an exhausted socket reads as
+  a hang-up rather than as a frame. Existing tests only use `push` for
+  shutdown, so nothing was wrong; the cap-correction test scripts its `405`
+  into the socket's opening frame tuple instead. The next mid-session frame
+  test will hit this.
+- *What the browser half actually needs — an unstated prerequisite, verified
+  2026-09-16 and re-verified 2026-09-17.* This entry says the hint is sent
+  *"on the existing socket"*. **There is no existing client socket.**
+  `grep -rn "new WebSocket" web/src/` returns nothing; `dc09147` ("the
+  browser socket, which deliberately arms nothing") touched only
+  `corollary/api/{app,fanout,schemas}.py`, `corollary/api/routes/{__init__,ws}.py`
+  and tests, nothing under `web/`. The only `WebSocket` mentions under
+  `web/src` are prose comments in `store.ts`, `store.test.ts`, `queries.ts`
+  and the Phase 1 fixture hook `useLiveTick.ts`. So step 8d's *Files* list
+  naming `web/src/lib/{api,store}.ts` was intent that never landed, and its
+  *Status: landed* is true of the server and misleading about the browser.
+  The Markets page half is therefore **two pieces, not one**:
+  (a) a browser `/api/ws` client — connect, the three-kind frame contract,
+  reconnect that **never** auto-resumes the engine (rule 9), and quote
+  frames routed into step 12's merge; then (b) the viewport observer,
+  its debounce, and the diff in `Markets.tsx`. **(b) cannot be written
+  without (a).** Step 12's stream writer likewise has no producer until (a)
+  exists — the merge is written and tested directly, and only the wiring
+  waits.
 - *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
   debounced client message on the existing WS that names the visible rows and is
   sent only when the set actually differs. The server treats it as input to that
@@ -2789,8 +3041,13 @@ actually on screen.
   client-to-server message), 12 (it is the second writer).
 - *Files:* `corollary/engine/stream.py`, `corollary/engine/runtime.py`,
   `corollary/engine/sockets.py`, `corollary/api/routes/ws.py`,
-  `corollary/api/schemas.py` (all landed),
-  `web/src/pages/Markets.tsx` (outstanding).
+  `corollary/api/schemas.py`, `corollary/sockets.py`,
+  `corollary/data/providers/alpaca.py`,
+  `tests/api/test_socket_composition.py`,
+  `tests/data/providers/test_alpaca_stream.py`, `tests/sockets_support.py`,
+  `tests/test_hard_rules.py` (all landed),
+  `web/src/lib/` — a new `/api/ws` browser client — and
+  `web/src/pages/Markets.tsx` (both outstanding).
 
 **10. Doc amendments.** Phase 2, **last**, so they describe what was actually
 built.
@@ -2913,6 +3170,9 @@ rediscover inside a merge that is already subtle.
   already wins ties against the poll, per decision 18 rule 2. Reachability is
   low — it needs no usable quote mid, no `latestTrade`, and a daily bar — which
   is why it is a note rather than a finding.
+  **Honoured** in step 12's web half: the tie table is written out in
+  `web/src/lib/quotes.ts` where the comparison lives, with one test per
+  cell.
 - **`Markets.tsx`'s trailing chart point is still stamped with the server
   clock** (`IntradayPoint(at=now, …)`) for the same price that now carries a
   vendor `at` beside it. Pre-existing and not a decision 18 violation —

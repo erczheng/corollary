@@ -172,14 +172,32 @@ VENDOR_PACKAGES = (
 
 #: Every ``action`` a vendor websocket may put on the wire.
 #:
-#: ``auth`` and ``listen`` carry no instruction, and a ``subscribe`` is how a
-#: *read* is scoped -- so none of the three changes anything at the vendor.
-#: The guard over this is structural and file-scoped, which is what
-#: :data:`WRITE_VERBS` cannot be for a socket: ``self._codec.transmit(...)``
-#: is a name no HTTP verb list knows, and an ``{"action": "cancel"}`` frame on
-#: the trading socket would be an order placed outside
-#: ``RiskManager.approve()`` under a green gate.
-SOCKET_ACTIONS = frozenset({"auth", "subscribe", "listen"})
+#: ``auth`` and ``listen`` carry no instruction, and ``subscribe`` /
+#: ``unsubscribe`` are how a *read* is scoped -- so none of the four changes
+#: anything at the vendor. ``unsubscribe`` was added when the Markets
+#: viewport hint became a mid-session re-plan: converging on a new plan by
+#: sending the difference costs one gap in the marks, where re-sending the
+#: whole list would cost one on every position underlying the socket carries.
+#: It narrows a read and can place nothing.
+#:
+#: **One set governs all three sockets, the trading socket included.** The
+#: guard is structural, which is what :data:`WRITE_VERBS` cannot be for a
+#: socket -- ``self._codec.transmit(...)`` is a name no HTTP verb list knows,
+#: and an ``{"action": "cancel"}`` frame on the trading socket would be an
+#: order placed outside ``RiskManager.approve()`` under a green gate. It is
+#: **not** file-scoped, and this said it was for as long as it took one
+#: widening to reach it:
+#: :func:`test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist`
+#: walks :func:`vendor_surface` -- ``engine/execution`` and
+#: ``data/providers`` entire, ``sockets.py``, and every fixture recorder --
+#: so an action added here for a *quote* stream is one the **order** socket
+#: may also say. ``unsubscribe`` is safe under that reading because it
+#: narrows a read wherever it is sent, and because Alpaca's trading stream
+#: speaks ``listen``/``unlisten`` and would not answer it. The next addition
+#: gets the same question asked of the trading socket, in writing, before it
+#: goes in -- which is exactly what a reader quoting *"file-scoped"* would
+#: have skipped.
+SOCKET_ACTIONS = frozenset({"auth", "subscribe", "unsubscribe", "listen"})
 
 #: The methods a ``VendorSocket`` may be asked to perform, and the whole
 #: protocol: two directions, a read and a close.
@@ -243,8 +261,9 @@ def vendor_surface() -> tuple[Path, ...]:
 #:
 #: What the sockets transmit is pinned by *behaviour* instead, which is
 #: stronger than a name check: ``tests/data/providers/test_alpaca_stream.py``
-#: asserts the market-data client's whole transmitted list is ``auth`` and
-#: ``subscribe`` frames and nothing else, and
+#: asserts the market-data client's whole transmitted list is ``auth``,
+#: ``subscribe`` and ``unsubscribe`` frames and nothing else -- the last of
+#: those is how a mid-session re-plan converges, and it narrows a read -- and
 #: ``tests/engine/execution/test_trade_update_stream.py`` does the same for
 #: ``auth`` and ``listen``. An order placed over a socket would fail both.
 WRITE_VERBS = frozenset({"post", "put", "patch", "delete", "request", "send"})
@@ -659,7 +678,7 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     which enumerates everything called on that attribute and insists it is
     the transport protocol and nothing else. A websocket frame changes nothing
     at the vendor; what those frames may *say* is
-    :func:`test_the_vendor_sockets_transmit_no_action_but_auth_subscribe_and_listen`.
+    :func:`test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist`.
     """
     offenders = []
     for path in _sources(*vendor_surface()):
@@ -708,8 +727,17 @@ def test_the_websocket_connection_is_only_ever_read_written_and_closed() -> None
 
 
 @pytest.mark.risk
-def test_the_vendor_sockets_transmit_no_action_but_auth_subscribe_and_listen() -> None:
-    """What the three sockets may *say*, as a file-scope invariant.
+def test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist() -> None:
+    """What the three sockets may *say*, across the whole vendor surface.
+
+    **Three sockets, one allowlist.** The scope is :func:`vendor_surface` --
+    ``engine/execution`` and ``data/providers`` entire, ``sockets.py``, and
+    every fixture recorder -- so this is not the quote streams' guard with
+    the trading socket alongside: it is one set governing all three, and an
+    action added to :data:`SOCKET_ACTIONS` for one of them is an action the
+    **order** socket may also carry. The name this test used to have listed
+    the allowlist's members, which went stale the first time one was added
+    and read as though the enumeration were the rule.
 
     The behavioural assertions in ``tests/data/providers/test_alpaca_stream
     .py`` and ``tests/engine/execution/test_trade_update_stream.py`` are good

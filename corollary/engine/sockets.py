@@ -76,13 +76,32 @@ What this module does not do
 Reconnecting into an unverified position state is how a bot doubles a
 position it already holds.
 
-**It does not re-plan when the book changes.** The plan is built once per
-session open. Nothing here places an order, so the book cannot change under
-it except by a human trading in Alpaca's own UI; re-planning on a five-second
-tick would spend the 200/min budget re-asking a question whose answer cannot
-have moved, and a re-subscribe protocol (unsubscribe, replace the plan,
-reconcile the acknowledgement) is a decision that belongs with the
-fifteen-minute refresh. Deferred deliberately, not overlooked.
+**It does not re-plan when the book changes.** The book half of the plan is
+built once per session open. Nothing here places an order, so the book cannot
+change under it except by a human trading in Alpaca's own UI; re-reading it
+on a five-second tick would spend the 200/min budget re-asking a question
+whose answer cannot have moved. Deferred deliberately, not overlooked.
+
+**It does re-plan when the Markets viewport hint moves**, which is the one
+input that changes mid-session and the one that costs nothing to re-fold: the
+book's units are the ones already read, so a re-plan is arithmetic and not a
+broker call. What that re-plan may do is deliberately narrow.
+
+* It **never opens a socket**. The launch gate reads ``engine_subscribed``,
+  so a flat book re-planned around a viewport hint still holds no equity
+  socket -- the case this trigger newly makes reachable, and the one finding 1
+  was about.
+* It **never widens what the watchdog judges**. The hint is the lowest
+  priority and the cut is a strict prefix, so the engine-owned subset of a
+  re-plan is the engine-owned subset of the plan before it.
+* It **converges rather than resubscribes**: what left the plan is
+  unsubscribed, what arrived is subscribed, and what was already streaming is
+  left alone. Every resubscribe is a gap in the marks, and the symbols on
+  this socket are position underlyings.
+* It **does not touch the option stream**. An equity-only input cannot move
+  the option plan, so that plan object is carried across unchanged rather
+  than rebuilt -- a rebuild would re-emit its drop records once per viewport
+  settle, which is volume for a decision nobody took.
 """
 
 import asyncio
@@ -93,7 +112,11 @@ from datetime import date, datetime
 from typing import Any, Final
 
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
-from corollary.data.providers.alpaca import option_quote_stream, stock_quote_stream
+from corollary.data.providers.alpaca import (
+    AlpacaQuoteStream,
+    option_quote_stream,
+    stock_quote_stream,
+)
 from corollary.data.providers.interface import Quote
 from corollary.engine.execution.alpaca import (
     TRADE_UPDATES_STREAM,
@@ -113,7 +136,13 @@ from corollary.engine.stream import (
     contract_unit,
     underlying_unit,
 )
-from corollary.sockets import SocketConnect, VendorStream, sleep_for, utcnow
+from corollary.sockets import (
+    SocketClosed,
+    SocketConnect,
+    VendorStream,
+    sleep_for,
+    utcnow,
+)
 
 __all__ = [
     "EQUITY_SOCKET",
@@ -241,6 +270,17 @@ class SocketSupervisor:
         #: close. ``None`` means *not planned yet* -- which is also what it
         #: means after a broker failure, so the next tick tries again.
         self._plans: StreamPlans | None = None
+        #: ``(option units, equity units)`` from the book this session's plan
+        #: was built from, kept so the viewport hint can be re-folded without
+        #: a second pair of broker calls. The book itself is still read once.
+        self._book_units: (
+            tuple[tuple[SubscriptionUnit, ...], tuple[SubscriptionUnit, ...]] | None
+        ) = None
+        #: The viewport hint :attr:`_plans` was built around. Compared against
+        #: the runtime's held hint on every tick, which is *applied* and never
+        #: merely *not refused*: a refused hint leaves the held tuple where it
+        #: was, and an unchanged one is equal to it.
+        self._planned_hint: tuple[str, ...] = ()
         #: Sockets whose *construction* failed, so the failure is stated once
         #: a session rather than once every five seconds. A missing feed
         #: variable is a standing condition, and a warning repeated 720 times
@@ -384,6 +424,8 @@ class SocketSupervisor:
         self._launch(TRADE_SOCKET, self._build_trade_stream)
         if self._plans is None:
             self._plans = await self._plan()
+        else:
+            await self._replan_for_viewport()
         plans = self._plans
         if plans is not None:
             if plans.option.engine_subscribed:
@@ -431,6 +473,11 @@ class SocketSupervisor:
             return None
         self._plan_failure_logged = False
         options, equities = subscription_units(result)
+        self._book_units = (options, equities)
+        # Read immediately before the plan that folds it, with no await
+        # between the two, so what is recorded here is exactly what was
+        # planned around. Anything arriving later is a re-plan, not a miss.
+        self._planned_hint = self._runtime.markets_visible
         plans = self._runtime.plan_stream_subscriptions(
             option_units=options, equity_units=equities
         )
@@ -455,12 +502,225 @@ class SocketSupervisor:
                 "not_streamed": plans.not_streamed,
                 "viewport_not_streamed": plans.client_not_streamed,
                 # The banner, verbatim, so the log and the UI cannot disagree
-                # about how many symbols went unsubscribed.
-                "message": plans.message,
+                # about how many symbols went unsubscribed. **Not** spelled
+                # ``message``: that key is reserved on a ``LogRecord`` and
+                # ``makeRecord`` raises ``KeyError`` on it. Invisible while
+                # nothing enables INFO -- ``Logger.info`` returns before it
+                # builds the record -- and the moment something does, this
+                # raises inside ``_plan``, the supervisor swallows it as a
+                # bad tick, and the quote sockets never open. Found by the
+                # first test to read these records at INFO.
+                "banner": plans.message,
                 "at": self._now().isoformat(),
             },
         )
         return plans
+
+    async def _replan_for_viewport(self) -> None:
+        """Re-fold the Markets viewport hint into this session's equity plan.
+
+        Called on every in-session tick that already has a plan, and it does
+        nothing unless the held hint has actually moved. *Moved* is the whole
+        gate: :meth:`EngineRuntime.set_markets_visible` leaves the held tuple
+        untouched on a refusal and equal on an unchanged list, so comparing
+        it against what was planned around asks the same question
+        ``MarketsVisibleOutcome.changed`` answers -- applied, never merely not
+        refused. Read from the runtime rather than pushed in by
+        ``api/routes/ws.py`` so that a client cannot call this at its own
+        rate: a burst of hints between two ticks is one re-plan, and
+        ``engine/`` keeps no callback into the transport.
+
+        **No broker call.** The book's units are the ones this session's plan
+        was built from; only the hint has moved. The option list is passed
+        empty and the previous option plan is carried across unchanged --
+        replanning it would produce an identical subscription under a new
+        correlation id, and re-emit its drop records once per viewport
+        settle.
+
+        **Nothing here launches a socket or arms the watchdog.** Both gates
+        live in :meth:`_open` and :meth:`_settle_expectations` and both read
+        ``engine_subscribed``, which a client tier is excluded from by
+        construction. A flat book re-planned around a hint still opens
+        nothing.
+
+        **A cap the server lowered survives a scroll.** The revision is built
+        at the cap *in force* -- the stream's, where a 405 has put it below
+        the account's budget -- rather than at the budget
+        ``plan_stream_subscriptions`` would otherwise use. Planning at the
+        budget put the symbols the correction dropped straight back on the
+        wire, where they were refused again and the cap ratcheted by halving
+        instead of holding at the figure the server stated, at the cost of a
+        whole-list resubscribe -- a gap in the mark of every position
+        underlying -- once per viewport settle.
+        """
+        plans = self._plans
+        units = self._book_units
+        if plans is None or units is None:
+            return
+        hint = self._runtime.markets_visible
+        if hint == self._planned_hint:
+            return
+        self._planned_hint = hint
+        _, equities = units
+        stream = self._streams.get(EQUITY_SOCKET)
+        client = stream if isinstance(stream, AlpacaQuoteStream) else None
+        # The cap **in force**, which is not the account's budget once a 405
+        # has narrowed it. `plan_stream_subscriptions` plans at the budget,
+        # and `AlpacaQuoteStream.apply_plan` refuses a revision that would
+        # widen what the socket is holding -- so planning at the budget here
+        # would either be refused or, before that guard existed, put the
+        # symbols the correction dropped straight back on the wire, be
+        # refused again, and ratchet by halving. A `min` of the two, because
+        # this is a narrowing and never a widening: the client's figure is
+        # the server's, the plan's is the account's, and the lower one is
+        # the only one both agree we may spend.
+        cap = plans.equity.cap
+        if client is not None:
+            cap = min(cap, client.plan.cap)
+        revised = self._runtime.plan_stream_subscriptions(
+            # Deliberately empty, and discarded unread: this call exists to
+            # re-fold the hint into the *equity* list, which is the only list
+            # it feeds. See the docstring.
+            option_units=(),
+            equity_units=equities,
+            equity_cap=cap,
+        ).equity
+        before = plans.equity.subscribed_set
+        after = revised.subscribed_set
+        dispatched = False
+        if client is not None:
+            # The same difference, computed again by the client for its own
+            # answer. Two set differences over the same two plans cannot
+            # disagree, and the alternative is a log record that says nothing
+            # when there is no socket to send on.
+            try:
+                dispatched = (await client.apply_plan(revised)).dispatched
+            except ValueError as error:
+                # **The cap guard, and only that.** `apply_plan` raises
+                # `ValueError` for a revision that would widen a cap the
+                # server lowered, and it raises it *before* swapping
+                # anything -- so the socket kept its plan and this must keep
+                # its own. Unreachable while the cap above is the one in
+                # force, and caught all the same: this runs inside `tick`,
+                # and a raise here would take the whole supervisor tick down
+                # -- the order socket with it -- for a viewport scroll.
+                #
+                # A transport failure is the *other* except below, under its
+                # own event: one is our guard refusing to widen a cap, the
+                # other is the wire going away, and a reader triaging them
+                # needs to tell them apart without parsing prose.
+                logger.warning(
+                    "the equity socket refused a viewport re-plan: %s",
+                    type(error).__name__,
+                    extra={
+                        "event": "socket_replan_refused",
+                        "rule": (
+                            "a re-plan is built at the cap in force; a "
+                            "revision that would widen one the server "
+                            "lowered is refused by the client and the plan "
+                            "in force is kept"
+                        ),
+                        "reason": "markets_visible",
+                        "socket": EQUITY_SOCKET,
+                        "error": type(error).__name__,
+                        # The plan refused, and the one still in force. Both,
+                        # because a refusal that cannot be tied to the
+                        # decision that caused it is a record nobody can
+                        # follow -- and `socket_replan` beside it carries the
+                        # same pair.
+                        "correlation_id": revised.correlation_id,
+                        "previous_correlation_id": plans.equity.correlation_id,
+                        # Counts only: these symbols came from a browser.
+                        "cap": cap,
+                        "planned_cap": revised.cap,
+                        "viewport_symbols": len(hint),
+                        # Not `said_once`: its two siblings in this file gate
+                        # that flag on real dedup state, and this is emitted
+                        # once per *distinct hint* -- five scrolls are five
+                        # records. `_planned_hint` is advanced before the
+                        # call and never rolled back, so it is not once per
+                        # tick either.
+                        "repeats": "per_distinct_hint",
+                        "at": self._now().isoformat(),
+                    },
+                )
+                return
+            except SocketClosed as error:
+                # The realistic raise on this path, and **not** a refusal:
+                # `apply_plan` reaches `_transmit` and the vendor socket's
+                # send, so a half-closed connection raises here rather than
+                # returning. Uncaught it escapes `_open` into `tick`, which
+                # loses the watchdog settle for that tick and the order
+                # socket's turn with it -- for a viewport scroll.
+                #
+                # It falls through rather than returning, which is the
+                # difference from the guard above: `apply_plan` swaps its own
+                # plan *before* the send, so the client is already holding
+                # `revised` and the reconnect will subscribe it whole.
+                # Returning here would leave `self._plans` describing a plan
+                # no socket holds for the rest of the session, since
+                # `_planned_hint` has already advanced and nothing retries.
+                dispatched = False
+                logger.warning(
+                    "the equity socket went away mid viewport re-plan: %s",
+                    type(error).__name__,
+                    extra={
+                        "event": "socket_replan_undelivered",
+                        "rule": (
+                            "a re-plan that cannot reach the wire is the "
+                            "plan in force all the same; the reconnect "
+                            "subscribes it whole and rule 9 halts on the "
+                            "close, which this is not a substitute for"
+                        ),
+                        "reason": "markets_visible",
+                        "socket": EQUITY_SOCKET,
+                        "error": type(error).__name__,
+                        "correlation_id": revised.correlation_id,
+                        "previous_correlation_id": plans.equity.correlation_id,
+                        # Counts only: these symbols came from a browser, and
+                        # the vendor's own close text is not interpolated
+                        # here -- the socket records that itself, through
+                        # `wire.vendor_detail`.
+                        "cap": cap,
+                        "planned_cap": revised.cap,
+                        "viewport_symbols": len(hint),
+                        "repeats": "per_distinct_hint",
+                        "at": self._now().isoformat(),
+                    },
+                )
+        self._plans = StreamPlans(option=plans.option, equity=revised)
+        logger.info(
+            "re-planned the equity subscription: %d added, %d removed",
+            len(after - before),
+            len(before - after),
+            extra={
+                "event": "socket_replan",
+                "rule": (
+                    "a viewport hint rides the spare slots of a socket the "
+                    "book opened; it never opens one and never arms the "
+                    "watchdog"
+                ),
+                "reason": "markets_visible",
+                "socket": EQUITY_SOCKET,
+                "stream": revised.stream.label,
+                "correlation_id": revised.correlation_id,
+                "previous_correlation_id": plans.equity.correlation_id,
+                # Counts only, everywhere below. These symbols came from a
+                # browser, and the shape filter that admitted them is not a
+                # redactor.
+                "added": len(after - before),
+                "removed": len(before - after),
+                "dispatched": dispatched,
+                "viewport_symbols": len(hint),
+                "equity_symbols": len(revised.subscribed),
+                "equity_engine_symbols": len(revised.engine_subscribed),
+                "not_streamed": self._plans.not_streamed,
+                "viewport_not_streamed": self._plans.client_not_streamed,
+                # ``banner`` rather than ``message``: see :meth:`_plan`.
+                "banner": self._plans.message,
+                "at": self._now().isoformat(),
+            },
+        )
 
     def _launch(self, name: str, build: Callable[[], VendorStream]) -> None:
         """Build one socket and put its read loop on a task. Never raises.
@@ -660,6 +920,8 @@ class SocketSupervisor:
         self._streams.clear()
         self._tasks.clear()
         self._plans = None
+        self._book_units = None
+        self._planned_hint = ()
         self._unbuildable.clear()
         self._plan_failure_logged = False
 

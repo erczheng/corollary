@@ -152,6 +152,7 @@ __all__ = [
     "QUOTES_CHANNEL",
     "STOCK_STREAM_URL_TEMPLATE",
     "AlpacaQuoteStream",
+    "PlanRevision",
     "StreamProtocolError",
     "option_quote_stream",
     "stock_quote_stream",
@@ -1403,6 +1404,15 @@ CAP_EXCEEDED_CODE: Final = 405
 #: reason: a vendor's internal error is exactly what a reconnect is for.
 FATAL_STREAM_CODES: Final = frozenset({400, 401, 402, 403, 404, 406, 407, 409, 410})
 
+#: How many outstanding ``subscription`` replies ``AlpacaQuoteStream`` will
+#: model at once. Two per revision, and a revision is at most one per
+#: supervisor tick, so sixteen is eight ticks of a server that has stopped
+#: answering -- well past the point where the watchdog has halted on silence.
+#: The bound exists so that a server which answers nothing cannot grow the
+#: list without limit; overflowing drops the *oldest* expectations, whose
+#: replies then reconcile loudly rather than being suppressed.
+PENDING_REPLIES_MAX: Final = 16
+
 
 class StreamProtocolError(ProviderError):
     """The vendor refused the stream in a way reconnecting cannot fix.
@@ -1416,6 +1426,32 @@ class StreamProtocolError(ProviderError):
     def __init__(self, detail: str, *, code: int | None = None) -> None:
         super().__init__(detail)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class PlanRevision:
+    """What :meth:`AlpacaQuoteStream.apply_plan` did. Counts, never symbols.
+
+    The counts are what a log record may carry: the lowest subscription tier
+    is a browser's viewport hint, its symbols are admitted by a shape filter
+    rather than a redactor, and a shape filter admits the account-number
+    pattern ``wire.vendor_detail`` exists to redact. What went on the wire is
+    on the socket; what reaches the log is how many.
+
+    :attr:`dispatched` is False when the revision landed while no connection
+    was up -- mid-backoff, or mid-handshake. Nothing is sent then and nothing
+    is lost: the plan in force is the new one, so the next handshake
+    subscribes it whole.
+    """
+
+    added: int
+    removed: int
+    dispatched: bool
+
+    @property
+    def changed(self) -> bool:
+        """Did the subscription set move at all?"""
+        return bool(self.added or self.removed)
 
 
 class AlpacaQuoteStream(VendorStream):
@@ -1499,6 +1535,34 @@ class AlpacaQuoteStream(VendorStream):
         self._correlation_root = plan.correlation_id
         self._replans = 0
         self._acknowledgement: AcknowledgedSubscription | None = None
+        #: Has the plan in force been put on *this* connection's wire? Per
+        #: connection, not per client, and cleared by :meth:`run_session` for
+        #: the same reason ``AlpacaTradeUpdateStream.listening`` is: a
+        #: revision that sends a subscribe before the auth frame is answered
+        #: is a 401, and 401 is fatal -- a browser scrolling would take the
+        #: feed down for the session.
+        self._subscribed = False
+        #: What this connection should be holding on :attr:`_channel` after
+        #: each frame we have put on the wire whose reply has not been read
+        #: yet, oldest first. One entry per frame, because Alpaca answers
+        #: **each** frame with the connection's whole current set: only the
+        #: reply to the *last* outstanding frame is news about the plan in
+        #: force, and the ones before it describe states we have already
+        #: moved on from. Matched by **content**, never counted -- see
+        #: :meth:`_reconcile`. Per connection, like ``_subscribed``.
+        self._pending_replies: tuple[frozenset[str], ...] = ()
+        #: How many frames we have sent and not had an answer to. A *count*
+        #: and deliberately not an expectation: it names no symbol, so it can
+        #: never match a reply and mute it. All it decides is whether a claim
+        #: about a symbol is answerable yet -- see :meth:`_answer_one_frame`.
+        self._unanswered_frames = 0
+        #: Symbols a revision **added** whose ``subscribe`` frame is still
+        #: unanswered. A reply that predates the frame carrying a symbol is
+        #: not evidence about that symbol, so these are held out of the
+        #: refusal record and counted into *"N symbols not streamed"*
+        #: instead. Emptied the moment every frame is answered, and pruned by
+        #: each reply that acknowledges one of them. Per connection.
+        self._unanswered_additions: frozenset[str] = frozenset()
 
     # -- what a caller can read -------------------------------------------
 
@@ -1691,12 +1755,157 @@ class AlpacaQuoteStream(VendorStream):
                 exc_info=True,
             )
 
+    async def run_session(self) -> None:
+        """One connection, and one thing to forget before it: what was subscribed.
+
+        The flag is per connection. Left set across a reconnect it would let
+        :meth:`apply_plan` send a subscribe into a socket that has not
+        authenticated yet, which Alpaca answers with a fatal code.
+        """
+        self._subscribed = False
+        # Nothing is outstanding on a socket that does not exist yet, and a
+        # reply owed by the connection that just died will never arrive: the
+        # handshake subscribes the plan in force, whole.
+        self._pending_replies = ()
+        self._unanswered_frames = 0
+        self._unanswered_additions = frozenset()
+        await super().run_session()
+
+    async def apply_plan(self, plan: SubscriptionPlan) -> PlanRevision:
+        """Take a new plan mid-session and converge on it. The difference only.
+
+        The caller is :class:`~corollary.engine.sockets.SocketSupervisor`,
+        re-planning because the Markets viewport hint moved. What it asks for
+        is convergence with the least possible disturbance, because the
+        symbols this socket already carries are position underlyings: every
+        resubscribe is a gap in the marks, and re-sending the whole list to
+        add one Markets row would cost a mark on something held to gain
+        freshness on something polled anyway.
+
+        So what goes on the wire is the difference -- an ``unsubscribe`` for
+        what left, a ``subscribe`` for what arrived, in that order and under
+        one lock so nothing interleaves between them -- and a plan whose
+        symbol set is unchanged sends nothing at all and leaves the plan in
+        force exactly where it was.
+
+        The plan is **replaced, never edited**, the same as the 405
+        correction's, and the acknowledgement is dropped with it: until the
+        server answers the new subscribe, what we asked for is the honest
+        claim about what is streaming.
+
+        A plan for the other socket raises rather than being sent: the
+        constructor refuses one for the same reason, since a list of OCC
+        symbols fits inside thirty equity slots, is admitted, and is never
+        quoted.
+        """
+        if plan.stream is not self._stream:
+            raise ValueError(
+                f"a {self._stream.label} stream was handed a "
+                f"{plan.stream.label} plan to revise. The plan carries its "
+                "own stream so that this cannot be inferred from a cap, and a "
+                "plan on the wrong socket is admitted, subscribed and never "
+                "quoted"
+            )
+        if plan.cap > self._plan.cap:
+            # Before the difference is computed, so an identical symbol set
+            # under a wider cap cannot widen it silently either.
+            raise ValueError(
+                f"a revision may not widen the cap in force: got {plan.cap} "
+                f"against the {self._plan.cap} the {self._stream.label} "
+                "stream is holding. A 405 is the server's own figure for how "
+                "many symbols this connection may carry, and the supervisor "
+                "builds every viewport re-plan from the *account's* budget -- "
+                "taken at face value here, a scroll would put the symbols the "
+                "correction dropped straight back on the wire, be refused "
+                "again, and ratchet by halving instead of holding at the "
+                "figure the server stated. `replan_at_cap` refuses the same "
+                "widening on the correction path; this is the same guard at "
+                "the re-plan door"
+            )
+        was = self._plan.subscribed_set
+        now = plan.subscribed_set
+        added = tuple(symbol for symbol in plan.subscribed if symbol not in was)
+        removed = tuple(symbol for symbol in self._plan.subscribed if symbol not in now)
+        if not added and not removed:
+            # Nothing to converge on. The plan in force is kept rather than
+            # swapped for an equivalent one, so the correlation id on the
+            # records this socket goes on to emit still names the decision
+            # that actually reached the vendor.
+            return PlanRevision(added=0, removed=0, dispatched=False)
+
+        # What the connection is holding *now*, taken before the plan is
+        # swapped: the state the last unanswered frame asked for, else the
+        # server's own last word, else the plan being replaced. The
+        # expectations recorded below are states of the wire and not of the
+        # plan -- a symbol the server refused is not on this socket however
+        # the plan reads, and an unsubscribe cannot remove it again.
+        held = self._held_symbols(was)
+
+        self._plan = plan
+        self._acknowledgement = None
+        socket = self._socket
+        if socket is None or not self._subscribed or self.closing:
+            # Mid-connect, mid-backoff or on the way down. The next handshake
+            # subscribes the plan in force, which is this one.
+            return PlanRevision(added=len(added), removed=len(removed), dispatched=False)
+
+        messages: list[Mapping[str, Any]] = []
+        expected: list[frozenset[str]] = []
+        if removed:
+            messages.append({"action": "unsubscribe", self._channel: list(removed)})
+            held = held - frozenset(removed)
+            expected.append(held)
+        if added:
+            messages.append({"action": "subscribe", self._channel: list(added)})
+            held = held | frozenset(added)
+            expected.append(held)
+        # What this revision *adds* is the part of the plan no reply can yet
+        # speak to: until the subscribe below is answered, a ``subscription``
+        # message omitting one of these has not refused it. Unioned rather
+        # than replaced -- a second revision inside one round trip leaves the
+        # first one's additions outstanding too -- and intersected with the
+        # plan, so a symbol that has since left it stops being tracked.
+        self._unanswered_additions = (
+            self._unanswered_additions | frozenset(added)
+        ) & plan.subscribed_set
+        # One expectation per frame, **appended** rather than replacing what
+        # is already outstanding: a second revision inside one round trip
+        # leaves four replies owed, and each of the first three answers a
+        # frame this one has superseded. Recorded *before* the send, because
+        # the replies are read by the session task and a state recorded
+        # afterwards could be recorded behind one that had already arrived.
+        self._expect_replies(expected)
+        await self._transmit(socket, *messages)
+        return PlanRevision(added=len(added), removed=len(removed), dispatched=True)
+
     async def _subscribe(self, socket: VendorSocket) -> None:
         """Send the plan's symbols, and nothing that is not in the plan."""
         symbols = list(self._plan.subscribed)
         # A new subscribe invalidates the old acknowledgement: until the
         # server answers this one, the plan's own figure is the honest claim.
         self._acknowledgement = None
+        # A whole-list subscribe -- the handshake's, or the one `_correct_cap`
+        # sends after a 405 -- supersedes every frame still outstanding: what
+        # this connection holds afterwards is this list whatever was asked
+        # for before it. The one expectation recorded below is this frame's
+        # own reply, which *is* news and is reconciled when it matches.
+        self._pending_replies = ()
+        # The frame **count** is a different question and is not reset with
+        # them. At the handshake it is already zero: this frame is the oldest
+        # on the connection, so every reply that follows describes a state
+        # the server reached after reading the whole list, every symbol in it
+        # is answerable, and an omission from any reply is a real omission.
+        # Mid-connection -- the 405 correction's resubscribe, sent behind the
+        # same lock as a revision whose reply is still owed -- it is not, and
+        # the reply that predates this list has been asked about none of it.
+        if self._unanswered_frames:
+            self._unanswered_additions = frozenset(symbols)
+        else:
+            self._unanswered_additions = frozenset()
+        # Before the send rather than after it: the flag says this connection
+        # has reached the point where a subscribe is legal, which the empty
+        # plan reaches too.
+        self._subscribed = True
         if not symbols:
             logger.info(
                 "nothing to subscribe on the %s stream",
@@ -1717,26 +1926,182 @@ class AlpacaQuoteStream(VendorStream):
                 },
             )
             return
-        await self._codec.transmit(
-            socket, {"action": "subscribe", self._channel: symbols}
+        self._expect_replies([frozenset(symbols)])
+        await self._transmit(socket, {"action": "subscribe", self._channel: symbols})
+
+    def _held_symbols(self, fallback: frozenset[str]) -> frozenset[str]:
+        """The best available claim about what this connection holds, right now.
+
+        In order of authority: the state the last frame we have not had an
+        answer to asked for, then the server's own last acknowledgement, then
+        ``fallback`` -- the plan. The plan is last on purpose: a symbol the
+        server refused is in the plan and not on the socket, so an
+        unsubscribe will not remove it and the reply will not list it.
+        """
+        if self._pending_replies:
+            return self._pending_replies[-1]
+        if self._acknowledgement is not None:
+            return frozenset(self._acknowledgement.acknowledged)
+        return fallback
+
+    def _expect_replies(self, states: Sequence[frozenset[str]]) -> None:
+        """Record one expected reply per frame sent, oldest first, bounded."""
+        pending = self._pending_replies + tuple(states)
+        self._pending_replies = pending[-PENDING_REPLIES_MAX:]
+        self._unanswered_frames = min(
+            self._unanswered_frames + len(states), PENDING_REPLIES_MAX
         )
 
+    def _answer_one_frame(self, answered: frozenset[str]) -> None:
+        """Book one frame as answered, whatever this reply turns out to say.
+
+        Called for **every** reply, including the ones
+        :meth:`_is_superseded` goes on to suppress: the question here is not
+        *"what does this say"* but *"how much of the wire is still in the
+        air"*, and a suppressed reply is still an answer to a frame.
+
+        When the count reaches zero every frame we sent has been answered,
+        so every symbol in the plan is answerable again and the additions are
+        forgotten whole. Below zero it cannot go -- a coalesced answer to two
+        frames leaves the count one ahead, which costs one reply's worth of
+        scope and is corrected by the next handshake.
+        """
+        self._unanswered_frames = max(0, self._unanswered_frames - 1)
+        if self._unanswered_frames == 0:
+            self._unanswered_additions = frozenset()
+        else:
+            # Acknowledged is answered: the server has spoken about these
+            # whatever frame this reply belongs to.
+            self._unanswered_additions -= answered
+
+    def _is_superseded(self, acknowledged: frozenset[str]) -> bool:
+        """Is this reply the answer to a frame a later one has replaced?
+
+        The whole suppression rule, and it turns on the reply's **content**:
+        a reply is skipped only when it is exactly the state some outstanding
+        frame asked for *and* a later frame is still owed an answer. Anything
+        else -- a set matching nothing we sent, the answer to the last frame,
+        a coalesced answer whose content is neither interim state -- clears
+        the expectations and is read as news.
+
+        Spending the expectations on a match is what bounds this: each frame
+        can mute at most its own reply, the match is on the exact symbol set,
+        and a mismatch throws the whole list away rather than carrying a
+        stale entry forward. A counter could not tell a coalesced reply from
+        an interim one, and neither could a bare flag.
+
+        **One case is genuinely ambiguous and is resolved as a mute.** A
+        coalesced answer to two frames whose content *equals* the interim
+        state is indistinguishable, from content alone, from the answer to
+        the first frame alone -- *"TSLA dropped as asked, and NVDA refused"*
+        and *"TSLA dropped as asked, NVDA not read yet"* are the same bytes.
+        This reads it as the second and suppresses it, because the first
+        reading would put a false refusal record on every ordinary revision.
+        What that costs is bounded by the match itself: equalling the interim
+        state means every symbol that survived the revision **is**
+        acknowledged, so the only thing a mute here can hide is a symbol the
+        revision itself added, and only until the next reply or revision.
+        ``test_a_coalesced_reply_equal_to_the_interim_state_is_the_surviving_mute``
+        pins it so it stays a decided property.
+        """
+        pending = self._pending_replies
+        if pending and pending[0] == acknowledged:
+            self._pending_replies = pending[1:]
+            # Still owed a later answer, so this one describes a state we
+            # have already moved on from.
+            return bool(self._pending_replies)
+        self._pending_replies = ()
+        return False
+
     def _reconcile(self, message: Mapping[str, Any]) -> None:
-        """Compare the server's list against the plan, per channel."""
+        """Compare the server's list against the plan, per channel.
+
+        **A reply that answers a frame we have superseded is skipped, and
+        skipped on its content.** :meth:`apply_plan` converges by difference
+        -- an ``unsubscribe`` for what left, then a ``subscribe`` for what
+        arrived -- and Alpaca answers *each* frame with the connection's
+        whole current set. The reply to that unsubscribe therefore lists
+        neither what just left nor what has not been asked for yet, which
+        against the plan already in force reads as *"the server refused
+        everything we added"*: a rule-8 WARNING whose ``absent`` list carries
+        the viewport hint's symbols verbatim -- browser strings admitted by a
+        shape filter, which is not a redactor (rule 6) -- and client-tier rows
+        counted into the *"N symbols not streamed"* banner that
+        ``client_not_streamed`` exists to keep them out of. Once per viewport
+        scroll, which is a rare anomaly path turned hot path.
+
+        The same is true of **any** reply still in flight when a revision
+        goes out: a handshake subscribe's, or the first revision's when a
+        second lands inside one round trip. So the test is not *"is one reply
+        outstanding"* -- a flag or a counter, either of which the reply
+        already in flight steals -- but *"is this the state some frame I have
+        since superseded asked for"*. :meth:`_expect_replies` records one
+        state per frame sent and :meth:`_is_superseded` spends them in order,
+        by exact symbol set.
+
+        A skipped reply records **nothing**, because rule 8 is about
+        rejections and the answer to a frame we have moved past is not one.
+        It is never a mute button, which is the property that matters here:
+        an ``error`` frame answering the unsubscribe clears the expectations
+        (see :meth:`_error`), a coalesced reply whose content is neither
+        interim state is read as news, and a server that answers the
+        *subscribe* without a symbol we added has genuinely refused it and
+        still gets its record. The one reply this does suppress that a
+        different reading would not is the coalesced answer that *equals* the
+        interim state, which :meth:`_is_superseded` states in full and a test
+        pins. Rule 8's failure mode is silence, and silence is the one thing
+        this must not buy.
+
+        **A reply that matches nothing is news about the wire, not about
+        every symbol in the plan.** The same window produces it: the
+        handshake's reply arrives after a revision has gone out and says
+        ``{AAPL}`` because the server refused TSLA, while the subscribe
+        carrying NVDA is still unanswered. Read against the plan in force
+        that is *"the server refused NVDA"* -- loud, wrong, and carrying the
+        viewport hint's symbols into ``absent``. So the claim is scoped by
+        :attr:`_unanswered_additions`: symbols a revision added whose frame
+        is still owed an answer are held out of the refusal record and
+        reported as a counts-only ``stream_subscription_out_of_step``
+        instead. Not a mute -- a record that says what is actually known,
+        which is that our model of the wire and the server's have diverged.
+        The scope lifts the moment the last frame is answered, and a symbol
+        genuinely never added is named then.
+        """
         acknowledged = message.get(self._channel)
         symbols = (
             [str(symbol) for symbol in acknowledged]
             if isinstance(acknowledged, list)
             else []
         )
+        answered = frozenset(symbols)
+        self._answer_one_frame(answered)
+        if self._is_superseded(answered):
+            return
         self._acknowledgement = reconcile_acknowledgement(
             self._plan,
             channel=self._channel,
             acknowledged=symbols,
             at=self._now(),
+            in_flight=self._unanswered_additions & self._plan.subscribed_set,
+            unanswered_frames=self._unanswered_frames,
         )
 
     async def _error(self, socket: VendorSocket, message: Mapping[str, Any]) -> None:
+        # The vendor has answered *something* with a refusal instead of a
+        # `subscription` message, so the replies we are still owed no longer
+        # describe the wire and the frame each expectation belongs to can no
+        # longer be told. Dropped rather than carried: an expectation that
+        # outlives the frame it describes is a mute button pointed at the
+        # next genuine refusal, and rule 8's failure mode is silence.
+        self._pending_replies = ()
+        # Booked as one frame's answer all the same, because the vendor
+        # answered *something* with this. The two ways to be wrong here are
+        # not symmetrical: leave the count where it is and an unrelated error
+        # frame keeps the last real reply scoped, so a genuine refusal goes
+        # unnamed for the rest of the connection; take one off it and, if the
+        # error answered no frame, the scope lifts one reply early -- which
+        # is at worst the behaviour that held before the scope existed.
+        self._answer_one_frame(frozenset())
         code = message.get("code")
         code = int(code) if isinstance(code, (int, Decimal)) else None
         detail = self._detail(str(message.get("msg", "")))

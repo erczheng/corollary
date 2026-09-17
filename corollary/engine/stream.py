@@ -648,6 +648,18 @@ class AcknowledgedSubscription:
     #: Exactly what the server listed for :attr:`channel`, in its order.
     acknowledged: tuple[str, ...]
     at: datetime
+    #: Subscribed symbols whose ``subscribe`` frame the server has **not yet
+    #: answered** -- added by a revision whose replies are still outstanding.
+    #: Empty in the steady state, which is every reconciliation but the ones
+    #: inside a round trip.
+    #:
+    #: They are held out of :attr:`absent` because nothing has refused them:
+    #: a reply that predates the frame carrying a symbol cannot be evidence
+    #: about that symbol, and a record saying otherwise names symbols the
+    #: server never saw. They are still counted into :attr:`not_streamed`,
+    #: because *unanswered* is *not marking yet* and over-reporting a gap is
+    #: the safe direction for a banner. See :attr:`unanswered`.
+    in_flight: frozenset[str] = frozenset()
 
     @property
     def acknowledged_set(self) -> frozenset[str]:
@@ -655,9 +667,35 @@ class AcknowledgedSubscription:
 
     @property
     def absent(self) -> tuple[str, ...]:
-        """Subscribed, and not acknowledged. In the plan's order."""
+        """Subscribed, not acknowledged, and answerable. In the plan's order.
+
+        :attr:`in_flight` is excluded: those are unanswered, not absent, and
+        the difference is the difference between *"the server refused this"*
+        and *"we have not heard yet"*. :attr:`unanswered` carries them.
+        """
         acked = self.acknowledged_set
-        return tuple(symbol for symbol in self.plan.subscribed if symbol not in acked)
+        return tuple(
+            symbol
+            for symbol in self.plan.subscribed
+            if symbol not in acked and symbol not in self.in_flight
+        )
+
+    @property
+    def unanswered(self) -> tuple[str, ...]:
+        """Subscribed, not acknowledged, and not yet answerable.
+
+        Held out of :attr:`absent` and counted into :attr:`not_streamed`.
+        **Never logged as symbols** -- a count of these is a statement about
+        our own round trip, while the list is whatever the caller last asked
+        for, which on the equity stream includes the Markets viewport hint
+        (rule 6: a ticker-shape filter is not a redactor).
+        """
+        acked = self.acknowledged_set
+        return tuple(
+            symbol
+            for symbol in self.plan.subscribed
+            if symbol not in acked and symbol in self.in_flight
+        )
 
     @property
     def surplus(self) -> tuple[str, ...]:
@@ -673,8 +711,15 @@ class AcknowledgedSubscription:
 
     @property
     def not_streamed(self) -> int:
-        """The N the UI renders, counting both causes."""
-        return self.plan.not_streamed + len(self.absent)
+        """The N the UI renders, counting every cause.
+
+        Our own drops, the server's refusals, and the symbols still inside a
+        round trip: the reader's question is *"is anything I hold unmarked?"*
+        and a symbol we have not been told about is not marking yet. It drops
+        out of the figure when the reply arrives, which is the direction that
+        cannot show *"0 not streamed"* over a gap.
+        """
+        return self.plan.not_streamed + len(self.absent) + len(self.unanswered)
 
     @property
     def message(self) -> str | None:
@@ -687,6 +732,8 @@ def reconcile_acknowledgement(
     channel: str,
     acknowledged: Iterable[str],
     at: datetime,
+    in_flight: Iterable[str] = (),
+    unanswered_frames: int = 0,
 ) -> AcknowledgedSubscription:
     """Compare what we subscribed against what the server says it streams.
 
@@ -696,6 +743,16 @@ def reconcile_acknowledgement(
     record part of the same decision that produced the plan. A reconciliation
     with nothing missing logs nothing, for :func:`_log`'s reason: the ordinary
     case is silent so that the extraordinary one is not.
+
+    ``in_flight`` names the subscribed symbols whose frame the server has not
+    answered yet, and ``unanswered_frames`` how many frames those are. Both
+    default to the steady state -- nothing outstanding, every claim
+    answerable. Given either, this emits **two** kinds of record and keeps
+    them apart: a refusal (:func:`_log_acknowledgement`, symbols and all) for
+    what the server has answered about, and a counts-only *out of step*
+    (:func:`_log_out_of_step`) for what it has not. The second is rule 8 held
+    to what is knowable: silence would hide a divergence, and naming symbols
+    nobody has refused is a false record in a log that is read after a loss.
     """
     if not channel:
         raise ValueError(
@@ -709,8 +766,10 @@ def reconcile_acknowledgement(
         channel=channel,
         acknowledged=tuple(acknowledged),
         at=_utc(at),
+        in_flight=frozenset(in_flight),
     )
     _log_acknowledgement(reconciled)
+    _log_out_of_step(reconciled, unanswered_frames=unanswered_frames)
     return reconciled
 
 
@@ -1143,6 +1202,63 @@ def _log_acknowledgement(reconciled: AcknowledgedSubscription) -> None:
                 "the subscribe was sent and the server confirmed fewer "
                 "symbols than it was handed, so these are unmarked with no "
                 "budget drop to explain them"
+            ),
+            "at": reconciled.at.isoformat(),
+        },
+    )
+
+
+def _log_out_of_step(
+    reconciled: AcknowledgedSubscription, *, unanswered_frames: int
+) -> None:
+    """Rule 8 for what the server has **not** answered: loud, and counts only.
+
+    A ``subscription`` reply that lands while frames we sent are still owed
+    answers cannot tell *"refused"* from *"not processed yet"* for a symbol
+    those frames added. :attr:`AcknowledgedSubscription.absent` therefore
+    holds those symbols out, and this record exists so that holding them out
+    is not silence: it says the divergence happened, when, under which
+    correlation id, and how many symbols and frames it covers.
+
+    **It names no symbol, and that is the point twice over.** The honest
+    claim here is about our own round trip rather than about any one ticker
+    -- we are out of step with the server, which is not the same statement as
+    *"the server refused these"* -- and the list on the equity stream is
+    whatever the Markets viewport last asked for, which rule 6 keeps out of
+    the log because a ticker-shape filter admits a paper account number.
+
+    ``WARNING`` rather than ``INFO`` because the ordinary revision never
+    reaches here: its interim reply matches a state we asked for and is spent
+    against it. Reaching this means the server's word and our model of the
+    wire have diverged, which is rare and worth seeing.
+    """
+    unanswered = reconciled.unanswered
+    if not unanswered:
+        return
+    plan = reconciled.plan
+    logger.warning(
+        "out of step with the %s stream: %d symbol(s) across %d unanswered "
+        "frame(s) cannot be claimed either way",
+        plan.stream.label,
+        len(unanswered),
+        unanswered_frames,
+        extra={
+            "event": "stream_subscription_out_of_step",
+            "correlation_id": plan.correlation_id,
+            "stream": plan.stream.label,
+            "rule": "out_of_step",
+            "channel": reconciled.channel,
+            "unanswered_count": len(unanswered),
+            "unanswered_frames": unanswered_frames,
+            "subscribed_count": len(plan.subscribed),
+            "acknowledged_count": len(reconciled.acknowledged),
+            "not_streamed": reconciled.not_streamed,
+            "cap": plan.cap,
+            "detail": (
+                "a reply landed while frames we sent were still owed "
+                "answers, so these symbols are unanswered rather than "
+                "refused; counts only, because the claim is about the round "
+                "trip and not about any symbol"
             ),
             "at": reconciled.at.isoformat(),
         },

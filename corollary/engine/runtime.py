@@ -469,6 +469,14 @@ class StreamPlans:
     Both plans come from one call, share one clock and one correlation id, and
     are subscribed to their own stream by the caller.
 
+    **With one exception, which is a pair rebuilt mid-session.** The Markets
+    viewport hint feeds the equity list and nothing else, so
+    ``SocketSupervisor`` re-plans that half alone and carries the option plan
+    across by reference -- the option socket is not touched, not on the wire
+    and not in what is reported about it. Such a pair holds two correlation
+    ids on purpose: they are two decisions taken at two times, and one id
+    over both would say the option stream resubscribed when it did not.
+
     :attr:`not_streamed` and :attr:`message` sum across the two, because the
     reader's question is *"is anything I hold unmarked?"* and not *"which
     socket ran out?"* -- that is a detail for the log record, which names the
@@ -2183,6 +2191,7 @@ class EngineRuntime:
         option_units: Iterable[SubscriptionUnit],
         equity_units: Iterable[SubscriptionUnit],
         correlation_id: str | None = None,
+        equity_cap: int | None = None,
     ) -> StreamPlans:
         """Fit the desired symbols into this account's two budgets.
 
@@ -2222,8 +2231,29 @@ class EngineRuntime:
         reads neither by design -- identical inputs have to give an identical
         subscription list, and an id minted inside that module would tie the
         plan to nothing upstream of it.
+
+        **``equity_cap`` narrows and can never widen.** The account's budget
+        is what a plan is normally built at, but a 405 is the *server's* own
+        figure for how many symbols one connection may carry and it is lower.
+        The supervisor passes the cap in force when it re-folds the viewport
+        hint, so a correction survives a scroll rather than being re-planned
+        back up to the budget, refused again, and ratcheted down by halving --
+        each round a whole-list resubscribe and a gap in every position
+        underlying's mark. It is clamped here rather than trusted: the plan is
+        built at ``min(equity_cap, budget.equity)``, so this is not a door a
+        caller can widen a budget through either.
         """
         budget = self.stream_budget
+        if equity_cap is not None and equity_cap < 0:
+            raise ValueError(
+                f"an equity cap is a count of symbols; got {equity_cap}. "
+                "Zero is a legitimate answer -- it means the socket streams "
+                "nothing and every symbol counts into the banner -- and "
+                "below zero is a caller bug"
+            )
+        equity_slots = (
+            budget.equity if equity_cap is None else min(equity_cap, budget.equity)
+        )
         at = _utc(self._now())
         handle = correlation_id or self._correlation_ids()
         return StreamPlans(
@@ -2247,7 +2277,7 @@ class EngineRuntime:
                 [*equity_units, *self.markets_visible_units()],
                 at=at,
                 correlation_id=handle,
-                cap=budget.equity,
+                cap=equity_slots,
                 stream=Stream.EQUITY,
             ),
         )

@@ -318,6 +318,8 @@ class VendorStream(ABC):
         #: The same fact, awaitable, so a backoff can be abandoned. Set
         #: alongside the flag and never instead of it -- see :meth:`_backoff`.
         self._close_requested = asyncio.Event()
+        #: One sender at a time. See :meth:`_transmit`.
+        self._send_lock = asyncio.Lock()
 
     @property
     def name(self) -> str:
@@ -441,7 +443,7 @@ class VendorStream(ABC):
                 # would attribute exists.
                 return
             self._socket = socket
-            await self._codec.transmit(socket, self._auth_message())
+            await self._transmit(socket, self._auth_message())
             while True:
                 frame = await socket.recv()
                 # Recorded before the frame is decoded: the socket is alive
@@ -460,6 +462,28 @@ class VendorStream(ABC):
             if socket is not None:
                 with suppress(Exception):
                     await socket.close()
+
+    async def _transmit(
+        self, socket: VendorSocket, *messages: Mapping[str, Any]
+    ) -> None:
+        """Put frames on the wire. One sender at a time, and grouped stays grouped.
+
+        Every frame a stream sends goes through here, and the lock is not
+        decoration: a subscription may now be revised from a task that is not
+        the one reading the socket (``SocketSupervisor`` hands the equity
+        stream a new plan mid-session), so two coroutines can reach one
+        connection. Interleaved there, an unsubscribe and a subscribe can land
+        either side of a frame the read loop is sending -- and the state that
+        leaves behind is a subscription set matching neither plan, which shows
+        up as a position marking off a price nobody asked for.
+
+        Several messages in one call are sent under **one** acquisition,
+        because a revision is one decision: unsubscribe what left, subscribe
+        what arrived, with nothing of anyone else's in between.
+        """
+        async with self._send_lock:
+            for message in messages:
+                await self._codec.transmit(socket, message)
 
     def begin_close(self) -> None:
         """Declare that any close from here on is **ours**. Synchronous.

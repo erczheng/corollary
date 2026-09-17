@@ -60,6 +60,7 @@ from corollary.engine.runtime import (
     WATCHDOG_TIMEOUT_SECONDS,
     EngineRuntime,
     HaltRule,
+    MarketsVisibleStatus,
 )
 from corollary.engine.sockets import (
     EQUITY_SOCKET,
@@ -67,6 +68,7 @@ from corollary.engine.sockets import (
     TRADE_SOCKET,
     SocketSupervisor,
 )
+from corollary.engine.stream import EQUITY_STREAM_SYMBOL_CAP
 from corollary.sockets import Codec, SocketClosed, VendorSocket
 from tests.api.conftest import RecordedBroker
 
@@ -1123,6 +1125,487 @@ async def test_a_viewport_hint_alone_opens_no_socket_and_arms_no_watchdog(
         assert runtime.check_watchdog() is None
         with Session(db_engine) as session:
             assert engine_state(session).halted_reason is None
+    finally:
+        await supervisor.aclose()
+
+
+# --------------------------------------------------------------------------
+# The mid-session re-plan (step 15's trigger)
+# --------------------------------------------------------------------------
+
+
+def _quote_connect() -> tuple[ScriptedSocket, ScriptedSocket, ScriptedConnect]:
+    """``(option socket, equity socket, connect)``, held so a test can read them.
+
+    The ``scripted`` fixture builds the same three and keeps them to itself;
+    these tests are about what goes *out* on the equity socket after the
+    session's first subscribe, so they need the reference.
+    """
+    option = ScriptedSocket(QUOTE_FRAMES, codec=_option_codec())
+    equity = ScriptedSocket(QUOTE_FRAMES, codec=_stock_codec())
+    connect = ScriptedConnect(
+        {
+            OPTION_SOCKET: option,
+            EQUITY_SOCKET: equity,
+            TRADE_SOCKET: ScriptedSocket(TRADE_FRAMES, codec=_stock_codec()),
+        }
+    )
+    return option, equity, connect
+
+
+async def _subscribed(supervisor: SocketSupervisor, socket: ScriptedSocket) -> None:
+    """Run the first tick and wait for the equity socket's opening subscribe."""
+    await supervisor.tick()
+    await settle(
+        lambda: any(frame.get("action") == "subscribe" for frame in socket.sent),
+        what="the equity socket sent its opening subscribe",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_hint_applied_mid_session_resubscribes_the_equity_stream(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+) -> None:
+    """The trigger itself: an *applied* hint reaches the socket this session.
+
+    The plan used to be built once at the open, so a hint that arrived at
+    10:05 did nothing until the next session. What goes on the wire is the
+    **difference** -- every resubscribe is a gap in the marks, and re-sending
+    the position underlyings would cost marks on held positions to add one
+    Markets row.
+    """
+    option, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+        before = supervisor.plans
+        assert before is not None
+        held = before.equity.subscribed
+        assert "ZZAA" not in held
+        equity_frames = len(equity.sent)
+        option_frames = len(option.sent)
+
+        assert runtime.set_markets_visible(["ZZAA"]).changed is True
+        await supervisor.tick()
+        await pump()
+
+        after = supervisor.plans
+        assert after is not None
+        assert after.equity.subscribed == (*held, "ZZAA")
+        # The difference, and nothing else. Not the whole list again.
+        assert equity.sent[equity_frames:] == [
+            {"action": "subscribe", "quotes": ["ZZAA"]}
+        ]
+        # An equity-only hint change does not touch the option stream at all:
+        # not on the wire, and not even a new plan object to report.
+        assert option.sent[option_frames:] == []
+        assert after.option is before.option
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_replan_on_a_flat_book_still_opens_no_equity_socket(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    clock: Clock,
+    db_engine: Engine,
+) -> None:
+    """Finding 1, at the one moment a re-plan makes newly reachable.
+
+    A flat book is every session before the first trade. The launch gate was
+    only ever asked once, at the open, before any hint could exist; a
+    mid-session re-plan asks it again, with a plan whose entire content is the
+    client's. If that could launch the equity socket, ``_settle_expectations``
+    would arm rule 9's ninety-second condition on symbols nobody validated
+    against a universe, and a browser scrolling would halt the engine.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(broker=EmptyBook(label="empty"), connect=connect)
+    try:
+        await supervisor.tick()
+        await settle(
+            lambda: runtime.watchdog.last_activity_at is not None,
+            what="the order socket authorized",
+        )
+        assert runtime.set_markets_visible(["ZZAA", "ZZAB", "ZZAC"]).changed is True
+        await supervisor.tick()
+        await pump()
+        # A third tick, because the launch gate is asked again on every tick
+        # after the one that re-planned.
+        await supervisor.tick()
+        await pump()
+
+        plans = supervisor.plans
+        assert plans is not None
+        assert plans.equity.subscribed == ("ZZAA", "ZZAB", "ZZAC")
+        assert plans.equity.engine_subscribed == ()
+        assert supervisor.held == (TRADE_SOCKET,)
+        assert EQUITY_SOCKET not in connect.attempts
+        assert equity.sent == []
+        assert runtime.watchdog.feed_expected(EQUITY_SOCKET) is False
+        assert runtime.watchdog.feed_expected() is False
+
+        clock.advance(WATCHDOG_TIMEOUT_SECONDS + 1)
+        assert runtime.check_watchdog() is None
+        with Session(db_engine) as session:
+            assert engine_state(session).halted_reason is None
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_replan_never_widens_what_the_watchdog_judges(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+) -> None:
+    """The other half of finding 1: the hint rides the socket, it never arms it.
+
+    With a book the equity socket is open and expected -- on the *book's*
+    symbols. Folding a viewport hint into that plan must leave
+    ``engine_subscribed`` exactly where it was, because that tuple is what
+    both the launch gate and the watchdog's expectation are taken on.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+        before = supervisor.plans
+        assert before is not None
+        engine_owned = before.equity.engine_subscribed
+        assert engine_owned
+
+        runtime.set_markets_visible(["ZZAA", "ZZAB"])
+        await supervisor.tick()
+        await pump()
+
+        after = supervisor.plans
+        assert after is not None
+        assert after.equity.engine_subscribed == engine_owned
+        assert set(after.equity.subscribed) == {*engine_owned, "ZZAA", "ZZAB"}
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_cap_the_server_lowered_survives_a_viewport_scroll(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+) -> None:
+    """A 405 is the server's figure, and a browser scrolling must not unlearn it.
+
+    ``_replan_for_viewport`` builds its revision from
+    ``plan_stream_subscriptions``, which plans at the **account's** budget.
+    After a 405 has narrowed the equity socket to fifteen, one viewport
+    settle would otherwise re-subscribe at thirty, be refused again, and
+    ratchet by halving to seven -- each round a whole-list resubscribe, which
+    is a gap in the mark of every position underlying, once per scroll. The
+    re-plan is built at the cap *in force* instead, so the correction holds
+    and the hint spends only what is left under it.
+    """
+    # The 405 is scripted rather than pushed: ``ScriptedSocket.push`` wakes a
+    # reader already parked on the release event, which reads as a close.
+    equity = ScriptedSocket(
+        (*QUOTE_FRAMES, [{"T": "error", "code": 405, "msg": "over the limit"}]),
+        codec=_stock_codec(),
+    )
+    connect = ScriptedConnect(
+        {
+            OPTION_SOCKET: ScriptedSocket(QUOTE_FRAMES, codec=_option_codec()),
+            EQUITY_SOCKET: equity,
+            TRADE_SOCKET: ScriptedSocket(TRADE_FRAMES, codec=_stock_codec()),
+        }
+    )
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+        planned = supervisor.plans
+        assert planned is not None
+        # What the *account* allows, which is what the supervisor planned at.
+        assert planned.equity.cap == EQUITY_STREAM_SYMBOL_CAP
+        engine_owned = planned.equity.engine_subscribed
+        assert engine_owned
+
+        # Nothing acknowledged yet, so the correction halves: the server
+        # refused what we asked for and gave no figure of its own.
+        corrected = EQUITY_STREAM_SYMBOL_CAP // 2
+        assert len(engine_owned) < corrected
+        await settle(
+            lambda: sum(frame.get("action") == "subscribe" for frame in equity.sent)
+            == 2,
+            what="the re-subscribe at the corrected cap",
+        )
+        frames = len(equity.sent)
+
+        # A viewport asking for more than the whole corrected budget.
+        hint = tuple(f"ZZ{index:02d}" for index in range(EQUITY_STREAM_SYMBOL_CAP))
+        assert runtime.set_markets_visible(list(hint)).changed is True
+        await supervisor.tick()
+        await pump()
+
+        after = supervisor.plans
+        assert after is not None
+        # The correction survived the scroll, in the supervisor's own record
+        # of what is in force as well as on the wire.
+        assert after.equity.cap == corrected
+        assert len(after.equity.subscribed) == corrected
+        # The book keeps its slots; the hint spends what is left and the
+        # tail of it is dropped, loudly, as a client-tier drop.
+        assert after.equity.engine_subscribed == engine_owned
+        assert after.client_not_streamed == len(hint) - (
+            corrected - len(engine_owned)
+        )
+        # The difference only -- not the whole list again, and no second 405.
+        added = [
+            symbol
+            for frame in equity.sent[frames:]
+            for symbol in frame.get("quotes", ())
+        ]
+        assert all(frame.get("action") == "subscribe" for frame in equity.sent[frames:])
+        assert set(added) == set(after.equity.subscribed) - set(
+            planned.equity.subscribed
+        )
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_or_refused_hint_replans_nothing(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """*Applied*, never merely *not refused*. The gap in the marks is the cost.
+
+    A hint identical to the one in force and a hint the engine refused whole
+    are both reasons **not** to touch the socket, and the ``bool`` this used
+    to return made the second look like the first.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+        runtime.set_markets_visible(["ZZAA"])
+        await supervisor.tick()
+        await pump()
+        frames = len(equity.sent)
+
+        with caplog.at_level(logging.INFO):
+            # Identical: UNCHANGED.
+            assert runtime.set_markets_visible(["ZZAA"]).changed is False
+            await supervisor.tick()
+            # Refused whole, and the previous hint stands.
+            assert (
+                runtime.set_markets_visible(["AAPL241220C00150000"]).status
+                is MarketsVisibleStatus.REFUSED
+            )
+            await supervisor.tick()
+            await pump()
+
+        assert equity.sent[frames:] == []
+        assert supervisor.plans is not None
+        assert supervisor.plans.equity.subscribed[-1] == "ZZAA"
+        replans = [
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "socket_replan"
+        ]
+        assert replans == []
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_replan_the_socket_cannot_carry_is_recorded_and_the_tick_survives(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A viewport scroll must not take the supervisor tick -- or the order socket -- down.
+
+    ``apply_plan`` reaches the vendor socket's ``send``, and the realistic
+    raise on a half-closed connection is ``SocketClosed``, not the
+    ``ValueError`` the cap guard raises. Uncaught it escapes ``_open`` into
+    ``tick``, which skips that tick's watchdog settle and the order socket's
+    turn with it.
+
+    It is recorded under its **own** event, because a refusal and a transport
+    failure are different news, and the revision still becomes the plan in
+    force: the client swapped its own before the send, so a supervisor that
+    kept the old one would describe a plan no socket holds for the rest of
+    the session.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+
+        async def _gone(_: Any) -> None:
+            raise SocketClosed("sent 1011 (internal error); no close frame received")
+
+        equity.send_text = _gone  # type: ignore[method-assign]
+        equity.send_bytes = _gone  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.INFO):
+            assert runtime.set_markets_visible(["ZZAA"]).changed is True
+            # The raise, if it escaped, would come out of here.
+            await supervisor.tick()
+            await pump()
+
+        events = [getattr(record, "event", "") for record in caplog.records]
+        assert events.count("socket_replan_undelivered") == 1
+        assert events.count("socket_replan") == 1
+
+        plans = supervisor.plans
+        assert plans is not None
+        # The client holds the revision, so this must too.
+        assert plans.equity.subscribed[-1] == "ZZAA"
+
+        undelivered = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "socket_replan_undelivered"
+        )
+        fields = undelivered.__dict__
+        assert fields["error"] == "SocketClosed"
+        assert fields["correlation_id"] == plans.equity.correlation_id
+        # Counts, never keys: this symbol came from a browser, and neither is
+        # the vendor's close text interpolated here.
+        assert "ZZAA" not in repr(sorted(fields.items(), key=str))
+        assert "1011" not in repr(sorted(fields.items(), key=str))
+
+        replan = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "socket_replan"
+        )
+        assert replan.__dict__["dispatched"] is False
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_viewport_churn_is_one_info_record_and_never_a_dropped_symbol_warning(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Finding 2, re-checked at the volume a re-plan per settle produces.
+
+    A full viewport is 64 rows against 30 equity slots, so most of it is
+    trimmed on every plan -- by design, since every Markets row is polled
+    regardless. That must stay **one INFO** record per plan, must never reach
+    ``dropped_symbols``/``not_streamed`` (whose question is *"is anything I
+    hold unmarked?"*), and must never put a browser's string into a log
+    record's fields (finding 4).
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    viewport = [f"ZZ{index:02d}" for index in range(64)]
+    try:
+        await _subscribed(supervisor, equity)
+        with caplog.at_level(logging.INFO):
+            assert runtime.set_markets_visible(viewport).changed is True
+            await supervisor.tick()
+            await pump()
+
+        plans = supervisor.plans
+        assert plans is not None
+        assert plans.client_not_streamed > 0
+        assert plans.not_streamed == 0
+        assert plans.message is None
+
+        events = [getattr(record, "event", "") for record in caplog.records]
+        assert events.count("socket_replan") == 1
+        assert events.count("stream_client_tier_trimmed") == 1
+        assert events.count("stream_subscription_dropped") == 0
+        assert events.count("stream_subscription_budget_exceeded") == 0
+
+        replan = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "socket_replan"
+        )
+        # Counts, never keys. A shape filter is not a redactor, and these
+        # strings came from a browser.
+        assert "ZZ" not in repr(sorted(replan.__dict__.items(), key=str))
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_plan_records_survive_being_logged_at_info(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``message`` is a reserved ``LogRecord`` key, and both records used it.
+
+    ``Logger.info`` returns before it builds a record when INFO is not
+    enabled, so ``extra={"message": ...}`` was invisible for as long as
+    nothing read these at INFO -- and fatal the moment something did:
+    ``makeRecord`` raises ``KeyError``, the raise lands inside ``_plan``, the
+    supervisor logs it as one bad tick and retries, and the quote sockets
+    never open at all. The banner is carried as ``banner``.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        with caplog.at_level(logging.INFO):
+            await _subscribed(supervisor, equity)
+            runtime.set_markets_visible(["ZZAA"])
+            await supervisor.tick()
+            await pump()
+
+        events = [getattr(record, "event", "") for record in caplog.records]
+        assert events.count("socket_plan") == 1
+        assert events.count("socket_replan") == 1
+        assert supervisor.plans is not None
+        plan_record = next(
+            record
+            for record in caplog.records
+            if getattr(record, "event", "") == "socket_plan"
+        )
+        assert hasattr(plan_record, "banner")
+    finally:
+        await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_tab_gives_its_slots_back_in_the_same_session(
+    make_supervisor: Callable[..., SocketSupervisor],
+    runtime: EngineRuntime,
+) -> None:
+    """The hint is dropped with its client, and now that drop reaches the socket.
+
+    The same trigger read the other way: what left the plan is unsubscribed,
+    and what the book asked for is not re-sent.
+    """
+    _, equity, connect = _quote_connect()
+    supervisor = make_supervisor(connect=connect)
+    try:
+        await _subscribed(supervisor, equity)
+        before = supervisor.plans
+        assert before is not None
+        held = before.equity.subscribed
+        runtime.set_markets_visible(["ZZAA", "ZZAB"], owner="tab-1")
+        await supervisor.tick()
+        await pump()
+        frames = len(equity.sent)
+
+        assert runtime.clear_markets_visible(owner="tab-1") is True
+        await supervisor.tick()
+        await pump()
+
+        assert equity.sent[frames:] == [
+            {"action": "unsubscribe", "quotes": ["ZZAA", "ZZAB"]}
+        ]
+        assert supervisor.plans is not None
+        assert supervisor.plans.equity.subscribed == held
     finally:
         await supervisor.aclose()
 

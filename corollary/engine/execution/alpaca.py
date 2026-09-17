@@ -1203,7 +1203,7 @@ class AlpacaTradeUpdateStream(VendorStream):
             )
         # Only now: an open socket that has not authorized carries nothing.
         self._record_stream_open(self._now())
-        await self._codec.transmit(
+        await self._transmit(
             socket, {"action": "listen", "data": {"streams": [TRADE_UPDATES_STREAM]}}
         )
 

@@ -9,6 +9,7 @@ transmitted, and decides when the far end goes away. Shared between
 socket is a second protocol to drift from the first.
 """
 
+import asyncio
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -75,6 +76,14 @@ class FakeSocket:
     how a test says *"the far end went away here"*. Running off the end of the
     list is also a close -- an abnormal one, the 1006 a dropped TCP connection
     produces.
+
+    ``hold_open`` is the exception to that last sentence, and it is what a
+    *mid-session* test needs: with it set, an exhausted script parks on
+    :meth:`recv` until :meth:`push` supplies more, so the session stays up
+    while the test revises the plan. Without it there is no way to reach
+    ``apply_plan`` on a live connection at all -- the read loop has already
+    ended by the time the test regains control -- and the dispatched half of
+    that method goes untested. :meth:`release` ends such a session.
     """
 
     def __init__(
@@ -83,9 +92,12 @@ class FakeSocket:
         *,
         codec: Codec,
         on_exhausted: SocketClosed | None = None,
+        hold_open: bool = False,
     ) -> None:
         self._frames = list(frames)
         self._codec = codec
+        self._hold_open = hold_open
+        self._more = asyncio.Event()
         self._on_exhausted = on_exhausted or SocketClosed(
             "1006 (connection closed abnormally [internal])"
         )
@@ -93,6 +105,9 @@ class FakeSocket:
         #: because "and nothing else was ever sent" is half of what it proves.
         self.sent: list[Any] = []
         self.closed = False
+        #: Frames handed to the client. A ``hold_open`` test waits on this to
+        #: know a pushed frame has been taken, rather than on a timer.
+        self.reads = 0
 
     # -- the protocol ------------------------------------------------------
 
@@ -103,26 +118,42 @@ class FakeSocket:
         self.sent.append(self._codec.decode(payload))
 
     async def recv(self) -> str | bytes:
-        while self._frames:
-            frame = self._frames.pop(0)
-            if isinstance(frame, SocketClosed):
-                raise frame
-            if callable(frame):
-                # A hook, so a test can close the client from inside its own
-                # read loop -- which is how "we closed it" is distinguished
-                # from "they closed it" without a second thread.
-                frame()
-                continue
-            return self._codec.encode(frame)
-        raise self._on_exhausted
+        while True:
+            while self._frames:
+                frame = self._frames.pop(0)
+                if isinstance(frame, SocketClosed):
+                    raise frame
+                if callable(frame):
+                    # A hook, so a test can close the client from inside its
+                    # own read loop -- which is how "we closed it" is
+                    # distinguished from "they closed it" without a second
+                    # thread.
+                    frame()
+                    continue
+                self.reads += 1
+                return self._codec.encode(frame)
+            if not self._hold_open:
+                raise self._on_exhausted
+            self._more.clear()
+            await self._more.wait()
 
     async def close(self) -> None:
         self.closed = True
+        # A real connection's pending ``recv()`` raises when it is closed;
+        # a parked one that did not would outlive the session.
+        self._hold_open = False
+        self._more.set()
 
     # -- driving a test ----------------------------------------------------
 
     def push(self, *frames: Any) -> None:
         self._frames.extend(frames)
+        self._more.set()
+
+    def release(self) -> None:
+        """Stop holding the session open: the next exhausted read is a close."""
+        self._hold_open = False
+        self._more.set()
 
 
 class FakeConnect:
