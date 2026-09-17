@@ -2,10 +2,28 @@ import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { act, render, screen, within, fireEvent } from '@testing-library/react'
 import App from '../App'
 import { MARKETS_FOREGROUND_POLL_MS } from '../hooks/useMarketPoll'
+import { MARKETS_VIEWPORT_DEBOUNCE_MS } from '../lib/markets'
 import { queryClient } from '../lib/queryClient'
 import { refetchStocks } from '../lib/queries'
 import { useUIStore } from '../lib/store'
 import type { AccountResponse, OptionContract, RiskLimit, StockQuote } from '../lib/types'
+
+/** Step 15 (b) sends through `liveSocket.ts`'s module-level export and owns
+ * no socket code of its own — the boundary (a) landed with. Spied rather
+ * than stubbed out entirely: what is under test is *what* is sent and *how
+ * often*, which is the whole of (b).
+ *
+ * `true` is the default return, meaning "it reached the socket". It is not
+ * an acceptance — there is no acknowledgement frame — and the refusal test
+ * below exercises the other path. */
+const { sendMarketsVisible } = vi.hoisted(() => ({
+  sendMarketsVisible: vi.fn<(symbols: readonly string[]) => boolean>(() => true),
+}))
+
+vi.mock('../lib/liveSocket', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/liveSocket')>()),
+  sendMarketsVisible,
+}))
 
 /** Markets reads three market endpoints and the account, and writes none of
  * them. Every payload below is the shape
@@ -667,3 +685,287 @@ describe('the stock table renders the merged quote, not the wire row', () => {
   })
 })
 
+
+/** **Step 15 (b), decision 18's viewport hint.** Which rows are on screen,
+ * debounced until the viewport settles, diffed, and sent only on a real
+ * difference.
+ *
+ * What is pinned here is the wiring: the observer watches the *stock*
+ * table's rows and nothing else, the debounce is trailing-edge, an
+ * unchanged set is silent, leaving the page says so, and a refusal is not
+ * fatal. The payload rules themselves — upper case, the 16-character
+ * ticker shape, the OCC refusal, the 64 cap, the diff — are pure and
+ * pinned in `markets.test.ts`; the cap in particular cannot be reached
+ * from here, because a page renders at most `PAGE_SIZE` rows.
+ *
+ * jsdom implements no layout and so ships no `IntersectionObserver`. The
+ * suite-wide stub in `test/setup.ts` is inert; this one is driveable, so a
+ * test can say which rows are on screen. */
+type Observation = {
+  callback: IntersectionObserverCallback
+  targets: Set<Element>
+}
+
+let observations: Observation[] = []
+
+class DriveableIntersectionObserver implements IntersectionObserver {
+  readonly root: Element | Document | null = null
+  readonly rootMargin: string = '0px'
+  // Recent lib.dom, and required on the interface.
+  readonly scrollMargin: string = '0px'
+  readonly thresholds: readonly number[] = [0]
+  private readonly own: Observation
+
+  constructor(callback: IntersectionObserverCallback) {
+    this.own = { callback, targets: new Set() }
+    observations.push(this.own)
+  }
+
+  observe(target: Element): void {
+    this.own.targets.add(target)
+  }
+
+  unobserve(target: Element): void {
+    this.own.targets.delete(target)
+  }
+
+  disconnect(): void {
+    this.own.targets.clear()
+    observations = observations.filter((o) => o !== this.own)
+  }
+
+  takeRecords(): IntersectionObserverEntry[] {
+    return []
+  }
+}
+
+/** Report a set of rows as on screen, and everything else as off it. */
+function onScreen(symbols: string[]): void {
+  const observation = observations.at(-1)
+  if (observation === undefined) throw new Error('nothing observed the stock table')
+  const entries = [...observation.targets].map((target) => ({
+    target,
+    isIntersecting: symbols.includes((target as HTMLElement).dataset.symbol ?? ''),
+  }))
+  act(() => {
+    observation.callback(
+      entries as unknown as IntersectionObserverEntry[],
+      null as unknown as IntersectionObserver,
+    )
+  })
+}
+
+/** The symbols the observer is watching, in DOM order — which is the order
+ * the hint has to be in, since order decides who survives both caps. */
+function observedSymbols(): string[] {
+  const observation = observations.at(-1)
+  if (observation === undefined) throw new Error('nothing observed the stock table')
+  return [...observation.targets].map((t) => (t as HTMLElement).dataset.symbol ?? '')
+}
+
+async function settleViewport(): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(MARKETS_VIEWPORT_DEBOUNCE_MS)
+  })
+}
+
+describe('the viewport hint', () => {
+  beforeEach(() => {
+    observations = []
+    sendMarketsVisible.mockClear()
+    sendMarketsVisible.mockReturnValue(true)
+    vi.stubGlobal('IntersectionObserver', DriveableIntersectionObserver)
+    // `shouldAdvanceTime` so the debounce is a fake timer from the start
+    // while RTL's real-time waits still resolve — the same arrangement the
+    // foreground-cadence test above uses.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('names the rows on screen once the viewport settles', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    // Mounting alone says nothing: no hint is in force, nothing is
+    // reported on screen, and an empty list against a server that holds
+    // none is not news.
+    await settleViewport()
+    expect(sendMarketsVisible).not.toHaveBeenCalled()
+
+    const order = observedSymbols()
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+    expect(sendMarketsVisible).toHaveBeenCalledWith(
+      order.filter((s) => s === 'NVDA' || s === 'SPY'),
+    )
+  })
+
+  it('sends once for a scroll, not once per frame', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    // Three changes inside one window. A resubscribe is a gap in the
+    // marks, so a scroll crossing forty rows has to cost one message.
+    onScreen(['NVDA'])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MARKETS_VIEWPORT_DEBOUNCE_MS / 4)
+    })
+    onScreen(['NVDA', 'SPY'])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(MARKETS_VIEWPORT_DEBOUNCE_MS / 4)
+    })
+    onScreen(['SPY', 'RDDT'])
+    expect(sendMarketsVisible).not.toHaveBeenCalled()
+
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+    expect(sendMarketsVisible).toHaveBeenCalledWith(['SPY', 'RDDT'])
+  })
+
+  it('says nothing when the set has not changed', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+    // The same rows reported again — a re-render, a poll, a scroll that
+    // moved nothing over an edge. The server would answer UNCHANGED; the
+    // cheaper answer is not to ask.
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends an empty list on the way off the page', async () => {
+    serve()
+    const { unmount } = render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+    unmount()
+    // Navigated away: nothing of this table is on screen, and an empty
+    // list is the correct way to say so rather than leaving the engine
+    // spending slots on rows nobody is looking at.
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith([])
+  })
+
+  it('does not record a hint the socket could not take', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    // `false` means there was no open socket to say it on. Not delivered,
+    // so it is not remembered as sent — and the next genuine settle says
+    // it again rather than believing a hint is in force that never left
+    // the browser.
+    sendMarketsVisible.mockReturnValue(false)
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+    sendMarketsVisible.mockReturnValue(true)
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA'])
+  })
+
+  it('never names a contract, and never watches the chain table', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+    await openChain('NVDA')
+
+    // The chain's rows are OCC contracts and are not this message: the
+    // engine refuses one by name, and the refusal is of the whole hint.
+    // Structurally impossible here, because only the stock table's
+    // `tbody` is observed — which is the letter of the spec's "the
+    // visible rows". Whether the chain's *underlying* should be hinted
+    // while its chain is open is an open question recorded in the spec.
+    expect(observedSymbols()).toEqual(expect.arrayContaining(['NVDA', 'SPY']))
+    expect(observedSymbols().some((s) => s.length > 6)).toBe(false)
+
+    onScreen(observedSymbols())
+    await settleViewport()
+    const hint = sendMarketsVisible.mock.calls.at(-1)?.[0] ?? []
+    expect(hint).not.toContain('NVDA260914C00210000')
+    expect(hint).toContain('NVDA')
+  })
+
+  it('drops a row the engine would refuse rather than losing the message', async () => {
+    // A served row whose symbol is wider than the engine's 16-character
+    // equity shape — the band this endpoint's transport filter admits for
+    // `subscribe`'s sake. The message is applied whole or not at all, so
+    // sending it would cost the hint entirely; the row is filtered out.
+    serve({
+      stocks: jsonResponse(200, [
+        ...STOCKS,
+        {
+          ...STOCKS[0],
+          symbol: 'ABCDEFGHIJKLMNOPQ',
+          name: 'Seventeen Characters Ltd.',
+          volume: 1_000,
+        },
+      ]),
+    })
+    render(<App />)
+    await screen.findByText('Seventeen Characters Ltd.')
+
+    onScreen(observedSymbols())
+    await settleViewport()
+
+    const hint = sendMarketsVisible.mock.calls.at(-1)?.[0] ?? []
+    expect(hint).not.toContain('ABCDEFGHIJKLMNOPQ')
+    expect(hint).toContain('NVDA')
+  })
+
+  it('treats a refused hint as no longer in force, silently and without retrying', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      useUIStore.getState().recordStreamError({
+        code: 'subscription_refused',
+        message: 'The engine refused the viewport hint.',
+      })
+    })
+    await settleViewport()
+
+    // **Finding F5.** No retry: a refusal is one refused message on a live
+    // socket, the previous hint stands, and the page is polled regardless.
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+    // And nothing on the page says the feed failed. A refused
+    // subscription hint is not a failed market-data feed, and every row
+    // is still rendering its polled price.
+    expect(screen.queryByText('Last poll failed')).not.toBeInTheDocument()
+    expect(screen.queryByText(/refused/i)).not.toBeInTheDocument()
+    expect(rowFor(stockTable(), 'NVDA')).toBeInTheDocument()
+
+    // What the refusal *did* change: the hint is no longer believed to be
+    // in force, so the next genuine settle sends it again instead of
+    // diffing it away and leaving the tier empty for the session.
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+  })
+})

@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pagination } from '../components/Pagination'
 import { RefreshButton } from '../components/RefreshButton'
 import { RequestFailed } from '../components/RequestFailed'
@@ -13,6 +13,7 @@ import {
   useMarketPoll,
 } from '../hooks/useMarketPoll'
 import { useUIStore } from '../lib/store'
+import { sendMarketsVisible } from '../lib/liveSocket'
 import { useAccount, useChain, useStocks } from '../lib/queries'
 import { isAccountUnavailable, isApiError } from '../lib/api'
 import { type OptionContract } from '../lib/types'
@@ -23,6 +24,7 @@ import {
   CHAIN_RANKS,
   CHAIN_RANK_LABEL,
   CHAIN_RANK_SORT,
+  MARKETS_VIEWPORT_DEBOUNCE_MS,
   MIN_VOLUME_STEPS,
   STOCK_RANKS,
   STOCK_RANK_LABEL,
@@ -31,6 +33,8 @@ import {
   filterChain,
   ivSourceOf,
   latestVolumeDate,
+  marketsVisibleDiffers,
+  marketsVisibleHint,
   relativeVolume,
   searchStocks,
   sortChain,
@@ -583,6 +587,134 @@ function OptionsChains({
   )
 }
 
+/** **The viewport hint, step 15 (b) of decision 18.** Tell the engine which
+ * equity rows are actually on screen, so the ~22 stream slots left over
+ * after the position book are spent on rows somebody is looking at.
+ *
+ * Returns the ref for the stock table's `tbody`. Only the *observer wiring
+ * and the debounce timer* live here; what may be sent and whether it is
+ * news are `marketsVisibleHint` / `marketsVisibleDiffers` in `markets.ts`,
+ * testable without a viewport, and the socket itself is `liveSocket.ts`,
+ * which observes nothing and diffs nothing by design.
+ *
+ * Three things this deliberately does **not** do, each of them rule 4
+ * applied to a stream budget — a client that could evict a held contract
+ * from the stream could make a position mark stale by scrolling:
+ *
+ * - **No retry, no escalation, no widening on a refusal.** A refused hint
+ *   is one refused message on a live socket. The page is polled at
+ *   {@link MARKETS_FOREGROUND_POLL_MS} regardless, so what a lost slot
+ *   costs is freshness, never a price.
+ * - **No reconnect replay.** `LiveSocket` already re-sends the last hint on
+ *   `onopen`, because the server drops it when the connection that sent it
+ *   closes. A second replay here would be a double send.
+ * - **Nothing on screen depends on a hinted row being streamed.** Every row
+ *   still falls back to the polled query row, so a refused hint costs a
+ *   little freshness and freezes nothing. If freshness here were ever
+ *   load-bearing, a refusal would freeze a row — the exact failure rule 4
+ *   exists to prevent.
+ */
+function useViewportHint(pageItems: readonly LiveStockRow[]) {
+  const body = useRef<HTMLTableSectionElement | null>(null)
+  /** The symbols the observer currently reports as on screen. A ref, not
+   * state: nothing renders from it, and re-rendering the table on every
+   * scroll frame is the opposite of what a debounce is for. */
+  const visible = useRef(new Set<string>())
+  /** The rendered rows in DOM order, which is what decides who survives the
+   * 64 cap and the server's prefix cut. */
+  const order = useRef<readonly string[]>([])
+  /** What actually reached the socket last. **Null means nothing is
+   * believed to be in force** — the state before the first send, and the
+   * state a refusal returns us to. */
+  const sent = useRef<string[] | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const flush = useCallback((symbols: string[]) => {
+    if (!marketsVisibleDiffers(sent.current, symbols)) return
+    // There is no acknowledgement frame, so `true` means only that the
+    // message reached the socket; silence from the server is what says it
+    // landed. `false` means there was no open socket to say it on — not
+    // delivered, so it is not recorded as sent and the next settle says it
+    // again. A duplicate is cheap: the server answers an identical list
+    // UNCHANGED, which triggers no re-plan and so costs no marks.
+    if (sendMarketsVisible(symbols)) sent.current = symbols
+  }, [])
+
+  const settle = useCallback(() => {
+    timer.current = null
+    flush(marketsVisibleHint(order.current.filter((symbol) => visible.current.has(symbol))))
+  }, [flush])
+
+  /** Trailing edge only. Continuous scrolling keeps pushing this out and
+   * sends nothing; one message goes out once the viewport stops moving. */
+  const schedule = useCallback(() => {
+    if (timer.current !== null) clearTimeout(timer.current)
+    timer.current = setTimeout(settle, MARKETS_VIEWPORT_DEBOUNCE_MS)
+  }, [settle])
+
+  // One observer per set of rendered rows. The page is paginated rather
+  // than virtualised, so the rows change wholesale — on a page turn, a
+  // search, or a re-sort — and re-observing is cheaper than tracking which
+  // of fifteen `tr`s survived.
+  const pageKey = pageItems.map((s) => s.symbol).join(' ')
+  useEffect(() => {
+    order.current = pageKey === '' ? [] : pageKey.split(' ')
+    // The previous page's rows are not on screen any more, whatever the
+    // observer last said about them.
+    visible.current = new Set()
+    // Scheduled unconditionally, because the rows may have gone away
+    // entirely — a search that matches nothing, or a failed cold read — and
+    // an observer with nothing to observe will never call back to say so.
+    schedule()
+
+    const tbody = body.current
+    if (tbody === null) return
+
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const symbol = (entry.target as HTMLElement).dataset.symbol
+        if (symbol === undefined) continue
+        if (entry.isIntersecting) visible.current.add(symbol)
+        else visible.current.delete(symbol)
+      }
+      schedule()
+    })
+    for (const row of tbody.querySelectorAll<HTMLElement>('tr[data-symbol]')) {
+      observer.observe(row)
+    }
+    // Disconnect only. **Not** a send: this cleanup also runs on an ordinary
+    // page turn, and emptying the hint between two pages would be a
+    // resubscribe — a gap in the marks — for a viewport that never went
+    // away. Leaving Markets is the unmount effect below.
+    return () => observer.disconnect()
+  }, [pageKey, schedule])
+
+  // Leaving the page. An empty list is the correct way to say nothing is on
+  // screen, and it is only news if something was in force.
+  useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current)
+      timer.current = null
+      flush([])
+    },
+    [flush],
+  )
+
+  // **Finding F5 from (a)'s audit.** A refusal means the hint did not
+  // apply and the previous one still stands server-side — so believing
+  // this one is in force can leave the tier silently empty for a session.
+  // Forgetting it is the whole fix: the next genuine settle sends again.
+  // Deliberately *not* an immediate re-send, which would be a retry, and
+  // deliberately not surfaced on the page: the hint changes no price.
+  const streamError = useUIStore((s) => s.lastStreamError)
+  useEffect(() => {
+    if (streamError?.code !== 'subscription_refused') return
+    sent.current = null
+  }, [streamError])
+
+  return body
+}
+
 function StocksAndEtfs({
   stocks,
   loading,
@@ -612,6 +744,8 @@ function StocksAndEtfs({
   const matched = searchStocks(stocks, search)
   const rows = sortStocks(matched, sort)
   const { page, pageCount, pageItems, setPage } = usePagination(rows, PAGE_SIZE)
+  // Decision 18's viewport hint. The rows on this page, in DOM order.
+  const tbody = useViewportHint(pageItems)
   const rank = stockRankFor(sort)
   const query = search.trim()
   // The most recent session anyone on this table printed in, from the
@@ -689,7 +823,7 @@ function StocksAndEtfs({
                 setPage(1)
               }}
             />
-            <tbody>
+            <tbody ref={tbody}>
               {pageItems.map((s) => {
                 const rel = relativeVolume(s)
                 const open = expanded === s.symbol
@@ -697,6 +831,10 @@ function StocksAndEtfs({
                 return (
                   <Fragment key={s.symbol}>
                     <tr
+                      // What the viewport observer reads. On the row rather
+                      // than in a parallel map keyed by element, so the
+                      // symbol cannot outlive the row it names.
+                      data-symbol={s.symbol}
                       className={`h-8 border-t border-outline/10 ${
                         open ? 'bg-surface-container-low' : 'hover:bg-surface-container-low'
                       }`}

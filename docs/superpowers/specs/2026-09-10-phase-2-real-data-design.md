@@ -2725,11 +2725,13 @@ and background are three states, not two.
 Spend the ~22 equity slots left after position underlyings on the Markets rows
 actually on screen.
 - *Status:* **server half landed in full, mid-session re-plan included;
-  browser half (a) — the `/api/ws` client — landed with this commit. What
-  remains is (b), the viewport observer in `Markets.tsx`, and a third piece
-  this entry did not originally name: nothing yet *mounts* the socket, and
-  mounting is blocked on an open question recorded under (a) below.** See
-  *What the browser half actually needs* and *(a) landed* below.
+  browser half (a) — the `/api/ws` client — and (b) — the viewport
+  observer, its debounce and its diff — have both landed. What remains is
+  a third piece this entry did not originally name: nothing yet *mounts*
+  the socket, and mounting is blocked on an open question recorded under
+  (a) below. (b) does not clear that blocker and never could — the
+  viewport hint changes no price.** See *What the browser half actually
+  needs*, *(a) landed* and *(b) landed* below.
   Landed: `markets_visible` is a second client message on `/api/ws`
   (`WsMarketsVisibleRequest` in `corollary/api/schemas.py`, dispatched from one
   `_CLIENT_FRAMES` table in `corollary/api/routes/ws.py`), bounded at
@@ -2819,7 +2821,8 @@ actually on screen.
      including that a shape filter is not a redactor. `engine/stream.py`
      imports no redactor and stays pure per decision 17 -- no vendor import,
      no clock read, no environment read.
-- *Owed by the client half (`web/src/pages/Markets.tsx`), and nothing else:*
+- *What the client half (`web/src/pages/Markets.tsx`) owed, and nothing
+  else. Landed 2026-09-17; the "(b) landed" bullet below records how:*
   observe which rows are on screen, debounce on a settled viewport, and send
   `{"type": "markets_visible", "symbols": [...]}` on the existing socket **only
   when the set actually differs** — every resubscribe is a gap in the marks.
@@ -3099,6 +3102,144 @@ actually on screen.
     branch by virtue of being a rejection.
     **WEB-4** `store.lastTradeUpdate` is one slot, newest wins, so it is not
     a log and its docstring now says so.
+- *(b) landed 2026-09-17 — the viewport observer, its debounce and its diff.*
+  Split the way this page's logic has always been split: the payload rules
+  are pure functions in `web/src/lib/markets.ts` (`marketsVisibleHint`,
+  `marketsVisibleDiffers`, `MARKETS_VIEWPORT_DEBOUNCE_MS`,
+  `MAX_MARKETS_VISIBLE_SYMBOLS`), tested without a viewport; only the
+  observer wiring and the timer are in `Markets.tsx`, as one local hook,
+  `useViewportHint`, over the stock table's `tbody`. It sends through
+  `sendMarketsVisible` and writes no socket code of its own: (a)'s boundary
+  is that the client sends what it is given and observes, debounces and
+  diffs nothing.
+  - **`MARKETS_VIEWPORT_DEBOUNCE_MS = 400`, trailing edge, exported and
+    pinned by a test.** The spec gave no number. It is deliberately the same
+    figure as `MARKETS_FOREGROUND_POLL_MS`, because both answer the same
+    question — how often may this page cost the server something — and at
+    400ms a continuous scroll sends *nothing* and one message goes out after
+    the user stops. That is the whole reason it is debounced: every
+    resubscribe is a gap in the marks, since the stream unsubscribes what
+    left before it subscribes what arrived.
+  - **The diff is ordered, and null means nothing is in force.** The server
+    dedups with `dict.fromkeys` and compares tuples, so a reorder is a change
+    *there*; a client whose idea of "unchanged" is wider than the server's is
+    a client that suppresses a message the server would have acted on. From
+    null only a non-empty list is news, so mounting the page says nothing; a
+    held hint against an emptied viewport *is* news, which is the unmount
+    case. `Markets.tsx` sends `[]` when the page unmounts and never between
+    two pages of the same table — the observer is rebuilt per page of rows,
+    and emptying the hint on a page turn would be a resubscribe for a
+    viewport that never went away.
+  - **A `false` from `sendMarketsVisible` is not recorded as sent.** It means
+    there was no open socket to say it on. A `true` is not an acceptance
+    either — there is no acknowledgement frame — so the record tracks "what
+    reached the socket", and the next genuine settle repeats a hint that did
+    not. A duplicate is cheap: the server answers an identical list
+    `UNCHANGED`, which triggers no re-plan and so costs no marks.
+  - **Payload filtering mirrors the *engine's* validator, not the
+    transport's.** `EQUITY_TICKER` and `OCC_SYMBOL` in `markets.ts` are
+    copies of `_EQUITY_TICKER` (`engine/runtime.py`) and `_OCC_SYMBOL`
+    (`engine/stream.py`), and both are needed: the shortest legal OCC symbol
+    is exactly 16 characters (`A241220C00150000`, a single-letter root), so
+    the width test alone would let one through. Over-wide and OCC-shaped
+    entries are dropped from the list rather than allowed to cost the
+    message, which is applied whole or not at all — and the 64 cap truncates
+    in DOM order for the same reason. A page renders at most `PAGE_SIZE`
+    rows, so the cap is unreachable from the page today and is pinned as a
+    pure test.
+  - **Finding F5 fixed, as (b)'s dispatch asked.** On an `error` frame with
+    code `subscription_refused` the page clears its last-sent record, so a
+    refused hint is no longer believed to be in force and the tier cannot sit
+    silently empty for a session. It does **not** re-send: the next genuine
+    settle does. Nothing else happens — the socket is not torn down, no page
+    error is surfaced, nothing is escalated, and no wider list is tried. A
+    refused hint is one refused message on a live socket, the previous hint
+    stands, and every Markets row is polled at 400ms regardless. The signal
+    is read off `store.lastStreamError`, which (a) already writes.
+  - **No reconnect replay here.** `LiveSocket.onopen` already re-sends the
+    last hint, because the server drops it when the connection that sent it
+    closes; a second replay in the page would be a double send.
+  - **Rule 4, held.** No client-side cap raising, no retry or escalation on a
+    refusal, and the hint never names a position **contract** — structurally,
+    since only the stock table's `tbody` is observed and an OCC symbol is
+    filtered out besides. **It can and does name a position *underlying*, and
+    that is correct rather than a leak:** hold NVDA options with NVDA on the
+    Markets page and the hint names NVDA. `SubscriptionPlan.engine_subscribed`
+    treats a symbol both tiers asked for as engine-owned — *dedup is not a
+    transfer of ownership* — so the client's mention cannot demote it, and
+    scrolling away cannot evict it. An earlier draft of this bullet said the
+    hint "never names a position contract or a position underlying", which is
+    false of the underlying half and worth correcting rather than softening:
+    the property that matters is not that the client stays away from held
+    symbols, it is that naming one buys the client nothing. The subtle one is
+    the rendering rule: **the
+    page does not start trusting the stream for hinted rows.** A symbol with
+    no live entry still renders its polled query row, exactly as before, so a
+    refused hint costs freshness and freezes nothing. If a hinted row's
+    freshness were ever load-bearing for what is on screen, a refusal would
+    freeze a row — which is the failure `SubscriptionPlan.engine_subscribed`
+    exists to prevent, arriving from the client side.
+  - **Left open, deliberately: whether the chain's *underlying* should be
+    hinted while its chain is open.** Its spot price is rendered on the page
+    and the chain is re-priced from it, so on purpose-grounds arguably yes;
+    on this entry's letter the hint is *"the visible rows"*, and the chain
+    table's visible rows are OCC contracts, which this tier refuses by name.
+    The letter-faithful version is what landed: the observer watches the
+    stock table's `tbody` and nothing else, so the chain contributes nothing
+    and a chain-only viewport reports an empty list — the mechanically
+    natural result. The cost either way is freshness only, since the spot is
+    polled with the rest of the stock table. Decide it when the socket is
+    mounted and there is something to measure.
+  - 20 new tests (12 pure in `markets.test.ts`, 8 page-level in
+    `Markets.test.tsx`), and a suite-wide inert `IntersectionObserver` in
+    `web/src/test/setup.ts` — jsdom implements no layout and so ships none,
+    the same gap `scrollIntoView` is stubbed for there, and a
+    `typeof IntersectionObserver === 'undefined'` branch in the page would be
+    production code shaped around the test environment. `Markets.test.tsx`
+    replaces it with a driveable one.
+  - **This does not clear the mount blocker.** Nothing calls
+    `startLiveSocket`, so the hint has no socket to travel on in the running
+    app, and the open question under *(a) landed* — a poll whose stamp is
+    parseable but static losing the price race to a streamed quote forever —
+    still needs its ruling before anything mounts. (b) was never going to
+    clear it: the viewport hint changes no price.
+  - *Follow-ups from (b)'s audit. None blocking, and each is bounded to
+    freshness on rows that are polled at 400ms regardless — recorded rather
+    than fixed, because every one of them costs a slot on the lowest tier
+    and none can reach a held mark.* **WEB-5** the refusal effect clears the
+    sent record to `null`, but the server's real state after a refusal is
+    *the previous hint still stands*; the two beliefs differ in one
+    reachable direction, because with `null` the unmount `[]` is diffed away
+    and the engine keeps `MARKETS_VISIBLE` units for rows on nobody's screen
+    until the socket closes. Reverting to the previous value models the
+    server exactly; `null` is safe-but-imprecise.
+    **WEB-6** `subscription_refused` is not specific to `markets_visible` —
+    `subscribe` refusals carry the same code — so an unrelated refusal
+    clears this page's record. The consequence is one duplicate hint, which
+    the server answers `UNCHANGED` with no re-plan, so it costs nothing; but
+    the effect reacts to a broader signal than it means.
+    **WEB-7** *"never between two pages of the same table"* holds by a
+    timing race rather than by construction: the effect body clears the
+    visible set and schedules unconditionally, and the `[]` is avoided only
+    because the new observer's first delivery beats the 400ms timer. A
+    throttled tab or a long main-thread block sends `[]` and then the new
+    page — two messages and a real resubscribe of that page's rows. The
+    claim is currently made in three places and pinned by none; no test
+    exercises a page turn or a sort change. Pin it before trusting it.
+    **WEB-8** the two mirrored server constants have a **one-way pointer**:
+    the TS names its Python origin, and neither `runtime.py` nor `stream.py`
+    records that a client copy exists. Narrowing `_EQUITY_TICKER` or
+    lowering `MAX_MARKETS_VISIBLE_SYMBOLS` server-side would refuse every
+    hint whole, forever — and WEB's re-send-on-refusal makes it re-send into
+    the same refusal — so the tier would sit empty for the session. Loud on
+    the server (`_refuse` logs rule, inputs and timestamp per refusal) and
+    invisible on the client. The fix is a back-reference comment in the two
+    Python files, not code.
+    **WEB-9** the inert `IntersectionObserver` masks in one direction: a
+    future component that uses it to decide *"is this visible"* takes the
+    never-visible branch forever, so a test asserting **absence** passes
+    vacuously. Without the stub such a failure is loud. Harden by recording
+    constructions, or by throwing unless a test opts in.
 - *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
   debounced client message on the existing WS that names the visible rows and is
   sent only when the set actually differs. The server treats it as input to that
@@ -3119,7 +3260,9 @@ actually on screen.
   `tests/test_hard_rules.py` (all landed),
   `web/src/lib/{liveSocket,liveSocket.test,api,quotes,quotes.test,store,types}.ts`
   — the `/api/ws` browser client, (a), **landed** — and
-  `web/src/pages/Markets.tsx` plus its test, (b), **outstanding**. The mount
+  `web/src/pages/{Markets.tsx,Markets.test.tsx}`,
+  `web/src/lib/{markets,markets.test}.ts`, `web/src/test/setup.ts` — the
+  viewport observer, its debounce and its diff, (b), **landed**. The mount
   (an `App.tsx` call to `startLiveSocket`) is a third piece, deliberately
   not written: see the open question under *(a) landed*.
 

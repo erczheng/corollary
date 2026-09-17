@@ -13,6 +13,11 @@
  * sorts *last in both directions* and renders as an absence — the rule the
  * fund `marketCap` column has always followed, now applied to the columns
  * the live feed turned out to share it with.
+ *
+ * The last section is not about ordering: it is the viewport hint's payload
+ * rules (step 15 (b), decision 18) — normalise, filter, cap, diff. Pure for
+ * the same reason as everything above it, so what the page tells the server
+ * is on screen can be tested without a viewport.
  */
 
 import { type OptionContract, type StockQuote } from './types'
@@ -401,4 +406,103 @@ export function contractMoneyness(
     itm: right === 'call' ? spot > strike : spot < strike,
     distance: Math.abs(spot - strike),
   }
+}
+
+// ---------------------------------------------------------------------- //
+// The viewport hint — step 15 (b), decision 18
+// ---------------------------------------------------------------------- //
+
+/** How long the viewport must sit still before the hint goes out.
+ *
+ * The same figure as `MARKETS_FOREGROUND_POLL_MS`, and for the same reason:
+ * both answer *how often may this page cost the server something*. A
+ * trailing-edge debounce at 400ms means continuous scrolling sends nothing
+ * at all and exactly one message goes out once the user stops — which is
+ * why this is debounced rather than sent per frame. **Every resubscribe is
+ * a gap in the marks**: the stream unsubscribes what left before it
+ * subscribes what arrived, so a hint per scroll event would be a hole in
+ * the equity feed per scroll event.
+ *
+ * Exported and pinned by a test rather than inlined, the way the poll
+ * cadences are — a debounce nobody can name is a debounce nobody can
+ * argue with. */
+export const MARKETS_VIEWPORT_DEBOUNCE_MS = 400
+
+/** The server's bound, mirrored so the client never sends a message that
+ * will be refused whole. `MAX_MARKETS_VISIBLE_SYMBOLS` in
+ * `corollary/engine/runtime.py`.
+ *
+ * **Applied whole or not at all**, which is why this truncates rather than
+ * letting an over-long list go: 65 entries do not cost the 65th, they cost
+ * the hint. Truncating in DOM order keeps the rows nearest the top of the
+ * table, which is where the eye is. */
+export const MAX_MARKETS_VISIBLE_SYMBOLS = 64
+
+/** The engine's `_EQUITY_TICKER`, mirrored: a leading letter then up to 15
+ * more letters, digits or dots (a class share is `BRK.B`). At most 16
+ * characters.
+ *
+ * **There are two validators and the engine's is the narrower one.** The
+ * transport's shape filter admits 32 characters because `subscribe` must
+ * also admit an OCC contract, so a 17-character entry passes the socket and
+ * is refused by the engine — and the refusal is of the *whole* message.
+ * Filtering here means never knowingly sending something the far side will
+ * refuse. Neither regex widens to close that gap; an unvalidated
+ * 17-character string on the equity socket is the thing being prevented. */
+const EQUITY_TICKER = /^[A-Z][A-Z0-9.]{0,15}$/
+
+/** `_OCC_SYMBOL` from `corollary/engine/stream.py`, mirrored.
+ *
+ * Needed *in addition* to the width test, because the shortest possible OCC
+ * symbol is exactly 16 characters — `A241220C00150000` is a single-letter
+ * root and matches the equity shape above. An option contract on the
+ * viewport hint is a caller bug the engine refuses by name, so the chain
+ * table's rows can never reach this message by accident. */
+const OCC_SYMBOL = /^[A-Z][A-Z0-9]{0,5}\d{6}[CP]\d{8}$/
+
+/** Normalise what is on screen into the `markets_visible` payload.
+ *
+ * Upper-cased, de-duplicated with the first occurrence winning, filtered to
+ * things the engine will actually accept, and capped at
+ * {@link MAX_MARKETS_VISIBLE_SYMBOLS}. **Input order is DOM order and is
+ * preserved**, because order is what decides which rows survive both this
+ * cap and the server's prefix cut against the equity budget.
+ *
+ * An empty result is a legitimate payload, not a failure: it is how the
+ * client says *nothing of this table is on screen* — scrolled away, or
+ * navigated off Markets. */
+export function marketsVisibleHint(symbols: Iterable<string>): string[] {
+  const hint: string[] = []
+  const seen = new Set<string>()
+  for (const raw of symbols) {
+    const symbol = raw.trim().toUpperCase()
+    if (!EQUITY_TICKER.test(symbol)) continue
+    if (OCC_SYMBOL.test(symbol)) continue
+    if (seen.has(symbol)) continue
+    seen.add(symbol)
+    hint.push(symbol)
+    if (hint.length === MAX_MARKETS_VISIBLE_SYMBOLS) break
+  }
+  return hint
+}
+
+/** Is this hint news? `sent` is what the client last got onto the socket,
+ * or null for *nothing is believed to be in force*.
+ *
+ * **Ordered, not set-wise**, because the server compares an ordered tuple
+ * (`EngineRuntime.set_markets_visible` dedups with `dict.fromkeys` and then
+ * tests `held == self._markets_visible`), and a client whose idea of
+ * "unchanged" is wider than the server's is a client that suppresses a
+ * message the server would have acted on.
+ *
+ * From null, only a non-empty list is news: an empty hint against a server
+ * that holds none says nothing. The reverse — a held hint against an empty
+ * viewport — is the unmount case and is real news. */
+export function marketsVisibleDiffers(
+  sent: readonly string[] | null,
+  next: readonly string[],
+): boolean {
+  if (sent === null) return next.length > 0
+  if (sent.length !== next.length) return true
+  return sent.some((symbol, i) => symbol !== next[i])
 }

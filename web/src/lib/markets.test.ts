@@ -3,6 +3,8 @@ import {
   CHAIN_LADDER_SORT,
   CHAIN_RANKS,
   CHAIN_RANK_SORT,
+  MARKETS_VIEWPORT_DEBOUNCE_MS,
+  MAX_MARKETS_VISIBLE_SYMBOLS,
   MIN_VOLUME_STEPS,
   STOCK_RANKS,
   STOCK_RANK_SORT,
@@ -11,6 +13,8 @@ import {
   filterChain,
   ivSourceOf,
   latestVolumeDate,
+  marketsVisibleDiffers,
+  marketsVisibleHint,
   relativeVolume,
   searchStocks,
   searchUnderlyings,
@@ -550,5 +554,90 @@ describe('contractMoneyness', () => {
     expect(contractMoneyness(230, 230, 'call').itm).toBe(false)
     expect(contractMoneyness(230, 230, 'put').itm).toBe(false)
     expect(contractMoneyness(230, 230, 'call').distance).toBe(0)
+  })
+})
+
+/** Step 15 (b)'s payload rules, decision 18. The observer and its debounce
+ * are wiring and live in `Markets.tsx`; everything that decides *what may
+ * be sent* and *whether it is news* is here, because a hint the engine
+ * refuses is a hint lost whole. */
+describe('the viewport hint payload', () => {
+  it('debounces at the foreground poll interval', () => {
+    // The same question as the poll — how often may this page cost the
+    // server something — so the same number. A trailing-edge debounce at
+    // 400ms sends nothing while a scroll is in progress and one message
+    // once it stops; every resubscribe is a gap in the marks.
+    expect(MARKETS_VIEWPORT_DEBOUNCE_MS).toBe(400)
+  })
+
+  it('mirrors the engine bound at 64', () => {
+    expect(MAX_MARKETS_VISIBLE_SYMBOLS).toBe(64)
+  })
+
+  it('upper-cases, trims, and keeps DOM order', () => {
+    expect(marketsVisibleHint([' nvda ', 'spy', 'BRK.B'])).toEqual(['NVDA', 'SPY', 'BRK.B'])
+  })
+
+  it('truncates at the bound rather than sending a list refused whole', () => {
+    // The message is applied whole or not at all, so a 65th entry does not
+    // cost the 65th row — it costs the hint. The kept rows are the first
+    // ones in DOM order, which is where the eye is.
+    const many = Array.from({ length: 80 }, (_, i) => `SYM${i}`)
+    const hint = marketsVisibleHint(many)
+    expect(hint).toHaveLength(MAX_MARKETS_VISIBLE_SYMBOLS)
+    expect(hint[0]).toBe('SYM0')
+    expect(hint.at(-1)).toBe('SYM63')
+  })
+
+  it('drops a symbol wider than the engine admits, without dropping the message', () => {
+    // Two validators, and the engine's `_EQUITY_TICKER` (16) is narrower
+    // than the transport's shape filter (32, because `subscribe` must admit
+    // an OCC contract). A 17-character entry passes the socket and is
+    // refused by the engine — and the refusal is of the whole message.
+    expect(marketsVisibleHint(['AAPL', 'ABCDEFGHIJKLMNOPQ', 'NVDA'])).toEqual(['AAPL', 'NVDA'])
+    expect(marketsVisibleHint(['ABCDEFGHIJKLMNOP'])).toEqual(['ABCDEFGHIJKLMNOP'])
+  })
+
+  it('drops an OCC contract, including the 16-character kind', () => {
+    // The chain table's rows are contracts and are not this message. The
+    // long form fails on width; `A241220C00150000` is exactly 16 and a
+    // single-letter root, so it passes the equity shape and has to be
+    // refused on the OCC shape instead.
+    expect(marketsVisibleHint(['NVDA260914C00210000', 'NVDA'])).toEqual(['NVDA'])
+    expect(marketsVisibleHint(['A241220C00150000', 'NVDA'])).toEqual(['NVDA'])
+  })
+
+  it('drops anything that is not a ticker at all', () => {
+    expect(marketsVisibleHint(['', ' ', '1NVDA', 'A B', 'NV-DA', 'NVDA'])).toEqual(['NVDA'])
+  })
+
+  it('de-duplicates, first occurrence winning', () => {
+    expect(marketsVisibleHint(['NVDA', 'nvda', 'SPY'])).toEqual(['NVDA', 'SPY'])
+  })
+
+  it('treats an empty viewport as a legitimate payload', () => {
+    expect(marketsVisibleHint([])).toEqual([])
+  })
+
+  it('says nothing when nothing is in force and nothing is on screen', () => {
+    // Null is "no hint believed to be in force". An empty list against a
+    // server that holds none is not news.
+    expect(marketsVisibleDiffers(null, [])).toBe(false)
+    expect(marketsVisibleDiffers(null, ['NVDA'])).toBe(true)
+  })
+
+  it('reads an emptied viewport against a held hint as news', () => {
+    // The unmount case: leaving Markets is exactly "nothing is on screen".
+    expect(marketsVisibleDiffers(['NVDA'], [])).toBe(true)
+  })
+
+  it('compares ordered, the way the server does', () => {
+    // `EngineRuntime.set_markets_visible` dedups with `dict.fromkeys` and
+    // then compares tuples, so a reorder *is* a change there. A client
+    // whose idea of unchanged is wider than the server's suppresses a
+    // message the server would have acted on.
+    expect(marketsVisibleDiffers(['NVDA', 'SPY'], ['NVDA', 'SPY'])).toBe(false)
+    expect(marketsVisibleDiffers(['NVDA', 'SPY'], ['SPY', 'NVDA'])).toBe(true)
+    expect(marketsVisibleDiffers(['NVDA'], ['NVDA', 'SPY'])).toBe(true)
   })
 })
