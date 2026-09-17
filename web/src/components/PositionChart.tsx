@@ -13,6 +13,7 @@ import { sliceRange } from '../lib/mockData'
 import { type Position } from '../lib/types'
 import { useUIStore } from '../lib/store'
 import { breakevens, maxLoss, maxProfit, payoffCurve } from '../lib/orders'
+import { changeOf, changePctOf } from '../lib/quotes'
 import { formatDateOnly, formatPct, formatUsd, signClass } from '../lib/format'
 
 type ChartMode = 'value' | 'payoff' | 'underlying'
@@ -36,6 +37,30 @@ const AXIS_TICK = { fill: 'var(--on-surface-variant)', fontSize: 12 }
  * **Payoff at expiry** is computed from strikes, premium and the
  * multiplier, so it needs no market data at all and is exactly as true in
  * Phase 1 as it will be in Phase 2. */
+/** The underlying's day, in dollars and percent.
+ *
+ * Both figures are **derived** from the quote's `price` and `previousClose`
+ * by `quotes.ts` — the wire carries the basis and nothing else, so the two
+ * numbers in this cell cannot disagree with the price above them. Taken as
+ * a pair because they are null together: no previous daily bar means nobody
+ * measured the thing the move would be measured from, and a `$0.00` there
+ * would claim the price was unchanged. */
+function DayMove({ change, changePct }: { change: number | null; changePct: number | null }) {
+  if (change === null || changePct === null) {
+    return (
+      <dd className="text-data-md">
+        <span className="text-on-surface-variant">Not measured</span>
+      </dd>
+    )
+  }
+  return (
+    <dd className={`text-data-md ${signClass(change)}`}>
+      {formatUsd(change, { signed: true })}{' '}
+      <span className="text-caption">{formatPct(changePct, { signed: true })}</span>
+    </dd>
+  )
+}
+
 export function PositionChart({ position }: { position: Position }) {
   const [mode, setMode] = useState<ChartMode>('value')
 
@@ -237,18 +262,10 @@ export function PositionChart({ position }: { position: Position }) {
             <dt className="text-on-surface-variant">Today</dt>
             {/* Sign carried textually as well as by colour, on both
                 figures — the rule that applies to every P&L here. */}
-            <dd className={`text-data-md ${signClass(underlying.change ?? 0)}`}>
-              {underlying.change === null || underlying.changePct === null ? (
-                <span className="text-on-surface-variant">Not measured</span>
-              ) : (
-                <>
-                  {formatUsd(underlying.change, { signed: true })}{' '}
-                  <span className="text-caption">
-                    {formatPct(underlying.changePct, { signed: true })}
-                  </span>
-                </>
-              )}
-            </dd>
+            {/* Derived from `price` and `previousClose`, never read off the
+                quote: the wire carries the basis and the move is a read-time
+                selector, so the two figures in this card cannot disagree. */}
+            <DayMove change={changeOf(underlying)} changePct={changePctOf(underlying)} />
           </div>
           <div>
             <dt className="text-on-surface-variant">Previous close</dt>

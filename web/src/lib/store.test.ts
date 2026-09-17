@@ -4,6 +4,7 @@ import { ACCOUNT_SNAPSHOTS, CHAT_HISTORY, NOTIFICATIONS, RISK_LIMITS } from './m
 import type { OrderDraft } from './orders'
 import { unreadCount, visibleNotifications } from './notifications'
 import { notificationAuditField } from './settings'
+import { changeOf, liveFromStockQuote } from './quotes'
 
 const initialState = useUIStore.getState()
 
@@ -302,11 +303,13 @@ describe('the price tick', () => {
       // daily close being appended every two seconds.
       expect(after[symbol].history).toHaveLength(before[symbol].history.length)
       expect(after[symbol].history[after[symbol].history.length - 1].value).toBe(after[symbol].price)
-      // The day is still measured from yesterday's close.
-      // `as number` rather than a null check: the fixture always carries a
-      // previous close, and the wire type allows null because a real
-      // snapshot need not.
-      expect(after[symbol].change).toBeCloseTo(
+      // The day is still measured from yesterday's close — and it is
+      // *derived*, never stored, so the walk moves the price and the basis
+      // stays put. `as number` rather than a null check: the fixture always
+      // carries a previous close, and the wire type allows null because a
+      // real snapshot need not.
+      expect(after[symbol].previousClose).toBe(before[symbol].previousClose)
+      expect(changeOf(after[symbol])).toBeCloseTo(
         after[symbol].price - (after[symbol].previousClose as number),
         2,
       )
@@ -567,7 +570,7 @@ describe('pollMarkets', () => {
   it('keeps the day change anchored to yesterday, not to the last poll', () => {
     useUIStore.getState().pollMarkets(2_000)
     for (const q of Object.values(useUIStore.getState().underlyings)) {
-      expect(q.change).toBeCloseTo(q.price - (q.previousClose as number), 2)
+      expect(changeOf(q)).toBeCloseTo(q.price - (q.previousClose as number), 2)
     }
   })
 
@@ -1139,3 +1142,72 @@ describe('chat history', () => {
     for (const m of s.chat) expect(archivedIds.has(m.id)).toBe(false)
   })
 })
+
+/** Decision 18's client half. The merge itself is `quotes.ts` and is tested
+ * there without a store; these are the three store facts: the map starts
+ * empty, each writer reaches it, and neither of them touches the Phase 1
+ * fixture map beside it. */
+describe('the live quote map', () => {
+  it('is empty on a cold start, so a never-quoted symbol has no price', () => {
+    expect(useUIStore.getState().quotes).toEqual({})
+  })
+
+  it('is not the fixture map, and no writer disturbs that map', () => {
+    const before = useUIStore.getState().underlyings
+
+    useUIStore.getState().applyStreamedQuote('AAPL', 101, '2026-09-16T14:30:00Z')
+    useUIStore.getState().applyPolledQuotes([
+      liveFromStockQuote({
+        symbol: 'AAPL',
+        name: 'Apple Inc.',
+        price: 99,
+        at: '2026-09-16T14:29:00Z',
+        previousClose: 100,
+        volume: 10,
+        volumeSession: 'in_progress',
+        volumeDate: '2026-09-16',
+        avgVolume: 20,
+        marketCap: 3_000,
+      }),
+    ])
+
+    // `underlyings` ships pre-seeded with invented prices; writing real
+    // quotes into it would make a never-polled symbol indistinguishable
+    // from a quoted one.
+    expect(useUIStore.getState().underlyings).toBe(before)
+    expect(useUIStore.getState().quotes.AAPL.price).not.toBe(before.AAPL?.price)
+  })
+
+  it('merges both writers into one entry, stream price over a stale poll', () => {
+    useUIStore.getState().applyStreamedQuote('AAPL', 101, '2026-09-16T14:30:00Z')
+    useUIStore.getState().applyPolledQuotes([
+      liveFromStockQuote({
+        symbol: 'AAPL',
+        name: 'Apple Inc.',
+        price: 99,
+        at: '2026-09-16T14:29:00Z',
+        previousClose: 100,
+        volume: 10,
+        volumeSession: 'in_progress',
+        volumeDate: '2026-09-16',
+        avgVolume: 20,
+        marketCap: 3_000,
+      }),
+    ])
+
+    const quote = useUIStore.getState().quotes.AAPL
+    expect(quote.price).toBe(101)
+    expect(quote.source).toBe('stream')
+    // The stale poll lost the price and kept everything else.
+    expect(quote.marketCap).toBe(3_000)
+    expect(quote.previousClose).toBe(100)
+  })
+
+  it('markPolled stamps the poll and only the poll', () => {
+    useUIStore.getState().markPolled('2026-09-16T14:30:00Z')
+
+    expect(useUIStore.getState().lastPollAt).toBe('2026-09-16T14:30:00Z')
+    expect(useUIStore.getState().lastTickAt).toBeNull()
+  })
+})
+

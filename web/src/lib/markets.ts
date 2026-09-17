@@ -254,7 +254,23 @@ export function relativeVolume(s: StockQuote): number | null {
   return s.volume / s.avgVolume
 }
 
-export function sortStocks(stocks: StockQuote[], sort: StockSort): StockQuote[] {
+/** What `sortStocks` needs beyond a wire row: the day's move, derived.
+ *
+ * `change` and `changePct` are **not** on `StockQuote` — the wire carries
+ * `price` and `previousClose`, and rule 4 derives the pair at read time in
+ * `quotes.ts`. So the sort is constrained to a row that has already been
+ * through that derivation (`LiveStockRow`), which is also the row the table
+ * renders. Sorting the wire row and rendering the merged one is how a column
+ * ends up ordered by a number that is not the one on screen. */
+export type SortableStock = StockQuote & {
+  change: number | null
+  changePct: number | null
+}
+
+/** Generic over the row rather than fixed to one type, so that the table's
+ * rendered rows keep their own type through the sort. Never in place: every
+ * view reads the same array. */
+export function sortStocks<T extends SortableStock>(stocks: readonly T[], sort: StockSort): T[] {
   const rows = [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol))
 
   if (sort.key === 'relVolume') {
@@ -300,9 +316,9 @@ export function stockRankFor(sort: StockSort): StockRank | null {
 /** Substring match over symbol and name, for the stock search. Both,
  * because half the reason to search a screener is that you know the company
  * and not the ticker — "reddit" should find RDDT. */
-export function searchStocks(stocks: StockQuote[], query: string): StockQuote[] {
+export function searchStocks<T extends StockQuote>(stocks: readonly T[], query: string): T[] {
   const q = query.trim().toLowerCase()
-  if (q === '') return stocks
+  if (q === '') return [...stocks]
   return stocks.filter(
     (s) => s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q),
   )
@@ -333,7 +349,7 @@ export type VolumeBasis = 'partial' | 'session' | 'stale' | 'absent'
  * lexicographically, so this is a max over what the server said, and it
  * stays correct on a weekend, a holiday, and at 09:31 when half the table
  * has printed and half has not. */
-export function latestVolumeDate(stocks: StockQuote[]): string | null {
+export function latestVolumeDate(stocks: readonly StockQuote[]): string | null {
   let latest: string | null = null
   for (const s of stocks) {
     // `!= null`, not `!== null`: an older server omits the key entirely, and

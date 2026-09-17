@@ -171,24 +171,47 @@ def test_the_price_is_the_quote_mid_and_it_is_exact(
     assert Decimal(str(table["NVDA"]["price"])) == expected
 
 
-def test_the_change_is_measured_from_the_previous_close(
+def test_the_previous_close_is_yesterdays_settle_not_a_point_of_the_series(
     make_market_client: MarketClient,
 ) -> None:
     """Yesterday's settle, never the first point of a series.
 
-    NVDA is *down* 5.95 on this recording. A change measured from anything
-    else would still look like a plausible number.
+    This was ``test_the_change_is_measured_from_the_previous_close``, which
+    asserted the ``change`` the row used to carry. Decision 18 took that
+    field off the wire -- two writers storing a price and a change
+    independently is how a row reports +1.2% beside a price that moved the
+    other way -- so the subtraction now happens in ``quotes.ts``'s
+    ``changeOf``, pinned there. **The basis is still the server's to get
+    right, and that is what this asserts.**
+
+    NVDA is *down* 5.95 on this recording, and the reason the guard is worth
+    keeping is that every wrong basis here yields a plausible-looking
+    number: the series opens at 206.64, closes at 225.16, and today's
+    partial bar is at 217.90. Anchored to any of those the row would report
+    a confident move that nothing downstream could flag. Only 223.77 is
+    yesterday's settle.
     """
     client, _ = make_market_client(market_data_routes())
     snapshot = fixture("stock_snapshots")["NVDA"]
     quote = snapshot["latestQuote"]
     price = (Decimal(str(quote["bp"])) + Decimal(str(quote["ap"]))) / 2
     previous = Decimal(str(snapshot["prevDailyBar"]["c"]))
+    series = fixture("stock_bars_daily")["bars"]["NVDA"]
 
     row = by_symbol(rows(client, "/api/markets/stocks", symbols="NVDA"))["NVDA"]
+    served = Decimal(str(row["previousClose"]))
 
-    assert Decimal(str(row["change"])) == price - previous
-    assert Decimal(str(row["changePct"])) == Decimal("-2.66")
+    assert served == previous
+    # The three plausible wrong answers, each excluded by name.
+    assert served != Decimal(str(series[0]["c"]))
+    assert served != Decimal(str(series[-1]["c"]))
+    assert served != Decimal(str(snapshot["dailyBar"]["c"]))
+    # And the move the client will derive from it is the recorded one.
+    assert price - served == Decimal("-5.95")
+
+    # The field the client derives is not on the wire, and must not come back.
+    assert "change" not in row
+    assert "changePct" not in row
 
 
 def test_average_volume_counts_completed_sessions_only(

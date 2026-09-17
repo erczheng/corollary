@@ -1970,7 +1970,10 @@ def _log_unpriced(symbols: Sequence[str], *, route: str) -> None:
 # --------------------------------------------------------------------------
 
 
-@router.get("/stocks", summary="The stock table: price, change, volume, relative volume")
+@router.get(
+    "/stocks",
+    summary="The stock table: price, previous close, volume, relative volume",
+)
 async def stocks(
     provider: ProviderDep,
     fundamentals: FundamentalsDep,
@@ -2007,9 +2010,11 @@ async def stocks(
     :func:`_volume_reading`, which also keeps that session out of its own
     average.
 
-    Every column that can be absent is served as ``null``: no previous close
-    means no change, no daily bar anywhere in the window means no volume and
-    no session to name, fewer than two sessions means no average. The one
+    Every column that can be absent is served as ``null``: a name with no
+    prior session has no previous close and the client's change selector
+    then has nothing to measure from, no daily bar anywhere in the window
+    means no volume and no session to name, fewer than two sessions means
+    no average. The one
     absence handled by omission instead is a symbol with no price at all --
     it is dropped and logged.
     """
@@ -2084,8 +2089,11 @@ async def stocks(
                 name=UNIVERSE_BY_SYMBOL[symbol].name,
                 price=price,
                 at=spot.at,
-                change=_change(price, previous),
-                change_pct=_change_pct(price, previous),
+                # The basis, not the result. Decision 18's rule 4 derives the
+                # change in a client selector; serving the subtraction's
+                # answer instead would make the client recover this by
+                # subtracting again, through two more IEEE roundings.
+                previous_close=previous,
                 volume=measured.volume,
                 volume_session=measured.state,
                 volume_date=measured.session,
@@ -2251,8 +2259,6 @@ async def underlyings(
                 price=price,
                 at=spot.at,
                 previous_close=previous,
-                change=_change(price, previous),
-                change_pct=_change_pct(price, previous),
                 history=history,
                 intraday=intraday,
             )

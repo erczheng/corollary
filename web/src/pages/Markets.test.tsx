@@ -13,14 +13,22 @@ import type { AccountResponse, OptionContract, RiskLimit, StockQuote } from '../
  * the nulls, which are the point: a live chain has no bid on roughly half
  * its contracts, a fund has no market capitalisation, and open interest is
  * absent wherever the vendor did not carry it (decision 15).
+ *
+ * **The stock rows carry `previousClose` and no change**, because the wire
+ * does not carry one any more (decision 18, rule 4): a change is derived
+ * from the price on screen by `changeOf` / `changePctOf`, so the two
+ * numbers cannot disagree. These fixtures are the basis and the price; the
+ * moves quoted in the comments are what the table derives from them.
  */
 const STOCKS: StockQuote[] = [
   {
     symbol: 'NVDA',
     name: 'NVIDIA Corp.',
     price: 218.17,
-    change: -0.2,
-    changePct: -0.09,
+    at: '2026-08-07T19:45:00Z',
+    // 218.17 − 218.37 = −0.20, −0.09% — down on the day, as the recording
+    // this fixture came from was.
+    previousClose: 218.37,
     // Still running: this is what has traded so far today.
     volume: 120_000_000,
     volumeSession: 'in_progress',
@@ -32,8 +40,12 @@ const STOCKS: StockQuote[] = [
     symbol: 'SPY',
     name: 'SPDR S&P 500 ETF Trust',
     price: 764.285,
-    change: 6.415,
-    changePct: 0.85,
+    at: '2026-08-07T19:45:00Z',
+    // 764.285 − 757.87 = +6.415, +0.85%. The half-cent is deliberate and is
+    // the case `changeOf`'s snap exists for: in doubles the subtraction
+    // yields 6.414999999999964, which would render `+$6.41` where the exact
+    // figure renders `+$6.42`.
+    previousClose: 757.87,
     // A finished session, and the most recent one on the table.
     volume: 40_000_000,
     volumeSession: 'completed',
@@ -46,9 +58,10 @@ const STOCKS: StockQuote[] = [
     symbol: 'RDDT',
     name: 'Reddit Inc.',
     price: 200,
-    // No prior daily bar: there is no move to state.
-    change: null,
-    changePct: null,
+    at: '2026-08-07T19:45:00Z',
+    // No prior daily bar: no basis, so there is no move to state. Null,
+    // never 0 — a `+$0.00` would claim the price was unchanged.
+    previousClose: null,
     // Completed, but a week behind everyone else — this symbol stopped
     // printing and the column has to say so.
     volume: 5_000_000,
@@ -61,8 +74,13 @@ const STOCKS: StockQuote[] = [
     symbol: 'ZZZ',
     name: 'Quiet Holdings',
     price: 5,
-    change: 1,
-    changePct: 2,
+    at: '2026-08-07T19:45:00Z',
+    // 5 − 4 = +1.00, +25.00%. The pair this replaced was `change: 1,
+    // changePct: 2` on a price of 5, which no previous close can produce:
+    // +$1.00 on a $5 stock is +25%, not +2%. Nothing caught it because the
+    // two fields were stored independently — exactly the drift rule 4
+    // removes by deriving both from one basis.
+    previousClose: 4,
     // No daily bar anywhere in the window. Not a zero.
     volume: null,
     volumeSession: null,
@@ -604,3 +622,48 @@ describe('the foreground cadence', () => {
     expect(stocksReads() - before).toBeGreaterThanOrEqual(3)
   })
 })
+
+/** Decision 18's rule 4 at the page level. The merge is `quotes.ts`'s and is
+ * tested there; what this pins is that the table reads *through* it — that
+ * a pushed price reaches the screen and the change beside it is recomputed
+ * from that price rather than read off the poll's response, which is how a
+ * row ends up reporting +1.2% beside a price that is down. */
+describe('the stock table renders the merged quote, not the wire row', () => {
+  it('shows a streamed price and a change derived from it', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    // A push, stamped later than the poll's observation, so rule 2 takes it.
+    act(() => {
+      useUIStore.getState().applyStreamedQuote('NVDA', 220, '2026-08-07T19:46:00Z')
+    })
+
+    const row = rowFor(stockTable(), 'NVDA')
+    // The basis is the poll's `previousClose`, 218.37, and it does not move
+    // when a price is pushed over it: 220.00 − 218.37 = +1.63, +0.75%. Read
+    // off the poll's own price it would still say −$0.20, beside a price
+    // that is up — which is the disagreement rule 4 exists to prevent.
+    expect(cellText(row, 2)).toBe('$220.00')
+    expect(cellText(row, 3)).toBe('+$1.63')
+    expect(cellText(row, 4)).toBe('+0.75%')
+  })
+
+  /** The served row has no previous daily bar. A derived change must stay
+   * absent rather than become a flat day the moment a price is pushed over
+   * it — a `+$0.00` in a column of dollars claims the price is unchanged. */
+  it('keeps an unmeasurable change unmeasurable under a streamed price', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    act(() => {
+      useUIStore.getState().applyStreamedQuote('RDDT', 210, '2026-08-07T19:46:00Z')
+    })
+
+    const row = rowFor(stockTable(), 'RDDT')
+    expect(cellText(row, 2)).toBe('$210.00')
+    expect(cellText(row, 3)).toContain('—')
+  })
+})
+

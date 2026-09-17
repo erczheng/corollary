@@ -27,9 +27,8 @@ function quote(parts: Partial<UnderlyingQuote> = {}): UnderlyingQuote {
   return {
     symbol: 'NVDA',
     price: 184.2,
+    at: '2026-08-07T19:45:00Z',
     previousClose: 181.0,
-    change: 3.2,
-    changePct: 1.77,
     history: [],
     intraday: [],
     ...parts,
@@ -291,8 +290,6 @@ describe('UnderlyingChart', () => {
             symbol: 'NVDA',
             price: 184.2,
             previousClose: 181,
-            change: 3.2,
-            changePct: 1.77,
             history: closes(20),
           },
         ]),
@@ -330,8 +327,6 @@ describe('UnderlyingChart', () => {
             symbol: 'NVDA',
             price: 184.2,
             previousClose: 181,
-            change: 3.2,
-            changePct: 1.77,
             history: closes(20),
           },
         ]),
@@ -356,8 +351,6 @@ describe('UnderlyingChart', () => {
             symbol: 'NVDA',
             price: 184.2,
             previousClose: 181,
-            change: 3.2,
-            changePct: 1.77,
             history: closes(20),
           },
         ]),
@@ -378,7 +371,7 @@ describe('UnderlyingChart', () => {
       // cannot read a series out of, and the two must not share wording.
       stubUnderlyings(() =>
         jsonResponse(200, [
-          { symbol: 'NVDA', price: 184.2, previousClose: 181, change: 3.2, changePct: 1.77 },
+          { symbol: 'NVDA', price: 184.2, previousClose: 181 },
         ]),
       )
       renderChart()

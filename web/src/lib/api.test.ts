@@ -454,9 +454,8 @@ function quoteWith(parts: Partial<UnderlyingQuote>): UnderlyingQuote {
   return {
     symbol: 'AAPL',
     price: 232.1,
+    at: '2026-08-07T19:45:00Z',
     previousClose: 230.0,
-    change: 2.1,
-    changePct: 0.91,
     history: [],
     intraday: [],
     ...parts,

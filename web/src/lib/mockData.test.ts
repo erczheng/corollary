@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { changeOf, changePctOf } from './quotes'
 import {
   ACCOUNT_SNAPSHOTS,
   BENCHMARK_HISTORY,
@@ -312,7 +313,7 @@ describe('the option chain is pinned and internally consistent', () => {
       const rows = OPTION_CHAIN.filter((c) => c.symbol === symbol && c.expiration === '2026-08-21')
       const calls = rows.filter((c) => c.type === 'call')
       const puts = rows.filter((c) => c.type === 'put')
-      const up = (UNDERLYINGS[symbol].change as number) > 0
+      const up = (changeOf(UNDERLYINGS[symbol]) as number) > 0
 
       expect(calls.every((c) => (up ? c.change > 0 : c.change < 0))).toBe(true)
       expect(puts.every((c) => (up ? c.change < 0 : c.change > 0))).toBe(true)
@@ -340,8 +341,10 @@ describe('the stock universe covers what the Markets table renders', () => {
     // that reaches them.
     expect(STOCKS.some((s) => s.marketCap === null)).toBe(true)
     expect(STOCKS.some((s) => s.marketCap !== null && s.marketCap > 0)).toBe(true)
-    expect(STOCKS.some((s) => s.changePct > 0)).toBe(true)
-    expect(STOCKS.some((s) => s.changePct < 0)).toBe(true)
+    // The day is derived, never stored — `quotes.ts` owns the arithmetic
+    // and the fixtures carry only the basis it measures from.
+    expect(STOCKS.some((s) => (changePctOf(s) ?? 0) > 0)).toBe(true)
+    expect(STOCKS.some((s) => (changePctOf(s) ?? 0) < 0)).toBe(true)
   })
 
   it('never prices a stock differently from the quote the rest of the app reads', () => {
@@ -351,8 +354,9 @@ describe('the stock universe covers what the Markets table renders', () => {
       const quote = UNDERLYINGS[s.symbol]
       if (!quote) continue
       expect(s.price).toBe(quote.price)
-      expect(s.change).toBe(quote.change)
-      expect(s.changePct).toBe(quote.changePct)
+      expect(s.previousClose).toBe(quote.previousClose)
+      expect(changeOf(s)).toBe(changeOf(quote))
+      expect(changePctOf(s)).toBe(changePctOf(quote))
     }
   })
 

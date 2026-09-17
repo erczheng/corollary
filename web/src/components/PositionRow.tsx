@@ -6,6 +6,7 @@ import { useUIStore } from '../lib/store'
 import { formatStrategyName, formatPct, formatUsd, signClass } from '../lib/format'
 import { TIME_IN_FORCE_LABEL, type Position } from '../lib/types'
 import { daysToExpiry, expiryUrgency, isMultiLeg, type TicketMode } from '../lib/orders'
+import { changeOf, changePctOf } from '../lib/quotes'
 import { formatExpiry, marketToday } from '../lib/format'
 
 const CELL = 'px-3 py-1 text-right text-data-md text-on-surface'
@@ -180,6 +181,8 @@ export function PositionRow({
   const openedBy = strategies.find((s) => s.id === position.openedByStrategyId)
   const openedByName = openedBy ? formatStrategyName(openedBy.name) : null
   const underlying = useUIStore((s) => s.underlyings[position.symbol]) ?? null
+  const underlyingChange = underlying === null ? null : changeOf(underlying)
+  const underlyingChangePct = underlying === null ? null : changePctOf(underlying)
   const dte = daysToExpiry(position.expiry, marketToday())
   const urgency = expiryUrgency(position, marketToday())
 
@@ -275,11 +278,12 @@ export function PositionRow({
                 <span className="text-data-md text-on-surface">
                   {formatUsd(underlying?.price ?? position.underlying)}
                 </span>
-                {underlying && underlying.change !== null && underlying.changePct !== null && (
-                  <span className={`ml-2 text-data-md ${signClass(underlying.change)}`}>
-                    {formatUsd(underlying.change, { signed: true })}{' '}
+                {/* Derived, not served — `quotes.ts#changeOf`. */}
+                {underlyingChange !== null && underlyingChangePct !== null && (
+                  <span className={`ml-2 text-data-md ${signClass(underlyingChange)}`}>
+                    {formatUsd(underlyingChange, { signed: true })}{' '}
                     <span className="text-caption">
-                      {formatPct(underlying.changePct, { signed: true })} today
+                      {formatPct(underlyingChangePct, { signed: true })} today
                     </span>
                   </span>
                 )}

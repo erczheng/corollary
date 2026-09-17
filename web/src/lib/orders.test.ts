@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { ACCOUNT_SNAPSHOTS, MARKET_TODAY, UNDERLYINGS } from './mockData'
 import { type Position } from './types'
+import { changeOf } from './quotes'
 import {
   MULTI_LEG_NOTE,
   availableOrderTypes,
@@ -432,7 +433,7 @@ describe('fixtures are internally consistent', () => {
       const previousClose = u.previousClose
       expect(previousClose).not.toBeNull()
       expect(previousClose).toBe(u.history[u.history.length - 2].value)
-      expect(u.change).toBeCloseTo(u.price - (previousClose as number), 2)
+      expect(changeOf(u)).toBeCloseTo(u.price - (previousClose as number), 2)
     }
   })
 

@@ -7,6 +7,8 @@ import {
   MARKETS_FOREGROUND_POLL_MS,
   useMarketPoll,
 } from './useMarketPoll'
+import { useUIStore } from '../lib/store'
+import type { StockQuote } from '../lib/types'
 
 /** Decision 18's three states, and the one number the server shares.
  *
@@ -253,5 +255,77 @@ describe('foreground superseding background', () => {
     expect(fetchMock).toHaveBeenCalledTimes(after + 1)
 
     background.unmount()
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * The poll writer — decision 18
+ * ---------------------------------------------------------------------- */
+
+const ROW: StockQuote = {
+  symbol: 'AAPL',
+  name: 'Apple Inc.',
+  price: 101.5,
+  at: '2026-09-16T14:30:00Z',
+  previousClose: 100.0,
+  volume: 1_000,
+  volumeSession: 'in_progress',
+  volumeDate: '2026-09-16',
+  avgVolume: 2_000,
+  marketCap: 3_000,
+}
+
+describe('the poll writes the live quote map', () => {
+  beforeEach(() => {
+    useUIStore.setState({ quotes: {}, lastPollAt: null })
+  })
+
+  it('merges the rows it read and stamps the poll', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse([ROW]))),
+    )
+    renderHook(() => useMarketPoll(MARKETS_FOREGROUND_POLL_MS), { wrapper: wrapper() })
+    await advance(0)
+
+    const state = useUIStore.getState()
+    expect(state.quotes.AAPL.price).toBe(101.5)
+    expect(state.quotes.AAPL.at).toBe('2026-09-16T14:30:00Z')
+    // The call site knows which writer it is; the server does not assert it.
+    expect(state.quotes.AAPL.source).toBe('poll')
+    // Read off the wire, never reconstructed. `ROW` carries `previousClose`
+    // and no change at all: deriving the basis as `price - change` was three
+    // IEEE roundings deep and rendered the wrong cent on ~48% of half-cent
+    // rows. This assertion is what stops that coming back.
+    expect(state.quotes.AAPL.previousClose).toBe(100)
+    expect(state.lastPollAt).not.toBeNull()
+  })
+
+  /** Same reason `dataUpdatedAt` only advances on success: `lastPollAt`
+   * answers *"is the poll alive"*, and a failed read that stamped would
+   * answer it wrongly in the one direction that matters. */
+  it('does not stamp a failed read, and writes no prices from it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) } as unknown as Response)),
+    )
+    renderHook(() => useMarketPoll(MARKETS_FOREGROUND_POLL_MS), { wrapper: wrapper() })
+    await advance(0)
+
+    expect(useUIStore.getState().lastPollAt).toBeNull()
+    expect(useUIStore.getState().quotes).toEqual({})
+  })
+
+  /** `lastTickAt` is the *stream's* question. Collapsing the two would let
+   * a healthy poll vouch for a dead socket. */
+  it('leaves lastTickAt alone', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse([ROW]))),
+    )
+    renderHook(() => useMarketPoll(MARKETS_FOREGROUND_POLL_MS), { wrapper: wrapper() })
+    await advance(0)
+
+    expect(useUIStore.getState().lastTickAt).toBeNull()
   })
 })

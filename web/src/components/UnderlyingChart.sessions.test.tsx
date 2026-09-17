@@ -65,9 +65,8 @@ function quote(parts: Partial<UnderlyingQuote> = {}): UnderlyingQuote {
   return {
     symbol: 'NVDA',
     price: 184.2,
+    at: '2026-08-07T19:45:00Z',
     previousClose: null,
-    change: 3.2,
-    changePct: 1.77,
     history: [],
     intraday: [],
     ...parts,

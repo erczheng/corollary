@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { Pagination } from '../components/Pagination'
 import { RefreshButton } from '../components/RefreshButton'
 import { RequestFailed } from '../components/RequestFailed'
@@ -15,7 +15,8 @@ import {
 import { useUIStore } from '../lib/store'
 import { useAccount, useChain, useStocks } from '../lib/queries'
 import { isAccountUnavailable, isApiError } from '../lib/api'
-import { type OptionContract, type StockQuote } from '../lib/types'
+import { type OptionContract } from '../lib/types'
+import { liveStockRows, type LiveStockRow } from '../lib/quotes'
 import {
   CHAIN_DEFAULT_DIRECTION,
   CHAIN_LADDER_SORT,
@@ -588,7 +589,10 @@ function StocksAndEtfs({
   error,
   onViewChain,
 }: {
-  stocks: StockQuote[]
+  /** Rendered rows, not wire rows: the live price merged in and the change
+   * derived from it — decision 18's rule 4. Nothing below reads a change
+   * off the response. */
+  stocks: LiveStockRow[]
   /** No snapshot **yet** — the first read is still in flight. */
   loading: boolean
   /** No snapshot **ever**: a cold failure, with nothing to put on screen.
@@ -705,6 +709,12 @@ function StocksAndEtfs({
                         <span className="block truncate">{s.name}</span>
                       </td>
                       <td className={TD_NUM}>{formatUsd(s.price)}</td>
+                      {/* Derived, not served: `s` is a `LiveStockRow`, so
+                          both of these were computed from the price in the
+                          cell above and the previous close behind it
+                          (`changeOf` / `changePctOf`). Reading them off the
+                          response instead is how a row reports +1.2% beside
+                          a price that is down. */}
                       <SignedCell value={s.change} reason={NO_PREVIOUS_CLOSE} />
                       <SignedCell value={s.changePct} percent reason={NO_PREVIOUS_CLOSE} />
                       {/* Compact, unlike the chain's volume: nine digits of
@@ -841,7 +851,18 @@ export function Markets() {
   // enforces the limit; this number informs.
   const accountQuery = useAccount()
 
-  const stocks = stocksQuery.data ?? []
+  // **The live merge, decision 18.** The response is the row; the live quote
+  // map is whatever a writer has since reported about it. A symbol with no
+  // entry renders the response's own price — not a fixture, and not a blank —
+  // and the change beside any price is *derived* from it rather than read off
+  // the wire, so the two can never disagree inside one row. Sorting runs on
+  // these merged rows for the same reason: a column ordered by a number that
+  // is not the one on screen is a column that lies about its own ranking.
+  const quotes = useUIStore((s) => s.quotes)
+  const stocks = useMemo(
+    () => liveStockRows(stocksQuery.data ?? [], quotes),
+    [stocksQuery.data, quotes],
+  )
   const symbols = underlyingSymbols(stocks)
 
   // **A failed poll is staleness; only a cold failure is a failure.**

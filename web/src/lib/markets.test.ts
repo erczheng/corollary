@@ -20,9 +20,11 @@ import {
   underlyingSymbols,
   volumeBasis,
   type ChainSortKey,
+  type SortableStock,
   type StockSortKey,
 } from './markets'
 import { OPTION_CHAIN, STOCKS } from './mockData'
+import { changeOf, changePctOf } from './quotes'
 import { type OptionContract, type StockQuote } from './types'
 
 const CHAIN_KEYS: ChainSortKey[] = [
@@ -58,11 +60,17 @@ function contract(over: Partial<OptionContract>): OptionContract {
   }
 }
 
-function stock(over: Partial<StockQuote>): StockQuote {
+/** A **derived** row, not a wire row: `change` and `changePct` are not on
+ * `StockQuote` any more — the wire carries `previousClose` and `quotes.ts`
+ * derives the pair at read time — and `sortStocks` sorts the derived shape
+ * because that is the shape the table renders. */
+function stock(over: Partial<SortableStock>): SortableStock {
   return {
     symbol: 'AAPL',
     name: 'Apple Inc.',
     price: 100,
+    at: '2026-08-07T19:45:00Z',
+    previousClose: 99,
     change: 1,
     changePct: 1,
     volume: 1_000_000,
@@ -243,7 +251,7 @@ describe('sortStocks', () => {
     ]
 
     for (const key of STOCK_KEYS) {
-      const read = (s: StockQuote) =>
+      const read = (s: SortableStock) =>
         (key === 'relVolume' ? relativeVolume(s) : s[key]) as number
       expect(sortStocks(rows, { key, direction: 'descending' }).map(read)).toEqual(
         rows.map(read).sort((a, b) => b - a),
@@ -304,9 +312,16 @@ describe('sortStocks', () => {
 
   it('never reorders the universe in place, and never drops a symbol', () => {
     const before = STOCKS.map((s) => s.symbol)
+    // The fixtures are wire rows; the table sorts the derived rows, so the
+    // day is derived here exactly as `liveStockRows` derives it.
+    const derived = STOCKS.map((s) => ({
+      ...s,
+      change: changeOf(s),
+      changePct: changePctOf(s),
+    }))
 
     for (const key of STOCK_KEYS) {
-      expect(sortStocks(STOCKS, { key, direction: 'descending' })).toHaveLength(STOCKS.length)
+      expect(sortStocks(derived, { key, direction: 'descending' })).toHaveLength(STOCKS.length)
     }
 
     expect(STOCKS.map((s) => s.symbol)).toEqual(before)

@@ -284,6 +284,15 @@ export interface Position {
 export interface UnderlyingQuote {
   symbol: string
   price: number
+  /** The **vendor's** observation timestamp for `price` — the quote, print
+   * or daily bar the number came from, never a clock on this side of the
+   * wire. ISO-8601 with a `Z`, aware UTC, straight from the server.
+   *
+   * Decision 18's rule 1: one quote map, two writers (this poll and the
+   * websocket), and without a stamp the last arrival wins — which on a
+   * 400ms poll racing a push means the screen flickers backwards in time.
+   * `quotes.ts` merges on it. */
+  at: string
   /** Yesterday's close. The daily change is measured from here, not from
    * the first point of the series — a 60-session chart's left edge is two
    * months ago and "today" measured against it is not today.
@@ -293,10 +302,6 @@ export interface UnderlyingQuote {
    * close nobody measured invents the entire move, so this stays null and
    * the chart's readout says so instead. */
   previousClose: number | null
-  /** Null exactly where `previousClose` is: with nothing to measure the move
-   * from there is no move, and a 0.00 would claim the price was unchanged. */
-  change: number | null
-  changePct: number | null
   /** Daily closes, oldest first, ending at today's live price. Served when
    * the request asks for `timeframe=1D` — the default — and **empty at every
    * other timeframe**, where `intraday` carries the series instead. */
@@ -574,10 +579,27 @@ export interface StockQuote {
   symbol: string
   name: string
   price: number
-  /** Null where there is no previous daily bar to measure from. Never 0 —
-   * unchanged and unknown are different facts in a column of dollars. */
-  change: number | null
-  changePct: number | null
+  /** The **vendor's** observation timestamp for `price`, exactly as on
+   * {@link UnderlyingQuote.at} and from the same server-side helper. This is
+   * the payload the shared quote map is polled from, so this is the stamp
+   * decision 18's rule 2 orders a poll against a push on. */
+  at: string
+  /** Yesterday's close — the **basis**, and the only form the daily move
+   * takes on this wire. Rule 4 derives `change` and `changePct` from it at
+   * read time (`changeOf` / `changePctOf` in `quotes.ts`), because two
+   * writers storing a price and a change independently is how a row reports
+   * +1.2% beside a price that is down.
+   *
+   * It is served rather than recovered as `price - change` for a second
+   * reason, measured: every money field crosses the wire as an IEEE double,
+   * so that subtraction is a third rounding on two already-rounded numbers.
+   * On a penny-wide quote the mid lands on a half-cent routinely, and the
+   * recovered close then renders a different cent than the server's own —
+   * including `+$0.00` in bullish green for a move that really happened.
+   *
+   * **Null where there is no previous daily bar.** Never 0 — unchanged and
+   * unknown are different facts in a column of dollars. */
+  previousClose: number | null
   /** Shares traded over the session named by `volumeSession` and
    * `volumeDate`. **Null, not 0**: a zero claims the symbol did not trade. */
   volume: number | null
@@ -604,6 +626,55 @@ export interface StockQuote {
    * company and read as a fund worth nothing, so the column shows an em
    * dash and the ranking sorts nulls last rather than treating them as
    * zero. */
+  marketCap: number | null
+}
+
+/** Which of the one quote map's two writers put a price there.
+ *
+ * Client-side only, and deliberately absent from every REST model: which
+ * endpoint a row arrived on is something the caller knows at the call site,
+ * and a server-asserted `'poll'` would be a second copy of that fact to
+ * disagree with. */
+export type QuoteSource = 'stream' | 'poll'
+
+/** One symbol's live price, merged from both writers — decision 18.
+ *
+ * **This is the live map's entry type, and the live map is empty on a cold
+ * start.** A symbol with no entry is a symbol with no live quote; the caller
+ * renders whatever its own query row says and never a fixture. (`underlyings`
+ * is the Phase 1 fixture map, pre-seeded with invented prices and moved by
+ * the mock random walks. It is not this and the two must not be confused —
+ * writing real quotes into it would leave every never-polled symbol
+ * rendering an invented price indistinguishable from a real one.)
+ *
+ * `price`, `at` and `source` travel together and describe one observation:
+ * `at` is when the vendor saw *this* price and `source` is which writer
+ * carried it. The remaining fields are the **poll's** alone — the stream
+ * carries a price and nothing else — so a stream write leaves them exactly
+ * as it found them.
+ *
+ * Nothing derived is stored here. See `changeOf` / `changePctOf`. */
+export interface LiveQuote {
+  symbol: string
+  price: number
+  /** The vendor's observation timestamp for `price`. The merge orders on
+   * this and on nothing else — never on arrival order, never on a clock
+   * read on this side of the wire. */
+  at: string
+  source: QuoteSource
+  /** Yesterday's close, and the only basis there is for a change. **Null
+   * means there is no basis to measure a move from** — a newly listed name,
+   * or one that did not trade the previous session — and the selectors
+   * return null rather than a 0.00 that would claim the price was
+   * unchanged. Poll-only. */
+  previousClose: number | null
+  /** Shares traded over the session named by `volumeSession`. Poll-only. */
+  volume: number | null
+  volumeSession: SessionState | null
+  volumeDate: string | null
+  /** The denominator of relative volume. Poll-only. */
+  avgVolume: number | null
+  /** Null for a fund, never 0. Poll-only. */
   marketCap: number | null
 }
 

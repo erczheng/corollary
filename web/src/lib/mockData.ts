@@ -45,6 +45,7 @@ import type {
   WorkingOrder,
 } from './types'
 import { MACRO_SECTOR } from './types'
+import { changeOf } from './quotes'
 
 // ---------------------------------------------------------------------- //
 // Seeded PRNG (mulberry32) — small, deterministic, no dependency.
@@ -75,6 +76,15 @@ const rand = mulberry32(20260807)
  * near-expiry state stops being reachable. Phase 2 replaces this with the
  * market calendar's today. */
 export const MARKET_TODAY = '2026-08-07'
+
+/** The vendor observation stamp every fixture quote carries.
+ *
+ * A fixed instant inside `MARKET_TODAY`'s session, never a clock read: these
+ * fixtures are deterministic so screenshots and tests do not flake, and a
+ * `new Date()` here would make decision 18's merge order depend on when the
+ * suite happened to run. 19:45Z is 15:45 ET, mid-afternoon on the session
+ * the rest of the fixtures describe. */
+export const MARKET_QUOTE_AT = `${MARKET_TODAY}T19:45:00Z`
 
 /** One year of daily closes. `next` is the PRNG draw, passed in so a series
  * can either share the module-level stream or run on its own seed. The
@@ -615,13 +625,14 @@ function buildUnderlying(symbol: string, price: number, seed: number, sessions: 
   points.reverse()
 
   const previousClose = points[points.length - 2].value
-  const change = Math.round((price - previousClose) * 100) / 100
   return {
     symbol,
     price,
+    at: MARKET_QUOTE_AT,
+    // The basis, and only the basis. The day's move is derived from it at
+    // read time by `quotes.ts#changeOf` — a fixture that stored both could
+    // drift from the price beside it, which is the failure rule 4 names.
     previousClose,
-    change,
-    changePct: Math.round((change / previousClose) * 10_000) / 100,
     history: points,
     // Empty, and correctly so: these fixtures are daily closes, which is
     // what `timeframe=1D` serves. An intraday series is a separate request
@@ -645,7 +656,7 @@ function buildUnderlying(symbol: string, price: number, seed: number, sessions: 
  *
  * Changing this does not move any quoted number: buildUnderlying walks
  * backwards from today's price, so previousClose comes from the first draw
- * and change and changePct follow it, whatever the count. */
+ * and the derived change follows it, whatever the count. */
 const QUOTE_SESSIONS = 400
 
 export const UNDERLYINGS: Record<string, UnderlyingQuote> = {
@@ -1287,11 +1298,11 @@ function buildChain(): OptionContract[] {
   for (const u of CHAIN_SPECS) {
     const next = mulberry32(u.seed)
     const spot = UNDERLYINGS[u.symbol].price
-    // `?? 0` is unreachable on a fixture -- `buildUnderlying` always computes
-    // a change -- and is here because the *wire* type allows null: a real
-    // snapshot carries no previous close for a name that had no prior
+    // `?? 0` is unreachable on a fixture -- `buildUnderlying` always has a
+    // previous close -- and is here because the *wire* type allows null: a
+    // real snapshot carries no previous close for a name that had no prior
     // session, and there is then no day move to scale a contract's by.
-    const underlyingChange = UNDERLYINGS[u.symbol].change ?? 0
+    const underlyingChange = changeOf(UNDERLYINGS[u.symbol]) ?? 0
     const inc = strikeIncrement(spot)
     const atm = Math.round(spot / inc) * inc
 
@@ -1429,8 +1440,9 @@ const stockRand = mulberry32(20262100)
  * relative volume that the five ranking views return visibly different
  * tables.
  *
- * Price, change and percent are read from the quote map rather than stored
- * here, so there is nothing to keep in sync. */
+ * Price and its basis are read from the quote map rather than stored here,
+ * so there is nothing to keep in sync — and the day's move is derived from
+ * the pair at read time rather than being a third stored number. */
 export const STOCKS: StockQuote[] = STOCK_SEEDS.map((s) => {
   const quote = MARKET_QUOTES[s.symbol]
   // Today's volume against the average. Most names trade near their usual
@@ -1441,8 +1453,8 @@ export const STOCKS: StockQuote[] = STOCK_SEEDS.map((s) => {
     symbol: s.symbol,
     name: s.name,
     price: quote.price,
-    change: quote.change,
-    changePct: quote.changePct,
+    at: quote.at,
+    previousClose: quote.previousClose,
     volume: Math.round(s.avgVolume * relative),
     // The fixtures are a session in progress -- MARKET_TODAY is the session,
     // and the volume above is a day's worth of it so far.

@@ -66,7 +66,7 @@ import type {
   SeriesWindow,
 } from './api'
 import { useUIStore } from './store'
-import type { AccountMode } from './types'
+import type { AccountMode, StockQuote } from './types'
 
 /* -------------------------------------------------------------------------
  * Keys
@@ -293,11 +293,17 @@ export function useStocks(symbols?: readonly string[]) {
  *
  * A fetch already in flight for this key is joined rather than duplicated,
  * so a server slower than the interval degrades to one outstanding request
- * instead of a pile-up. */
+ * instead of a pile-up.
+ *
+ * **Resolves with the rows on success and `null` on failure**, which is how
+ * the caller tells the two apart without rejecting. `useMarketPoll` needs
+ * exactly that distinction twice over: the rows feed the live quote map, and
+ * only a success may stamp `store.lastPollAt` — a failed poll that stamped
+ * would report a dead feed as healthy. */
 export function refetchStocks(
   client: QueryClient,
   symbols?: readonly string[],
-): Promise<void> {
+): Promise<StockQuote[] | null> {
   return client
     .fetchQuery({
       queryKey: queryKeys.stocks(symbols),
@@ -305,8 +311,8 @@ export function refetchStocks(
       staleTime: 0,
     })
     .then(
-      () => undefined,
-      () => undefined,
+      (rows) => rows,
+      () => null,
     )
 }
 

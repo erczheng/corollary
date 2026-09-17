@@ -26,6 +26,7 @@ import {
 import {
   type UnderlyingQuote,
   type AccountMode,
+  type LiveQuote,
   type ActivityItem,
   type ApiKeyPresence,
   type ArchivedChat,
@@ -77,6 +78,7 @@ import {
   type OrderDraft,
 } from './orders'
 import { formatExpiry, formatUsd } from './format'
+import { mergeQuotes, streamedQuote } from './quotes'
 
 // Defined in `theme.ts`, which owns reading and writing it. Re-exported so
 // the store stays the single import site for UI state types.
@@ -122,6 +124,50 @@ interface UIState {
    * "now" marker would never move. Keyed by symbol because two positions
    * can share an underlying and must never disagree about its price. */
   underlyings: Record<string, UnderlyingQuote>
+  /** **The live quote map — real prices, two writers, empty on a cold
+   * start.** Decision 18.
+   *
+   * Not `underlyings` above, and the split is the point rather than a
+   * second map of the kind CLAUDE.md rules out. `underlyings` ships
+   * *pre-seeded* with `MARKET_QUOTES` fixture prices and is moved by the
+   * Phase 1 mock walks (`tick`, `pollMarkets`); writing server quotes into
+   * it would leave every never-polled symbol rendering an invented price
+   * indistinguishable from a real one — §8.5's "a table of invented numbers
+   * reads as invented", arriving one row at a time. This map holds exactly
+   * one entry per symbol a writer has actually reported, so **a symbol with
+   * no entry is a symbol with no live quote** and the caller renders its own
+   * query row instead. The fixture map stays inert until Phase 6 deletes it,
+   * and there is still only one *live* map.
+   *
+   * Written through `quotes.ts` and nowhere else — see `applyPolledQuotes`
+   * and `applyStreamedQuote`. Nothing derived is stored in it. */
+  quotes: Record<string, LiveQuote>
+  /** Merge one successful poll's rows into {@link quotes}.
+   *
+   * Rows, not a stamp: `markPolled` is separate, because a poll that
+   * returned nothing usable is still a poll that answered. The caller
+   * converts its wire rows with `liveFromStockQuote` /
+   * `liveFromUnderlyingQuote`, because which endpoint a row arrived on is
+   * something the call site knows and the server deliberately does not
+   * assert. */
+  applyPolledQuotes: (rows: readonly LiveQuote[]) => void
+  /** Merge one pushed quote into {@link quotes}.
+   *
+   * **The producer is the browser websocket client, which is not written
+   * yet** — `corollary/api/routes/ws.py` landed the server half and nothing
+   * under `web/`. The merge has to exist before the second writer does:
+   * landing these rules afterwards means shipping the
+   * flickers-backwards-in-time bug first and fixing it second. */
+  applyStreamedQuote: (symbol: string, price: number, at: string) => void
+  /** Stamp {@link lastPollAt} and nothing else.
+   *
+   * Called by `useMarketPoll` on a **successful** read only, for the same
+   * reason `dataUpdatedAt` only advances on success: a failed poll that
+   * stamped would report a dead feed as healthy, which is the one thing
+   * this field exists to answer. Separate from `applyPolledQuotes` so that a
+   * read which merged no rows still says the poll is alive, and separate
+   * from `lastTickAt` forever — see {@link lastPollAt}. */
+  markPolled: (at: string) => void
   /** The live option chain behind the Markets page.
    *
    * Held here rather than read straight from the fixture for the same
@@ -718,6 +764,13 @@ export const useUIStore = create<UIState>((set) => ({
     cash: ACCOUNT_SNAPSHOTS.cash.workingOrders,
   },
   underlyings: MARKET_QUOTES,
+  // Empty, and it stays empty for any symbol nothing has reported. See the
+  // field's note above for why this is not `underlyings`.
+  quotes: {},
+  applyPolledQuotes: (rows) => set((s) => ({ quotes: mergeQuotes(s.quotes, rows) })),
+  applyStreamedQuote: (symbol, price, at) =>
+    set((s) => ({ quotes: mergeQuotes(s.quotes, [streamedQuote(symbol, price, at)]) })),
+  markPolled: (at) => set({ lastPollAt: at }),
   chain: OPTION_CHAIN,
   lastPollAt: null,
   newsFeed: NEWS_ITEMS,
@@ -912,18 +965,20 @@ export const useUIStore = create<UIState>((set) => ({
       for (const symbol of streamed) {
         const quote = underlyings[symbol]
         if (!quote) continue
-        // No previous close is nothing to measure a move from. The row keeps
-        // the price it has rather than being re-marked against a number that
-        // was never there.
+        // No previous close is no measurable day: `quotes.ts#changeOf`
+        // returns null for this row whatever the price does, so walking it
+        // would move a number the page can say nothing about. The row keeps
+        // the price it has. Unreachable on the fixtures — `buildUnderlying`
+        // always has a basis — and here because the wire type allows null.
         if (quote.previousClose === null) continue
         const move = (priceStream() - 0.5) * 2 * UNDERLYING_VOLATILITY_PER_SECOND * seconds
         const price = round2(quote.price * (1 + move))
-        const change = round2(price - quote.previousClose)
         underlyings[symbol] = {
           ...quote,
           price,
-          change,
-          changePct: round2((change / quote.previousClose) * 100),
+          // No `change` written beside it: the day is derived from `price`
+          // and `previousClose` at read time (decision 18's rule 4), and a
+          // stored copy is the second writer that can disagree with it.
           // Today's point *is* today's price so far, so it moves rather
           // than a new daily close being appended every two seconds.
           history: [...quote.history.slice(0, -1), { date: quote.history[quote.history.length - 1].date, value: price }],
@@ -1051,6 +1106,14 @@ export const useUIStore = create<UIState>((set) => ({
     }),
   pollMarkets: (elapsedMs = DEFAULT_TICK_MS) =>
     set((s) => {
+      // **This is the second writer of `lastPollAt`, and it is the mock
+      // one.** `markPolled` is the real one, stamped by `useMarketPoll`
+      // after a successful `/api/markets/stocks` read. This Phase 1 walk has
+      // no production caller and nothing renders the field yet, so the two
+      // cannot currently disagree — but the first stale-pill built on
+      // `lastPollAt` inherits a mock writer that advances the stamp without
+      // a server ever having answered. Take the stamp off this walk before
+      // anything reads it, not after.
       const at = new Date().toISOString()
       // **Square root of elapsed time, not elapsed time.** A random walk
       // travels with sqrt(t), so scaling a draw linearly makes a 2s poll
@@ -1074,12 +1137,10 @@ export const useUIStore = create<UIState>((set) => ({
         }
         const move = (marketStream() - 0.5) * 2 * POLL_UNDERLYING_VOLATILITY_PER_SECOND * seconds
         const price = round2(quote.price * (1 + move))
-        const change = round2(price - quote.previousClose)
         underlyings[symbol] = {
           ...quote,
           price,
-          change,
-          changePct: round2((change / quote.previousClose) * 100),
+          // Derived at read time, never stored — as in `tick` above.
           // Today's point *is* today's price so far, so it moves rather
           // than a new daily close being appended every two seconds.
           history: [

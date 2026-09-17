@@ -1091,14 +1091,11 @@ class UnderlyingQuote(ApiModel):
     when the feed had nothing. Nulls, never zeros. See
     ``api/routes/markets.py``.
 
-    **:attr:`change` and :attr:`change_pct` are owed a removal.** Decision
-    18's rule 4 says everything derived is derived at read time, from
-    :attr:`price` and :attr:`previous_close` in a client selector -- two
-    writers storing a price and a change independently is how a row reports
-    +1.2% beside a price that is down. They stay on the wire until the client
-    derives them, because dropping them first ships a Markets page that
-    renders no change between two commits. The pair goes in step 12's web
-    commit, here and in ``types.ts`` together.
+    **The daily change is not on the wire, and that is decision 18's rule
+    4.** Everything derived is derived at read time, from :attr:`price` and
+    :attr:`previous_close` in a client selector -- two writers storing a
+    price and a change independently is how a row reports +1.2% beside a
+    price that is down. The basis is served; the result is not.
     """
 
     symbol: str
@@ -1131,10 +1128,6 @@ class UnderlyingQuote(ApiModel):
     #: ``prevDailyBar`` for a name that had no prior session; asserting a
     #: previous close there would anchor a change to a number nobody measured.
     previous_close: JsonMoney | None
-    #: ``None`` wherever :attr:`previous_close` is -- there is nothing to
-    #: measure the move from.
-    change: JsonMoney | None
-    change_pct: JsonMoney | None
     #: Daily closes, oldest first, ending at today's live price. Served when
     #: ``?timeframe=1D`` -- the default -- and **empty at every other
     #: timeframe**, where :attr:`intraday` carries the series instead.
@@ -1163,9 +1156,10 @@ class StockQuote(ApiModel):
     **This is the payload the browser's shared quote map is polled from** --
     the Markets poll reads ``/stocks``, the websocket pushes the same
     symbols, and decision 18 is about the two of them writing one map. Hence
-    :attr:`at`. :attr:`change` and :attr:`change_pct` are owed the same
-    removal :class:`UnderlyingQuote` documents, for the same reason and in
-    the same commit.
+    :attr:`at`, and hence :attr:`previous_close`: rule 4's selector needs the
+    *basis*, because a streamed price arriving a moment later has to be
+    measurable against something, and a change computed here is a fact about
+    the poll's price rather than the stream's.
     """
 
     symbol: str
@@ -1176,10 +1170,18 @@ class StockQuote(ApiModel):
     #: naming the quote, print or daily bar the price came from, never a
     #: clock on this side of the wire. Decision 18's rule 1.
     at: datetime
-    #: **Nullable, against ``types.ts``'s ``number``.** No previous daily bar
-    #: means no change to state.
-    change: JsonMoney | None
-    change_pct: JsonMoney | None
+    #: Yesterday's close, the basis the client's change selector measures
+    #: from. Exactly the figure this route already subtracts from
+    #: :attr:`price`, served rather than spent: recovered on the client as
+    #: ``price - change`` it is three IEEE roundings deep, which flips the
+    #: rendered cent whenever the true move lands on a half-cent -- and a
+    #: penny-wide quote's mid puts it there routinely.
+    #:
+    #: **Nullable, and null means no previous daily bar**, which is a
+    #: newly listed name or one that did not trade the prior session.
+    #: Never 0: anchoring a move to a close nobody measured invents the
+    #: whole move.
+    previous_close: JsonMoney | None
     #: Session volume so far, from today's **partial daily bar on the
     #: historical feed** -- the same feed, and the same request family, as
     #: :attr:`avg_volume` below.

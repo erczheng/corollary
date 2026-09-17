@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { refetchStocks } from '../lib/queries'
+import { liveFromStockQuote } from '../lib/quotes'
+import { useUIStore } from '../lib/store'
 
 /** The Markets stock poll, in three states — decision 18.
  *
@@ -183,6 +185,44 @@ function subscribe(requested: Subscriber): () => void {
   }
 }
 
+/** One poll: read, merge, stamp — and stamp **only** on success.
+ *
+ * Decision 18's poll writer. The rows go into the one live quote map
+ * through `liveFromStockQuote`, which is where the `'poll'` provenance is
+ * attached: the server deliberately asserts no `source`, because which
+ * endpoint a row arrived on is something this call site knows and a
+ * server-side copy of that fact is a copy that can disagree.
+ *
+ * **`lastPollAt` advances on a successful read and on nothing else**, for
+ * the same reason `dataUpdatedAt` does: it answers *"is the poll alive"*,
+ * and a failure that stamped would answer it wrongly in the one direction
+ * that matters. `refetchStocks` resolves with `null` rather than rejecting,
+ * so the failure arrives here as a value instead of as an unhandled
+ * rejection every 400ms.
+ *
+ * **Not `lastTickAt`.** *"Is the stream alive"* and *"is the poll alive"*
+ * are different questions with different feeds behind them, and collapsing
+ * them would let a healthy poll vouch for a dead socket. */
+function pollOnce(client: QueryClient): Promise<void> {
+  return refetchStocks(client).then((rows) => {
+    if (rows === null) return
+    // `request<StockQuote[]>` casts rather than validates, so a 200 whose
+    // body is not an array at all arrives here as a `StockQuote[]` that is
+    // not one, and the `.map` below would throw inside a 400ms timer --
+    // an unhandled rejection two or three times a second in the one
+    // console that matters. **That is the whole of what this checks.** A
+    // JSON array of non-rows passes it and is merged; the claim is
+    // narrowed to the throw deliberately, because a guard credited with
+    // validating the shape is one the next reader trusts for more than it
+    // does. Our own FastAPI serves this through a Pydantic
+    // `response_model`, so a malformed body needs a proxy or a mock.
+    if (!Array.isArray(rows)) return
+    const store = useUIStore.getState()
+    store.applyPolledQuotes(rows.map(liveFromStockQuote))
+    store.markPolled(new Date().toISOString())
+  })
+}
+
 /** Mount the market snapshot poll at `intervalMs`.
  *
  * Mounted twice by design: once app-wide at
@@ -197,23 +237,6 @@ export function useMarketPoll(intervalMs: number): void {
 
   useEffect(() => {
     if (intervalMs <= 0) return
-    // TODO(step 12, `store.ts`): write `lastPollAt` from this poll.
-    //
-    // This is the only real market poll in the app now, and
-    // `store.lastPollAt` — documented in `store.ts` as the *poll's* own
-    // timestamp, kept separate from `lastTickAt` so a live stream can never
-    // vouch for a dead poll — has **zero production writers**. Nothing
-    // renders it today, so there is no bug yet; the bug is the next
-    // stale-pill, which would find the field present, correctly documented,
-    // and permanently null, and report a healthy poll as dead.
-    //
-    // It cannot be wired from here: the only action that writes it is
-    // `store.pollMarkets`, which is the Phase 1 mock random walk, so calling
-    // it would overwrite real quotes with fixture prices. What step 12 needs
-    // to add is a setter that stamps and nothing else — `markPolled(at)`, or
-    // `lastPollAt` fed from the successful read's `dataUpdatedAt` — for this
-    // `poll` to call on success. Do **not** collapse it into `lastTickAt`.
-    // Until then, Markets reads its own staleness off `dataUpdatedAt`.
-    return subscribe({ intervalMs, poll: () => void refetchStocks(client) })
+    return subscribe({ intervalMs, poll: () => void pollOnce(client) })
   }, [client, intervalMs])
 }
