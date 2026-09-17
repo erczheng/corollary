@@ -175,6 +175,92 @@ describe('mergeQuotes', () => {
   })
 })
 
+describe('mergeQuotes — an observation with no observation time', () => {
+  // `request<StockQuote[]>` casts rather than validating, so a server that
+  // predates `86a239f` — the commit that put `at` on the REST rows, two
+  // commits after `dc09147` shipped `/api/ws` with `WsQuote.at` already
+  // required — delivers `undefined` here as a value the types say cannot
+  // exist. A browser at HEAD against a server anywhere in that window gets
+  // stamped pushes and unstamped polls *together*, which is the sequence
+  // the third test below pins.
+  function unstamped(over: Partial<LiveQuote> = {}): LiveQuote {
+    return polled({ ...over, at: undefined as unknown as string })
+  }
+
+  const row: StockQuote = {
+    symbol: 'AAPL',
+    name: 'Apple Inc.',
+    price: 100,
+    at: EARLY,
+    previousClose: 100,
+    volume: 1_000,
+    volumeSession: 'in_progress',
+    volumeDate: '2026-09-16',
+    avgVolume: 2_000,
+    marketCap: 3_000,
+  }
+
+  it('does not seed the map, so the table falls back to the query row', () => {
+    const next = mergeQuotes({}, [unstamped({ price: 100 })])
+
+    expect(next.AAPL).toBeUndefined()
+
+    // Not a blank and not a fixture: the response's own price, from the
+    // very poll the unstamped observation arrived in.
+    const [rendered] = liveStockRows([row], next)
+    expect(rendered.price).toBe(100)
+    expect(rendered.source).toBeNull()
+  })
+
+  it('treats an unparseable stamp exactly as an absent one', () => {
+    expect(mergeQuotes({}, [polled({ at: 'not a time' })]).AAPL).toBeUndefined()
+  })
+
+  it('never leaves a row frozen behind a stamped push', () => {
+    // The sequence that motivates the rule: unstamped poll, push with a
+    // real stamp, unstamped poll. `-Infinity` loses to every real stamp
+    // *forever*, so an entry pinned by one push would discard every later
+    // poll for price for the rest of the session while `Markets.tsx`'s
+    // `Read HH:MM:SS ET` header — which advances on any successful fetch —
+    // went on claiming the row was current.
+    let map = mergeQuotes({}, [unstamped({ price: 100 })])
+    map = mergeQuotes(map, [streamedQuote('AAPL', 101, LATE)])
+    expect(map.AAPL.price).toBe(101)
+
+    map = mergeQuotes(map, [unstamped({ price: 102 })])
+    expect(map.AAPL).toBeUndefined()
+
+    const [rendered] = liveStockRows([{ ...row, price: 102 }], map)
+    expect(rendered.price).toBe(102)
+    // Derived from the row's own basis, so the pair on screen still agree.
+    expect(rendered.change).toBe(2)
+    expect(rendered.source).toBeNull()
+  })
+
+  it('touches no symbol but its own, and holds only entries it can order', () => {
+    const map = mergeQuotes(
+      {
+        AAPL: polled({ price: 100, at: EARLY }),
+        MSFT: polled({ symbol: 'MSFT', price: 400, at: LATE }),
+      },
+      [unstamped({ price: 102 })],
+    )
+
+    expect(Object.keys(map)).toEqual(['MSFT'])
+    for (const quote of Object.values(map)) {
+      expect(Number.isNaN(Date.parse(quote.at))).toBe(false)
+    }
+  })
+
+  it('takes a stamped poll the moment one arrives, over a pushed entry', () => {
+    let map = mergeQuotes({}, [streamedQuote('AAPL', 101, EARLY)])
+    map = mergeQuotes(map, [polled({ price: 103, at: LATE })])
+
+    expect(map.AAPL.price).toBe(103)
+    expect(map.AAPL.source).toBe('poll')
+  })
+})
+
 describe('the two producers', () => {
   const row: StockQuote = {
     symbol: 'AAPL',

@@ -28,7 +28,9 @@ import {
   type AccountMode,
   type LiveQuote,
   type ActivityItem,
+  type ApiErrorBody,
   type ApiKeyPresence,
+  type WsTradeUpdate,
   type ArchivedChat,
   type ChatMessage,
   type AttachedExit,
@@ -153,12 +155,66 @@ interface UIState {
   applyPolledQuotes: (rows: readonly LiveQuote[]) => void
   /** Merge one pushed quote into {@link quotes}.
    *
-   * **The producer is the browser websocket client, which is not written
-   * yet** — `corollary/api/routes/ws.py` landed the server half and nothing
-   * under `web/`. The merge has to exist before the second writer does:
-   * landing these rules afterwards means shipping the
-   * flickers-backwards-in-time bug first and fixing it second. */
+   * The producer is `liveSocket.ts`, the browser's `/api/ws` client, which
+   * calls this for every quote frame that carries a **price** — a quote
+   * with no midpoint (one-sided, or crossed) prices nothing and is not
+   * written at all. `at` is the vendor's observation timestamp, which is
+   * what the merge orders the two writers on.
+   *
+   * The merge landed before its writer on purpose: landing these rules
+   * afterwards means shipping the flickers-backwards-in-time bug first and
+   * fixing it second. */
   applyStreamedQuote: (symbol: string, price: number, at: string) => void
+  /** Stamp {@link lastTickAt} and nothing else — the stream's half of the
+   * pair `markPolled` completes.
+   *
+   * Called by `liveSocket.ts` when a quote frame delivers a price, and
+   * **only then**: a frame that prices nothing leaves the screen exactly as
+   * stale as it was, and a trade update is not a price. Separate from
+   * `applyStreamedQuote` for the same reason `markPolled` is separate from
+   * `applyPolledQuotes`, and separate from `markPolled` forever — see
+   * {@link lastPollAt}.
+   *
+   * **`at` is when the update *arrived*, not the vendor's observation
+   * time**, and the two are genuinely different questions. The vendor stamp
+   * goes to the merge, which orders writers by it. This field answers "is
+   * the stream alive", and on the Basic plan the options feed is
+   * `indicative` — a 15-minute-delayed derivative of OPRA — so a pill fed
+   * the vendor's stamp would read `stale` forever on a perfectly healthy
+   * socket and stop meaning anything. `useMarketPoll` stamps `markPolled`
+   * the same way, with its own read time. */
+  markStreamed: (at: string) => void
+  /** The broker's last word about an order, or null before one arrives.
+   *
+   * A `trade_updates` event from `/api/ws`: what happened to an order we
+   * placed. **Recorded, not applied** — nothing here moves a position, a
+   * balance or the ledger, because the server is authoritative for all
+   * three and the client's copy is the estimate between refreshes. It is a
+   * fact worth holding rather than dropping: silence is how an order
+   * executes and the screen never hears about it.
+   *
+   * **One slot, newest wins — so this is not a log and must not be read as
+   * one.** A `rejected` for one order is overwritten by a `new` for another
+   * milliseconds later, so the absence of a rejection here is no evidence
+   * that none arrived. The authoritative record is server-side (rule 8's
+   * structured log, surfaced through the 15s activity poll); anything that
+   * needs to *enumerate* refusals reads that, never this field. */
+  lastTradeUpdate: WsTradeUpdate | null
+  applyTradeUpdate: (update: WsTradeUpdate) => void
+  /** The last refusal the live socket stated, or null.
+   *
+   * There is no acknowledgement frame on `/api/ws`: silence means a client
+   * message landed and a `WsErrorFrame` means it did not. Holding the
+   * refusal is what keeps "the server refused my subscription" from looking
+   * like "the server has nothing to say" — the same bug, at the other end
+   * of the same pipe, that rule 8 exists for.
+   *
+   * **This is not engine state.** A refused subscription is this connection
+   * being told what it did wrong; a halt is the engine reporting on itself
+   * and arrives on the 15s poll. Nothing reads this to decide whether the
+   * engine is halted. */
+  lastStreamError: ApiErrorBody | null
+  recordStreamError: (error: ApiErrorBody) => void
   /** Stamp {@link lastPollAt} and nothing else.
    *
    * Called by `useMarketPoll` on a **successful** read only, for the same
@@ -273,7 +329,15 @@ interface UIState {
   cancelWorkingOrder: (id: string) => void
   /** When the last price update arrived, or null before the first one. The
    * header reads this to say whether the page is actually live rather than
-   * merely claiming to be. */
+   * merely claiming to be.
+   *
+   * **Two writers, one question.** `liveSocket.ts` stamps it through
+   * {@link markStreamed} when a real quote frame delivers a price, and the
+   * Phase 1 fixture `tick` stamps it for the mock walk. Both mean the same
+   * thing — a price arrived — which is why they share the field.
+   * {@link lastPollAt} is a *different* question and never shares it: a
+   * healthy poll hiding a dead socket is exactly what splitting them
+   * prevents. */
   lastTickAt: string | null
   /** One price update.
    *
@@ -770,6 +834,14 @@ export const useUIStore = create<UIState>((set) => ({
   applyPolledQuotes: (rows) => set((s) => ({ quotes: mergeQuotes(s.quotes, rows) })),
   applyStreamedQuote: (symbol, price, at) =>
     set((s) => ({ quotes: mergeQuotes(s.quotes, [streamedQuote(symbol, price, at)]) })),
+  markStreamed: (at) => set({ lastTickAt: at }),
+  lastTradeUpdate: null,
+  // Recorded and nothing more. Applying a broker event to the local book
+  // here would be the client computing money the server is authoritative
+  // for — and, on a reconnect replay, computing it twice.
+  applyTradeUpdate: (update) => set({ lastTradeUpdate: update }),
+  lastStreamError: null,
+  recordStreamError: (error) => set({ lastStreamError: error }),
   markPolled: (at) => set({ lastPollAt: at }),
   chain: OPTION_CHAIN,
   lastPollAt: null,

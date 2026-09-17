@@ -162,13 +162,35 @@ export function isUnreachable(error: unknown): boolean {
   return isApiError(error) && error.code === NETWORK_UNREACHABLE
 }
 
+/** The API's error envelope, read out of an already-parsed body — or null
+ * when the body is not that envelope.
+ *
+ * **The one error parser, and it is exported because a socket needs it
+ * too.** `WsErrorFrame` carries `ApiErrorBody` under the same `error` key
+ * and draws its codes from the same vocabulary (`invalid_request` means over
+ * the socket exactly what the 422 means over HTTP) precisely so that there
+ * is one shape to read. `schemas.py` says why in its own words: *"a client
+ * holding two error parsers uses the wrong one on the day it matters."* So
+ * this is a function rather than four lines inside `errorFor`, and
+ * `liveSocket.ts` calls it rather than owning a second copy.
+ *
+ * Both fields are checked as strings: `request<T>` casts unvalidated JSON,
+ * so a half-formed envelope is reachable, and a `code` that is not a string
+ * is not something a caller may branch on. */
+export function errorBodyOf(body: unknown): ApiErrorBody | null {
+  const stated = (body as { error?: Partial<ApiErrorBody> } | null | undefined)?.error
+  if (!stated || typeof stated.code !== 'string' || typeof stated.message !== 'string') {
+    return null
+  }
+  return { code: stated.code, message: stated.message }
+}
+
 async function errorFor(response: Response, url: string): Promise<ApiError> {
   let code = HTTP_ERROR
   let message = `The engine answered ${response.status} for ${url}.`
   try {
-    const body: unknown = await response.json()
-    const stated = (body as { error?: Partial<ApiErrorBody> } | null)?.error
-    if (stated && typeof stated.code === 'string' && typeof stated.message === 'string') {
+    const stated = errorBodyOf(await response.json())
+    if (stated) {
       code = stated.code
       message = stated.message
     }

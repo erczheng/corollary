@@ -2724,9 +2724,12 @@ and background are three states, not two.
 **15. The `MARKETS_VISIBLE` tier and the viewport hint — decision 18.** Phase 2.
 Spend the ~22 equity slots left after position underlyings on the Markets rows
 actually on screen.
-- *Status:* **server half landed in full, mid-session re-plan included.
-  The Markets page half is what remains, and it is bigger than this entry
-  originally implied** — see *What the browser half actually needs* below.
+- *Status:* **server half landed in full, mid-session re-plan included;
+  browser half (a) — the `/api/ws` client — landed with this commit. What
+  remains is (b), the viewport observer in `Markets.tsx`, and a third piece
+  this entry did not originally name: nothing yet *mounts* the socket, and
+  mounting is blocked on an open question recorded under (a) below.** See
+  *What the browser half actually needs* and *(a) landed* below.
   Landed: `markets_visible` is a second client message on `/api/ws`
   (`WsMarketsVisibleRequest` in `corollary/api/schemas.py`, dispatched from one
   `_CLIENT_FRAMES` table in `corollary/api/routes/ws.py`), bounded at
@@ -3028,6 +3031,74 @@ actually on screen.
   without (a).** Step 12's stream writer likewise has no producer until (a)
   exists — the merge is written and tested directly, and only the wiring
   waits.
+- *(a) landed 2026-09-17 — the `/api/ws` browser client.*
+  `web/src/lib/liveSocket.ts` holds it: `liveSocketUrl` (scheme-swapped off
+  the page href, **no token and no query string** — rule 6), `parseServerFrame`
+  over the three discriminated kinds with an `unreadable` branch, `midOf`
+  mirroring `Quote.mid` exactly (**a one-sided or crossed quote prices
+  nothing and therefore writes nothing**, the same judgement `markets._spot`
+  makes server-side), a `LiveSocket` class over a `SocketLike` seam so the
+  suite never opens a real socket, and exponential reconnect backoff
+  (`RECONNECT_BASE_MS` 500 → `RECONNECT_MAX_MS` 15s, reset after
+  `RECONNECT_STABLE_MS` 10s). Quote frames route through
+  `storeHandlers().onQuote` → `store.applyStreamedQuote` → step 12's
+  `mergeQuote`, which is the **single** entry point the poll also uses, so
+  there is no second path into the live map. `markStreamed` and `markPolled`
+  stay distinct setters. 41 new tests.
+  - **Rule 9 holds, and the one thing the reconnect re-sends is data
+    recovery rather than a resume.** Nothing in the module resumes, clears a
+    halt, restarts anything a halt stopped, or writes engine state; `onopen`
+    replays the viewport hint because the server drops it when the
+    connection that sent it closes, and that hint is the lowest tier and
+    cannot open a socket or arm a watchdog condition by itself
+    (`SubscriptionPlan.engine_subscribed`). Engine state and notifications
+    stay on the 15s poll.
+  - **The `quotes.ts:157` prerequisite is half closed, and the other half is
+    an open question that blocks mounting.** `liveFromStockQuote` now guards
+    `at`, and an unorderable stamp can no longer lose the price race
+    forever. What is *not* closed is a stamp that is parseable but **static**:
+    `_spot`'s daily-bar fallback returns `price = daily.close` with
+    `at = daily.at`, and `Bar.at` is the interval's *opening* time
+    (`data/providers/interface.py`), so it is fixed for the session while the
+    close advances. Once a stream has pushed one two-sided quote for a
+    symbol and that symbol's snapshot then falls back to the bar, every
+    later poll is stamped earlier than the stream entry, `replacesPrice`
+    discards it, and the row freezes at the streamed price for the rest of
+    the session — with `changeOf` deriving a wrong day change and colour off
+    it, the gainers/losers ranking sorting on it, and `spot` feeding
+    `ChainOrderTicket`'s moneyness sentence. Nothing on screen contradicts
+    it: `LiveStockRow.source` and the per-row `at` are computed and never
+    rendered, and the global `Read HH:MM:SS ET` header advances on every
+    successful fetch.
+    **This is a defect in `replacesPrice`, which landed in `7cfe553` and is
+    untouched by (a); (a) only makes it reachable.** It is unreachable in the
+    running app today because nothing calls `startLiveSocket`. It is
+    recorded here rather than fixed because **the repair is a choice, not a
+    defect with one correct answer** — the server has no honest advancing
+    stamp for a still-forming daily bar (`datetime.now()` is explicitly
+    forbidden here: "a synthesised observation time is newer than every real
+    one by construction and would win the merge forever"), so the candidates
+    are an age-out on the client's merge, a server-side refusal to serve a
+    bar-stamped row at all, or rendering the staleness per row. That is the
+    same shape as 8d's unpersisted-halt question: it needs a ruling.
+    **Mounting the socket is blocked on it.** (b) is not — the viewport hint
+    changes no price.
+  - *Follow-ups from (a)'s audit, none blocking, all recorded rather than
+    fixed:* **WEB-2** a malformed stream frame with a missing `at` reaches
+    `applyStreamedQuote` and *evicts* a healthy polled entry (the `delete` in
+    `mergeQuotes`, written for the poll, now also fires on the stream), while
+    `markStreamed` stamps `lastTickAt` anyway so the pill still reads Live.
+    Bounded — the row falls back to the query row — and it sits in the same
+    merge code the question above will touch, so fix them together.
+    **WEB-3** `storeHandlers()` wires no `onUnusable`, so an unknown or
+    unreadable frame leaves no trace; the module docstring's claim that such
+    frames are "counted" was false and has been corrected rather than the
+    code, because a counter wants somewhere to be read and nothing renders
+    one. Not rule 8 — a rejected order's record is the engine's structured
+    log plus the 15s activity poll, and no rejection reaches the unreadable
+    branch by virtue of being a rejection.
+    **WEB-4** `store.lastTradeUpdate` is one slot, newest wins, so it is not
+    a log and its docstring now says so.
 - *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
   debounced client message on the existing WS that names the visible rows and is
   sent only when the set actually differs. The server treats it as input to that
@@ -3046,8 +3117,11 @@ actually on screen.
   `tests/api/test_socket_composition.py`,
   `tests/data/providers/test_alpaca_stream.py`, `tests/sockets_support.py`,
   `tests/test_hard_rules.py` (all landed),
-  `web/src/lib/` — a new `/api/ws` browser client — and
-  `web/src/pages/Markets.tsx` (both outstanding).
+  `web/src/lib/{liveSocket,liveSocket.test,api,quotes,quotes.test,store,types}.ts`
+  — the `/api/ws` browser client, (a), **landed** — and
+  `web/src/pages/Markets.tsx` plus its test, (b), **outstanding**. The mount
+  (an `App.tsx` call to `startLiveSocket`) is a third piece, deliberately
+  not written: see the open question under *(a) landed*.
 
 **10. Doc amendments.** Phase 2, **last**, so they describe what was actually
 built.

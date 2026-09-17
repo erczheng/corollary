@@ -1191,3 +1191,124 @@ export interface EngineStateResponse {
   haltedAt: string | null // ISO datetime
   t0: string | null // ISO datetime
 }
+
+/* -------------------------------------------------------------------------
+ * `/api/ws` — the live socket's wire shapes
+ *
+ * Mirrors `corollary/api/schemas.py`'s `Ws*` models, camelCase as
+ * `ApiModel`'s alias generator emits them. The parsing lives in
+ * `liveSocket.ts`; these are only the shapes.
+ *
+ * **Three server kinds, discriminated on `type`, and a fourth is a decision
+ * rather than an addition.** Engine halt state and notifications are polled
+ * at 15s and must not migrate here: rule 9 halts *because* the socket
+ * closed, so a halt announcement cannot ride the thing whose closure caused
+ * it, and a broken client socket has to stay distinguishable from a halted
+ * engine or a human presses Resume on an engine nobody halted.
+ * ---------------------------------------------------------------------- */
+
+/** A best bid and offer as it leaves the vendor stream.
+ *
+ * **There is no `mid` on the wire and the client may not invent one.** The
+ * midpoint is a derivation, and the judgement worth keeping — a crossed
+ * quote has *no* midpoint, because a bid above an ask is a data error rather
+ * than a tradeable market — lives in one place on each side. Here that place
+ * is `liveSocket.ts#midOf`. */
+export interface WsQuote {
+  /** OCC for a contract, a plain ticker for an underlying. This socket
+   * carries both; which vendor socket it arrived on is not the browser's
+   * business. */
+  symbol: string
+  /** **Null when that side of the book is empty.** Alpaca sends `0`, which
+   * it documents as "the security has no active bid"; a zero here would
+   * claim someone is bidding nothing. */
+  bid: number | null
+  ask: number | null
+  bidSize: number
+  askSize: number
+  /** The **vendor's** observation timestamp — never the server's receive
+   * time and never this client's clock. The quote map's merge orders on it
+   * and on nothing else. */
+  at: string // ISO datetime
+}
+
+/** One `trade_updates` event: what the broker says happened to an order.
+ *
+ * Not a notification and not engine state. This is the broker reporting on
+ * an order we placed; a *halt* is Corollary reporting on itself, and that
+ * goes out on the 15s poll. */
+export interface WsTradeUpdate {
+  /** The vendor's event name — `new`, `fill`, `partial_fill`, `canceled`,
+   * `rejected`, `expired` and a dozen more. A free string deliberately: the
+   * vendor's set is open, and a union that has not heard of `calculated`
+   * turns a real fill notice into a parse failure. */
+  event: string
+  at: string // ISO datetime
+  orderId: string
+  /** Empty on an `mleg` parent, where the parent is the structure and the
+   * legs are the instruments. */
+  symbol: string
+  /** The order's status *after* this event. Free string, same reasoning as
+   * `event`. */
+  status: string
+  /** Resolved server-side from the vendor's position intent. **Null on an
+   * `mleg` parent**, which carries no intent at all — guessing one there is
+   * how a buy-to-close gets booked as a new lot. */
+  action: OrderSide | null
+  quantity: number | null
+  filledQuantity: number
+  fillPrice: number | null
+  fillQuantity: number | null
+  /** **Signed on an `mleg` parent**: a negative average fill price is a net
+   * credit. The sign is the fact, not a presentation choice. */
+  filledAvgPrice: number | null
+  /** The resulting position size, signed, as the broker sees it. */
+  positionQuantity: number | null
+}
+
+export interface WsQuoteFrame {
+  type: 'quote'
+  quote: WsQuote
+}
+
+export interface WsTradeUpdateFrame {
+  type: 'trade_update'
+  update: WsTradeUpdate
+}
+
+/** A stated condition on a socket that has no status code to carry one.
+ *
+ * `ApiErrorBody` in the same position it occupies in the HTTP envelope, so
+ * `api.ts#errorBodyOf` reads both. **A refusal does not close the socket and
+ * is not fatal** — closing on one would make a rejected subscription look
+ * exactly like a dead connection. */
+export interface WsErrorFrame {
+  type: 'error'
+  error: ApiErrorBody
+}
+
+export type WsServerFrame = WsQuoteFrame | WsTradeUpdateFrame | WsErrorFrame
+
+/** The delivery filter for **this connection only**. It does not reach the
+ * vendor sockets.
+ *
+ * `symbols` has no default: `null` means every symbol the fan-out publishes
+ * and spells itself, which reads differently from a forgotten field.
+ * Applied whole or not at all — one malformed entry refuses the message and
+ * the previous filter stands. */
+export interface WsSubscribeMessage {
+  type: 'subscribe'
+  symbols: string[] | null
+}
+
+/** The Markets viewport hint — decision 18, and the producer is step 15 (b).
+ *
+ * Equity tickers only; an OCC contract here is a caller bug and is refused.
+ * Not nullable: an empty list is *nothing is on screen*, which is what
+ * scrolling away or leaving the page means. Bounded server-side at 64. */
+export interface WsMarketsVisibleMessage {
+  type: 'markets_visible'
+  symbols: string[]
+}
+
+export type WsClientMessage = WsSubscribeMessage | WsMarketsVisibleMessage

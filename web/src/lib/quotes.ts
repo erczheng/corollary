@@ -13,7 +13,8 @@
  * 1. **An entry carries its provenance**: `at`, the vendor's observation
  *    timestamp, and `source`. Without them two writers cannot tell a newer
  *    price from an older one, the last arrival wins, and the screen flickers
- *    backwards in time.
+ *    backwards in time. `mergeQuotes` enforces this rather than trusting it:
+ *    an observation it cannot order does not become an entry.
  * 2. **Price is last-observation-wins on `at`**, with the stream winning a
  *    tie. A poll response older than the entry already held is *discarded
  *    for price and applied for everything else*.
@@ -41,6 +42,26 @@ import type { LiveQuote, QuoteSource, StockQuote, UnderlyingQuote } from './type
 function instant(at: string): number {
   const ms = Date.parse(at)
   return Number.isNaN(ms) ? -Infinity : ms
+}
+
+/** Can this observation be ranked against another one at all?
+ *
+ * **Why there is no `?? null` on `at`, three lines from a `previousClose`
+ * that has one.** `previousClose` has a canonical absence: `null` is the
+ * poll's own "no basis to measure a move from", every selector is written
+ * for it, and the merge can carry it around like any other value. `at` has
+ * no such value. It is the *vendor's* observation time, so nothing on this
+ * side of the wire may stand in for it — not `Date.now()`, not the server's
+ * receive time, not an empty string dressed as a stamp. What has to be
+ * answered for a missing stamp is therefore the **entry**, not the field,
+ * and {@link mergeQuotes} is where that happens.
+ *
+ * Reachable, not theoretical: `request<StockQuote[]>` casts rather than
+ * validating, so a server that omits the key delivers `undefined` as a
+ * value the types say cannot exist. Same hazard, same reasoning as the
+ * `?? null` beside it in {@link liveFromStockQuote}. */
+function orderable(at: string): boolean {
+  return instant(at) !== -Infinity
 }
 
 /** Does `incoming` replace the price, the stamp and the source of
@@ -118,7 +139,45 @@ export function mergeQuote(existing: LiveQuote | undefined, incoming: LiveQuote)
  * A new object rather than a mutation, because this feeds a Zustand slice
  * and a mutated map is a map React cannot see change. Symbols the batch does
  * not mention are carried through untouched: a poll for one page's symbols
- * is not a statement that every other symbol stopped existing. */
+ * is not a statement that every other symbol stopped existing.
+ *
+ * ## The map holds only entries it can order
+ *
+ * This is the one way into the map — both writers reach it through
+ * `store.applyPolledQuotes` and `store.applyStreamedQuote` — so it is where
+ * rule 1, *an entry carries its provenance*, is made structurally true
+ * rather than assumed. An observation whose `at` is absent or unparseable
+ * (see {@link orderable}) **removes** the symbol's entry instead of being
+ * merged into it.
+ *
+ * **Why it cannot just lose the price race.** `-Infinity` loses to every
+ * real stamp, and keeps losing. One stamped write — a single pushed quote —
+ * would pin the entry, and every later unstamped poll would be discarded
+ * for price for the rest of the session, while `Markets.tsx`'s `Read
+ * HH:MM:SS ET` header, which advances on any successful fetch, went on
+ * saying the row was current. A quiet stream is not even a fault on this
+ * socket: the viewport hint stops pushes for a symbol the moment it scrolls
+ * off screen, so *last push, then only polls* is the ordinary case rather
+ * than the broken one.
+ *
+ * **Why that mix is reachable.** `dc09147` shipped `/api/ws` with
+ * `WsQuote.at` already required; `86a239f`, two commits later, is what put
+ * `at` on the REST rows. A browser at HEAD against a server anywhere in
+ * that window gets stamped pushes and unstamped polls at the same time.
+ *
+ * **Why dropping the entry costs nothing.** The map has exactly one reader,
+ * {@link liveStockRows}, and a symbol with no entry there renders the query
+ * row's own price — from the very response the unstamped observation
+ * arrived in, with that row's volume and basis beside it. No entry is not a
+ * blank row; it is the server's own figure at the poll's cadence. The cost
+ * runs the other way and is the lesser one: against such a server a live
+ * push and the poll alternate, sub-second apart, both of them real prices
+ * of the same symbol, where rule 1's flicker is an *older* price
+ * overwriting a newer one.
+ *
+ * {@link mergeQuote} is deliberately left out of this. It answers the
+ * field-level question — what does the entry *become* — and an unorderable
+ * observation can only reach it from a caller that is not the map. */
 export function mergeQuotes(
   map: Readonly<Record<string, LiveQuote>>,
   incoming: readonly LiveQuote[],
@@ -127,6 +186,10 @@ export function mergeQuotes(
 
   const next: Record<string, LiveQuote> = { ...map }
   for (const quote of incoming) {
+    if (!orderable(quote.at)) {
+      delete next[quote.symbol]
+      continue
+    }
     next[quote.symbol] = mergeQuote(next[quote.symbol], quote)
   }
   return next
@@ -154,6 +217,11 @@ export function liveFromStockQuote(row: StockQuote): LiveQuote {
   return {
     symbol: row.symbol,
     price: row.price,
+    // Bare, and deliberately bare one line above a `?? null`: there is no
+    // value this side of the wire may put in a vendor observation time, so
+    // an absent key stays absent here and is refused entry to the map by
+    // `mergeQuotes`, which is the only place it can be answered without
+    // inventing a stamp. See `orderable`.
     at: row.at,
     source: 'poll',
     // `?? null`, not a bare read: nullable *and* absent are both reachable
@@ -184,6 +252,8 @@ export function liveFromUnderlyingQuote(row: UnderlyingQuote): LiveQuote {
   return {
     symbol: row.symbol,
     price: row.price,
+    // Bare for the reason `liveFromStockQuote` states: a missing vendor
+    // stamp is refused an entry by `mergeQuotes`, never defaulted here.
     at: row.at,
     source: 'poll',
     previousClose: row.previousClose,
@@ -197,10 +267,12 @@ export function liveFromUnderlyingQuote(row: UnderlyingQuote): LiveQuote {
 
 /** A pushed quote as a live entry.
  *
- * **The producer is the browser websocket client, which is not written
- * yet.** `corollary/api/routes/ws.py` and `fanout.py` landed the server half
- * and nothing under `web/`, so this writer has no caller in the app today
- * and is tested directly instead. It exists now rather than later because
+ * **The producer is the browser websocket client, and it now exists** —
+ * `web/src/lib/liveSocket.ts`, whose `storeHandlers().onQuote` routes a
+ * `quote` frame here through `store.applyStreamedQuote`. It still has no
+ * caller *in the running app*, because nothing calls `startLiveSocket` yet;
+ * it is tested directly and against a fake socket. It exists now rather than
+ * later because
  * the *merge* is what has to be in place before the second writer arrives —
  * landing the rules afterwards means shipping the flickers-backwards-in-time
  * bug first and fixing it second.
@@ -328,6 +400,10 @@ export type LiveStockRow = StockQuote & {
  * it, and that price is the best thing known about the symbol until a writer
  * says otherwise. The change beside it is still derived rather than read, so
  * the two numbers cannot disagree with each other on any row on the screen.
+ * That fallback is also what an *unstamped* observation resolves to:
+ * `mergeQuotes` holds no entry for one, so the row shown is the price the
+ * server sent, refreshed every poll, rather than a price frozen behind a
+ * stamp it could not be ranked against.
  *
  * **The basis falls back to the query row's**, which is what a *stream-first*
  * symbol needs. `streamedQuote` writes `previousClose: null` — the stream
