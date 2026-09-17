@@ -628,6 +628,25 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
    * state a refusal returns us to. */
   const sent = useRef<string[] | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** **Does an observer owe us a first answer?** True from the moment a
+   * fresh observer starts watching rows until its first callback, and
+   * false whenever nothing is being watched.
+   *
+   * This is what makes "never `[]` between two pages of the same table" a
+   * property rather than a race (finding WEB-7). A page turn, a re-sort or
+   * a search rebuilds the observer, and `visible` is emptied with it — but
+   * an empty `visible` in that window means *not yet known*, not *nothing
+   * on screen*. `IntersectionObserver` always queues an initial
+   * notification per observed target, so the answer is coming; it just
+   * need not beat a {@link MARKETS_VIEWPORT_DEBOUNCE_MS} timer that a
+   * throttled tab or a blocked main thread can fire first. Without this
+   * gate that interleaving sends `[]` and then the new page: two messages,
+   * and a real resubscribe of rows that never left the screen.
+   *
+   * It is deliberately *not* "are there rows": when the rows genuinely go
+   * away — a search that matches nothing, a cold read that failed — there
+   * is no observer, nothing is pending, and `[]` is both true and sent. */
+  const awaitingObserver = useRef(false)
 
   const flush = useCallback((symbols: string[]) => {
     if (!marketsVisibleDiffers(sent.current, symbols)) return
@@ -642,6 +661,12 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
 
   const settle = useCallback(() => {
     timer.current = null
+    // A fresh observer has not said what is on screen yet, so there is
+    // nothing to report — see {@link awaitingObserver}. Its first callback
+    // schedules another settle, so this drops no message; it only declines
+    // to invent an empty one. The unmount send calls `flush` directly and
+    // is deliberately not gated: leaving the page *is* an empty viewport.
+    if (awaitingObserver.current) return
     flush(marketsVisibleHint(order.current.filter((symbol) => visible.current.has(symbol))))
   }, [flush])
 
@@ -660,17 +685,23 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
   useEffect(() => {
     order.current = pageKey === '' ? [] : pageKey.split(' ')
     // The previous page's rows are not on screen any more, whatever the
-    // observer last said about them.
+    // observer last said about them. Until the new observer reports, the
+    // *correct* reading of this empty set is "unknown", which is what
+    // `awaitingObserver` below encodes.
     visible.current = new Set()
+    awaitingObserver.current = false
     // Scheduled unconditionally, because the rows may have gone away
     // entirely — a search that matches nothing, or a failed cold read — and
     // an observer with nothing to observe will never call back to say so.
+    // That is exactly the case `awaitingObserver` stays false for, so the
+    // settle below reports the empty viewport it should.
     schedule()
 
     const tbody = body.current
     if (tbody === null) return
 
     const observer = new IntersectionObserver((entries) => {
+      awaitingObserver.current = false
       for (const entry of entries) {
         const symbol = (entry.target as HTMLElement).dataset.symbol
         if (symbol === undefined) continue
@@ -679,14 +710,21 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
       }
       schedule()
     })
-    for (const row of tbody.querySelectorAll<HTMLElement>('tr[data-symbol]')) {
-      observer.observe(row)
-    }
+    const rows = tbody.querySelectorAll<HTMLElement>('tr[data-symbol]')
+    // Only rows that are actually being watched put an answer in flight.
+    // Watching nothing is not "unknown", it is "nothing".
+    awaitingObserver.current = rows.length > 0
+    for (const row of rows) observer.observe(row)
     // Disconnect only. **Not** a send: this cleanup also runs on an ordinary
     // page turn, and emptying the hint between two pages would be a
     // resubscribe — a gap in the marks — for a viewport that never went
-    // away. Leaving Markets is the unmount effect below.
-    return () => observer.disconnect()
+    // away. A disconnected observer owes nothing, so the flag clears with
+    // it; the next effect body sets it again for the next set of rows.
+    // Leaving Markets is the unmount effect below.
+    return () => {
+      observer.disconnect()
+      awaitingObserver.current = false
+    }
   }, [pageKey, schedule])
 
   // Leaving the page. An empty list is the correct way to say nothing is on

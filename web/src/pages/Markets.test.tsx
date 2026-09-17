@@ -769,6 +769,26 @@ async function settleViewport(): Promise<void> {
   })
 }
 
+/** Twenty rows, which is two pages at `PAGE_SIZE` 15 — the only way to
+ * reach a page turn, since the four-row fixture above never paginates.
+ * Volume descends with the index, so under the default `active` rank the
+ * DOM order is the fixture order and page 1 is A–O. */
+const PAGED_STOCKS: StockQuote[] = Array.from({ length: 20 }, (_, i) => {
+  const letter = String.fromCharCode(65 + i)
+  return {
+    symbol: `PG${letter}`,
+    name: `Paged Holdings ${letter}`,
+    price: 100 + i,
+    at: '2026-08-07T19:45:00Z',
+    previousClose: 100,
+    volume: 20_000_000 - i * 100_000,
+    volumeSession: 'completed',
+    volumeDate: '2026-09-11',
+    avgVolume: 10_000_000,
+    marketCap: 10 + i,
+  }
+})
+
 describe('the viewport hint', () => {
   beforeEach(() => {
     observations = []
@@ -967,5 +987,98 @@ describe('the viewport hint', () => {
     await settleViewport()
     expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
     expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+  })
+
+  /** **Finding WEB-7.** "Never `[]` between two pages of the same table"
+   * used to hold only because the rebuilt observer's first delivery beat
+   * the debounce timer. The three tests below drive the *other*
+   * interleaving — the debounce fires first, which is what a throttled
+   * tab or a long main-thread block produces — and the third one pins the
+   * case the gate must **not** swallow. */
+  describe('rebuilding the observer', () => {
+    it('never empties the hint between two pages of the same table', async () => {
+      serve({ stocks: jsonResponse(200, PAGED_STOCKS) })
+      render(<App />)
+      await screen.findByText('Paged Holdings A')
+
+      const firstPage = observedSymbols()
+      expect(firstPage).toHaveLength(15)
+      onScreen(firstPage.slice(0, 3))
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(firstPage.slice(0, 3))
+
+      fireEvent.click(within(section('Stocks & ETFs')).getByRole('button', { name: 'Next' }))
+      await screen.findByText('Paged Holdings P')
+
+      // The whole debounce window elapses with the new observer still
+      // silent. Nothing may go out: the viewport never emptied, so an
+      // empty hint here is a resubscribe of rows that are on screen.
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+      // The observer answers late, and *that* is what sends — one
+      // message, the new page, never an `[]` in front of it.
+      const secondPage = observedSymbols()
+      expect(secondPage).not.toEqual(firstPage)
+      onScreen(secondPage.slice(0, 2))
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(secondPage.slice(0, 2))
+      expect(sendMarketsVisible.mock.calls.every(([hint]) => hint.length > 0)).toBe(true)
+    })
+
+    it('never empties the hint on a re-sort of the same rows', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      const byVolume = observedSymbols()
+      onScreen(byVolume)
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(byVolume)
+
+      // A re-sort renders the same rows in a different order, which
+      // rebuilds the observer exactly as a page turn does. Same hazard.
+      fireEvent.change(within(section('Stocks & ETFs')).getByLabelText('Rank stocks by'), {
+        target: { value: 'gainers' },
+      })
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+      const byGain = observedSymbols()
+      // Same set, different order — and the diff is ordered, mirroring the
+      // server's tuple comparison, so this is news on its own.
+      expect(byGain).not.toEqual(byVolume)
+      expect([...byGain].sort()).toEqual([...byVolume].sort())
+      onScreen(byGain)
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(byGain)
+    })
+
+    it('still empties the hint when the rows themselves go away', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      onScreen(['NVDA', 'SPY'])
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+      // A search that matches nothing. There is no observer to wait on
+      // here and no answer coming, so an empty `visible` set means
+      // *nothing on screen* rather than *not yet known* — and the engine
+      // must stop holding slots for rows that are gone. The guard above
+      // is about an unanswered observer, never about suppressing `[]`.
+      fireEvent.change(
+        within(section('Stocks & ETFs')).getByLabelText('Search stocks by symbol or name'),
+        { target: { value: 'no such company' } },
+      )
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith([])
+    })
   })
 })
