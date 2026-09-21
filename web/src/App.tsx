@@ -7,6 +7,7 @@ import { useThemeSync } from './hooks/useThemeSync'
 import { useCommandPaletteShortcut } from './hooks/useCommandPaletteShortcut'
 import { useFocusModality } from './hooks/useFocusModality'
 import { MARKETS_BACKGROUND_POLL_MS, useMarketPoll } from './hooks/useMarketPoll'
+import { useLiveSocket } from './hooks/useLiveSocket'
 import { Dashboard } from './pages/Dashboard'
 import { Activity } from './pages/Activity'
 import { News } from './pages/News'
@@ -26,6 +27,11 @@ function AppShell() {
   // Markets page mounts the same hook at the foreground interval and
   // supersedes this one — one interval exists at a time, never two.
   useMarketPoll(MARKETS_BACKGROUND_POLL_MS)
+  // The app's one connection to `/api/ws`, opened here and nowhere else:
+  // one browser, one socket, for the app's whole life. Two mounts would be
+  // two connections and two viewport hints overwriting each other. The hook
+  // holds the StrictMode reasoning and the reason it registers no cleanup.
+  useLiveSocket()
 
   return (
     <BrowserRouter>

@@ -1,11 +1,15 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { LiveQuote, StockQuote, UnderlyingQuote } from './types'
+// Imported *into the test only*, for the mirror pin below. The two
+// constants stay uncoupled in production code on purpose.
+import { STALE_AFTER_MS } from '../components/LiveStatus'
 import {
   changeOf,
   changePctOf,
   liveFromStockQuote,
   liveFromUnderlyingQuote,
   liveStockRows,
+  MAX_HELD_AGE_MS,
   mergeQuote,
   mergeQuotes,
   streamedQuote,
@@ -14,6 +18,18 @@ import {
 const EARLY = '2026-09-16T14:30:00Z'
 const LATE = '2026-09-16T14:30:01Z'
 
+/** **No file-scoped clock, and that is a property worth noticing.** The
+ * age-out measures how long the *map* has held an entry, not how old the
+ * vendor says the observation is, so a dated fixture stamp no longer ages
+ * out against the real clock and every stamp-ordering test below is
+ * clock-independent. Timer control survives in exactly one block — the
+ * age-out's, which has to advance past `MAX_HELD_AGE_MS` on purpose rather
+ * than avoid tripping it by accident.
+ *
+ * Fake timers there, not a `now` parameter threaded through `replacesPrice`
+ * → `mergeQuote` → `mergeQuotes`: those signatures are the store's, and a
+ * test-only argument on the one public entry point into the live map is a
+ * worse trade than a fake clock in the one block that needs it. */
 function polled(over: Partial<LiveQuote> = {}): LiveQuote {
   return {
     symbol: 'AAPL',
@@ -99,6 +115,230 @@ describe('mergeQuote — the equal-`at` tie table', () => {
   })
 })
 
+/** Two constants, one number, and nothing in production holding them
+ * together.
+ *
+ * `MAX_HELD_AGE_MS` and `LiveStatus.STALE_AFTER_MS` are deliberately
+ * separate — one asks *"has a frame arrived recently"*, the other *"has this
+ * entry been held too long to keep winning on its stamp"*, and they may
+ * legitimately diverge. But `MAX_HELD_AGE_MS`'s docstring claims the app has
+ * one idea of how long a price stays believable, so changing one number
+ * alone would leave the other behind and the docstring wrong. The pin lives
+ * here rather than in a shared constant, the same way `markets.test.ts`
+ * mirror-pins `MARKETS_VIEWPORT_DEBOUNCE_MS`. */
+describe('MAX_HELD_AGE_MS', () => {
+  it('is the same fifteen seconds the status pill calls stale', () => {
+    expect(MAX_HELD_AGE_MS).toBe(STALE_AFTER_MS)
+  })
+})
+
+/** The reported defect, reproduced as reported rather than abstracted.
+ *
+ * `markets._spot` falls back to `Spot(price=daily.close, at=daily.at)` for a
+ * symbol with no two-sided quote, and `Bar.at` is the interval's *opening*
+ * timestamp (Alpaca's convention; the no-look-ahead rule depends on it). So
+ * on a thin name the poll's stamp is fixed for the session while its price
+ * advances. Once the stream has pushed one quote for that symbol, every
+ * later poll is stamped earlier than the held entry and — before the age-out
+ * — lost the price race on every poll for the rest of the day, with the
+ * frozen price driving the day change and its colour, the gainers/losers
+ * ranking and `ChainOrderTicket`'s moneyness sentence. */
+describe('replacesPrice — the daily-bar fallback must not freeze a row for the session', () => {
+  /** 09:30 ET: the opening stamp of today's daily bar, which is what a
+   * bar-fallback snapshot reports all session. */
+  const BAR_AT = '2026-09-16T13:30:00Z'
+  /** A plausible vendor stamp on the one two-sided quote the stream saw. */
+  const STREAM_AT = EARLY
+  /** The local clock when each of these tests starts: five seconds after the
+   * stream's stamp, which is an ordinary amount of latency-plus-skew. The
+   * block below is largely about that five seconds making no difference. */
+  const ADOPTED_AT = Date.parse(STREAM_AT) + 5_000
+
+  /** The one block in this file that reads a clock, because it is the one
+   * that has to advance past `MAX_HELD_AGE_MS` deliberately. Elapsed time is
+   * advanced with `advanceTimersByTime`, not jumped to with `setSystemTime`:
+   * the hold starts when the *merge* adopts an observation, so what these
+   * tests need to say is "fifteen seconds later", never "fifteen seconds
+   * after the vendor's stamp". */
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(ADOPTED_AT)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const thinRow: StockQuote = {
+    symbol: 'THIN',
+    name: 'Thinly Traded Inc.',
+    price: 100,
+    at: BAR_AT,
+    previousClose: 100,
+    volume: 4_000,
+    volumeSession: 'in_progress',
+    volumeDate: '2026-09-16',
+    avgVolume: 5_000,
+    marketCap: 400,
+  }
+
+  /** One poll of the bar-fallback snapshot: advancing close, static stamp. */
+  function barPoll(price: number, at: string = BAR_AT): LiveQuote {
+    return liveFromStockQuote({ ...thinRow, price, at })
+  }
+
+  it('recovers on the first poll past MAX_HELD_AGE_MS rather than freezing at the pushed price', () => {
+    // 1. The stream pushes one two-sided quote, stamped by the vendor.
+    let map = mergeQuotes({}, [streamedQuote('THIN', 101, STREAM_AT)])
+    expect(map.THIN.price).toBe(101)
+
+    // 2. The snapshot falls back to the daily bar from here on. Inside the
+    //    window the push still holds, which is rule 2 working: a genuinely
+    //    older observation does not overwrite a fresh one.
+    map = mergeQuotes(map, [barPoll(102)])
+    expect(map.THIN.price).toBe(101)
+
+    // At the boundary exactly, still held — the comparison is a strict `>`.
+    vi.advanceTimersByTime(MAX_HELD_AGE_MS)
+    map = mergeQuotes(map, [barPoll(103)])
+    expect(map.THIN.price).toBe(101)
+
+    // 3. One millisecond past it, the poll wins. This is the assertion the
+    //    pre-fix `replacesPrice` fails: it held 101 here and for every poll
+    //    after, for the rest of the session.
+    vi.advanceTimersByTime(1)
+    map = mergeQuotes(map, [barPoll(104)])
+    expect(map.THIN.price).toBe(104)
+    expect(map.THIN.source).toBe('poll')
+
+    // 4. And it keeps tracking: the bar stamp now ties with itself, so the
+    //    later read wins and the row follows the close for the rest of the
+    //    session instead of stopping again at 104.
+    map = mergeQuotes(map, [barPoll(105)])
+    expect(map.THIN.price).toBe(105)
+    map = mergeQuotes(map, [barPoll(106)])
+    expect(map.THIN.price).toBe(106)
+  })
+
+  it('recovers the derived day change with it, which is what the frozen price corrupted', () => {
+    const row = { ...thinRow, price: 104 }
+
+    let map = mergeQuotes({}, [streamedQuote('THIN', 101, STREAM_AT)])
+    const frozen = liveStockRows([row], map)[0]
+    expect(frozen.price).toBe(101)
+    expect(frozen.change).toBe(1)
+
+    vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+    map = mergeQuotes(map, [liveFromStockQuote(row)])
+    const recovered = liveStockRows([row], map)[0]
+
+    expect(recovered.price).toBe(104)
+    expect(recovered.change).toBe(4)
+    expect(recovered.source).toBe('poll')
+  })
+
+  it('never writes the local clock into `at` — the winning stamp is the vendor’s, even going backwards', () => {
+    let map = mergeQuotes({}, [streamedQuote('THIN', 101, STREAM_AT)])
+    vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+    map = mergeQuotes(map, [barPoll(104)])
+    const entry = map.THIN
+
+    // The age-out decides *whether* the incoming write wins. It never
+    // supplies a stamp: the entry carries the bar's own opening time, which
+    // is earlier than the stream stamp it just replaced.
+    expect(entry.price).toBe(104)
+    expect(entry.at).toBe(BAR_AT)
+    expect(Date.parse(entry.at)).toBeLessThan(Date.parse(STREAM_AT))
+    expect(Date.parse(entry.at)).not.toBe(Date.now())
+
+    // The clock read lands on the entry's own bookkeeping instead, where it
+    // orders no observation against any other and nothing renders it.
+    expect(entry.heldSinceLocalMs).toBe(Date.now())
+  })
+
+  /** The pin the first version of this fix did not have, and the reason it
+   * needed one.
+   *
+   * That version measured `Date.now() - Date.parse(existing.at)`: a local
+   * clock minus a *remote* stamp, so skew did not cancel — it entered the
+   * threshold directly, and in both directions. A clock slow by Δ held every
+   * entry for `15s + Δ`, so at Δ of minutes the fix barely worked and at Δ
+   * of hours (a VM restored from a snapshot, a clock set back) it never
+   * fired all session and was a silent no-op. A clock fast by Δ fired it on
+   * every call, which does not merely cost the stream its tie-breaks: it
+   * switches rule 2 off and lets an *older* observation overwrite a newer
+   * one. A held-age is two reads of one clock, so all four cases below hold
+   * whatever that clock is doing — and all four fail against the version
+   * that measured the stamp. */
+  describe('the hold is measured on one clock, so the vendor’s stamp cannot lengthen or shorten it', () => {
+    it('holds an entry whose stamp is already hours old, rather than ageing it out on contact', () => {
+      // A bar-fallback stamp is hours old the moment it is adopted. Ageing
+      // it out on contact is not a freeze, but it is not ordering either:
+      // the symbol degrades to last-arrival-wins, so a *genuinely older*
+      // observation overwrites a newer one.
+      const OLDER_STILL = '2026-09-16T13:00:00Z'
+
+      let map = mergeQuotes({}, [streamedQuote('THIN', 101, BAR_AT)])
+      map = mergeQuotes(map, [barPoll(102, OLDER_STILL)])
+      expect(map.THIN.price).toBe(101)
+
+      vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+      map = mergeQuotes(map, [barPoll(103, OLDER_STILL)])
+      expect(map.THIN.price).toBe(103)
+    })
+
+    it('releases an entry stamped in the year 9999, which arithmetic on `at` never bounded', () => {
+      // `Date.parse` returns no `+Infinity`, so a parseable far-future stamp
+      // gave a large *negative* observation-age, never aged out, and pinned
+      // the entry permanently. Same arithmetic as a slow local clock,
+      // reached from the other end.
+      let map = mergeQuotes({}, [streamedQuote('THIN', 101, '9999-12-31T00:00:00Z')])
+      map = mergeQuotes(map, [barPoll(102)])
+      expect(map.THIN.price).toBe(101)
+
+      vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+      map = mergeQuotes(map, [barPoll(103)])
+      expect(map.THIN.price).toBe(103)
+    })
+
+    it('holds for the same fifteen seconds when the local clock is five minutes slow', () => {
+      // A resumed laptop, an unsynced VM, w32time drift. Against the vendor
+      // stamp every poll lost for 5m15s instead of 15s, and the failure is
+      // silent: nothing checks the clock and nothing on screen says the
+      // age-out has stopped firing.
+      vi.setSystemTime(Date.parse(STREAM_AT) - 5 * 60_000)
+
+      let map = mergeQuotes({}, [streamedQuote('THIN', 101, STREAM_AT)])
+      map = mergeQuotes(map, [barPoll(102)])
+      expect(map.THIN.price).toBe(101)
+
+      vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+      map = mergeQuotes(map, [barPoll(103)])
+      expect(map.THIN.price).toBe(103)
+    })
+
+    it('keeps rule 2 in force when the local clock runs an hour ahead of the feed', () => {
+      // The direction the first version analysed, and misdescribed as
+      // "exactly the pre-stream behaviour". Every held entry was old on
+      // contact, so `replacesPrice` returned true unconditionally — not a
+      // tie-break lost, the whole rule off. Pre-stream there was one writer
+      // and last-write-wins was monotone in observation order; with two
+      // writers it is an older observation overwriting a newer one, which is
+      // the flicker rules 1 and 2 exist to prevent.
+      vi.setSystemTime(Date.parse(LATE) + 60 * 60 * 1_000)
+
+      const held = mergeQuotes({}, [streamedQuote('AAPL', 101, LATE)])
+      const next = mergeQuotes(held, [polled({ price: 99, at: EARLY })])
+
+      expect(next.AAPL.price).toBe(101)
+      expect(next.AAPL.source).toBe('stream')
+      // The stale poll still lands its own fields, which never depended on
+      // the price race.
+      expect(next.AAPL.marketCap).toBe(3_000)
+    })
+  })
+})
+
 describe('mergeQuote — rule 3, the merge is field-level', () => {
   it('a stream write never blanks the poll-only fields', () => {
     const existing = polled({ at: EARLY })
@@ -136,9 +376,19 @@ describe('mergeQuote — rule 3, the merge is field-level', () => {
     expect(merged.avgVolume).toBeNull()
   })
 
-  it('a first write for an unseen symbol is taken whole', () => {
+  it('a first write for an unseen symbol is taken whole, plus the moment it was taken', () => {
     const incoming = streamed({ price: 42 })
-    expect(mergeQuote(undefined, incoming)).toEqual(incoming)
+    const merged = mergeQuote(undefined, incoming)
+
+    // Every observation field, unchanged and unstamped by this side.
+    expect(merged).toMatchObject(incoming)
+    expect(merged.at).toBe(incoming.at)
+
+    // And the one field an entry has that an observation does not.
+    // `streamedQuote` could not have supplied it: producers describe
+    // observations, and only the merge decides what the map holds.
+    expect(merged.heldSinceLocalMs).toBeTypeOf('number')
+    expect(merged.heldSinceLocalMs).not.toBe(Date.parse(incoming.at))
   })
 
   it('an unparseable stamp never beats a real one', () => {
@@ -258,6 +508,50 @@ describe('mergeQuotes — an observation with no observation time', () => {
 
     expect(map.AAPL.price).toBe(103)
     expect(map.AAPL.source).toBe('poll')
+  })
+
+  /** WEB-2. The `delete` above was written for the poll, where the row the
+   * table falls back to arrived in the very same response. A malformed
+   * *stream* frame has no such row behind it: the entry it would evict was
+   * written by a different, healthy writer, so a bad frame took a good
+   * price off the screen — and `markStreamed` stamped `lastTickAt` anyway,
+   * so the pill went on reading `Live` with nothing saying the row had
+   * just lost its live entry. */
+  describe('from the stream, where the entry belongs to the other writer', () => {
+    function unstampedPush(price: number): LiveQuote {
+      return { ...streamedQuote('AAPL', price, EARLY), at: undefined as unknown as string }
+    }
+
+    it('leaves a healthy polled entry exactly where it was', () => {
+      const map = { AAPL: polled({ price: 100, at: EARLY, marketCap: 3_000 }) }
+      const next = mergeQuotes(map, [unstampedPush(999)])
+
+      // Untouched, not re-merged: the frame is evidence about the frame.
+      expect(next.AAPL).toBe(map.AAPL)
+      expect(next.AAPL.price).toBe(100)
+      expect(next.AAPL.source).toBe('poll')
+      expect(next.AAPL.marketCap).toBe(3_000)
+    })
+
+    it('does not seed an entry for a symbol the map has never seen', () => {
+      expect(mergeQuotes({}, [unstampedPush(101)])).toEqual({})
+    })
+
+    it('leaves the poll writing that entry on the next cycle', () => {
+      let map = mergeQuotes({}, [polled({ price: 100, at: EARLY })])
+      map = mergeQuotes(map, [unstampedPush(999)])
+      map = mergeQuotes(map, [polled({ price: 102, at: LATE })])
+
+      expect(map.AAPL.price).toBe(102)
+    })
+
+    it('still removes the entry when the unorderable observation is the poll’s', () => {
+      // The asymmetry is the point, so pin both halves together.
+      const map = { AAPL: streamed({ price: 101, at: EARLY }) }
+
+      expect(mergeQuotes(map, [unstampedPush(999)]).AAPL).toBeDefined()
+      expect(mergeQuotes(map, [polled({ at: undefined as unknown as string })]).AAPL).toBeUndefined()
+    })
   })
 })
 

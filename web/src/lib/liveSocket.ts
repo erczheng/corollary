@@ -584,10 +584,19 @@ export function liveSocket(): LiveSocket | null {
 
 /** Start the app's socket, or return the one already running.
  *
- * **Nothing calls this yet.** Starting the feed decides what every page's
- * liveness stamp means and has to be sequenced against the Phase 1 fixture
- * tick that writes the same field; that mount is its own step. The seam is
- * here so step 15 (b) has a socket to send its viewport hint on. */
+ * **Called from exactly one place:** `useLiveSocket` in
+ * `web/src/hooks/useLiveSocket.ts`, mounted once in `AppShell` — step 15
+ * (c). Until that hook existed this said *nothing calls this yet*, because
+ * starting the feed decides what every page's liveness stamp means and had
+ * to be sequenced against the Phase 1 fixture tick that wrote the same
+ * field. That tick has no caller left in the app, so there is no second
+ * writer to sequence against any more.
+ *
+ * **Idempotent, and the mount depends on it being so.** `start()` returns
+ * early while the instance is running, so React StrictMode's
+ * effect/cleanup/effect double-invoke yields one connection rather than
+ * two — which is why `useLiveSocket` registers no cleanup. That reasoning
+ * is written out there, not here. */
 export function startLiveSocket(options: LiveSocketOptions = {}): LiveSocket {
   if (current === null) current = new LiveSocket({ ...storeHandlers(), ...options })
   current.start()

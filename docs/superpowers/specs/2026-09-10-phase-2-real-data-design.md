@@ -2724,14 +2724,18 @@ and background are three states, not two.
 **15. The `MARKETS_VISIBLE` tier and the viewport hint — decision 18.** Phase 2.
 Spend the ~22 equity slots left after position underlyings on the Markets rows
 actually on screen.
-- *Status:* **server half landed in full, mid-session re-plan included;
-  browser half (a) — the `/api/ws` client — and (b) — the viewport
-  observer, its debounce and its diff — have both landed. What remains is
-  a third piece this entry did not originally name: nothing yet *mounts*
-  the socket, and mounting is blocked on an open question recorded under
-  (a) below. (b) does not clear that blocker and never could — the
-  viewport hint changes no price.** See *What the browser half actually
-  needs*, *(a) landed* and *(b) landed* below.
+- *Status:* **landed in full — the server half including the mid-session
+  re-plan, and all three browser pieces: (a) the `/api/ws` client, (b) the
+  viewport observer with its debounce and its diff, and (c) the mount.
+  Step 15 is complete, and with it Phase 2's code** — every other step in
+  this section reads *landed*, and the only Phase 2 item still outstanding
+  is step 10's doc amendments, which are documentation and not code.
+  (c) was not named when this entry was written: the mount was blocked on
+  an open question about the price merge, the owner ruled on that question
+  on 2026-09-17, and the ruling and the mount landed together, in that
+  order and as two commits. (b) never could have cleared that blocker —
+  the viewport hint changes no price. See *What the browser half actually
+  needs*, *(a) landed*, *(b) landed* and *(c) landed* below.
   Landed: `markets_visible` is a second client message on `/api/ws`
   (`WsMarketsVisibleRequest` in `corollary/api/schemas.py`, dispatched from one
   `_CLIENT_FRAMES` table in `corollary/api/routes/ws.py`), bounded at
@@ -3056,43 +3060,215 @@ actually on screen.
     cannot open a socket or arm a watchdog condition by itself
     (`SubscriptionPlan.engine_subscribed`). Engine state and notifications
     stay on the 15s poll.
-  - **The `quotes.ts:157` prerequisite is half closed, and the other half is
-    an open question that blocks mounting.** `liveFromStockQuote` now guards
-    `at`, and an unorderable stamp can no longer lose the price race
-    forever. What is *not* closed is a stamp that is parseable but **static**:
-    `_spot`'s daily-bar fallback returns `price = daily.close` with
-    `at = daily.at`, and `Bar.at` is the interval's *opening* time
-    (`data/providers/interface.py`), so it is fixed for the session while the
-    close advances. Once a stream has pushed one two-sided quote for a
-    symbol and that symbol's snapshot then falls back to the bar, every
-    later poll is stamped earlier than the stream entry, `replacesPrice`
-    discards it, and the row freezes at the streamed price for the rest of
-    the session — with `changeOf` deriving a wrong day change and colour off
-    it, the gainers/losers ranking sorting on it, and `spot` feeding
-    `ChainOrderTicket`'s moneyness sentence. Nothing on screen contradicts
-    it: `LiveStockRow.source` and the per-row `at` are computed and never
-    rendered, and the global `Read HH:MM:SS ET` header advances on every
-    successful fetch.
-    **This is a defect in `replacesPrice`, which landed in `7cfe553` and is
-    untouched by (a); (a) only makes it reachable.** It is unreachable in the
-    running app today because nothing calls `startLiveSocket`. It is
-    recorded here rather than fixed because **the repair is a choice, not a
-    defect with one correct answer** — the server has no honest advancing
-    stamp for a still-forming daily bar (`datetime.now()` is explicitly
-    forbidden here: "a synthesised observation time is newer than every real
-    one by construction and would win the merge forever"), so the candidates
-    are an age-out on the client's merge, a server-side refusal to serve a
-    bar-stamped row at all, or rendering the staleness per row. That is the
-    same shape as 8d's unpersisted-halt question: it needs a ruling.
-    **Mounting the socket is blocked on it.** (b) is not — the viewport hint
-    changes no price.
+  - **The `quotes.ts:157` prerequisite is closed — the owner ruled, and the
+    ruling landed 2026-09-17.** `liveFromStockQuote` already guarded `at`, so
+    an unorderable stamp could not lose the price race forever. The other
+    half was a stamp that is parseable but **static**: `_spot`'s daily-bar
+    fallback returns `price = daily.close` with `at = daily.at`, and `Bar.at`
+    is the interval's *opening* time (`data/providers/interface.py:232`, and
+    the no-look-ahead rule depends on it), so it is fixed for the session
+    while the close advances. Once a stream had pushed one two-sided quote
+    for such a symbol, every later poll was stamped earlier than the held
+    entry, `replacesPrice` discarded it, and the row froze at the streamed
+    price for the rest of the session — with `changeOf` deriving a wrong day
+    change and colour off it, the gainers/losers ranking sorting on it, and
+    `spot` feeding `ChainOrderTicket`'s moneyness sentence, under the word
+    "risk". Nothing on screen contradicted it: `LiveStockRow.source` and the
+    per-row `at` are computed and never rendered, and the global `Read
+    HH:MM:SS ET` header advances on every successful fetch.
+    **The ruling: an age-out on the client merge.** `replacesPrice` gains one
+    branch, checked ahead of both stamps — if the entry already held has been
+    *held* longer than `MAX_HELD_AGE_MS`, the incoming observation wins
+    whatever the stamps say; below that the existing table is unchanged
+    (newer wins, older loses and still applies its other fields, an equal
+    stamp goes to the incoming write unless it is a poll over a streamed
+    entry). The branch only ever lets `incoming` win, so until it fires the
+    ordinary stamp comparison still runs and a real streamed push still beats
+    a held bar-stamped entry on the stamps. What it buys: **no row vanishes,
+    no timestamp is fabricated, and the row recovers on the first poll past
+    the threshold** — a bounded ~15s of staleness instead of a session of it,
+    and once recovered the bar stamp ties with itself so the row tracks the
+    close for the rest of the day.
+    **What it costs when the stream is not quiet, recorded because the first
+    write-up of this said only the quiet case.** For a symbol whose snapshot
+    is bar-only (stamp `B`, hours old) *and* which the socket pushes for at a
+    cadence `C` longer than `MAX_HELD_AGE_MS`, the merge does not converge —
+    it alternates: the pushed quote mid for 15s, the bar's last-trade close
+    for `C − 15`s, indefinitely. On a thin name those two can differ by the
+    spread, so the day change, its bullish/bearish colour, the gainers/losers
+    rank and `ChainOrderTicket`'s moneyness sentence flip on that period, and
+    a contract can be watched going ITM → OTM → ITM with nothing touched.
+    **This is an accepted consequence of the ruling, not an open defect**:
+    both alternating figures are real, recently-observed prices of the same
+    symbol, where the behaviour being replaced showed one price nobody had
+    observed since the morning for the rest of the session. It is written
+    into `replacesPrice`'s docstring as well, so the next reader meets it
+    there rather than on a screen.
+    **Why not the other two candidates.** A *server-side refusal to serve
+    bar-stamped rows* drops thinly-traded names off the Markets table
+    entirely — the failure is worse than the defect and it is invisible.
+    *Rendering the staleness per row* labels the problem but leaves the wrong
+    price driving the change %, the ranking and the moneyness sentence, with
+    every fresh poll still discarded; a label beside a wrong number is not a
+    correction. The server still has no honest advancing stamp for a
+    still-forming daily bar, and `datetime.now()` there stays forbidden.
+    **`MAX_HELD_AGE_MS = 15_000`, exported from `quotes.ts`, and the number
+    is borrowed rather than invented.** CLAUDE.md already states one notion
+    of stale — *"past ~15s without a price the status pill reads `stale`"* —
+    and `LiveStatus.STALE_AFTER_MS` is that figure; the app should have one
+    idea of how long a price stays believable. It is 3× the 5s
+    `MARKETS_BACKGROUND_POLL_MS` and ~37× the 400ms foreground poll, so
+    neither a foregrounded nor a backgrounded tab ages out as a matter of
+    course, and a stream that is genuinely pushing re-stamps its entry many
+    times inside the window and never reaches the branch.
+    **Which quantity is measured, and this is the part the first attempt got
+    wrong.** It measured `Date.now() - Date.parse(existing.at)` — the age of
+    the *vendor's observation* against the local clock — and analysed only
+    the direction where the local clock runs ahead. Skew does not cancel in
+    that subtraction, because its two ends come from two different clocks,
+    and it fails in **both** directions. A clock slow by Δ fires the branch
+    only once the true age passes `15s + Δ`: five minutes slow (a resumed
+    laptop, an unsynced VM, w32time drift) meant every poll lost for 5m15s
+    instead of 15s, and at Δ of hours — a VM restored from a snapshot, a
+    clock set back — the branch never fired all session and **the fix was a
+    no-op**, silently, with nothing checking for it. A clock fast by Δ fires
+    it on every call, which does not merely cost the stream its tie-breaks:
+    `replacesPrice` returns true unconditionally and rule 2 is switched off,
+    so an *older* observation overwrites a newer one — the
+    flickers-backwards-in-time bug rules 1 and 2 exist to prevent, not "the
+    pre-stream behaviour" (pre-stream there was one writer, and last-write-
+    wins was monotone in observation order; with two writers it is not).
+    This is recorded rather than quietly corrected because the same diff
+    declared the mount prerequisite **closed**, and the thing doing the
+    unblocking was disabled by a condition nobody checks.
+    **What landed instead: measure how long we have *held* the entry.** The
+    map's value type gains one field — `HeldQuote.heldSinceLocalMs`, a local
+    `Date.now()` in milliseconds, written in `mergeQuote` (including its
+    `existing === undefined` base case) and nowhere else, so a producer
+    cannot forge one: `liveFromStockQuote`, `liveFromUnderlyingQuote` and
+    `streamedQuote` all return `LiveQuote` and describe *observations*, while
+    only the merge decides what the map *holds*. It moves with
+    `price`/`at`/`source`, which already move as one because they describe a
+    single observation: a losing write leaves the held observation and its
+    held-since alone, or a 400ms poll would renew the hold forever. The field
+    is optional because the store's slice is typed `Record<string, LiveQuote>`
+    and hands that map straight back to `mergeQuotes`; absence means *not
+    held by this map yet*, an age of zero, and readers cannot see the field
+    at all, which is the guarantee that nothing renders it.
+    **This stays inside the approved shape.** The clock still only decides
+    **whether** a held entry still wins, and is still **never written into
+    `at`** — a test pins that the winning entry after an age-out carries the
+    bar's own earlier stamp, not the local time (`markets.py:1121`, "never a
+    clock on this side of the wire"). The forbidden thing is a fabricated
+    *observation stamp*, newer than every real one by construction and
+    winning the merge forever; a held-since marker orders no observation
+    against any other, is never rendered, and never goes on the wire. There
+    is in-repo precedent: `store.markStreamed`'s docstring is explicit that
+    its `at` is *when the update arrived, not the vendor's observation time*,
+    because the Basic plan's `indicative` options feed is 15 minutes delayed
+    and a pill fed the vendor stamp would read `stale` forever on a healthy
+    socket. Same reasoning, different consumer.
+    **Three consequences worth stating.** (1) No regression against a held
+    bar-stamped poll: the age-out is an override that can only make
+    `incoming` win, so until it fires a real streamed push still beats a held
+    bar-stamped entry on the stamps. (2) Held-age is strictly better than
+    observation-age even ignoring skew — under observation-age a bar-stamped
+    entry aged out *on contact*, degrading that symbol to last-arrival-wins
+    with no ordering at all; under held-age it is ordered normally for 15s
+    and then released. (3) A far-future stamp stops mattering: `Date.parse`
+    never returns `+Infinity`, so `9999-12-31` gave a large negative
+    observation-age, never aged out, and pinned the entry permanently — the
+    same arithmetic as a slow clock, reached from the other end. Under
+    held-age it is released after 15s like anything else. That mirror edge
+    also composes with WEB-2: post-gate a malformed stream frame no longer
+    evicts the entry, so the age-out is the *only* remaining bound on it, and
+    a branch that never fires is a frozen row with its rescue path removed.
+    **Same number as the pill, different quantity, and now both are
+    local-against-local.** `LiveStatus.STALE_AFTER_MS` asks *"has a frame
+    arrived recently"*, comparing the local clock against `lastTickAt`, which
+    `storeHandlers().onQuote` wrote from that same clock — skew cancels
+    exactly, which is why the pill is trustworthy. The age-out asks *"has
+    this entry been held too long to keep winning on its stamp"*, comparing
+    the local clock against the moment the merge adopted the entry: the same
+    property, for a different consumer. Neither is the age of the vendor's
+    observation, which is not measurable on this side of the wire at all.
+    Two constants is still the right shape — they are different quantities
+    and may legitimately diverge — but nothing in production couples them, so
+    `quotes.test.ts` mirror-pins `MAX_HELD_AGE_MS === STALE_AFTER_MS` (the
+    test imports the pill's constant; production code does not), the same way
+    `markets.test.ts` pins `MARKETS_VIEWPORT_DEBOUNCE_MS`. Change one and the
+    pin says out loud that the other, and the docstring claiming the app has
+    one idea of how long a price stays believable, are behind.
+    **What this map holds, stated as what is actually true of it.** Its only
+    reader is `liveStockRows`, which resolves equity rows — that half was
+    verified. The writer side is *not* filtered: `storeHandlers().onQuote`
+    routes every priced quote frame into `applyStreamedQuote`, and the
+    server's fan-out is sized for 30 equity symbols plus 200 option quotes,
+    so an OCC-symbol entry can sit in this map. It sits there inertly,
+    because **nothing reads the non-equity entries** — which is the true
+    statement, where "the map holds equities" was a premise about the reader
+    dressed as a structural property of the writer. No filter was added; that
+    is a different change. The delayed-feed caveat that used to hang off this
+    is moot under a held-age: a 15-minute-delayed options quote is held and
+    released on exactly the terms an IEX one is, because the measurement no
+    longer involves the vendor's stamp. The delay shows up in the price, not
+    in the merge.
+    **Tested as reported, not as an abstraction.** `quotes.test.ts`
+    reproduces the sequence — one streamed push with a plausible vendor
+    stamp, then a bar-fallback poll with an earlier static stamp and an
+    advancing price — and asserts the row *recovers*, at the boundary
+    (strict `>`, so it still holds), one millisecond past it, and on every
+    poll after; a further case asserts the entry that wins carries the bar's
+    stamp rather than the clock read. Four more pin the finding above: a
+    stamp already hours old is *held* for the full window rather than aged
+    out on contact, a `9999-12-31` stamp is released after the window rather
+    than pinned forever, a local clock five minutes slow holds for the same
+    fifteen seconds, and a local clock an hour fast keeps rule 2 in force
+    instead of letting an older observation win. All four fail against the
+    `Date.now() - Date.parse(existing.at)` version — three because the branch
+    never fires, one because it fires on every call.
+    **The fake-timer workaround is gone with the problem it worked around.**
+    Held-age re-stamps adoption on every merge, so a dated fixture no longer
+    ages out against the real clock: `store.test.ts` is back to its committed
+    state, and in `quotes.test.ts` the pinned clock is scoped to the one
+    block that has to advance *past* `MAX_HELD_AGE_MS` deliberately rather
+    than the whole file. Every stamp-ordering test in that file now runs
+    against the real clock and is clock-independent, which is itself the
+    evidence: under the previous version they only passed because a
+    `vi.setSystemTime` held the wall clock next to the fixtures. No `now`
+    parameter was threaded through `replacesPrice` → `mergeQuote` →
+    `mergeQuotes`, since those signatures are the store's.
+    **WEB-2 closed in the same change** (next bullet). **This is what
+    unblocked the mount**, which landed immediately behind it — see *(c)
+    landed* below. The two are separate commits, and in that order on
+    purpose: the mount is what makes a frozen row reachable in the running
+    app, so the age-out may not land after it.
+  - **WEB-2 closed 2026-09-17 — the eviction in `mergeQuotes` is the poll's,
+    and only the poll's.** An observation whose `at` is absent or unparseable
+    still never becomes an entry; what happens to the entry *already held*
+    now depends on which writer sent it. The `delete` was written for the
+    poll, where the discarded observation and the row the table falls back to
+    arrive in the **same response**, so dropping the entry costs nothing and
+    is what stops an unstamped poll losing the price race forever. A stream
+    frame has no such row behind it: the entry it evicted was written by a
+    different, healthy writer, so a malformed frame took a good price off the
+    screen on the strength of a bad one. From the stream the frame is now
+    **ignored** — `if (quote.source === 'poll') delete …`. Ignoring cannot
+    freeze a row the way an ignored poll would: the poll produces an
+    orderable observation every cycle, and the age-out above bounds the wait
+    even if it goes quiet. The `markStreamed` half of WEB-2 is deliberately
+    left alone, and the case for leaving it is stronger after the gate than
+    before. The complaint covers exactly one shape of frame — a valid mid
+    with an absent or unparseable `at` — because `liveSocket` returns early
+    on a null mid, so a frame that prices nothing never reaches
+    `markStreamed` at all and the pill never claims a price arrived when
+    none did. For the frame it does cover, `lastTickAt` answers *"did a frame
+    arrive"*, one did and it carried a price, so the pill reading `Live` is
+    true; the aggravation was the row losing its live entry silently
+    underneath it, and that is what the gate removed. Four new cases in
+    `quotes.test.ts` pin both halves of the asymmetry together.
   - *Follow-ups from (a)'s audit, none blocking, all recorded rather than
-    fixed:* **WEB-2** a malformed stream frame with a missing `at` reaches
-    `applyStreamedQuote` and *evicts* a healthy polled entry (the `delete` in
-    `mergeQuotes`, written for the poll, now also fires on the stream), while
-    `markStreamed` stamps `lastTickAt` anyway so the pill still reads Live.
-    Bounded — the row falls back to the query row — and it sits in the same
-    merge code the question above will touch, so fix them together.
+    fixed:*
     **WEB-3** `storeHandlers()` wires no `onUnusable`, so an unknown or
     unreadable frame leaves no trace; the module docstring's claim that such
     frames are "counted" was false and has been corrected rather than the
@@ -3197,12 +3373,12 @@ actually on screen.
     `typeof IntersectionObserver === 'undefined'` branch in the page would be
     production code shaped around the test environment. `Markets.test.tsx`
     replaces it with a driveable one.
-  - **This does not clear the mount blocker.** Nothing calls
-    `startLiveSocket`, so the hint has no socket to travel on in the running
-    app, and the open question under *(a) landed* — a poll whose stamp is
-    parseable but static losing the price race to a streamed quote forever —
-    still needs its ruling before anything mounts. (b) was never going to
-    clear it: the viewport hint changes no price.
+  - **This did not clear the mount blocker, and (b) was never going to:**
+    the viewport hint changes no price. The open question it named — a poll
+    whose stamp is parseable but static losing the price race to a streamed
+    quote forever — was ruled on and closed separately on 2026-09-17, under
+    *(a) landed* above. The mount then followed as *(c)* below, which is
+    what finally gives the hint a socket to travel on in the running app.
   - *Follow-ups from (b)'s audit. None blocking, and each is bounded to
     freshness on rows that are polled at 400ms regardless — recorded rather
     than fixed, because every one of them costs a slot on the lowest tier
@@ -3218,14 +3394,24 @@ actually on screen.
     clears this page's record. The consequence is one duplicate hint, which
     the server answers `UNCHANGED` with no re-plan, so it costs nothing; but
     the effect reacts to a broader signal than it means.
-    **WEB-7** *"never between two pages of the same table"* holds by a
-    timing race rather than by construction: the effect body clears the
-    visible set and schedules unconditionally, and the `[]` is avoided only
-    because the new observer's first delivery beats the 400ms timer. A
-    throttled tab or a long main-thread block sends `[]` and then the new
-    page — two messages and a real resubscribe of that page's rows. The
-    claim is currently made in three places and pinned by none; no test
-    exercises a page turn or a sort change. Pin it before trusting it.
+    **WEB-7 closed 2026-09-17 (`e8e33fb`), structurally rather than by a
+    test alone.** The claim *"never between two pages of the same table"*
+    held only because the rebuilt observer's first delivery usually beat the
+    400ms debounce; a throttled tab or a long main-thread block sent `[]` and
+    then the new page — two messages and a real resubscribe of rows that
+    never left the screen. `useViewportHint` now tracks whether an observer
+    still owes its first answer, and `settle()` returns early while one does,
+    so an empty visible set during a rebuild reads as *not yet known* rather
+    than *nothing on screen*. No message is dropped: the observer's first
+    callback schedules, and the hint goes out one debounce later. The gate is
+    on *"an observer owes an answer"*, not on *"are there rows"* — when the
+    rows genuinely go away nothing is being watched, the flag stays false,
+    and `[]` is still sent — and the unmount send bypasses it entirely by
+    calling `flush([])` directly. Three tests drive the interleaving the race
+    depended on (a page turn, a re-sort of the same rows, rows genuinely
+    disappearing), advancing the full debounce before the new observer
+    speaks; neutering the single gate line fails the first two with
+    `called 1 times, but got 2 times`.
     **WEB-8** the two mirrored server constants have a **one-way pointer**:
     the TS names its Python origin, and neither `runtime.py` nor `stream.py`
     records that a client copy exists. Narrowing `_EQUITY_TICKER` or
@@ -3240,6 +3426,103 @@ actually on screen.
     never-visible branch forever, so a test asserting **absence** passes
     vacuously. Without the stub such a failure is loud. Harden by recording
     constructions, or by throwing unless a test opts in.
+  - **(c) landed 2026-09-17 — the mount, and the socket is finally open in
+    the running app.** `useLiveSocket` (`web/src/hooks/useLiveSocket.ts`) is
+    the whole of it: one `useEffect` calling `startLiveSocket()` on an empty
+    dependency array, mounted once in `AppShell` beside `useMarketPoll`. No
+    arguments, no state, no return value. Until it existed the client was
+    written, tested and never opened.
+    **At the shell and never per page**, because one connection per browser
+    is an app-wide invariant no component can hold: a second mount is a
+    second connection and two viewport hints taking turns overwriting each
+    other, and the server drops a hint with the connection that sent it.
+    **No cleanup, deliberately.** Unmounting `AppShell` means the React root
+    is going away, which happens on page unload — where the browser closes
+    the socket itself. The only time a cleanup runs against a live app is
+    StrictMode's double-invoke, and `return stopLiveSocket` there closes the
+    socket *and nulls the singleton*, so development would open, close and
+    reopen on every boot against a fresh `LiveSocket` that has forgotten the
+    last viewport hint, which is the one piece of state the reconnect path
+    exists to replay. With no cleanup the sequence is start → nothing →
+    start and the second `start()` is a no-op against the same instance. The
+    cost falls entirely in the test environment, where unmounting really does
+    mean *throw the app away*, and is paid in `web/src/test/setup.ts`'s
+    suite-wide `afterEach(stopLiveSocket)` — harness hygiene belongs in the
+    harness, not in the shape of the app's lifetime.
+    **Rule 9 holds now that the client actually runs, and it is pinned
+    against the store rather than against a comment.** `storeHandlers()`
+    writes `quotes`, `lastTickAt`, `lastTradeUpdate` and `lastStreamError`
+    and nothing else; no `onStatus` is wired, so socket status reaches no
+    store field and no render. Engine state and notifications stay on their
+    15s poll and did **not** migrate onto the socket:
+    `useLiveSocket.test.tsx` spies on `queryClient.invalidateQueries` and
+    asserts the count is unchanged across mount → open → close →
+    reconnect → open, with `isHalted: true` held throughout. A refetch
+    triggered by a reconnect is a reconnect reading as a resume, which is
+    the thing rule 9 exists to forbid. The hook runs regardless of halt
+    state and must: a halt stops new entries, it does not stop marking what
+    is held (rule 7). Nothing resumes, nothing clears a halt, and the only
+    thing a reconnect replays is the viewport hint — tier
+    `MARKETS_VISIBLE`, last and cut first, which cannot arm a watchdog
+    condition.
+    **Two test-environment pieces, each under its honest name.**
+    `web/vite.config.ts` gains `ws: true` on the `/api` proxy entry, and it
+    is not redundant: Vite forwards websocket upgrades only on a proxy entry
+    that opts in, and `liveSocketUrl()` correctly takes its host from the
+    page, which in development is the dev server rather than the API.
+    Without the flag the mount still "lands" and simply never connects, the
+    only symptom being a reconnect loop nobody is watching. It sits under
+    `server.*`, so it configures the dev server process and changes no
+    production build — the bundle is served from the API's own origin and
+    never passes through the proxy at all. `web/src/test/setup.ts` replaces
+    the global `WebSocket`, and **that one is a suppression, not a gap**:
+    jsdom implements `WebSocket` for real, so left alone every suite that
+    renders `<App />` would open `ws://localhost/api/ws` against nothing and
+    arm a reconnect timer inside the run. The rejected alternative, a
+    `typeof WebSocket === 'undefined'` branch in the hook, is production code
+    shaped around the test environment.
+    `web/src/test/recordingWebSocket.ts` **records constructions rather than
+    being inert**, which is WEB-9's hardening applied at the point it was
+    predicted: a test asserts the mount *happened* instead of passing
+    vacuously on its absence. It is test-only — two importers, `setup.ts`
+    and `useLiveSocket.test.tsx`, no barrel, and no path to it from
+    production code.
+  - *Follow-ups from (c)'s audit. Nothing at MEDIUM or above; each is bounded
+    to freshness or to the harness, and none can reach a held mark or an
+    order.* **WEB-10** `replacesPrice` returns `true` on the age-out branch
+    *before* `instant(incoming.at)` is consulted, so an unorderable
+    `incoming` wins against an aged-out `existing` and `mergeQuote` writes
+    `at: undefined`. `mergeQuote` is exported and the invariant *nothing
+    unorderable enters the map* is stated on it, but only `mergeQuotes`
+    enforces it, by filtering first — and `mergeQuotes` is the sole
+    production caller, so this is unreachable today and self-limiting if
+    reached, the bad entry carrying a fresh `heldSinceLocalMs` and being
+    released 15s later. An `orderable(incoming.at)` guard inside the branch
+    would restore the invariant where a reader looks for it.
+    **WEB-11** `RecordingWebSocket.readyState` never leaves `CONNECTING`
+    unless a test calls `driveOpen()`, so `send()` returns `false` in every
+    suite that does not drive the socket: a later test asserting *the hint
+    went out* would fail for a reason that looks like a product bug, and one
+    asserting *nothing was sent* would pass vacuously. Invisible today
+    because `Markets.test.tsx` mocks `sendMarketsVisible` at the module
+    boundary — which is the same fact said differently: **(b) and (c) are
+    only ever tested apart, never composed.** The composition is covered by
+    parts, so this is a coverage note and not a hole.
+    **WEB-12** `storeHandlers().onQuote` still calls `markStreamed` for a
+    valid-mid frame whose `at` is unorderable, so `lastTickAt` advances for a
+    price that never reached the map. Unobservable today, because
+    `LiveStatus` is rendered exactly once — on `News.tsx`, against
+    `lastNewsAt` — so no rendered pill reads `lastTickAt` at all. It
+    becomes a real *Live over a frozen timestamp* the day a stream pill
+    returns to Markets or Activity.
+  - *Recorded, not acted on, because it is not this step's to fix:*
+    **SPEC-1** step 8's umbrella line earlier in this section still says
+    *"six sub-steps, two of which are not written"* while 8a, 8b, 8c-1,
+    8c-2, 8d and 8e each read *landed* individually. It is the same disease
+    as the four sentences (c) had to correct in this entry, and the standing
+    correction at the head of this section names it; left alone only because
+    step 8's reasoning was not read in this pass, and a confidently wrong
+    doc fix is worse than a flagged stale one.
 - *The work, from decision 18:* a **new lowest** `SubscriptionPriority`, fed by a
   debounced client message on the existing WS that names the visible rows and is
   sent only when the set actually differs. The server treats it as input to that
@@ -3262,9 +3545,11 @@ actually on screen.
   — the `/api/ws` browser client, (a), **landed** — and
   `web/src/pages/{Markets.tsx,Markets.test.tsx}`,
   `web/src/lib/{markets,markets.test}.ts`, `web/src/test/setup.ts` — the
-  viewport observer, its debounce and its diff, (b), **landed**. The mount
-  (an `App.tsx` call to `startLiveSocket`) is a third piece, deliberately
-  not written: see the open question under *(a) landed*.
+  viewport observer, its debounce and its diff, (b), **landed** — and
+  `web/src/hooks/{useLiveSocket.ts,useLiveSocket.test.tsx}`,
+  `web/src/App.tsx`, `web/src/test/recordingWebSocket.ts`,
+  `web/src/test/setup.ts`, `web/vite.config.ts` — the mount, (c),
+  **landed**.
 
 **10. Doc amendments.** Phase 2, **last**, so they describe what was actually
 built.
