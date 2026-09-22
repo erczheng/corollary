@@ -256,6 +256,70 @@ describe('replacesPrice — the daily-bar fallback must not freeze a row for the
     expect(entry.heldSinceLocalMs).toBe(Date.now())
   })
 
+  /** WEB-10. `mergeQuotes` filters unorderable observations out before the
+   * merge ever sees one, so the map's own path cannot reach this — these
+   * call the **exported** {@link mergeQuote} directly, the way the finding
+   * is written and the way a future caller would.
+   *
+   * The age-out is the one branch that decides the race before either stamp
+   * is read, so it was the one branch that could adopt an observation the
+   * map can never order again, writing `at: undefined` into an entry. What
+   * it must do instead is nothing: hold what it has until an observation
+   * arrives that can be held. */
+  describe('the age-out hands the entry only to an observation the map can hold', () => {
+    /** A held entry, adopted through the merge so it carries a real
+     * `heldSinceLocalMs`, then left to age past the window. */
+    function agedOut() {
+      const entry = mergeQuote(undefined, streamedQuote('THIN', 101, STREAM_AT))
+      vi.advanceTimersByTime(MAX_HELD_AGE_MS + 1)
+      return entry
+    }
+
+    const NO_STAMP = undefined as unknown as string
+
+    it.each([
+      ['a stream frame', (): LiveQuote => ({ ...streamedQuote('THIN', 999, STREAM_AT), at: NO_STAMP })],
+      ['a poll row', (): LiveQuote => liveFromStockQuote({ ...thinRow, price: 999, at: NO_STAMP })],
+    ])('refuses an unstamped observation from %s against an aged-out entry', (_label, make) => {
+      const existing = agedOut()
+      const merged = mergeQuote(existing, make())
+
+      // Nothing unorderable entered the entry: the stamp is still one the
+      // merge can read, which is the invariant stated on `mergeQuotes` and
+      // now true of `mergeQuote` on its own.
+      expect(merged.at).toBe(STREAM_AT)
+      expect(Number.isNaN(Date.parse(merged.at))).toBe(false)
+      expect(merged.price).toBe(101)
+      expect(merged.source).toBe('stream')
+      // The hold is not refreshed either, because nothing was adopted — so
+      // the first orderable observation after this still wins immediately
+      // rather than starting a fresh fifteen seconds.
+      expect(merged.heldSinceLocalMs).toBe(existing.heldSinceLocalMs)
+    })
+
+    it('still lets an aged-out entry go to the next stamped observation, older stamp and all', () => {
+      // The property the guard must not cost: the age-out exists to release
+      // a quiet entry, and it still does for anything the map can order.
+      const merged = mergeQuote(agedOut(), barPoll(104))
+
+      expect(merged.price).toBe(104)
+      expect(merged.at).toBe(BAR_AT)
+      expect(merged.source).toBe('poll')
+      expect(merged.heldSinceLocalMs).toBe(Date.now())
+    })
+
+    it('leaves the ordinary stamp comparison running until the age-out fires', () => {
+      // Inside the window an unstamped observation loses on `-Infinity`,
+      // which is the same answer by a different route — pinned so a later
+      // reader cannot conclude the guard is the only thing refusing it.
+      const held = mergeQuote(undefined, streamedQuote('THIN', 101, STREAM_AT))
+      const merged = mergeQuote(held, { ...streamedQuote('THIN', 999, STREAM_AT), at: NO_STAMP })
+
+      expect(merged.price).toBe(101)
+      expect(merged.at).toBe(STREAM_AT)
+    })
+  })
+
   /** The pin the first version of this fix did not have, and the reason it
    * needed one.
    *

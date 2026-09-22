@@ -3269,13 +3269,23 @@ actually on screen.
     `quotes.test.ts` pin both halves of the asymmetry together.
   - *Follow-ups from (a)'s audit, none blocking, all recorded rather than
     fixed:*
-    **WEB-3** `storeHandlers()` wires no `onUnusable`, so an unknown or
+    **WEB-3 closed 2026-09-22 as already addressed, and deliberately with
+    no code.** `storeHandlers()` wires no `onUnusable`, so an unknown or
     unreadable frame leaves no trace; the module docstring's claim that such
     frames are "counted" was false and has been corrected rather than the
     code, because a counter wants somewhere to be read and nothing renders
     one. Not rule 8 — a rejected order's record is the engine's structured
     log plus the 15s activity poll, and no rejection reaches the unreadable
     branch by virtue of being a rejection.
+    Re-checked on the 2026-09-22 pass: the correction is present and
+    accurate at `liveSocket.ts:25-33`, and `onUnusable` has exactly four
+    production mentions — the optional field on `LiveSocketHandlers`, the
+    optional call in the frame dispatch, the docstring line, and nothing
+    else; `storeHandlers()` returns `onQuote` / `onTradeUpdate` / `onError`
+    only, and the single wiring anywhere is a `vi.fn()` in
+    `liveSocket.test.ts`. No counter exists and nothing renders one, so the
+    original reasoning stands unchanged and **adding one now would be
+    inventing a reader**. Closed on the evidence, not deferred.
     **WEB-4** `store.lastTradeUpdate` is one slot, newest wins, so it is not
     a log and its docstring now says so.
 - *(b) landed 2026-09-17 — the viewport observer, its debounce and its diff.*
@@ -3412,15 +3422,61 @@ actually on screen.
     disappearing), advancing the full debounce before the new observer
     speaks; neutering the single gate line fails the first two with
     `called 1 times, but got 2 times`.
-    **WEB-8** the two mirrored server constants have a **one-way pointer**:
-    the TS names its Python origin, and neither `runtime.py` nor `stream.py`
-    records that a client copy exists. Narrowing `_EQUITY_TICKER` or
+    **WEB-8 closed 2026-09-22 — the pointer runs both ways now.** The
+    finding: the two mirrored server constants had a **one-way pointer**.
+    The TS named its Python origin, and neither `runtime.py` nor `stream.py`
+    recorded that a client copy exists. Narrowing `_EQUITY_TICKER` or
     lowering `MAX_MARKETS_VISIBLE_SYMBOLS` server-side would refuse every
     hint whole, forever — and WEB's re-send-on-refusal makes it re-send into
     the same refusal — so the tier would sit empty for the session. Loud on
     the server (`_refuse` logs rule, inputs and timestamp per refusal) and
-    invisible on the client. The fix is a back-reference comment in the two
-    Python files, not code.
+    invisible on the client. The fix was a back-reference comment in the two
+    Python files, not code, and that is exactly what landed: no regex
+    widened or narrowed, no bound moved, no code line altered.
+    Three definitions carry it — `MAX_MARKETS_VISIBLE_SYMBOLS` and
+    `_EQUITY_TICKER` in `corollary/engine/runtime.py`, `_OCC_SYMBOL` in
+    `corollary/engine/stream.py` — each naming its mirror by symbol and path
+    in `web/src/lib/markets.ts`, and each stating the consequence rather
+    than the mere existence of a copy: a hint is applied whole or not at
+    all, so a symbol the old client still sends refuses the *whole* message
+    and the client re-sends into the same refusal; and the asymmetry that
+    hides it is that the server is loud and the client surfaces nothing, so
+    the only symptom on screen is staleness.
+    **Two corrections the audit of this change forced, and both are the
+    reason a comment-only unit still went through the gate.** First, *what
+    triggers the bound's refusal is the hint's size, not the client's cap* —
+    the test is `len(asked) > MAX_MARKETS_VISIBLE_SYMBOLS`, and the hint is
+    built from one page of the stock table, so lowering 64 to any figure
+    still above a page refuses nothing. The dangerous regime is specifically
+    a bound *below* what a viewport can report. The guidance to move the
+    mirror anyway stays, as the conservative habit, but the comment no
+    longer misattributes the trigger. Second, *"the tier sits empty for the
+    session" is only the total-failure case*: `set_markets_visible` returns
+    before it assigns `self._markets_visible`, so **the previous hint is
+    left standing**, and an intermittent refusal — a narrowed
+    `_EQUITY_TICKER` that only bites while `BRK.B` is on screen, a bound
+    that only bites on a full page — leaves the tier holding a **stale**
+    hint, streaming rows nobody is looking at. That is the quieter state and
+    the harder one to notice, and all three comments now name it.
+    The `_EQUITY_TICKER` comment additionally qualifies *"widening is the
+    safe direction"* as safe **for the mirror** only, because there is a
+    separate and stronger argument against widening on the length axis: the
+    sixteen here is what keeps a 17-to-32 character client-derived string —
+    the band `_SYMBOL` admits for `subscribe`'s sake, and a twelve-character
+    paper account number is a legal ticker shape — from becoming a
+    subscription unit. Out of context that phrase was the most quotable line
+    in the diff and the one most likely to be cited while doing the thing it
+    exists to prevent.
+    **The safe direction is stated per constant rather than copied across,
+    and for `_OCC_SYMBOL` it is the opposite one.** Raising
+    `MAX_MARKETS_VISIBLE_SYMBOLS` is safe and lowering it needs the mirror
+    in the same change; widening `_EQUITY_TICKER` is safe and narrowing it
+    needs the mirror. `_OCC_SYMBOL` **excludes** rather than admits —
+    `set_markets_visible` refuses any hint naming a contract, via
+    `stream_of` — so matching *fewer* strings asks nothing of the client and
+    matching **more** is the change that needs the mirror moved. Writing
+    "widening is safe" there, by symmetry with the other two, would have
+    been wrong.
     **WEB-9** the inert `IntersectionObserver` masks in one direction: a
     future component that uses it to decide *"is this visible"* takes the
     never-visible branch forever, so a test asserting **absence** passes
@@ -3489,16 +3545,30 @@ actually on screen.
     production code.
   - *Follow-ups from (c)'s audit. Nothing at MEDIUM or above; each is bounded
     to freshness or to the harness, and none can reach a held mark or an
-    order.* **WEB-10** `replacesPrice` returns `true` on the age-out branch
-    *before* `instant(incoming.at)` is consulted, so an unorderable
-    `incoming` wins against an aged-out `existing` and `mergeQuote` writes
+    order.* **WEB-10 closed 2026-09-22.** The finding: `replacesPrice`
+    returned `true` on the age-out branch
+    *before* `instant(incoming.at)` was consulted, so an unorderable
+    `incoming` won against an aged-out `existing` and `mergeQuote` wrote
     `at: undefined`. `mergeQuote` is exported and the invariant *nothing
     unorderable enters the map* is stated on it, but only `mergeQuotes`
-    enforces it, by filtering first — and `mergeQuotes` is the sole
-    production caller, so this is unreachable today and self-limiting if
+    enforced it, by filtering first — and `mergeQuotes` is the sole
+    production caller, so it was unreachable today and self-limiting if
     reached, the bad entry carrying a fresh `heldSinceLocalMs` and being
-    released 15s later. An `orderable(incoming.at)` guard inside the branch
-    would restore the invariant where a reader looks for it.
+    released 15s later. Fixed as the finding proposed, with one line:
+    `if (heldPastAgeOut(existing) && orderable(incoming.at)) return true`.
+    **Falling through rather than short-circuiting is the part that
+    matters** — when the guard declines, `instant` sends the unorderable
+    stamp to `-Infinity` and the ordinary comparison keeps `existing`,
+    which is the same answer an ignored stream frame gets and leaves
+    `heldSinceLocalMs` unrefreshed. Both properties the age-out was built
+    on survive: the branch still only ever lets `incoming` win, and until
+    it fires the ordinary stamp comparison still runs. No `now` was
+    threaded through, no signature moved, `MAX_HELD_AGE_MS` and its
+    mirror-pin against `STALE_AFTER_MS` are untouched, and WEB-2's
+    poll/stream eviction asymmetry in `mergeQuotes` is untouched. Four
+    tests call the **exported `mergeQuote` directly**, which is the point —
+    the invariant is now true where a reader of that function looks for it,
+    rather than only on the batch path.
     **WEB-11** `RecordingWebSocket.readyState` never leaves `CONNECTING`
     unless a test calls `driveOpen()`, so `send()` returns `false` in every
     suite that does not drive the socket: a later test asserting *the hint
@@ -3508,13 +3578,32 @@ actually on screen.
     boundary — which is the same fact said differently: **(b) and (c) are
     only ever tested apart, never composed.** The composition is covered by
     parts, so this is a coverage note and not a hole.
-    **WEB-12** `storeHandlers().onQuote` still calls `markStreamed` for a
-    valid-mid frame whose `at` is unorderable, so `lastTickAt` advances for a
+    **WEB-12 closed 2026-09-22.** The finding: `storeHandlers().onQuote`
+    still called `markStreamed` for a
+    valid-mid frame whose `at` is unorderable, so `lastTickAt` advanced for a
     price that never reached the map. Unobservable today, because
     `LiveStatus` is rendered exactly once — on `News.tsx`, against
     `lastNewsAt` — so no rendered pill reads `lastTickAt` at all. It
-    becomes a real *Live over a frozen timestamp* the day a stream pill
-    returns to Markets or Activity.
+    would have become a real *Live over a frozen timestamp* the day a stream
+    pill returns to Markets or Activity, which is why it was fixed now
+    rather than when a pill made it visible.
+    One line, after the merge call and before the stamp:
+    `if (!orderable(quote.at)) return`. **`orderable` is now exported from
+    `quotes.ts`** and imported by `liveSocket.ts` rather than respelled, so
+    the socket's gate and the merge's filter cannot drift — that export, and
+    its second production reader, is the only structural change here.
+    `markStreamed` itself is unchanged and still takes
+    `new Date().toISOString()`: its `at` is deliberately **when the update
+    arrived, not the vendor's observation time**, because the Basic plan's
+    `indicative` options feed is 15 minutes delayed and a pill fed the
+    vendor stamp would read `stale` forever on a healthy socket. Only
+    *whether* it is called changed. The null-mid early return is untouched,
+    so only the unorderable-`at` case is newly gated. The paragraph in
+    `mergeQuotes`' docstring that argued `markStreamed` was deliberately
+    left alone for exactly this frame now records that the earlier reasoning
+    only held while nothing rendered `lastTickAt`. Four tests, including the
+    other direction — an ordinary priced frame still stamps, and on the
+    arrival clock rather than the vendor's.
   - *Recorded, not acted on, because it is not this step's to fix:*
     **SPEC-1** step 8's umbrella line earlier in this section still says
     *"six sub-steps, two of which are not written"* while 8a, 8b, 8c-1,

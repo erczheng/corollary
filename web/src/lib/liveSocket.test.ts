@@ -11,6 +11,9 @@ import {
   storeHandlers,
   type SocketLike,
 } from './liveSocket'
+// The poll's own producer, so the held entry in the WEB-12 block below is
+// built the way the app builds one rather than hand-shaped.
+import { liveFromStockQuote } from './quotes'
 import { useUIStore } from './store'
 import type { WsQuote } from './types'
 // The module's own text, for the absence check at the bottom of this file.
@@ -542,6 +545,71 @@ describe('storeHandlers', () => {
     const s = useUIStore.getState()
     expect(s.quotes['AAPL']).toBeUndefined()
     expect(s.lastTickAt).toBeNull()
+  })
+
+  /** WEB-12. A priced frame whose `at` the merge cannot order reaches no
+   * entry — `mergeQuotes` drops it, and from the stream it does not even
+   * evict what is held (WEB-2). Stamping liveness for it is the *badge over
+   * a frozen timestamp* this codebase says is worse than no badge: the map
+   * took nothing from the frame, so a pill reading `Live` would be reporting
+   * on a price that does not exist. Unobservable while `LiveStatus` renders
+   * only against `lastNewsAt`; a stream pill returning to Markets or
+   * Activity is what makes it visible, and that is too late to find it. */
+  describe('a frame the map will not hold stamps no liveness', () => {
+    it.each([
+      ['an absent stamp', undefined as unknown as string],
+      ['an unparseable stamp', 'not a time'],
+    ])('writes nothing and stamps nothing for a priced quote with %s', (_label, at) => {
+      storeHandlers().onQuote?.({ ...QUOTE, at })
+
+      const s = useUIStore.getState()
+      expect(s.quotes['AAPL']).toBeUndefined()
+      expect(s.lastTickAt).toBeNull()
+    })
+
+    it('leaves a held entry from the other writer in place, and still stamps nothing', () => {
+      // The WEB-2 asymmetry, seen from the socket: the frame is evidence
+      // about the frame, so the polled entry survives — and the pill must
+      // not claim the stream refreshed it.
+      useUIStore.getState().applyPolledQuotes([
+        liveFromStockQuote({
+          symbol: 'AAPL',
+          name: 'Apple Inc.',
+          price: 188,
+          at: '2026-09-17T14:29:00Z',
+          previousClose: 187,
+          volume: 1_000,
+          volumeSession: 'in_progress',
+          volumeDate: '2026-09-17',
+          avgVolume: 2_000,
+          marketCap: 3_000,
+        }),
+      ])
+      const stamped = '2026-09-17T14:29:01Z'
+      useUIStore.getState().markPolled(stamped)
+
+      storeHandlers().onQuote?.({ ...QUOTE, at: undefined as unknown as string })
+
+      const s = useUIStore.getState()
+      expect(s.quotes['AAPL'].price).toBe(188)
+      expect(s.quotes['AAPL'].source).toBe('poll')
+      expect(s.lastTickAt).toBeNull()
+      // The poll's own stamp is untouched: two feeds, two questions.
+      expect(s.lastPollAt).toBe(stamped)
+    })
+
+    it('still stamps for an ordinary priced frame, on the arrival clock', () => {
+      // The other direction, so the gate cannot pass by refusing everything.
+      // `markStreamed` takes the *arrival* time deliberately: the Basic
+      // plan's `indicative` options feed is 15 minutes delayed, and a pill
+      // fed the vendor's stamp would read `stale` on a healthy socket.
+      storeHandlers().onQuote?.(QUOTE)
+
+      const s = useUIStore.getState()
+      expect(s.quotes['AAPL'].price).toBe(190)
+      expect(s.lastTickAt).not.toBeNull()
+      expect(s.lastTickAt).not.toBe(QUOTE.at)
+    })
   })
 
   it('records a trade update without moving a position or the ledger', () => {

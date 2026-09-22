@@ -246,6 +246,33 @@ OPTION_STREAM_QUOTE_CAP: Final[int] = 200
 #: straddle both budgets or sit wholly on the other one (:func:`_stream_of`).
 #: It never decides who gets a slot, which is what keeps allocation ignorant
 #: of what an instrument is.
+#:
+#: **Mirrored on the client** as ``OCC_SYMBOL`` in ``web/src/lib/markets.ts``,
+#: which uses it to keep contracts off a Markets viewport hint. That mirror is
+#: needed *in addition to* the client's width test, because the shortest legal
+#: OCC symbol is exactly sixteen characters -- ``A241220C00150000``, a
+#: single-letter root -- and so matches the equity shape.
+#:
+#: Which direction is dangerous is the other way round here, because this
+#: pattern *excludes*: matching **fewer** strings asks nothing of the client,
+#: and matching **more** is the change that needs the mirror moved in the same
+#: commit. :meth:`~corollary.engine.runtime.EngineRuntime.set_markets_visible`
+#: reads this through :func:`stream_of` and refuses a hint naming any
+#: contract, and a hint is applied whole or not at all -- so one symbol newly
+#: matched here, with the old client still sending it, refuses *every* hint
+#: that names it, and the client re-sends on refusal into the identical
+#: refusal. Whether the ``MARKETS_VISIBLE`` tier then holds **nothing** or
+#: something **stale** depends on how often the newly-matched shape is on
+#: screen: a refusal returns before the held hint is reassigned, so the
+#: previous one stands, and only a session in which every hint is refused
+#: leaves the tier genuinely empty. The intermittent case -- streaming rows
+#: nobody is looking at -- is the quieter of the two and the harder to
+#: notice. The asymmetry that hides both: this side is loud (rule 8 --
+#: :meth:`~corollary.engine.runtime.EngineRuntime.set_markets_visible`
+#: refuses through a helper that logs the rule, the inputs and the timestamp
+#: on every refusal) and the
+#: client side is silent, surfacing nothing and polling regardless, so the
+#: only symptom on screen is staleness.
 _OCC_SYMBOL: Final = re.compile(r"^[A-Z][A-Z0-9]{0,5}\d{6}[CP]\d{8}$")
 
 

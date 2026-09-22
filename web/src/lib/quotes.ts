@@ -93,8 +93,16 @@ function instant(at: string): number {
  * Reachable, not theoretical: `request<StockQuote[]>` casts rather than
  * validating, so a server that omits the key delivers `undefined` as a
  * value the types say cannot exist. Same hazard, same reasoning as the
- * `?? null` beside it in {@link liveFromStockQuote}. */
-function orderable(at: string): boolean {
+ * `?? null` beside it in {@link liveFromStockQuote}.
+ *
+ * **Exported so the socket can ask the same question the merge asks.**
+ * `liveSocket.storeHandlers().onQuote` gates its liveness stamp on this
+ * (WEB-12): a frame the map will not hold must not make the pill read
+ * `Live`. One predicate rather than a second spelling of it in the socket,
+ * because the two answers have to agree — a stamp for a frame the merge
+ * discarded is precisely the *Live over a frozen timestamp* this codebase
+ * says is worse than no badge. */
+export function orderable(at: string): boolean {
   return instant(at) !== -Infinity
 }
 
@@ -255,9 +263,11 @@ function heldPastAgeOut(existing: HeldQuote): boolean {
  * The age-out is checked **first** and overrides the rest — and only ever in
  * the direction of letting `incoming` win, so until it fires the ordinary
  * stamp comparison still runs and a real streamed push still beats a held
- * bar-stamped entry on the stamps. The rows below it collapse to: on an
- * equal stamp the incoming price wins unless it is a poll arriving over a
- * streamed entry.
+ * bar-stamped entry on the stamps. It can hand the entry only to an
+ * observation the map could hold: an `incoming` whose `at` is absent or
+ * unparseable does not win it (WEB-10, at the branch). The rows below it
+ * collapse to: on an equal stamp the incoming price wins unless it is a poll
+ * arriving over a streamed entry.
  *
  * ## Why the age-out row exists
  *
@@ -315,7 +325,17 @@ function replacesPrice(existing: HeldQuote, incoming: LiveQuote): boolean {
   // First, and ahead of both stamps: a held entry that has gone quiet stops
   // being evidence about the present. See `heldPastAgeOut` for why reading
   // the local clock here is not the thing `orderable` forbids.
-  if (heldPastAgeOut(existing)) return true
+  //
+  // The `orderable` conjunct is WEB-10, and it is what keeps *nothing
+  // unorderable enters the map* true of this function rather than only of
+  // {@link mergeQuotes}' pre-filter. Without it the age-out returned `true`
+  // before `incoming.at` was looked at, so an unstampable observation won
+  // against an aged-out entry and `mergeQuote` wrote `at: undefined` — an
+  // entry the merge could never order again. Falling through instead costs
+  // nothing: `instant` sends an unorderable stamp to `-Infinity`, so the
+  // comparison below keeps `existing` until an observation the map *can*
+  // hold arrives, exactly as an ignored stream frame does.
+  if (heldPastAgeOut(existing) && orderable(incoming.at)) return true
 
   const a = instant(incoming.at)
   const b = instant(existing.at)
@@ -409,11 +429,14 @@ export function mergeQuote(existing: HeldQuote | undefined, incoming: LiveQuote)
  * carrying a valid mid whose `at` is absent or unparseable. A frame that
  * prices nothing never reaches `markStreamed` at all — `liveSocket` returns
  * early on a null mid — so the pill never claims a price arrived when none
- * did. `markStreamed` is deliberately left as it is, and the case for
- * leaving it is stronger after this gate than before: `lastTickAt` answers
- * *"did a frame arrive"*, one did and it carried a price, and the
- * aggravation — a pill reading `Live` over a row that had silently lost its
- * live entry — is exactly what the gate removed.
+ * did. **Nor does this one, as of WEB-12:** `storeHandlers().onQuote` now
+ * gates the liveness stamp on {@link orderable} too, so the frame that is
+ * ignored here stamps nothing either. An earlier revision argued the other
+ * way — that `lastTickAt` answers *"did a frame arrive"* and one had, with
+ * a price — and it was defensible only while nothing rendered `lastTickAt`.
+ * The day a stream pill returns to Markets or Activity it would read `Live`
+ * over a map that took nothing from the frame, which is the same *badge
+ * over a frozen timestamp* the delete was reverted for.
  *
  * Ignoring cannot freeze a row the way an ignored *poll* would. The held
  * entry stays only until the next orderable observation, the poll produces
@@ -445,9 +468,27 @@ export function mergeQuote(existing: HeldQuote | undefined, incoming: LiveQuote)
  * of the same symbol, where rule 1's flicker is an *older* price
  * overwriting a newer one.
  *
- * {@link mergeQuote} is deliberately left out of this. It answers the
- * field-level question — what does the entry *become* — and an unorderable
- * observation can only reach it from a caller that is not the map. */
+ * The *entry-level* decision is this function's alone: {@link mergeQuote}
+ * answers the field-level question — what does the entry *become* — and an
+ * unorderable observation can only reach it from a caller that is not the
+ * map. It is no longer defenceless when one does, though. WEB-10 put an
+ * {@link orderable} guard on the age-out branch of `replacesPrice` — the
+ * branch that could adopt such an observation *over a perfectly good held
+ * entry* — so a direct caller now gets the held entry back rather than one
+ * stamped `undefined`.
+ *
+ * **That is a guard on the branch, not a proof about the function**, and
+ * the difference is worth stating so a later reader does not take it for
+ * one. One route still adopts an unorderable `at`: the equal-stamp tie
+ * where *both* sides are unorderable, `instant` sending each to
+ * `-Infinity`, which {@link instant} already documents as deliberate
+ * ("two unparseable ones fall through to the later-read rule"). It needs
+ * an `existing` that is itself unorderable, and this filter is what makes
+ * that unreachable — no map entry can ever be in that state, and
+ * `mergeQuotes` is `mergeQuote`'s only production caller. So the invariant
+ * is enforced in two places for two different readers: here for the map,
+ * and on the age-out branch for anyone reading the exported function on
+ * its own. */
 export function mergeQuotes(
   map: Readonly<Record<string, HeldQuote>>,
   incoming: readonly LiveQuote[],

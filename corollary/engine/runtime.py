@@ -295,8 +295,38 @@ PAID_OPTION_STREAM_QUOTE_CAP: Final[int] = 1000
 #: this account runs today and accept ten thousand entries on the plan it
 #: moves to at Phase 4. This is a bound on *the message*, and the budget is
 #: enforced separately by the plan, which cuts the tail of this tier first.
-#: Sixty-four is generous against the ~26 rows the Markets table renders and
+#: Sixty-four is generous against what one page of the Markets stock table
+#: can report -- ``PAGE_SIZE`` rows, and the observer watches one page -- and
 #: small enough that the tail is cheap to drop.
+#:
+#: **Mirrored on the client** as ``MAX_MARKETS_VISIBLE_SYMBOLS`` in
+#: ``web/src/lib/markets.ts``, which truncates the hint to this figure so the
+#: browser never knowingly sends a message that will be refused. Raising it
+#: here is safe *for the mirror* and asks nothing of that copy; **lowering it
+#: requires the mirror to move in the same change.**
+#:
+#: **What actually triggers the refusal is the hint's size, not the client's
+#: cap**, and the distinction decides which lowerings are dangerous. The test
+#: below is ``len(asked) > MAX_MARKETS_VISIBLE_SYMBOLS``, so lowering this to
+#: any figure still above the number of rows a viewport can report refuses
+#: nothing and the mirror does not strictly have to follow. The dangerous
+#: regime is a bound *below* what a viewport can report: a hint is applied
+#: whole or not at all, so an over-long list is refused entire, and the
+#: client re-sends on refusal, walking the next viewport settle into the
+#: identical refusal. Move the mirror regardless -- it is the conservative
+#: habit, and it is what turns a refusal into an accepted, degraded hint.
+#:
+#: **Two failure states, and the quieter one is the worse one.** From a cold
+#: session where every hint is refused, the ``MARKETS_VISIBLE`` tier holds
+#: nothing at all. But a refusal returns before ``self._markets_visible`` is
+#: assigned, so **the previous hint is left standing** -- and a bound that
+#: bites only on a full page therefore leaves the tier holding a *stale*
+#: hint, streaming rows nobody is looking at, which is harder to notice than
+#: an empty one. The asymmetry that hides both: this
+#: side is loud (:meth:`EngineRuntime._refuse_markets_visible` logs the rule,
+#: the inputs and the timestamp on every refusal, rule 8) and the client side
+#: is silent -- the Markets page surfaces no refusal and polls on its own
+#: cadence regardless, so the only symptom on screen is staleness.
 MAX_MARKETS_VISIBLE_SYMBOLS: Final[int] = 64
 
 #: An equity ticker, shape only: upper case, dots allowed for a class share
@@ -308,6 +338,35 @@ MAX_MARKETS_VISIBLE_SYMBOLS: Final[int] = 64
 #: a transport that validates: rule 4 is that the engine enforces, and a
 #: second caller of :meth:`EngineRuntime.set_markets_visible` must not be
 #: able to get past it by not being a websocket.
+#:
+#: **Mirrored on the client** as ``EQUITY_TICKER`` in
+#: ``web/src/lib/markets.ts``, which filters a viewport hint through the same
+#: shape before sending it. Widening this pattern is safe **for the mirror**
+#: and asks nothing of that copy; **narrowing it requires the mirror to
+#: narrow in the same change.** A hint is applied whole or not at all, so one
+#: symbol the old client still admits refuses the entire message, and the
+#: client's re-send-on-refusal sends the next viewport settle into the
+#: identical refusal. Where the narrowing bites only sometimes -- a shape
+#: that excludes ``BRK.B``, say, refusing only while a class share is on
+#: screen -- the tier is left holding the *previous*, stale hint rather than
+#: nothing, because a refusal returns before ``self._markets_visible`` is
+#: assigned. Loud here (rule 8:
+#: :meth:`EngineRuntime._refuse_markets_visible` records the rule, the inputs
+#: and the timestamp per refusal) and invisible there, where the page
+#: surfaces no refusal and keeps polling, so freshness is the only symptom.
+#:
+#: **"Safe for the mirror" is the whole of the claim, and it is not a licence
+#: to widen.** There is a separate, stronger argument against widening on the
+#: length axis, recorded in the client mirror's own docstring and in
+#: :meth:`EngineRuntime.markets_visible_units`: ``api/routes/ws.py``'s
+#: ``_SYMBOL`` admits 32 characters because ``subscribe`` must also admit an
+#: OCC contract, and the sixteen here is what stops a 17-to-32 character
+#: client-derived string becoming a subscription unit -- a twelve-character
+#: paper account number is a legal ticker shape, and a shape filter is not a
+#: redactor. Widening to close that gap is the thing being prevented. The
+#: safe direction is safe, and it is also **inert**: the client truncates and
+#: filters with its own copies, so nothing here is observable until that copy
+#: moves too.
 _EQUITY_TICKER: Final = re.compile(r"^[A-Z][A-Z0-9.]{0,15}$")
 
 #: How many healthy watchdog ticks the repair gets before it stops trying and

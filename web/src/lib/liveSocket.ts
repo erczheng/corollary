@@ -76,6 +76,7 @@
  */
 
 import { API_BASE, errorBodyOf } from './api'
+import { orderable } from './quotes'
 import { useUIStore } from './store'
 import type {
   ApiErrorBody,
@@ -532,7 +533,10 @@ function detach(socket: SocketLike): void {
  *   `underlyings`, which ships pre-seeded with fixture prices — a server
  *   quote landing there would leave every never-polled symbol rendering an
  *   invented price indistinguishable from a real one;
- * - `markStreamed` stamps liveness, and **only a priced quote stamps it**;
+ * - `markStreamed` stamps liveness, and **only a frame the map can hold
+ *   stamps it** — a priced one (a null mid prices nothing) whose `at` the
+ *   merge can order (WEB-12). A frame that reached no entry must not make a
+ *   pill read `Live`;
  * - `applyTradeUpdate` records the broker's last word about an order. It
  *   moves no position and no money: the server is authoritative for both;
  * - `recordStreamError` records a stated refusal so it is visible rather
@@ -552,8 +556,18 @@ export function storeHandlers(): LiveSocketHandlers {
       // `quote.at` is the **vendor's** observation time and is what the
       // merge orders two writers on.
       store.applyStreamedQuote(quote.symbol, price, quote.at)
+      // WEB-12: a frame the merge will not hold stamps nothing. `mergeQuotes`
+      // drops an observation whose `at` is absent or unparseable — it cannot
+      // be ordered against anything, so it never becomes an entry — and
+      // stamping liveness for it would put `Live` over a map that took
+      // nothing from the frame. The same predicate the merge uses, imported
+      // rather than respelled, so the two answers cannot drift.
+      if (!orderable(quote.at)) return
       // The liveness stamp is the *arrival* time, which is a different
       // question and deliberately a different clock — see `markStreamed`.
+      // Not `quote.at`: the Basic plan's `indicative` options feed is 15
+      // minutes delayed, and a pill fed the vendor's stamp would read
+      // `stale` forever on a perfectly healthy socket.
       store.markStreamed(new Date().toISOString())
     },
     onTradeUpdate: (update) => {
