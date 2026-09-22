@@ -3365,17 +3365,55 @@ actually on screen.
     freshness were ever load-bearing for what is on screen, a refusal would
     freeze a row — which is the failure `SubscriptionPlan.engine_subscribed`
     exists to prevent, arriving from the client side.
-  - **Left open, deliberately: whether the chain's *underlying* should be
-    hinted while its chain is open.** Its spot price is rendered on the page
+  - **Resolved 2026-09-22, in the affirmative: the chain's *underlying* is
+    hinted while its chain is open.** The question, as it stood: its spot
+    price is rendered on the page
     and the chain is re-priced from it, so on purpose-grounds arguably yes;
     on this entry's letter the hint is *"the visible rows"*, and the chain
     table's visible rows are OCC contracts, which this tier refuses by name.
-    The letter-faithful version is what landed: the observer watches the
-    stock table's `tbody` and nothing else, so the chain contributes nothing
-    and a chain-only viewport reports an empty list — the mechanically
-    natural result. The cost either way is freshness only, since the spot is
-    polled with the rest of the stock table. Decide it when the socket is
-    mounted and there is something to measure.
+    The letter-faithful version is what landed first: the observer watched
+    the stock table's `tbody` and nothing else, so the chain contributed
+    nothing and a chain-only viewport reported an empty list — the
+    mechanically natural result. The cost either way is freshness only,
+    since the spot is polled with the rest of the stock table, which is why
+    it was left to be decided once the socket was mounted.
+    **The owner's ruling, and the reasoning it turns on:** the spot above
+    the ladder is not one more row, it is *the number the whole ladder is
+    re-priced from*. Every contract's displayed price and day change derives
+    from it, so a stale spot is stale in as many places as the chain has
+    strikes, where a stale stock row is stale once. The letter was faithful
+    and under-served the page. Streamed when slots allow.
+    **What landed.** One new pure export in `web/src/lib/markets.ts`,
+    `marketsVisiblePayload(chainUnderlying, visibleRows)`, which prepends
+    the chain symbol and delegates to an **unchanged**
+    `marketsVisibleHint` — so the OCC refusal, the 16-character shape, the
+    64 cap, the first-occurrence-wins dedup and the ordered diff are all
+    inherited rather than re-implemented, and a contract still cannot reach
+    the message from either side. It **leads** the list because input order
+    is DOM order, the chain section renders above the stock table, and order
+    decides who survives both the cap and the server's prefix cut: leading
+    is what guarantees the number the ladder is priced from is the last
+    thing cut rather than the first. Dedup means a chain underlying that is
+    also a visible row appears once, in the earlier position.
+    In `Markets.tsx`: a second parameter on `useViewportHint`, a `chain` ref
+    read inside `settle()`, and **a separate effect keyed on the chain
+    symbol** that calls `schedule()`. Deliberately not folded into the
+    `pageKey` effect — that one rebuilds the `IntersectionObserver` and
+    re-arms `awaitingObserver`, so a chain change routed through it would
+    re-observe rows that never moved and delay the hint by a whole debounce.
+    `StocksAndEtfs` takes the symbol as a prop rather than the hook being
+    lifted, because lifting it would have dragged pagination, sort and
+    search up with it.
+    **Three things that did not move, and the ruling did not license moving
+    them.** WEB-7's `awaitingObserver` early-return in `settle()` is
+    byte-for-byte unchanged, with no second gate and no bypass: a chain
+    opened inside that window goes out one debounce later, which is a late
+    message and not a dropped one. The unmount `flush([])` still bypasses
+    the gate directly. And the tier is still the lowest — the client's
+    mention of a symbol buys it nothing, because `engine_subscribed` treats
+    a symbol both tiers asked for as engine-owned, so hinting a chain whose
+    underlying is also a position underlying cannot demote it and closing
+    the chain cannot evict it.
   - 20 new tests (12 pure in `markets.test.ts`, 8 page-level in
     `Markets.test.tsx`), and a suite-wide inert `IntersectionObserver` in
     `web/src/test/setup.ts` — jsdom implements no layout and so ships none,

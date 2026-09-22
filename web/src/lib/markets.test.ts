@@ -15,6 +15,7 @@ import {
   latestVolumeDate,
   marketsVisibleDiffers,
   marketsVisibleHint,
+  marketsVisiblePayload,
   relativeVolume,
   searchStocks,
   searchUnderlyings,
@@ -617,6 +618,56 @@ describe('the viewport hint payload', () => {
 
   it('treats an empty viewport as a legitimate payload', () => {
     expect(marketsVisibleHint([])).toEqual([])
+  })
+
+  it('puts an open chain’s underlying at the head of the hint', () => {
+    // The chain section renders above the stock table, so DOM order puts
+    // it first — and first is where the number the ladder is priced from
+    // belongs, because order decides who survives the 64 cap and the
+    // server's prefix cut.
+    expect(marketsVisiblePayload('NVDA', ['SPY', 'RDDT'])).toEqual(['NVDA', 'SPY', 'RDDT'])
+  })
+
+  it('names an open chain even with nothing else on screen', () => {
+    // Scrolled past the stock table with a ladder open: the spot price the
+    // whole ladder is re-priced from is still the thing being looked at.
+    expect(marketsVisiblePayload('NVDA', [])).toEqual(['NVDA'])
+  })
+
+  it('names a chain underlying once when it is also a visible row', () => {
+    // `marketsVisibleHint` dedups first-occurrence-wins, so the earlier
+    // position is the one that survives — which is the chain's.
+    expect(marketsVisiblePayload('NVDA', ['SPY', 'NVDA', 'RDDT'])).toEqual([
+      'NVDA',
+      'SPY',
+      'RDDT',
+    ])
+    expect(marketsVisiblePayload('nvda', ['NVDA'])).toEqual(['NVDA'])
+  })
+
+  it('is the rows alone when no chain is open', () => {
+    // Closing a chain is how the symbol leaves the hint again.
+    expect(marketsVisiblePayload(null, ['SPY', 'RDDT'])).toEqual(['SPY', 'RDDT'])
+    expect(marketsVisiblePayload(null, [])).toEqual([])
+  })
+
+  it('costs the last row rather than the chain when the cap binds', () => {
+    // 64 visible rows plus an open chain is 65 entries, and the message is
+    // applied whole or not at all. The chain leads, so the truncation
+    // takes the last row: the ladder's spot survives the cut by
+    // construction.
+    const rows = Array.from({ length: MAX_MARKETS_VISIBLE_SYMBOLS }, (_, i) => `SYM${i}`)
+    const hint = marketsVisiblePayload('NVDA', rows)
+    expect(hint).toHaveLength(MAX_MARKETS_VISIBLE_SYMBOLS)
+    expect(hint[0]).toBe('NVDA')
+    expect(hint.at(-1)).toBe('SYM62')
+  })
+
+  it('still refuses a contract, whichever side it arrives on', () => {
+    // The chain's *underlying* is an equity ticker; its rows are OCC and
+    // stay excluded. A caller passing a contract as the chain symbol gets
+    // it dropped rather than the whole message refused by the engine.
+    expect(marketsVisiblePayload('NVDA260914C00210000', ['NVDA'])).toEqual(['NVDA'])
   })
 
   it('says nothing when nothing is in force and nothing is on screen', () => {

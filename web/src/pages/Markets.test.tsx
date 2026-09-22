@@ -277,6 +277,15 @@ function cellText(row: HTMLElement, index: number): string {
   return within(row).getAllByRole('cell')[index].textContent ?? ''
 }
 
+/** Back to no chain. `null` is a real option at the head of the listbox
+ * rather than the absence of one, so closing is a selection like any
+ * other. */
+async function closeChain() {
+  const box = within(section('Options chains')).getByLabelText('Search underlying')
+  fireEvent.focus(box)
+  fireEvent.mouseDown(await screen.findByRole('option', { name: 'All underlyings' }))
+}
+
 async function openChain(symbol: string) {
   const box = within(section('Options chains')).getByLabelText('Search underlying')
   fireEvent.focus(box)
@@ -913,9 +922,10 @@ describe('the viewport hint', () => {
     // The chain's rows are OCC contracts and are not this message: the
     // engine refuses one by name, and the refusal is of the whole hint.
     // Structurally impossible here, because only the stock table's
-    // `tbody` is observed — which is the letter of the spec's "the
-    // visible rows". Whether the chain's *underlying* should be hinted
-    // while its chain is open is an open question recorded in the spec.
+    // `tbody` is observed. The chain's *underlying* does reach the hint
+    // — the ladder is re-priced from it, and `an open chain` below pins
+    // that — but it arrives from the page's own state, not from an
+    // observer, so the chain table is still watched by nothing.
     expect(observedSymbols()).toEqual(expect.arrayContaining(['NVDA', 'SPY']))
     expect(observedSymbols().some((s) => s.length > 6)).toBe(false)
 
@@ -987,6 +997,138 @@ describe('the viewport hint', () => {
     await settleViewport()
     expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
     expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+  })
+
+  /** **The open chain's underlying, step 15 (b).** The spot price sits
+   * above the ladder and **the whole ladder is re-priced from it**, so
+   * while a chain is open that symbol is the one this page is most about.
+   * It leads the list: the chain section renders above the stock table, so
+   * DOM order puts it first, and first is what survives the 64 cap and the
+   * server's prefix cut.
+   *
+   * The chain's *rows* stay out of this message — they are OCC contracts
+   * and the engine refuses one by name. Pinned above, and in
+   * `markets.test.ts` without a viewport. */
+  describe('an open chain', () => {
+    it('leads the hint with the underlying its ladder is priced from', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      const order = observedSymbols()
+      const rows = order.filter((s) => s === 'SPY' || s === 'RDDT')
+      onScreen(rows)
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(rows)
+
+      // NVDA's own row is scrolled past; its chain is open. The hint gains
+      // the underlying, at the head.
+      await openChain('NVDA')
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', ...rows])
+    })
+
+    it('names the chain even with no rows on screen', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      // Scrolled clear of the table. Nothing in force, nothing on screen:
+      // still not news.
+      onScreen([])
+      await settleViewport()
+      expect(sendMarketsVisible).not.toHaveBeenCalled()
+
+      await openChain('NVDA')
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA'])
+    })
+
+    it('names a chain underlying once, ahead of its own row', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      const order = observedSymbols()
+      onScreen(order)
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(order)
+
+      // SPY is both the open chain and a visible row. The hint dedups
+      // first-occurrence-wins, so it appears once — in the chain's
+      // earlier position, not the table's.
+      await openChain('SPY')
+      await settleViewport()
+      const hint = sendMarketsVisible.mock.calls.at(-1)?.[0] ?? []
+      expect(hint).toEqual(['SPY', ...order.filter((s) => s !== 'SPY')])
+      expect(hint.filter((s) => s === 'SPY')).toHaveLength(1)
+      expect(hint).toHaveLength(order.length)
+    })
+
+    it('drops the underlying when the chain closes', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      await openChain('NVDA')
+      onScreen(['SPY'])
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+      const sent = sendMarketsVisible.mock.calls.length
+
+      // No chain open is no slot held for one. Closing has to say so, or
+      // the engine streams a ladder's spot nobody is looking at for the
+      // rest of the session.
+      await closeChain()
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(sent + 1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['SPY'])
+    })
+
+    it('does not rebuild the observer, and sends once', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      onScreen(['SPY'])
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+      // The chain change is deliberately *not* routed through the effect
+      // that owns the `IntersectionObserver`: the rows did not move, so
+      // re-observing them would cost a rebuild and a whole debounce for
+      // nothing. Same observer, same watched rows, one message.
+      const observer = observations.at(-1)
+      const watched = observedSymbols()
+      await openChain('NVDA')
+      await settleViewport()
+      expect(observations.at(-1)).toBe(observer)
+      expect(observedSymbols()).toEqual(watched)
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+    })
+
+    it('waits a debounce rather than reporting past an unanswered observer', async () => {
+      serve()
+      render(<App />)
+      await screen.findByText('NVIDIA Corp.')
+
+      // **Finding WEB-7's gate, unchanged.** A fresh observer owes a first
+      // answer, so a chain opened in that window reports nothing yet — not
+      // a second gate and not a bypass. The answer is coming, and the
+      // message goes out one debounce later with the chain in it.
+      await openChain('NVDA')
+      await settleViewport()
+      expect(sendMarketsVisible).not.toHaveBeenCalled()
+
+      onScreen(['SPY'])
+      await settleViewport()
+      expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+      expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+    })
   })
 
   /** **Finding WEB-7.** "Never `[]` between two pages of the same table"

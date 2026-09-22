@@ -34,7 +34,7 @@ import {
   ivSourceOf,
   latestVolumeDate,
   marketsVisibleDiffers,
-  marketsVisibleHint,
+  marketsVisiblePayload,
   relativeVolume,
   searchStocks,
   sortChain,
@@ -588,14 +588,21 @@ function OptionsChains({
 }
 
 /** **The viewport hint, step 15 (b) of decision 18.** Tell the engine which
- * equity rows are actually on screen, so the ~22 stream slots left over
- * after the position book are spent on rows somebody is looking at.
+ * equity symbols this page is actually looking at, so the ~22 stream slots
+ * left over after the position book are spent on them.
+ *
+ * Two things are on screen, not one: the stock table's visible rows, and —
+ * when a chain is open — **the underlying its whole ladder is priced
+ * from**. The chain leads the list, because the chain section renders
+ * above the table and order decides who survives the caps;
+ * `marketsVisiblePayload` in `markets.ts` states that reasoning and is
+ * tested without a viewport.
  *
  * Returns the ref for the stock table's `tbody`. Only the *observer wiring
  * and the debounce timer* live here; what may be sent and whether it is
- * news are `marketsVisibleHint` / `marketsVisibleDiffers` in `markets.ts`,
- * testable without a viewport, and the socket itself is `liveSocket.ts`,
- * which observes nothing and diffs nothing by design.
+ * news are `marketsVisiblePayload` / `marketsVisibleDiffers` in
+ * `markets.ts`, and the socket itself is `liveSocket.ts`, which observes
+ * nothing and diffs nothing by design.
  *
  * Three things this deliberately does **not** do, each of them rule 4
  * applied to a stream budget — a client that could evict a held contract
@@ -614,7 +621,14 @@ function OptionsChains({
  *   load-bearing, a refusal would freeze a row — the exact failure rule 4
  *   exists to prevent.
  */
-function useViewportHint(pageItems: readonly LiveStockRow[]) {
+function useViewportHint(
+  pageItems: readonly LiveStockRow[],
+  /** The open chain's underlying, or null for no open chain. Lifted state
+   * from `Markets`, passed down rather than observed: a chain is chosen
+   * from a combobox, so "is it open" is a fact the page already knows and
+   * an `IntersectionObserver` would only guess at. */
+  chainUnderlying: string | null,
+) {
   const body = useRef<HTMLTableSectionElement | null>(null)
   /** The symbols the observer currently reports as on screen. A ref, not
    * state: nothing renders from it, and re-rendering the table on every
@@ -623,6 +637,11 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
   /** The rendered rows in DOM order, which is what decides who survives the
    * 64 cap and the server's prefix cut. */
   const order = useRef<readonly string[]>([])
+  /** The open chain's underlying as of the last render, read by `settle`.
+   * A ref for the same reason `order` is one: the debounce fires outside
+   * React's render, and what it must report is the state *now*, not the
+   * state the timer was armed in. */
+  const chain = useRef(chainUnderlying)
   /** What actually reached the socket last. **Null means nothing is
    * believed to be in force** — the state before the first send, and the
    * state a refusal returns us to. */
@@ -667,7 +686,16 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
     // to invent an empty one. The unmount send calls `flush` directly and
     // is deliberately not gated: leaving the page *is* an empty viewport.
     if (awaitingObserver.current) return
-    flush(marketsVisibleHint(order.current.filter((symbol) => visible.current.has(symbol))))
+    // An open chain gets no bypass around the gate above and no second
+    // gate of its own. A chain opened while a fresh observer still owes
+    // its first answer goes out one debounce later, on that answer — a
+    // late message rather than a dropped one.
+    flush(
+      marketsVisiblePayload(
+        chain.current,
+        order.current.filter((symbol) => visible.current.has(symbol)),
+      ),
+    )
   }, [flush])
 
   /** Trailing edge only. Continuous scrolling keeps pushing this out and
@@ -727,8 +755,29 @@ function useViewportHint(pageItems: readonly LiveStockRow[]) {
     }
   }, [pageKey, schedule])
 
+  // Opening or closing a chain changes what this page is looking at, so it
+  // schedules a settle exactly as a scroll does — one debounce, one
+  // message, diffed like any other.
+  //
+  // **Deliberately its own effect, not folded into `pageKey`.** That effect
+  // rebuilds the `IntersectionObserver` and re-arms `awaitingObserver`, so
+  // routing a chain change through it would re-observe fifteen rows that
+  // never moved and push the hint out by a whole debounce for nothing —
+  // while the rows themselves are unchanged and the chain symbol is not
+  // observed at all.
+  //
+  // Closing schedules for the same reason opening does: `chainUnderlying`
+  // back to null must *drop* the symbol on the next settle, or the engine
+  // holds a slot for a ladder nobody has open.
+  useEffect(() => {
+    chain.current = chainUnderlying
+    schedule()
+  }, [chainUnderlying, schedule])
+
   // Leaving the page. An empty list is the correct way to say nothing is on
-  // screen, and it is only news if something was in force.
+  // screen, and it is only news if something was in force. Unchanged by
+  // the chain: `flush([])` names no symbols at all, and a chain that is
+  // still open leaves the page with everything else.
   useEffect(
     () => () => {
       if (timer.current !== null) clearTimeout(timer.current)
@@ -758,6 +807,7 @@ function StocksAndEtfs({
   loading,
   error,
   onViewChain,
+  chainUnderlying,
 }: {
   /** Rendered rows, not wire rows: the live price merged in and the change
    * derived from it — decision 18's rule 4. Nothing below reads a change
@@ -774,6 +824,12 @@ function StocksAndEtfs({
    * while it is not. See `pollFailed` in `Markets`. */
   error: unknown
   onViewChain: (symbol: string) => void
+  /** The open chain's underlying, for the viewport hint — **not** for
+   * anything this table renders. The hint is one message for the whole
+   * page and the timer that sends it lives in `useViewportHint` here, so
+   * the chain's symbol has to reach this component; nothing else about
+   * the stock table depends on which chain is open. */
+  chainUnderlying: string | null
 }) {
   const [sort, setSort] = useState<StockSort>(STOCK_RANK_SORT.active)
   const [search, setSearch] = useState('')
@@ -782,8 +838,9 @@ function StocksAndEtfs({
   const matched = searchStocks(stocks, search)
   const rows = sortStocks(matched, sort)
   const { page, pageCount, pageItems, setPage } = usePagination(rows, PAGE_SIZE)
-  // Decision 18's viewport hint. The rows on this page, in DOM order.
-  const tbody = useViewportHint(pageItems)
+  // Decision 18's viewport hint. The open chain's underlying first, then
+  // the rows on this page in DOM order.
+  const tbody = useViewportHint(pageItems, chainUnderlying)
   const rank = stockRankFor(sort)
   const query = search.trim()
   // The most recent session anyone on this table printed in, from the
@@ -1150,6 +1207,10 @@ export function Markets() {
       <StocksAndEtfs
         stocks={stocks}
         loading={stocksQuery.isPending}
+        // For the viewport hint only. The chain section renders above this
+        // table, so the underlying leads the hint — see
+        // `marketsVisiblePayload`.
+        chainUnderlying={underlying}
         // The cold failure only, and the sibling of `isPending`: that is
         // "no data yet", this is "no data at all". A poll that failed over
         // a good snapshot goes to the header pill, never here.

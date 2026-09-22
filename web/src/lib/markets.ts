@@ -486,6 +486,41 @@ export function marketsVisibleHint(symbols: Iterable<string>): string[] {
   return hint
 }
 
+/** The whole `markets_visible` body for the Markets page: the **open
+ * chain's underlying first**, then the stock table's visible rows in DOM
+ * order, normalised by {@link marketsVisibleHint}.
+ *
+ * **Why an open chain puts anything on this message at all.** Step 15 (b)
+ * says "the visible rows", and a chain's rows are OCC contracts, so the
+ * letter-faithful reading streams nothing for an open chain. That reading
+ * was mechanically natural and under-served the page: the number an open
+ * chain is *about* is the spot price rendered above the ladder, and **the
+ * whole ladder is re-priced from it**. When slots allow, that is the
+ * equity symbol on this page most worth streaming.
+ *
+ * **Why it leads the list.** Input order is DOM order, and order is what
+ * decides who survives both {@link MAX_MARKETS_VISIBLE_SYMBOLS} and the
+ * server's prefix cut against the equity budget. The chain section renders
+ * above the stock table, so DOM order puts it first — and first is exactly
+ * where the number the ladder is priced from belongs, because it is the
+ * one entry that must survive the cut. A chain underlying that is also a
+ * visible stock row appears **once, in the earlier position**:
+ * `marketsVisibleHint` dedups first-occurrence-wins.
+ *
+ * Null means no chain is open, which is simply the rows — and closing a
+ * chain is how the symbol leaves the hint again. None of this raises the
+ * tier: a client hint still ranks below every position contract and
+ * position underlying in `SubscriptionPlan.engine_subscribed`, and nothing
+ * on screen depends on a hinted symbol being streamed. The chain itself is
+ * a snapshot read either way. */
+export function marketsVisiblePayload(
+  chainUnderlying: string | null,
+  visibleRows: Iterable<string>,
+): string[] {
+  if (chainUnderlying === null) return marketsVisibleHint(visibleRows)
+  return marketsVisibleHint([chainUnderlying, ...visibleRows])
+}
+
 /** Is this hint news? `sent` is what the client last got onto the socket,
  * or null for *nothing is believed to be in force*.
  *
