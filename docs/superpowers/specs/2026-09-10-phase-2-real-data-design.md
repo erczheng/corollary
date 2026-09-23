@@ -3884,7 +3884,16 @@ rediscover inside a merge that is already subtle.
   **Honoured** in step 12's web half: the tie table is written out in
   `web/src/lib/quotes.ts` where the comparison lives, with one test per
   cell.
-- **`Markets.tsx`'s trailing chart point is still stamped with the server
+- **CLOSED 2026-09-23 — the trailing chart point is stamped with the
+  observation.** (It was in `api/routes/markets.py`, not `Markets.tsx`.)
+  `IntradayPoint(at=spot.at, …)`, and two conditions that stamp brings with
+  it: the observation must itself be inside the regular session, and it must
+  come after the last bar, since a bar-only snapshot's stamp is the daily
+  bar's *opening* time and would draw the series backwards. Pinned by
+  `test_the_live_point_is_stamped_with_the_quote_s_observation_not_the_clock`
+  and `test_a_live_point_older_than_the_last_bar_is_not_appended`, both
+  checked to fail against the old line. The original finding, kept:
+  **the trailing chart point was stamped with the server
   clock** (`IntradayPoint(at=now, …)`) for the same price that now carries a
   vendor `at` beside it. Pre-existing and not a decision 18 violation —
   decision 18 governs the quote map, not the series — but the two disagreeing

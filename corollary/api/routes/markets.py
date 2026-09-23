@@ -2243,7 +2243,12 @@ async def underlyings(
         intraday = list(intradays.get(symbol, ()))
         if traded_today and daily:
             history.append(PricePoint(date=today, value=price))
-        elif traded_today and _in_regular_session(now):
+        elif (
+            traded_today
+            and _in_regular_session(now)
+            and _in_regular_session(spot.at)
+            and (not intraday or spot.at > intraday[-1].at)
+        ):
             # Bars stop fifteen minutes short of now, and during the session
             # the quote closes that gap. Once the session has closed it must
             # not: the series above is regular hours only, so a point at the
@@ -2252,7 +2257,18 @@ async def underlyings(
             # a post-market print, and stamping it at the close would report
             # it as the closing price. The series ends at the last regular
             # bar; ``price`` still carries what the name is trading at now.
-            intraday.append(IntradayPoint(at=now, value=price))
+            #
+            # **Stamped at ``spot.at``, never at ``now``.** This point is the
+            # same observation as the quote's own ``at`` beside it, and one
+            # payload must not carry two times for one price -- the server
+            # clock is always newer than the observation, so the chart drew
+            # the price later than anyone saw it. The same stamp is also why
+            # two more conditions apply. It must fall inside the session
+            # itself: a pre-open print on an RTH chart is the same mistake
+            # as a post-market one. And it must come after the last bar: a
+            # bar-only snapshot's stamp is the daily bar's *opening* time,
+            # and appending that would draw the series backwards.
+            intraday.append(IntradayPoint(at=spot.at, value=price))
         quotes.append(
             UnderlyingQuote(
                 symbol=symbol,

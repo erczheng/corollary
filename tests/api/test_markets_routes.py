@@ -2667,8 +2667,48 @@ def test_the_live_point_is_still_appended_while_the_session_is_open(
     )
 
     stamps = stamps_of(quote)
-    assert stamps[-1] == MARKET_DATA_RECORDED_AT
+    assert stamps[-1] > SEP_10_REGULAR_OPEN + timedelta(minutes=55)
     assert quote["intraday"][-1]["value"] == quote["price"]
+
+
+def test_the_live_point_is_stamped_with_the_quote_s_observation_not_the_clock(
+    make_market_client: MarketClient,
+) -> None:
+    """One price, one time: the series' last point and the quote's ``at`` agree.
+
+    It used to be stamped with the server clock, which is newer than the
+    observation by construction, so a single payload carried the same price
+    at two different instants and the chart drew it later than it was seen.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(five_minutes_from(SEP_10_REGULAR_OPEN, 12)),
+        now=MARKET_DATA_RECORDED_AT,
+    )
+
+    last = stamps_of(quote)[-1]
+    assert last == datetime.fromisoformat(quote["at"])
+    assert last != MARKET_DATA_RECORDED_AT
+
+
+def test_a_live_point_older_than_the_last_bar_is_not_appended(
+    make_market_client: MarketClient,
+) -> None:
+    """Stamped at the observation, the point can predate the series.
+
+    A bar-only snapshot stamps its price at the daily bar's opening time, and
+    a quote can simply be older than the newest bar. Appending either would
+    draw the right-hand edge backwards, so the series ends at its last bar.
+    """
+    quote = intraday_quote(
+        make_market_client,
+        bars_at(five_minutes_from(SEP_10_REGULAR_OPEN, 78)),
+        now=MARKET_DATA_RECORDED_AT,
+    )
+
+    stamps = stamps_of(quote)
+    assert stamps[-1] == SEP_10_LAST_REGULAR_BAR
+    assert stamps == sorted(stamps)
 
 
 # --------------------------------------------------------------------------
