@@ -633,10 +633,16 @@ class IngestService:
         # which is always the parser's form -- it comes from
         # `LotMovement.symbol`, which is `parse_occ_symbol(...).symbol`,
         # stripped and upper-cased. This side is the **vendor's** spelling:
-        # `_demand` keys on `activity.symbol`, and the four matcher rules that
-        # reject before a contract is resolved (FRACTIONAL_QUANTITY,
-        # INTENT_CONTRADICTS_SIDE, UNKNOWN_INTENT, MISSING_SYMBOL) pass
-        # `activity.symbol` through verbatim.
+        # `_demand` keys on `activity.symbol`, and seven ledger rules reject
+        # before a contract is resolved and pass `activity.symbol` through
+        # verbatim -- FRACTIONAL_QUANTITY (on a fill; the event path's copy
+        # carries `contract.symbol`), INTENT_CONTRADICTS_SIDE, UNKNOWN_INTENT,
+        # MISSING_SYMBOL, NOT_AN_OPTION, NOT_A_LEDGER_ACTIVITY and
+        # MISSING_FEE_AMOUNT. The last three add nothing to the guard in
+        # practice -- a non-OCC symbol, a cash journal's, and a FEE row's,
+        # which Alpaca sends with no symbol at all -- but they are inputs to
+        # it all the same, and the fold below is what keeps any of them from
+        # mattering if that stops being true.
         #
         # Left raw, a padded or lower-cased spelling misses the held row and a
         # **booked trade is deleted**: a short closed by a `buy` books while
@@ -1911,10 +1917,13 @@ def _canonical_symbol(symbol: str | None) -> str | None:
 
     **The canonical form is the parser's.** ``parse_occ_symbol`` returns
     ``symbol.strip().upper()``, and a matcher rejection raised *after* the
-    contract is resolved carries that form via ``contract.symbol``. Four are
-    raised before it and do not: ``FRACTIONAL_QUANTITY``,
-    ``INTENT_CONTRADICTS_SIDE``, ``UNKNOWN_INTENT`` and ``MISSING_SYMBOL``
-    pass ``activity.symbol`` through verbatim. Ingestion's own refusals name
+    contract is resolved carries that form via ``contract.symbol``. Seven are
+    raised before it and do not: ``FRACTIONAL_QUANTITY`` (the fill path's),
+    ``INTENT_CONTRADICTS_SIDE``, ``UNKNOWN_INTENT``, ``MISSING_SYMBOL``,
+    ``NOT_AN_OPTION``, ``NOT_A_LEDGER_ACTIVITY`` and ``MISSING_FEE_AMOUNT``
+    pass ``activity.symbol`` through verbatim. The last one is complete only
+    because Alpaca's ``FEE`` rows carry no symbol; this fold is what keeps a
+    fee that one day does from comparing in a second spelling. Ingestion's own refusals name
     the vendor's spelling, and ``examined_symbols`` is built from the vendor's
     spelling too, so today the forms agree by **observation** --
     Alpaca sends canonical uppercase -- rather than by construction. On the day
