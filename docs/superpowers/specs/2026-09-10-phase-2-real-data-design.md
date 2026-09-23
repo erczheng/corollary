@@ -3898,7 +3898,13 @@ rediscover inside a merge that is already subtle.
   vendor `at` beside it. Pre-existing and not a decision 18 violation —
   decision 18 governs the quote map, not the series — but the two disagreeing
   inside one payload is worth closing when the series is next touched.
-- **`useMarketPoll`'s floor is total against every value except `NaN`.**
+- **CLOSED 2026-09-23 — `Number.isFinite` guards the opt-out**, and treats
+  `Infinity` the same way, since a delay past 2³¹−1 ms overflows and fires
+  almost at once — the same hazard from the other end. Non-finite opts out
+  rather than clamping to the floor: a value nobody meant is not a request
+  to poll as fast as the budget allows. Pinned by an `it.each` over both.
+  The original finding, kept:
+  **`useMarketPoll`'s floor is total against every value except `NaN`.**
   `useMarketPoll(NaN)` passes the `<= 0` opt-out, survives `Math.max(NaN, 400)`
   as `NaN`, and `setInterval(fn, NaN)` runs as `0` — an unthrottled poll
   against a bucket that waits rather than refusing, which is the exact latency

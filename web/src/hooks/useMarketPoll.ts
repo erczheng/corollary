@@ -166,8 +166,8 @@ function sync(): void {
  * nothing would fail, because `ratelimit.py`'s bucket *waits* rather than
  * refusing: the overspend surfaces as latency creep that looks like it
  * worked. The constant test pins the constant; this pins "no subscriber may
- * ask for less than it". Opting out is still `intervalMs <= 0`, which never
- * reaches here. */
+ * ask for less than it". Opting out is still `intervalMs <= 0`, and a
+ * non-finite interval is refused the same way; neither reaches here. */
 function subscribe(requested: Subscriber): () => void {
   const sub: Subscriber = {
     intervalMs: Math.max(requested.intervalMs, MARKETS_FOREGROUND_POLL_MS),
@@ -228,7 +228,8 @@ function pollOnce(client: QueryClient): Promise<void> {
  * Mounted twice by design: once app-wide at
  * {@link MARKETS_BACKGROUND_POLL_MS}, and again by `Markets.tsx` at
  * {@link MARKETS_FOREGROUND_POLL_MS} while that page is open. An interval of
- * zero or less mounts nothing, which is how a caller opts out; anything
+ * zero or less mounts nothing, which is how a caller opts out, and so does
+ * one that is not a finite number at all; anything
  * faster than {@link MARKETS_FOREGROUND_POLL_MS} is clamped up to it, which
  * is how the vendor bucket stays a property of this module rather than of
  * every call site remembering. */
@@ -236,7 +237,17 @@ export function useMarketPoll(intervalMs: number): void {
   const client = useQueryClient()
 
   useEffect(() => {
-    if (intervalMs <= 0) return
+    // `Number.isFinite` first, because the clamp below cannot catch what it
+    // cannot compare. `NaN <= 0` is false and `Math.max(NaN, 400)` is NaN,
+    // and `setInterval(fn, NaN)` runs at 0 — an unthrottled poll against a
+    // bucket that waits rather than refusing. `Infinity` is the same hazard
+    // from the other end: a delay past 2^31-1 ms overflows and fires almost
+    // at once. Neither is reachable while both call sites pass module
+    // constants; this is for the day an interval comes from config. Opting
+    // out rather than clamping to the floor: a value nobody meant is not a
+    // request to poll as fast as the budget allows, and a quote that stops
+    // moving is already said on the page by the stale pill.
+    if (!Number.isFinite(intervalMs) || intervalMs <= 0) return
     return subscribe({ intervalMs, poll: () => void pollOnce(client) })
   }, [client, intervalMs])
 }

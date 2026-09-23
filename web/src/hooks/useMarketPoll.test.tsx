@@ -185,6 +185,22 @@ describe('useMarketPoll', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  /** The one value the clamp could not see. `NaN <= 0` is false, so it
+   * passed the opt-out, and `Math.max(NaN, floor)` is NaN, so it passed the
+   * clamp too — reaching `setInterval` as a zero delay. `Infinity` overflows
+   * the timer the other way and fires almost at once. Both mount nothing. */
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])(
+    'mounts nothing for a non-finite interval (%s)',
+    async (interval) => {
+      const fetchMock = stubFetch()
+      renderHook(() => useMarketPoll(interval), { wrapper: wrapper() })
+
+      await advance(MARKETS_FOREGROUND_POLL_MS * 4)
+
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
 })
 
 /** The three states are one hook and one constant pair, and the whole point
