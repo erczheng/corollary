@@ -448,7 +448,7 @@ async def read_history(
     Decision 6. Nothing is simulated and nothing is stored: this is a
     pass-through of ``/v2/account/portfolio/history`` plus ``engine_state.t0``.
 
-    The ``t0`` read is a **read**. ``engine.engine_state()`` creates the
+    The ``t0`` read is a **read**. ``engine.state.engine_state()`` creates the
     singleton when it is missing, which is right for the question *"is the
     engine halted?"* -- absence of state is not evidence of a healthy engine --
     and wrong for this one. ``t0`` is written once on the first ever start and

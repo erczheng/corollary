@@ -31,8 +31,11 @@ stay different controls. There is also no execution path this phase, so a
 flatten would have nothing to close and everything to imply.
 
 The watchdog that *calls* halt, the ``notification`` row it writes, and
-``EngineRuntime`` are step 8. This module is the persistence and the
-statement of state, nothing more.
+``EngineRuntime`` are step 8. This module is the statement of state and the
+two human controls, nothing more. The singleton's persistence rules --
+create-if-missing and write-``t0``-once -- live in ``corollary/engine/state.py``,
+below both this module and the runtime, so each imports them rather than
+restating them.
 """
 
 import logging
@@ -44,74 +47,14 @@ from sqlalchemy.orm import Session
 
 from corollary.api.deps import SessionDep
 from corollary.api.schemas import EngineStateResponse, HaltRequest
-from corollary.db.models import ENGINE_STATE_ID, EngineState
+from corollary.db.models import EngineState
+from corollary.engine.state import engine_state
 
-__all__ = ["engine_state", "mark_started", "router"]
+__all__ = ["router"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/engine", tags=["engine"])
-
-
-# --------------------------------------------------------------------------
-# The singleton
-# --------------------------------------------------------------------------
-
-
-def engine_state(session: Session) -> EngineState:
-    """The one ``engine_state`` row, created **halted** if it is not there.
-
-    Creating on read is a write in a GET, which is normally a smell. It is the
-    right call here for one reason: the alternative is answering "is the
-    engine halted?" with a 404 or a made-up default, and the only safe default
-    is the one that also has to be persisted. **Absence of state is not
-    evidence of a healthy engine.**
-
-    The row is seeded on startup, so reaching this branch means somebody has
-    been in the database. Coming up halted is what the design spec asks for on
-    a cold start anyway: halted until the opening snapshot succeeds.
-    """
-    state = session.get(EngineState, ENGINE_STATE_ID)
-    if state is None:
-        state = EngineState(id=ENGINE_STATE_ID, halted=True)
-        session.add(state)
-        session.commit()
-        logger.warning(
-            "engine_state was missing and was recreated halted",
-            extra={
-                "event": "engine_state_recreated",
-                "rule": "absence of state is not evidence of a healthy engine",
-                "at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-    return state
-
-
-def mark_started(session: Session, *, at: datetime) -> EngineState:
-    """Write ``t0`` if it has never been written. Never rewrite it.
-
-    Decision 6: the Dashboard draws Alpaca's own equity curve and marks where
-    Corollary started running, so the chart does not claim credit for manual
-    trading that predates it. A ``t0`` that moved on every restart would walk
-    the marker forward until it claimed credit for none of the trading it
-    covers -- and ``uvicorn --reload`` restarts this process on every edit.
-
-    Called from the lifespan. It does **not** touch ``halted``: a restart is
-    not a resume.
-    """
-    state = engine_state(session)
-    if state.t0 is None:
-        state.t0 = at
-        session.commit()
-        logger.info(
-            "corollary t0 recorded",
-            extra={
-                "event": "engine_t0_recorded",
-                "rule": "t0 is written on the first ever start and never rewritten",
-                "at": at.isoformat(),
-            },
-        )
-    return state
 
 
 def _response(state: EngineState) -> EngineStateResponse:

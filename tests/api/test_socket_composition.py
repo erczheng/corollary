@@ -47,7 +47,7 @@ from corollary.api.app import (
 )
 from corollary.api.deps import AccountMode, ServiceRegistry
 from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
-from corollary.api.routes.engine import engine_state
+from corollary.engine.state import engine_state
 from corollary.data.providers.alpaca import (
     ALPACA_OPTIONS_FEED_ENV,
     ALPACA_PAPER_KEY_ENV,

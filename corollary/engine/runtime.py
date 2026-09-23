@@ -152,21 +152,18 @@ where every other halt ends: at an explicit human resume.
 
 ``t0`` is written on the first ever start and never rewritten -- the equity
 curve's marker for where Corollary started running, which would otherwise walk
-forward on every ``uvicorn --reload``. ``api/routes/engine.py`` owns that rule
-in ``mark_started``, along with the create-if-missing rule in ``engine_state``,
-and this module **calls them rather than restating them**: two places deciding
-whether ``t0`` is rewritten is how a marker starts moving, and two places
-deciding what a missing row means is how an absent state becomes evidence of a
-healthy engine.
+forward on every ``uvicorn --reload``. ``corollary/engine/state.py`` owns that
+rule in ``mark_started``, along with the create-if-missing rule in
+``engine_state``, and this module **calls them rather than restating them**:
+two places deciding whether ``t0`` is rewritten is how a marker starts moving,
+and two places deciding what a missing row means is how an absent state
+becomes evidence of a healthy engine.
 
-Both imports are **deferred into the methods that use them**, and that is not
-a style choice. ``corollary/api/__init__.py`` imports ``app`` eagerly and
-``app`` imports this module, so a module-level import here is a genuine
-circular import that fails at collection. The structurally right fix is for
-those two helpers to live somewhere neither layer owns -- they are persistence,
-not routing -- which is a change to a file this step does not own. Until then
-the import is local, and the alternative (a second copy of the ``t0`` rule in
-``engine/``) is the one thing worse than a deferred import.
+Those helpers used to live in ``api/routes/engine.py``, which this module could
+only reach through imports deferred into each method -- ``corollary.api``
+imports ``app`` eagerly and ``app`` imports this module. They are persistence,
+not routing, so they now sit below both layers and are imported at module
+level like everything else.
 """
 
 import asyncio
@@ -186,6 +183,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from corollary.db.models import NOTIFICATION_CHANNELS, NotificationRoute
+from corollary.engine.state import engine_state, mark_started
 from corollary.engine.stream import (
     EQUITY_STREAM_SYMBOL_CAP,
     OPTION_STREAM_QUOTE_CAP,
@@ -1785,11 +1783,6 @@ class EngineRuntime:
         makes for the same reason: an unmigrated database must degrade the
         routes that need a table, not stop the process booting.
         """
-        # Deferred: see the module docstring. `corollary.api` imports `app`,
-        # which imports this module, so importing the helper at module level
-        # is a circular import rather than a preference.
-        from corollary.api.routes.engine import mark_started
-
         at = _utc(self._now())
         try:
             with self._session_factory() as session:
@@ -2607,9 +2600,6 @@ class EngineRuntime:
         :attr:`_recorded`, and :meth:`_log_ongoing` then reports the rule as
         unknown rather than inventing one from the prose.
         """
-        # Deferred for the same reason `start` defers `mark_started`.
-        from corollary.api.routes.engine import engine_state
-
         try:
             with self._session_factory() as session:
                 state = engine_state(session)
@@ -3045,17 +3035,13 @@ class EngineRuntime:
         is the requirement rather than laziness. :meth:`halt` promises that
         persisting, logging and notifying are independent; anything escaping
         this method breaks that promise at the worst possible moment, by
-        swallowing the alert about the fault it is part of. The deferred
-        import sits inside the ``try`` for exactly that reason -- an
-        ``ImportError`` here is no more entitled to silence the switch than a
-        locked SQLite file is. ``KeyboardInterrupt`` and ``SystemExit`` derive
+        swallowing the alert about the fault it is part of. An unexpected
+        error from the session factory or the ORM is no more entitled to
+        silence the switch than a locked SQLite file is. ``KeyboardInterrupt`` and ``SystemExit`` derive
         from ``BaseException`` and still propagate, which is right: those are
         the process being told to stop, not the halt path failing.
         """
         try:
-            # Deferred for the same reason `start` defers `mark_started`.
-            from corollary.api.routes.engine import engine_state
-
             with self._session_factory() as session:
                 state = engine_state(session)
                 state.halted = True

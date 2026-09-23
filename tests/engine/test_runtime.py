@@ -1687,13 +1687,16 @@ def test_a_halt_still_notifies_when_the_database_is_unavailable(
 def test_a_halt_notifies_even_when_the_persist_step_raises_something_else(
     clock: Clock, notifier: SpyNotifier
 ) -> None:
-    """Not only ``SQLAlchemyError``. The deferred import can raise too.
+    """Not only ``SQLAlchemyError``. Anything the persist step raises.
 
-    ``_persist`` imports ``api/routes/engine.py`` *inside* the halt, to break
-    a genuine circular import. Catching only the database's exception left an
-    ``ImportError`` propagating out of ``halt()`` before the log line and
+    ``_persist`` once imported ``api/routes/engine.py`` *inside* the halt, to
+    break a circular import, and catching only the database's exception left
+    an ``ImportError`` propagating out of ``halt()`` before the log line and
     before the notification -- the alert about one fault swallowed by an
-    unrelated second one, at the exact moment it mattered.
+    unrelated second one, at the exact moment it mattered. The import is gone
+    (the helpers moved to ``engine/state.py``), and the breadth of the catch
+    stays: this test still raises a non-database error from the session
+    factory to prove it.
     """
 
     def broken_session() -> Session:
