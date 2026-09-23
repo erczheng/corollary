@@ -3762,10 +3762,18 @@ actually on screen.
 
 **10. Doc amendments.** Phase 2, **last**, so they describe what was actually
 built.
-- *Status:* partially applied. PRD's five amendments landed 2026-09-11
-  (`53d5097`, `3f8ca60`); PRD §12 and the two-budget / Phase 4 corrections
-  landed in `073c9a6`, which also amended CLAUDE.md's cap sentences.
-- *Outstanding — CLAUDE.md's layout and vendor-surface amendment:* the vendor
+- *Status:* **landed 2026-09-23, on the repo owner's go-ahead.** PRD's five
+  amendments landed 2026-09-11 (`53d5097`, `3f8ca60`); PRD §12 and the
+  two-budget / Phase 4 corrections landed in `073c9a6`, which also amended
+  CLAUDE.md's cap sentences. The CLAUDE.md amendment below landed in the
+  same commit as this status line, and went slightly past the letter of it
+  because the tree had: the layout names every module Phase 2 actually
+  added (`ingest`, `sockets`, `state`, `fanout`, `pricing/`, `ratelimit`,
+  `instruments`, `calendars` as well as the ones listed), marks what is
+  still a stub, and the migration head in Commands moved from 0003 to 0004.
+  **With this, Phase 2 has no outstanding step.** The Phase 4 CLAUDE.md
+  amendment under *Doc amendments* is Phase 4's.
+- *Was outstanding — CLAUDE.md's layout and vendor-surface amendment:* the vendor
   surface gains `BrokerAccount`; the layout gains
   `engine/{ledger,grouping,runtime,stream}.py`, `api/routes/`, `api/schemas.py`
   and `corollary/wire.py`; `CONTRACT_MULTIPLIER` is named as a **fixture**
@@ -3850,15 +3858,25 @@ already fixed costs the next session a dispatch to rediscover that.
   the unpersisted halt rather than forget it, so the engine ends genuinely
   halted awaiting an explicit human resume. The only value it ever writes to
   `halted` is `True`.
-- **Still open:** `engine_state`/`mark_started` remain persistence living in
-  `api/routes/engine.py`, imported lazily inside `EngineRuntime` method bodies
-  to dodge a circular import. **Still open:** `ingest.py`'s `guarded` comment
-  still under-counts its inputs, and `MISSING_FEE_AMOUNT` is still unnamed.
-  **Still open:** the commit trailer — every commit on this branch, including
-  today's, carries `Co-Authored-By: Claude Sonnet 5`, because the committer
-  takes the trailer from its own invocation context rather than from a
-  dispatch's claim about it. That is the correct rule and it produced a
-  discrepancy anyway. Amending history remains a human call.
+- **`engine_state`/`mark_started` — CLOSED 2026-09-23.** Both moved to
+  `corollary/engine/state.py`, below the route module and the runtime alike;
+  `EngineRuntime` imports them at module level and the three deferred imports
+  are gone. Still one copy of each rule, which was the constraint. The
+  ImportError test on `_persist` stays, re-worded: the breadth of the catch
+  was the point, not the import.
+- **`ingest.py`'s `guarded` comment — CLOSED 2026-09-23.** Checked against
+  every `_reject` call rather than against this item's count: **seven** rules
+  pass `activity.symbol` verbatim — the four named, plus `NOT_AN_OPTION`,
+  `NOT_A_LEDGER_ACTIVITY` and `MISSING_FEE_AMOUNT` — and `FRACTIONAL_QUANTITY`
+  does so only on the fill path (its event-path copy carries
+  `contract.symbol`). The comment and `_canonical_symbol`'s docstring both
+  say so now.
+- **The commit trailer — CLOSED 2026-09-23 by the owner's ruling: no
+  trailer.** Branch history was already rewritten without it on 2026-09-21
+  (the `filter-branch` in the reflog); the rewrite's backup ref was deleted;
+  the committer agent and CLAUDE.md's Conventions now say no
+  `Co-Authored-By:` line at all, which settles the discrepancy by removing
+  the thing that could drift.
 - **Amended:** the Research/`isHalted` item's framing is now wrong in detail.
   `Research.tsx` and `ChainOrderTicket.tsx` both read `isHalted` from the
   Zustand fixture store; `OrderTicket.tsx` reads neither, being gated by a

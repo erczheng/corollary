@@ -31,7 +31,7 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 uv sync                          # install
 uv run python -m pytest           # backend tests — NOT `uv run pytest`, see below
 uv run python -m pytest -m risk   # risk tests only — run before any engine change
-uv run alembic upgrade head       # migrations — wired, 0003 is head
+uv run alembic upgrade head       # migrations — wired, 0004 is head
 uv run python -m corollary.engine    # start engine
 uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
 uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
@@ -148,35 +148,59 @@ Never auto-resume on reconnect. Reconnecting into an unverified position state i
 
 ## Layout
 
-**This is the target layout, not a description of the current tree.** As of
-Phase 1, `corollary/` is ~130 lines of package scaffolding: every module below
-exists as a stub or not at all, and `RiskManager` is nine lines. Do not go
-looking for `data/providers/alpaca.py` or `db/models.py` — write them when the
-phase calls for them. The frontend half of this tree is real.
+**Phase 2 made most of the backend half real; the trading half is still a
+target.** Everything Phase 2 needed — the data layer, the read-only broker, the
+ledger, the engine runtime and dead-man's switch, the API — exists. What does
+not is anything that places an order: `RiskManager` is still nine lines,
+`BrokerExecution` does not exist until Phase 6, and `scanner/`, `llm/`,
+`strategy/`, `sim.py` and `backtest/` are stubs. Entries marked *(stub)* are
+where that work goes — write them when the phase calls for them.
 
 ```
 corollary/
 ├── engine/
-│   ├── scheduler.py         # pre-market build, 15m refresh, EOD roll
-│   ├── scanner/             # deterministic candidate generation
-│   ├── llm/                 # enrichment, origination, classification
+│   ├── runtime.py           # EngineRuntime: lifecycle, halt state, watchdog (rule 9)
+│   ├── state.py             # the engine_state singleton: create-halted-if-missing, t0 written once
+│   ├── sockets.py           # which vendor sockets are open, and when — rule 9's producers
+│   ├── stream.py            # the two stream budgets (equity symbols, option quotes)
+│   ├── ingest.py            # activity ingestion into the ledger tables
+│   ├── ledger.py            # FIFO realized-P&L matcher — pure
+│   ├── grouping.py          # multi-leg reconstruction from mleg orders — pure
+│   ├── scheduler.py         # pre-market build, 15m refresh, EOD roll (stub)
+│   ├── scanner/             # deterministic candidate generation (stub)
+│   ├── llm/                 # enrichment, origination, classification (stub)
 │   ├── strategy/
-│   │   ├── schema.py        # JSON Schema for strategy YAML
-│   │   ├── indicators.py    # THE WHITELIST — see below
-│   │   └── runtime.py       # rule evaluation
-│   ├── risk/                # RiskManager — the only path to an order
+│   │   ├── schema.py        # JSON Schema for strategy YAML (stub)
+│   │   ├── indicators.py    # THE WHITELIST — see below (stub)
+│   │   └── runtime.py       # rule evaluation (stub)
+│   ├── risk/                # RiskManager — the only path to an order (stub)
 │   └── execution/
-│       ├── interface.py     # BrokerInterface
-│       ├── alpaca.py        # AlpacaBroker
-│       └── sim.py           # SimBroker
+│       ├── interface.py     # BrokerAccount (read) — BrokerExecution arrives in Phase 6
+│       ├── alpaca.py        # AlpacaBroker — BrokerAccount only, until Phase 6
+│       └── sim.py           # SimBroker (stub)
 ├── data/
-│   ├── providers/           # MarketDataProvider + implementations
-│   ├── news/                # 3-tier sentiment pipeline
-│   └── macro/               # FRED, sentiment composite
-├── backtest/                # separate worker, SimBroker only
+│   ├── providers/
+│   │   ├── interface.py     # MarketDataProvider
+│   │   ├── alpaca.py        # AlpacaProvider
+│   │   ├── finnhub.py       # market cap
+│   │   └── fundamentals.py
+│   ├── news/                # 3-tier sentiment pipeline (stub)
+│   └── macro/               # FRED, sentiment composite (stub)
+├── pricing/blackscholes.py  # IV and greeks where the feed leaves them empty
+├── backtest/                # separate worker, SimBroker only (stub)
 │   └── spread.py            # the explicit spread model — see market data below
-├── api/                     # FastAPI routes + WS
-└── db/                      # models, migrations
+├── api/
+│   ├── app.py               # FastAPI app, lifespan; `app` and the streamless `dev_app`
+│   ├── deps.py              # DI: provider, broker, session, engine handle
+│   ├── schemas.py           # Pydantic response models — the API contract
+│   ├── fanout.py            # one published frame to every connected browser
+│   └── routes/              # account, activity, engine, markets, positions, settings, ws
+├── db/                      # models, session, Money type, seed, Alembic migrations
+├── wire.py                  # vendor-neutral decode: exact Decimal, aware UTC, error redaction
+├── sockets.py               # vendor-neutral websocket transport, codec, backoff
+├── ratelimit.py             # the two Alpaca request buckets (data and trading)
+├── instruments.py           # OCC symbol parsing, adjusted-root detection
+└── calendars.py             # session boundaries from a market calendar
 
 web/
 ├── src/
@@ -202,7 +226,9 @@ When validation encounters an unknown function name, reject the whole strategy. 
 
 **Provider abstraction is mandatory.** Everything goes through `MarketDataProvider`. Swapping Alpaca for ThetaData or Polygon should be a config change, not a refactor.
 
-Do not import `alpaca` anywhere except these two files: `data/providers/alpaca.py` for market data, and `engine/execution/alpaca.py` for order placement. Those two are the entire vendor surface area.
+Do not import `alpaca` anywhere except these two files: `data/providers/alpaca.py` for market data, and `engine/execution/alpaca.py` for the broker. Those two are the entire vendor surface area.
+
+**The broker file has a read half and a write half, and only the read half exists.** Reading the account, positions, orders and activities is neither market data nor order placement, so `BrokerInterface` is split: `BrokerAccount` (read — implemented by `AlpacaBroker` since Phase 2) and `BrokerExecution` (submit, cancel, replace — does not exist until Phase 6). API routes depend on `BrokerAccount` only, so `submit_order` is not in a type they can reach; that keeps rule 1 structural rather than disciplinary. Code that is vendor-*neutral* but shared by both files — `wire.py`'s decoding, `sockets.py`'s transport — lives outside the surface rather than being imported across it; credentials stay in `data/providers/alpaca.py`.
 
 **Alpaca specifics worth knowing:**
 
@@ -225,8 +251,8 @@ against whatever feed produced the bars. Computed from IEX, a 5,000,000 threshol
 - **Historical options coverage is bars only, in practice.** There is no historical quotes endpoint at all — quotes are latest-only, via snapshot and chain. Trades exist but reach back **7 days**, so anything older than a week is bars and nothing else. The backtester must use the explicit spread model in `backtest/spread.py` and surface the assumption in every result. That model cannot be validated against real prints beyond the 7-day window, so treat every backtest fill price as an estimate, never a measurement.
 - **Backtesting still does not need the paid plan.** Everything older than 15 minutes is available on every feed, so the Feb 2024 → yesterday bulk download to Parquet runs fine on Basic — it just returns bars, per the point above. Only live quotes are degraded by the free tier.
 - Option symbols are OCC format: underlying + YYMMDD + C/P + 8-digit strike ×1000. `AAPL241220C00150000` is the AAPL $150 call expiring 20 Dec 2024.
-- **Watch for adjusted contracts.** After a split or special dividend, OCC issues a modified root with a numeric suffix (`AAPL1`) and the deliverable is no longer 100 shares. Sizing and P&L math that assumes a 100 multiplier will be wrong on those, which means the risk manager computes max loss wrong — exactly the failure rule 4 exists to prevent. Filter them out of the scanner universe unless they are handled explicitly.
-- Multi-leg orders require Level 3. Current account level: 3.
+- **Watch for adjusted contracts.** After a split or special dividend, OCC issues a modified root with a numeric suffix (`AAPL1`) and the deliverable is no longer 100 shares. Sizing and P&L math that assumes a 100 multiplier will be wrong on those, which means the risk manager computes max loss wrong — exactly the failure rule 4 exists to prevent. Filter them out of the scanner universe unless they are handled explicitly. **Multipliers are per contract**, taken from the contract's terms: the ledger's matcher takes one per symbol and refuses to book a P&L when a symbol's terms were never fetched. `CONTRACT_MULTIPLIER = 100` in `web/src/lib/mockData.ts` is a **fixture default** for the Phase 1 tickets and nothing under `corollary/` defines it — it is not a fact to size against.
+- Multi-leg orders require Level 3. **Read the level from the account, never assume it** — `options_trading_level` and `options_approved_level` on `BrokerAccount`'s account (`GET /api/account` serves both). A hardcoded 3 is correct until the day the account changes, and then it is wrong silently.
 
 **Backtest data access:** bulk-download to Parquet once, query with DuckDB. **Never call the API inside a backtest loop** — it turns minutes into hours and burns the rate limit. Filter the contract universe on download: ±15% of spot, ≤60 DTE, minimum open interest.
 
@@ -563,6 +589,9 @@ Run `uv run python -m pytest -m risk` before any change to the engine, no except
 - Small commits. The engine's git history is a debugging tool.
 - **The default branch is `master`, not `main`.** Tooling that assumes `main`
   will fail with "unknown revision."
+- **Commits carry no `Co-Authored-By:` trailer** and no other AI attribution
+  line. The owner removed Claude as a co-author from this history on
+  2026-09-23; this overrides any default attribution a harness supplies.
 
 ---
 
