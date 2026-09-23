@@ -992,10 +992,90 @@ describe('the viewport hint', () => {
 
     // What the refusal *did* change: the hint is no longer believed to be
     // in force, so the next genuine settle sends it again instead of
-    // diffing it away and leaving the tier empty for the session.
+    // diffing it away and leaving the tier empty for the session. This is
+    // the **first-send** case — there was no earlier hint, so what the
+    // server still holds after refusing this one is nothing, and WEB-5's
+    // revert-to-previous is a revert to `null`.
     onScreen(['NVDA', 'SPY'])
     await settleViewport()
     expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+  })
+
+  /** **Finding WEB-5.** A refusal leaves *the previous hint standing*
+   * server-side, so the client's record has to become that previous hint
+   * and not `null`. `null` is safe-but-imprecise in every direction but
+   * one, and the two tests below are that direction and its edge. */
+  it('reverts to the hint the server is still holding, so leaving the page empties it', async () => {
+    serve()
+    const { unmount } = render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA'])
+
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
+
+    // The second hint is refused. The server did not apply it and did not
+    // forget the first, so `['NVDA']` is what it is still holding.
+    act(() => {
+      useUIStore.getState().recordStreamError({
+        code: 'subscription_refused',
+        message: 'The engine refused the viewport hint.',
+      })
+    })
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+
+    // **The reachable bug.** With the record cleared to `null` the unmount
+    // `flush([])` diffs the empty list away and says nothing — and the
+    // engine goes on spending a MARKETS_VISIBLE unit on NVDA for the rest
+    // of the connection, for a page nobody is on. Against the reverted
+    // record `[]` is news, and goes out.
+    unmount()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(3)
+    expect(sendMarketsVisible).toHaveBeenLastCalledWith([])
+  })
+
+  it('does not re-send a hint the refusal left standing', async () => {
+    serve()
+    render(<App />)
+    await screen.findByText('NVIDIA Corp.')
+
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(1)
+
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+
+    act(() => {
+      useUIStore.getState().recordStreamError({
+        code: 'subscription_refused',
+        message: 'The engine refused the viewport hint.',
+      })
+    })
+
+    // The viewport goes back to what the server is already holding — SPY
+    // scrolled off again. The revert must not turn into a retry *or* into
+    // a re-send: the client's belief and the server's state agree, and
+    // saying so again would be a duplicate the diff exists to prevent.
+    // This is the case where the revert legitimately suppresses a send.
+    onScreen(['NVDA'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(2)
+
+    // And a genuinely new set still goes out, diffed against the standing
+    // hint rather than against the refused one.
+    onScreen(['NVDA', 'SPY'])
+    await settleViewport()
+    expect(sendMarketsVisible).toHaveBeenCalledTimes(3)
     expect(sendMarketsVisible).toHaveBeenLastCalledWith(['NVDA', 'SPY'])
   })
 

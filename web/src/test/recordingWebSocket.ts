@@ -24,6 +24,22 @@ import { SOCKET_OPEN, type SocketLike } from '../lib/liveSocket'
  * methods are the only way anything moves, and they are named so that a grep
  * separates what a test caused from what the client did.
  *
+ * **What that costs, and where it is paid — finding WEB-11.** Because
+ * `readyState` starts at `CONNECTING`, `LiveSocket.send` returns `false` in
+ * every suite that does not call {@link RecordingWebSocket.driveOpen}, and
+ * the frame never reaches this stub at all. The composition that would meet
+ * it — the Markets viewport hint travelling over a real `LiveSocket` — is
+ * **tested only in parts today**, deliberately: `Markets.test.tsx` mocks
+ * `sendMarketsVisible` at the module boundary, because what step 15 (b) owns
+ * is *which* symbols are named and *how often*, while `liveSocket.test.ts`
+ * and `useLiveSocket.test.tsx` own the frame and the connection over a
+ * socket they drive themselves. Covered by parts is not covered by
+ * composition, so the day those two meet, the failure has to be legible:
+ * {@link RecordingWebSocket.sent} throws on a socket nobody opened, and
+ * {@link RecordingWebSocket.send} throws on a frame the browser would have
+ * refused. Neither invents an open socket — a `send` that reported success
+ * from `CONNECTING` would make the vacuous pass worse, not better.
+ *
  * Typed `implements SocketLike` rather than `implements WebSocket`:
  * `SocketLike` is the entire surface `LiveSocket` uses, so the compiler checks
  * the contract that is actually exercised instead of a hundred DOM members
@@ -39,9 +55,11 @@ export class RecordingWebSocket implements SocketLike {
   readonly url: string
   /** Mutable so a test can drive it; the client only ever reads it. */
   readyState: number = RecordingWebSocket.CONNECTING
-  /** Every frame the client sent, in order — the viewport hint and nothing
-   * else, on today's client. */
-  readonly sent: string[] = []
+  private readonly frames: string[] = []
+  /** Whether {@link driveOpen} was ever called. Not `readyState`: a socket
+   * that opened and then closed *could* have carried frames, and one that
+   * never opened could not have. */
+  private everOpened = false
   /** How many times the client closed this socket deliberately. */
   closeCount = 0
 
@@ -55,8 +73,42 @@ export class RecordingWebSocket implements SocketLike {
     constructions.push(this)
   }
 
+  /** Every frame the client sent, in order — the viewport hint and nothing
+   * else, on today's client.
+   *
+   * **Throws on a socket that was never driven open — finding WEB-11.**
+   * `readyState` starts at `CONNECTING` and only {@link driveOpen} moves it,
+   * so `LiveSocket.send` refuses every frame before it reaches this stub:
+   * the list is `[]` whatever the client did. A test asserting *the hint
+   * went out* would then fail for a reason that reads like a product bug,
+   * and one asserting *nothing was sent* would pass vacuously. Throwing
+   * makes both loud and names the cause. Nothing is lost by it: *no frame
+   * before open* is already structural, because {@link send} below refuses
+   * to record one. */
+  get sent(): readonly string[] {
+    if (!this.everOpened) {
+      throw new Error(
+        'RecordingWebSocket: this socket was never driven open, so ' +
+          'LiveSocket refused every frame before it reached the stub and ' +
+          '`sent` is [] whatever the client did. Call driveOpen() before ' +
+          'asserting on what was or was not sent.',
+      )
+    }
+    return this.frames
+  }
+
   send(data: string): void {
-    this.sent.push(data)
+    if (this.readyState !== RecordingWebSocket.OPEN) {
+      throw new Error(
+        `RecordingWebSocket: send() from readyState ${this.readyState}. A ` +
+          'real WebSocket throws InvalidStateError from CONNECTING and ' +
+          'discards silently from CLOSED; both are loud here rather than ' +
+          'appended, because a frame the browser would have dropped must ' +
+          'not read back as one that went out. `LiveSocket.send` guards on ' +
+          '`connected`, so this firing means that guard regressed.',
+      )
+    }
+    this.frames.push(data)
   }
 
   close(): void {
@@ -72,6 +124,7 @@ export class RecordingWebSocket implements SocketLike {
   /** The server accepted the connection. */
   driveOpen(): void {
     this.readyState = RecordingWebSocket.OPEN
+    this.everOpened = true
     this.onopen?.({})
   }
 

@@ -3430,18 +3430,62 @@ actually on screen.
   - *Follow-ups from (b)'s audit. None blocking, and each is bounded to
     freshness on rows that are polled at 400ms regardless — recorded rather
     than fixed, because every one of them costs a slot on the lowest tier
-    and none can reach a held mark.* **WEB-5** the refusal effect clears the
+    and none can reach a held mark.* **WEB-5 closed 2026-09-22.** The
+    finding: the refusal effect cleared the
     sent record to `null`, but the server's real state after a refusal is
-    *the previous hint still stands*; the two beliefs differ in one
-    reachable direction, because with `null` the unmount `[]` is diffed away
-    and the engine keeps `MARKETS_VISIBLE` units for rows on nobody's screen
-    until the socket closes. Reverting to the previous value models the
-    server exactly; `null` is safe-but-imprecise.
-    **WEB-6** `subscription_refused` is not specific to `markets_visible` —
-    `subscribe` refusals carry the same code — so an unrelated refusal
-    clears this page's record. The consequence is one duplicate hint, which
-    the server answers `UNCHANGED` with no re-plan, so it costs nothing; but
-    the effect reacts to a broader signal than it means.
+    *the previous hint still stands*; the two beliefs differed in one
+    reachable direction, because with `null` the unmount `[]` was diffed away
+    and the engine kept `MARKETS_VISIBLE` units for rows on nobody's screen
+    until the socket closed. Reverting to the previous value models the
+    server exactly; `null` was safe-but-imprecise.
+    Fixed with one ref. `previouslySent` sits beside `sent`, is written in
+    `flush` **only on a send the socket actually took** — a `false` from
+    `sendMarketsVisible` means there was no open socket, and a hint that
+    never left must not displace the record — and the refusal effect reverts
+    to it rather than to `null`.
+    `null` keeps its meaning of *nothing is believed to be in force*, and
+    reverting when there is no previous value **is** a revert to `null`,
+    which is exactly right for the first-send case; the existing test
+    covering that case passes unchanged and now says so in a comment.
+    **Two things this deliberately is not.** It is not a retry — no send
+    happens in the effect, and the next genuine settle is what speaks. And
+    it does not always send more: where the next settle computes exactly the
+    hint the refusal left standing, the diff now correctly stays **silent**,
+    because client belief and server state agree. That suppression is the
+    precision being bought rather than a message being lost, and it is
+    pinned alongside a case where a genuinely new set still goes out.
+    The residual, stated because it is the direction that matters: an
+    out-of-order refusal reverts one step too far, which understates what
+    the server holds — the same safe direction `null` was, and it can never
+    leave the client believing *more* than the server holds. The reachable
+    bug is pinned by a test that sends twice, takes a refusal, unmounts, and
+    asserts the `[]` actually goes out; restoring `sent.current = null`
+    fails it with `called 3 times, but got 2 times`.
+    **WEB-6 closed 2026-09-22 as not reproducing, with a comment rather
+    than code.** The finding: `subscription_refused` is not specific to
+    `markets_visible` — `subscribe` refusals carry the same code — so an
+    unrelated refusal clears this page's record. The consequence is one
+    duplicate hint, which the server answers `UNCHANGED` with no re-plan, so
+    it costs nothing; but the effect reacts to a broader signal than it
+    means.
+    **It cannot fire in the app as assembled, because the browser never
+    sends a `subscribe` frame.** `liveSocket.ts` carries a docstring section
+    titled *"Why this client does not send `subscribe` on connect"*, and its
+    only send paths are `sendMarketsVisible` and the `onopen` viewport
+    replay; the sole occurrence of `'subscribe'` anywhere in `web/src` is
+    the `type` literal in `WsSubscribeMessage`'s declaration, which is never
+    constructed. So every `subscription_refused` the browser can receive
+    *is* a `markets_visible` refusal.
+    **And a discriminator is not available to the client anyway**, which is
+    why closing it any other way would have been inventing work. The error
+    frame is `{code, message}` only, `WsErrorCode` is three literals, two of
+    the four emit sites are inside a helper shared by both message kinds,
+    and `ApiErrorBody`'s own field comment forbids the alternative:
+    *"Stable and machine-readable. The client branches on this, never on the
+    prose."* The day a `subscribe` send is added to the browser, this effect
+    needs a discriminator the frame contract cannot currently provide —
+    making that a **server** change, not a client one. That coupling is now
+    written at the effect, which is the finding's real content.
     **WEB-7 closed 2026-09-17 (`e8e33fb`), structurally rather than by a
     test alone.** The claim *"never between two pages of the same table"*
     held only because the rebuilt observer's first delivery usually beat the
@@ -3515,11 +3559,26 @@ actually on screen.
     matching **more** is the change that needs the mirror moved. Writing
     "widening is safe" there, by symmetry with the other two, would have
     been wrong.
-    **WEB-9** the inert `IntersectionObserver` masks in one direction: a
+    **WEB-9 closed 2026-09-22 by recording, which is the precedent this
+    harness had already set.** The finding: the inert
+    `IntersectionObserver` masks in one direction — a
     future component that uses it to decide *"is this visible"* takes the
     never-visible branch forever, so a test asserting **absence** passes
-    vacuously. Without the stub such a failure is loud. Harden by recording
-    constructions, or by throwing unless a test opts in.
+    vacuously. Without the stub such a failure is loud.
+    `web/src/test/recordingIntersectionObserver.ts` is the answer, shaped
+    deliberately like `recordingWebSocket.ts` — the same two exports, the
+    same suite-wide reset in `afterEach` — so the harness has one idea
+    rather than two. It records constructions, the targets currently
+    watched in observe order, and whether it was disconnected.
+    **What it still refuses to do is report an intersection.** jsdom
+    implements no layout, so an entry invented here would be fiction; the
+    stub may say *what is being watched* and may not say *what is visible*.
+    That is precisely the split the finding asked for: *nothing was
+    observed* and *nothing was reported on screen* are now two different
+    assertions, where the inert stub collapsed them into one vacuous pass.
+    No suite opts in, and `Markets.test.tsx`'s own driveable observer still
+    overrides the global cleanly for the tests that are *about* the
+    viewport.
   - **(c) landed 2026-09-17 — the mount, and the socket is finally open in
     the running app.** `useLiveSocket` (`web/src/hooks/useLiveSocket.ts`) is
     the whole of it: one `useEffect` calling `startLiveSocket()` on an empty
@@ -3607,15 +3666,38 @@ actually on screen.
     tests call the **exported `mergeQuote` directly**, which is the point —
     the invariant is now true where a reader of that function looks for it,
     rather than only on the batch path.
-    **WEB-11** `RecordingWebSocket.readyState` never leaves `CONNECTING`
-    unless a test calls `driveOpen()`, so `send()` returns `false` in every
+    **WEB-11 closed 2026-09-22 by making it loud, and the composition note
+    written down beside the throws because the note is what explains
+    them.** The finding: `RecordingWebSocket.readyState` never leaves
+    `CONNECTING`
+    unless a test calls `driveOpen()`, so `send()` returned `false` in every
     suite that does not drive the socket: a later test asserting *the hint
     went out* would fail for a reason that looks like a product bug, and one
     asserting *nothing was sent* would pass vacuously. Invisible today
     because `Markets.test.tsx` mocks `sendMarketsVisible` at the module
     boundary — which is the same fact said differently: **(b) and (c) are
     only ever tested apart, never composed.** The composition is covered by
-    parts, so this is a coverage note and not a hole.
+    parts, so this was a coverage note and not a hole.
+    Two throws, and **neither invents an open socket**, which was the one
+    thing that would have made the vacuous pass worse. `sent` is now a
+    getter that **throws on a socket nobody drove open**, naming the cause —
+    `LiveSocket` refused every frame before it reached the stub, so `sent`
+    is `[]` whatever the client did — which kills both halves of the finding
+    at once: the vacuous *nothing was sent* and the misleading *the hint
+    went out*. And `send()` **throws unless `readyState` is OPEN**, matching
+    what a real socket does (`InvalidStateError` from `CONNECTING`, a
+    **silent discard** from `CLOSED` — and the silent discard is exactly the
+    mask this file exists not to reproduce). Nothing is lost by the first
+    throw, because *no frame before open* is structural rather than
+    incidental. Neither can fire in correct production code: `LiveSocket`
+    guards its send on `readyState === OPEN`, so a firing means that guard
+    regressed, which is news worth a failure.
+    The docstring now states the composition outright — (b) tested with
+    `sendMarketsVisible` mocked at the module boundary, (c) with a socket
+    the test drives and no Markets page mounted, covered by parts and never
+    together — so the day they do meet, the failure is legible. Two of
+    `useLiveSocket.test.tsx`'s existing `expect(...sent).toEqual([])`
+    assertions are non-vacuous for the first time.
     **WEB-12 closed 2026-09-22.** The finding: `storeHandlers().onQuote`
     still called `markStreamed` for a
     valid-mid frame whose `at` is unorderable, so `lastTickAt` advanced for a

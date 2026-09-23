@@ -644,8 +644,16 @@ function useViewportHint(
   const chain = useRef(chainUnderlying)
   /** What actually reached the socket last. **Null means nothing is
    * believed to be in force** — the state before the first send, and the
-   * state a refusal returns us to. */
+   * state a refusal returns to when it was the first send that was
+   * refused. */
   const sent = useRef<string[] | null>(null)
+  /** What was in force *before* {@link sent}, and the value a refusal
+   * reverts to — **finding WEB-5**. A refused message leaves the previous
+   * one standing server-side, so this is the client's copy of what the
+   * server still holds when the newest hint does not apply. Written only
+   * on a delivered send, so a hint the socket could not take never
+   * displaces it. */
+  const previouslySent = useRef<string[] | null>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** **Does an observer owe us a first answer?** True from the moment a
    * fresh observer starts watching rows until its first callback, and
@@ -675,7 +683,12 @@ function useViewportHint(
     // delivered, so it is not recorded as sent and the next settle says it
     // again. A duplicate is cheap: the server answers an identical list
     // UNCHANGED, which triggers no re-plan and so costs no marks.
-    if (sendMarketsVisible(symbols)) sent.current = symbols
+    if (sendMarketsVisible(symbols)) {
+      // Both records move together, and only on a delivered message: what
+      // the server held a moment ago is exactly what this send replaced.
+      previouslySent.current = sent.current
+      sent.current = symbols
+    }
   }, [])
 
   const settle = useCallback(() => {
@@ -787,16 +800,58 @@ function useViewportHint(
     [flush],
   )
 
-  // **Finding F5 from (a)'s audit.** A refusal means the hint did not
-  // apply and the previous one still stands server-side — so believing
-  // this one is in force can leave the tier silently empty for a session.
-  // Forgetting it is the whole fix: the next genuine settle sends again.
-  // Deliberately *not* an immediate re-send, which would be a retry, and
-  // deliberately not surfaced on the page: the hint changes no price.
+  // **Finding F5 from (a)'s audit, made exact by WEB-5.** A refusal means
+  // the hint did not apply and *the previous one still stands*
+  // server-side — so believing the refused hint is in force can leave the
+  // tier silently empty for a session. Reverting to the last delivered
+  // value models the server exactly: what it holds after refusing is what
+  // it held before the refused message arrived.
+  //
+  // **Why not `null`,** which is what this recorded until WEB-5. `null`
+  // means *nothing is believed to be in force*, which is one state too
+  // few. On the next ordinary settle it is merely imprecise — a duplicate
+  // the server answers UNCHANGED, no re-plan, no cost. On **unmount** it
+  // is a dropped message: `flush([])` diffs the empty list away against a
+  // `null` record and says nothing at all, so the engine keeps
+  // `MARKETS_VISIBLE` units for rows on nobody's screen until the socket
+  // closes. Reverting is what keeps that `[]` news.
+  //
+  // Reverting when there was no previous value *is* reverting to `null`,
+  // and that is correct: a refused first hint leaves the server holding
+  // nothing.
+  //
+  // **Still not a retry.** Nothing is sent from here; the next genuine
+  // settle sends. And if what that settle computes equals what the server
+  // already holds, the diff correctly stays silent — that silence is the
+  // precision being bought, not a suppressed message.
+  //
+  // A refusal that arrives *after* a later send reverts one step too far.
+  // That is the same safe direction `null` was, and the only direction
+  // reachable from here: the client believes less than the server holds,
+  // so the next settle re-sends and is answered UNCHANGED. Nothing here
+  // can leave the client believing *more* than the server holds, which is
+  // the belief that could strand a slot.
+  //
+  // **WEB-6, recorded rather than fixed: this effect is unambiguous only
+  // while the client sends exactly one kind of client frame.**
+  // `subscription_refused` is not specific to `markets_visible` — the
+  // server's bound and malformed-symbol refusals are shared with
+  // `subscribe` (`corollary/api/routes/ws.py`, four emit sites across both
+  // messages) — and the error frame is `{code, message}` only, with `code`
+  // the machine-readable half the client is told to branch on and never
+  // the prose. So the frame cannot say *which* message was refused. It
+  // does not matter in the app as assembled, because **this client never
+  // sends `subscribe`**: `liveSocket.ts` carries the reasoning under *Why
+  // this client does not send `subscribe` on connect*, its only send paths
+  // are `sendMarketsVisible` and the reconnect replay of that same hint,
+  // and `WsSubscribeMessage` is declared in `types.ts` and constructed
+  // nowhere. The day a `subscribe` send is added, this effect needs a
+  // discriminator the frame contract cannot currently provide — which
+  // makes that day a server change, not a client one.
   const streamError = useUIStore((s) => s.lastStreamError)
   useEffect(() => {
     if (streamError?.code !== 'subscription_refused') return
-    sent.current = null
+    sent.current = previouslySent.current
   }, [streamError])
 
   return body
