@@ -440,3 +440,36 @@ def test_url_secrets_splits_a_webhook_into_its_authenticating_parts() -> None:
     assert _FAKE_HOOK_TOKEN in parts
     assert _FAKE_HOOK_ID in parts
     assert url_secrets("") == ()
+
+
+#: An unbalanced IPv6 bracket: ``urllib.parse.urlsplit`` raises ``ValueError``
+#: on it. A dummy value, like every URL in this file.
+_MALFORMED_HOOK_TOKEN = "dummy-token-not-real"
+_MALFORMED_HOOK = f"https://[::1/api/webhooks/1/{_MALFORMED_HOOK_TOKEN}"
+
+
+@pytest.mark.risk
+def test_url_secrets_never_raises_on_a_malformed_url() -> None:
+    """The Discord sink's constructor calls this; a raise aborted the lifespan."""
+    parts = url_secrets(_MALFORMED_HOOK)
+    assert parts[0] == _MALFORMED_HOOK
+    assert _MALFORMED_HOOK_TOKEN in parts
+    # Longest first, so the whole value is replaced before any part of it.
+    assert list(parts) == sorted(parts, key=len, reverse=True)
+
+
+@pytest.mark.risk
+def test_url_secrets_on_a_malformed_url_splits_query_and_fragment_too() -> None:
+    parts = url_secrets(f"{_MALFORMED_HOOK}?wait=true")
+    assert _MALFORMED_HOOK_TOKEN in parts
+
+
+@pytest.mark.risk
+def test_operator_text_redacts_a_malformed_webhooks_token_on_its_own() -> None:
+    # The token is 20 characters: under the 32-character shape, and the host
+    # is not Discord's, so only expansion of the configured value catches it.
+    out = operator_text(
+        f"halting, see {_MALFORMED_HOOK_TOKEN}", secrets=(_MALFORMED_HOOK,)
+    )
+    assert _MALFORMED_HOOK_TOKEN not in out
+    assert "halting" in out

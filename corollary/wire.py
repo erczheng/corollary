@@ -320,6 +320,15 @@ def url_secrets(url: str) -> tuple[str, ...]:
     only the token, is still scrubbed. Longest first, so the whole URL is
     replaced before a part of it can leave the rest behind.
 
+    **Never raises.** ``urlsplit`` raises ``ValueError`` on a malformed value
+    (an unbalanced IPv6 bracket: ``https://[::1/...``), and the callers are
+    the Discord sink's constructor and :func:`operator_text` -- a lifespan
+    and a halt route, neither of which an optional setting may abort. A
+    value ``urlsplit`` refuses still yields its whole literal, plus every
+    16+ character run between ``/``, ``?`` and ``#`` in the raw string. That
+    split has no notion of authority or path, so it can only over-redact:
+    redaction never gets weaker because the value is broken.
+
     Written for the Discord webhook URL, whose token *is* its last path
     segment. Lives here rather than in ``engine/notify.py`` because two
     boundaries need the same derivation -- the Discord sink's own logging and
@@ -328,13 +337,32 @@ def url_secrets(url: str) -> tuple[str, ...]:
     if not url:
         return ()
     parts = {url}
-    path = urlsplit(url).path
-    if path:
-        parts.add(path)
-    for segment in path.split("/"):
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        segments = re.split(r"[/?#]", url)
+    else:
+        if path:
+            parts.add(path)
+        segments = path.split("/")
+    for segment in segments:
         if len(segment) >= 16:
             parts.add(segment)
     return tuple(sorted(parts, key=len, reverse=True))
+
+
+def _is_http_url(value: str) -> bool:
+    """Whether a configured secret is an ``http(s)`` URL, without ever raising.
+
+    ``urlsplit`` decides when it can. When it raises on a malformed value the
+    raw prefix decides instead, so a broken webhook URL is still expanded
+    through :func:`url_secrets` and its token redacted on its own -- the
+    answer errs toward expanding, which can only over-redact.
+    """
+    try:
+        return urlsplit(value).scheme.lower() in ("http", "https")
+    except ValueError:
+        return value.strip().lower().startswith(("http://", "https://"))
 
 
 def operator_text(
@@ -365,17 +393,14 @@ def operator_text(
     for secret in secrets:
         if not secret:
             continue
-        # The literal value is redacted whatever happens next. Expansion is
-        # the extra, and it must never be able to fail the caller: urlsplit
-        # raises ValueError on a malformed value (``https://[bad``), and the
-        # caller is the halt route -- a halt that 500s and records nothing
-        # over a scrubbing detail is worse than any line this protects.
+        # The literal value is redacted whatever happens next. Neither helper
+        # below can raise -- both absorb urlsplit's ValueError on a malformed
+        # value (``https://[bad``) -- because the caller is the halt route,
+        # and a halt that 500s and records nothing over a scrubbing detail is
+        # worse than any line this protects.
         expanded.add(secret)
-        try:
-            if urlsplit(secret).scheme.lower() in ("http", "https"):
-                expanded.update(url_secrets(secret))
-        except ValueError:
-            pass
+        if _is_http_url(secret):
+            expanded.update(url_secrets(secret))
     ordered = tuple(sorted(expanded, key=len, reverse=True))
     detail = vendor_detail(
         text, secrets=ordered, patterns=CREDENTIAL_SHAPES, limit=limit

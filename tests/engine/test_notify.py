@@ -443,6 +443,69 @@ async def test_no_webhook_configured_is_recorded_as_dropped(db_engine: Engine) -
     assert recorder.requests == []
 
 
+#: Dummy values. The first is one ``urllib.parse.urlsplit`` raises on.
+MALFORMED_TOKEN = "dummy-token-not-real"
+MALFORMED_WEBHOOK_URL = f"https://[::1/api/webhooks/1/{MALFORMED_TOKEN}"
+PLAIN_HTTP_TOKEN = "dummy-http-token-not-real"
+PLAIN_HTTP_WEBHOOK_URL = f"http://discord.com/api/webhooks/1/{PLAIN_HTTP_TOKEN}"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_webhook_is_an_unavailable_sink_not_a_crash(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = Recorder()
+    with caplog.at_level(logging.DEBUG):
+        await _deliver_one(
+            db_engine, recorder.transport(), webhook_url=MALFORMED_WEBHOOK_URL
+        )
+    rows = _deliveries(db_engine, "discord")
+    assert [row.status for row in rows] == ["dropped"]
+    assert rows[0].detail == f"{DISCORD_WEBHOOK_ENV} is set but malformed"
+    assert recorder.requests == []
+    logged = _everything_logged(caplog)
+    assert MALFORMED_TOKEN not in logged
+    assert "[::1" not in logged
+    misconfigured = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "notification_discord_misconfigured"
+    ]
+    assert len(misconfigured) == 1
+    assert misconfigured[0].levelno == logging.ERROR
+    assert DISCORD_WEBHOOK_ENV in misconfigured[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_non_https_webhook_is_an_unavailable_sink(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plain ``http`` would send the token in the clear; nothing posts."""
+    recorder = Recorder()
+    with caplog.at_level(logging.DEBUG):
+        await _deliver_one(
+            db_engine, recorder.transport(), webhook_url=PLAIN_HTTP_WEBHOOK_URL
+        )
+    rows = _deliveries(db_engine, "discord")
+    assert [row.status for row in rows] == ["dropped"]
+    assert rows[0].detail == f"{DISCORD_WEBHOOK_ENV} is set but is not an https URL"
+    assert recorder.requests == []
+    assert PLAIN_HTTP_TOKEN not in _everything_logged(caplog)
+
+
+@pytest.mark.parametrize("url", ["https:///api/webhooks/1/x", "https://host:99999/x"])
+@pytest.mark.asyncio
+async def test_a_webhook_without_a_usable_host_or_port_is_malformed(
+    db_engine: Engine, url: str
+) -> None:
+    recorder = Recorder()
+    await _deliver_one(db_engine, recorder.transport(), webhook_url=url)
+    rows = _deliveries(db_engine, "discord")
+    assert [row.status for row in rows] == ["dropped"]
+    assert rows[0].detail == f"{DISCORD_WEBHOOK_ENV} is set but malformed"
+    assert recorder.requests == []
+
+
 @pytest.mark.asyncio
 async def test_a_disabled_sink_records_why(db_engine: Engine) -> None:
     recorder = Recorder()

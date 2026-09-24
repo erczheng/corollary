@@ -495,18 +495,46 @@ def create_app(
         # uses it. The runtime separately reads it for *presence* only.
         # Started before the watchdog, so the first halt it could raise finds
         # a running delivery task.
-        discord_sink = DiscordNotifier(
-            webhook_url=os.environ.get(DISCORD_WEBHOOK_ENV),
-            session_factory=lambda: Session(db_engine),
-            disabled_reason=(
-                None
-                if discord
-                else (
-                    "this app was built without Discord delivery "
-                    "(create_app(discord=False), e.g. dev_app)"
-                )
-            ),
-        )
+        #
+        # Discord is optional; the engine is not. Construction is guarded as
+        # well as ``start()``: the sink already treats a malformed or
+        # non-https URL as unavailable without raising, and this catches
+        # whatever else a constructor might raise, so no setting of an
+        # optional channel can abort the lifespan that carries rule 9. The
+        # fallback is a disabled sink with no URL -- it still records a
+        # ``dropped`` row naming why for every alert routed to Discord.
+        try:
+            discord_sink = DiscordNotifier(
+                webhook_url=os.environ.get(DISCORD_WEBHOOK_ENV),
+                session_factory=lambda: Session(db_engine),
+                disabled_reason=(
+                    None
+                    if discord
+                    else (
+                        "this app was built without Discord delivery "
+                        "(create_app(discord=False), e.g. dev_app)"
+                    )
+                ),
+            )
+        except Exception as exc:
+            # Class name only: the message may quote the URL (rule 6).
+            logger.error(
+                "the Discord sink could not be built; alerts routed there "
+                "will be recorded as dropped",
+                extra={
+                    "event": "notification_discord_not_built",
+                    "variable": DISCORD_WEBHOOK_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            discord_sink = DiscordNotifier(
+                webhook_url=None,
+                session_factory=lambda: Session(db_engine),
+                disabled_reason=(
+                    f"the Discord sink could not be built ({type(exc).__name__}); "
+                    f"check {DISCORD_WEBHOOK_ENV}"
+                ),
+            )
         try:
             discord_sink.start()
         except Exception as exc:

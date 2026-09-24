@@ -47,6 +47,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.orm import Session
@@ -325,6 +326,38 @@ class _Attempt:
         self.retry_in = retry_in
 
 
+def _webhook_config_error(url: str) -> str | None:
+    """Why a configured webhook URL cannot be posted to, or ``None``.
+
+    An empty URL is not an error here -- :meth:`DiscordNotifier._unavailable`
+    reports it as "not set". Anything else must parse (``urlsplit`` and
+    httpx's own parser both), name a host, carry a valid port if it names
+    one, and be ``https``: a plain ``http`` POST sends the token in the clear,
+    and Discord serves webhooks over TLS only. No caller or test posts to a
+    plain-``http`` webhook, so there is no loopback exception.
+
+    Never raises. The reasons name the variable and **never the value**
+    (rule 6), and never the parser's message either, which quotes the input.
+    """
+    if not url:
+        return None
+    malformed = f"{DISCORD_WEBHOOK_ENV} is set but malformed"
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        host = parts.hostname
+        # Raises ValueError on a non-numeric or out-of-range port.
+        _ = parts.port
+        httpx.URL(url)
+    except (ValueError, httpx.InvalidURL):
+        return malformed
+    if scheme != "https":
+        return f"{DISCORD_WEBHOOK_ENV} is set but is not an https URL"
+    if not host:
+        return malformed
+    return None
+
+
 class DiscordNotifier:
     """Posts a notification to a Discord webhook, off the caller's thread of control.
 
@@ -343,8 +376,8 @@ class DiscordNotifier:
     only ever touched on the loop.
 
     **Never raises from ``emit``.** Every path that cannot deliver records a
-    ``dropped`` row saying why: no webhook configured, a sink built disabled,
-    ``emit`` before :meth:`start` or after :meth:`aclose`, a :meth:`start`
+    ``dropped`` row saying why: no webhook configured, a webhook configured
+    but malformed or not ``https``, a sink built disabled, ``emit`` before :meth:`start` or after :meth:`aclose`, a :meth:`start`
     that raised, a delivery task that has died, a full queue. A delivery
     cancelled mid-POST by shutdown is ``failed``, not ``dropped`` -- the
     request may already have gone out.
@@ -371,7 +404,23 @@ class DiscordNotifier:
         disabled_reason: str | None = None,
     ) -> None:
         self._url = (webhook_url or "").strip()
+        # Neither can raise: an optional channel's setting must never abort
+        # the lifespan that builds this sink, which is also rule 9's voice.
         self._secrets = url_secrets(self._url)
+        self._config_error = _webhook_config_error(self._url)
+        if self._config_error is not None:
+            # Once, at construction. The variable, never the value -- rule 6.
+            logger.error(
+                "%s; Discord delivery is unavailable and every alert routed "
+                "there will be recorded as dropped",
+                self._config_error,
+                extra={
+                    "event": "notification_discord_misconfigured",
+                    "channel": DISCORD_CHANNEL,
+                    "variable": DISCORD_WEBHOOK_ENV,
+                    "detail": self._config_error,
+                },
+            )
         self._session_factory = session_factory
         self._now = now
         self._transport = transport
@@ -506,7 +555,7 @@ class DiscordNotifier:
         if not self._url:
             # Named by variable, never by value -- rule 6.
             return f"{DISCORD_WEBHOOK_ENV} is not set"
-        return None
+        return self._config_error
 
     def _enqueue(self, notification: Notification) -> None:
         """On the loop's thread only."""
