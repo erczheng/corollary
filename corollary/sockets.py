@@ -48,7 +48,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as open_websocket
 
-from corollary.wire import decode_json, decode_msgpack, vendor_detail
+from corollary.wire import WireFormatError, decode_json, decode_msgpack, vendor_detail
 
 __all__ = [
     "JSON_CODEC",
@@ -153,13 +153,29 @@ class StreamActivityRecorder(Protocol):
 class Codec:
     """How one socket's frames are encoded, both ways.
 
-    Encoding differs per socket and decoding does not: outgoing frames use
-    whichever format that socket's handshake negotiated, while an incoming
-    frame declares its own format by *being* text or bytes. Decoding on the
-    frame type rather than on the configured codec is defensive on purpose --
-    an error emitted before codec negotiation completes arrives as text on a
-    socket that is otherwise msgpack, and a decoder that insisted on msgpack
-    would turn the vendor's explanation into a parse error.
+    **A received frame is read by this socket's codec, not by its websocket
+    opcode.** Whether a frame is text or binary is transport framing, not a
+    declaration of what format its payload is in -- and Alpaca's paper
+    trading host proves it, sending its JSON ``authorization`` and
+    ``listening`` replies in *binary* frames. The decoder used to dispatch on
+    the opcode alone, so those bytes went to msgpack, which reads the leading
+    ``{`` (0x7b) as the integer 123 and fails on "extra data". The frames were
+    dropped as undecodable, the listen was never confirmed, and rule 9's
+    handshake condition halted the engine ~90s after every start and resume.
+
+    The rule, per codec:
+
+    - **JSON** (``binary=False``): text is JSON; bytes are strict UTF-8, then
+      JSON. Invalid UTF-8 or invalid JSON raises :class:`WireFormatError`,
+      which each client's ``_messages`` logs as an undecodable frame (rule 8:
+      logged, never silent). A JSON socket never falls back to msgpack.
+    - **msgpack** (``binary=True``): bytes are msgpack; text is JSON. The text
+      case is the vendor's error emitted as text *before* codec negotiation
+      completes, and a decoder that insisted on msgpack would turn the
+      vendor's explanation into a parse error. Bytes are **never** sniffed for
+      JSON here, even when they begin with ``{``: that is a valid msgpack
+      fixint, and content-sniffing would make a msgpack stream's decoding
+      depend on what the vendor happened to send.
     """
 
     def __init__(self, name: str, *, binary: bool) -> None:
@@ -188,14 +204,29 @@ class Codec:
     def decode(self, frame: str | bytes) -> Any:
         """One received frame as Python objects, with money as ``Decimal``.
 
+        Read by this socket's codec -- see the class docstring for the rule
+        and why the frame's opcode does not decide it.
+
         Both paths convert numbers exactly: ``decode_json`` parses ``4.15``
-        from its digits, and ``decode_msgpack`` converts the double it is
-        handed through its shortest repr. Neither leaves a ``float`` where
-        ``corollary.wire.as_decimal`` would refuse it.
+        from its digits (a binary JSON frame is UTF-8 decoded to text first,
+        so it takes the same path), and ``decode_msgpack`` converts the double
+        it is handed through its shortest repr. Neither leaves a ``float``
+        where ``corollary.wire.as_decimal`` would refuse it.
         """
-        if isinstance(frame, (bytes, bytearray, memoryview)):
+        if not isinstance(frame, (bytes, bytearray, memoryview)):
+            # Text is JSON on either codec.
+            return decode_json(frame)
+        if self.binary:
             return decode_msgpack(bytes(frame))
-        return decode_json(frame)
+        try:
+            text = bytes(frame).decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            # The reason names a byte offset and value, never the payload.
+            raise WireFormatError(
+                f"binary frame on a {self.name} socket is not UTF-8: {exc.reason}"
+                f" at byte {exc.start}"
+            ) from exc
+        return decode_json(text)
 
     async def transmit(self, socket: VendorSocket, message: Mapping[str, Any]) -> None:
         """Encode ``message`` and put it on the wire, in this codec's format."""
@@ -206,7 +237,9 @@ class Codec:
             await socket.send_text(encoded)
 
 
-#: JSON text frames: Alpaca's stock data stream and the trading stream.
+#: JSON frames: Alpaca's stock data stream and the trading stream. Sent as
+#: text; received as text *or* binary, a binary frame being UTF-8 JSON -- the
+#: paper trading host sends its replies that way.
 JSON_CODEC: Final = Codec("json", binary=False)
 
 #: msgpack binary frames: Alpaca's **option** data stream, which documents no

@@ -621,7 +621,10 @@ export interface StockQuote {
    * now" actually means: 4x its usual volume is a stock something is
    * happening to, where raw volume only ever finds the same mega caps. */
   avgVolume: number | null
-  /** Billions of dollars, or **null for a fund**. An ETF has no market
+  /** **Dollars**, as the server sends them (it scales Finnhub's millions
+   * exactly), or **null for a fund**. Not billions: the Phase 1 fixtures used
+   * billions, and reading live dollars that way printed NVDA as
+   * "$5434790884.05T". An ETF has no market
    * capitalisation. Rendering that as 0 would sort SPY below every real
    * company and read as a fund worth nothing, so the column shows an em
    * dash and the ranking sorts nulls last rather than treating them as
@@ -900,7 +903,12 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The eight routable events of PRD.md §10.
+/** The routable events: PRD.md §10's eight, plus five operator events.
+ *
+ * The owner's call: "any action i do should be put into the discord". So a
+ * human halt or resume, and every change to risk limits, data feeds or the
+ * routing matrix itself, is an event too. Only actions that reach the server
+ * notify — client-only toggles gain an event when they gain an endpoint.
  *
  * A key, not the display string. The routing matrix, the severity map and
  * the emitted notifications all have to agree about which event this is,
@@ -913,9 +921,14 @@ export type NotificationEvent =
   | 'stop_loss_hit'
   | 'daily_loss_halt'
   | 'engine_error'
+  | 'operator_halt'
+  | 'operator_resume'
   | 'price_alert'
   | 'recommendations_ready'
   | 'strategy_promotion'
+  | 'risk_limits_changed'
+  | 'data_feeds_changed'
+  | 'notification_routes_changed'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -923,9 +936,14 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   stop_loss_hit: 'Stop loss hit',
   daily_loss_halt: 'Daily loss halt',
   engine_error: 'Engine error / dead-man’s switch',
+  operator_halt: 'Engine halted by operator',
+  operator_resume: 'Engine resumed by operator',
   price_alert: 'Price alert on a recommended trade',
   recommendations_ready: 'New recommendations ready',
   strategy_promotion: 'Strategy promotion eligible',
+  risk_limits_changed: 'Risk limits changed',
+  data_feeds_changed: 'Data feeds changed',
+  notification_routes_changed: 'Notification routing changed',
 }
 
 /** Routing per channel.
@@ -941,12 +959,19 @@ export interface NotificationRoute {
   discord: boolean
 }
 
-/** One delivered bell notification.
+/** How loud a notification is. Stored by the engine **as raised**, so a later
+ * change to the frontend's event→severity map cannot recolour history — see
+ * `severityFor` in `notifications.ts` for which one wins. */
+export type NotificationSeverity = 'critical' | 'warning' | 'info'
+
+/** One delivered bell notification — the shape `GET /api/notifications`
+ * serves (`NotificationItem` in `corollary/api/schemas.py`, mirrored by
+ * `tests/api/test_schema_contract.py`; keep the names exact).
  *
- * `event` carries the type and the title comes off
- * `NOTIFICATION_EVENT_LABEL`, so a notification never stores its own
- * heading — two copies of "Order filled" is two things to reword and one to
- * forget.
+ * `title` is the **engine's own heading**, which is not always the event
+ * label: a halt recorded after its fault cleared is titled so. The event
+ * label (`NOTIFICATION_EVENT_LABEL`) is what the routing matrix and the
+ * accessible names use; the title is what the row reads.
  *
  * `account` is the book the event happened in, or **null** for an event
  * that belongs to no book: an engine error is not paper's or cash's, and
@@ -956,14 +981,20 @@ export interface NotificationRoute {
  * live misreports which money moved. */
 export interface Notification {
   id: string
+  /** ISO-8601 UTC. Displayed in America/New_York through `format.ts`. */
   time: string
   event: NotificationEvent
+  severity: NotificationSeverity
+  title: string
   /** The specifics: which contract, what price, which rule rejected it.
-   * The event label says what kind of thing happened; this says what
-   * happened. */
+   * The title says what kind of thing happened; this says what happened. */
   detail: string
   read: boolean
   account: AccountMode | null
+  /** Traces the event back through scan → risk → order → fill (CLAUDE.md's
+   * structured logging). Not rendered as prose; carried so a notification
+   * can be matched to its log lines. */
+  correlationId: string
 }
 
 export interface DataSourceStatus {

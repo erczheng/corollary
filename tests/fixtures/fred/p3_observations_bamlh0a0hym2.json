@@ -1,0 +1,82 @@
+{
+  "recorded_at": "2026-09-24T04:38:35+00:00",
+  "request": "https://api.stlouisfed.org/fred/series/observations?series_id=BAMLH0A0HYM2&file_type=json&sort_order=desc&limit=10",
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {
+    "realtime_start": "2026-09-23",
+    "realtime_end": "2026-09-23",
+    "observation_start": "1600-01-01",
+    "observation_end": "9999-12-31",
+    "units": "lin",
+    "output_type": 1,
+    "file_type": "json",
+    "order_by": "observation_date",
+    "sort_order": "desc",
+    "count": 794,
+    "offset": 0,
+    "limit": 10,
+    "observations": [
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-22",
+        "value": "2.68"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-21",
+        "value": "2.66"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-18",
+        "value": "2.68"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-17",
+        "value": "2.7"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-16",
+        "value": "2.7"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-15",
+        "value": "2.76"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-14",
+        "value": "2.71"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-11",
+        "value": "2.65"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-10",
+        "value": "2.7"
+      },
+      {
+        "realtime_start": "2026-09-23",
+        "realtime_end": "2026-09-23",
+        "date": "2026-09-09",
+        "value": "2.71"
+      }
+    ]
+  }
+}

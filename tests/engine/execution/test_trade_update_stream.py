@@ -31,7 +31,15 @@ from corollary.engine.execution.alpaca import (
 from corollary.engine.execution.interface import PositionIntent, TradeUpdate
 from corollary.sockets import JSON_CODEC, SocketClosed
 from corollary.wire import ERROR_BODY_MAX
-from tests.sockets_support import T0, Clock, FakeConnect, FakeSocket, SpyActivity, SpySleep
+from tests.sockets_support import (
+    T0,
+    Clock,
+    FakeConnect,
+    FakeSocket,
+    RawFrame,
+    SpyActivity,
+    SpySleep,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -531,3 +539,91 @@ async def test_a_new_connection_confirms_nothing_until_it_says_so() -> None:
         await client.run_session()
 
     assert client.listening is False
+
+
+# --------------------------------------------------------------------------
+# Binary frames: the paper host sends its JSON replies in binary frames
+# --------------------------------------------------------------------------
+#
+# Every test above feeds the double *text* frames, because ``FakeSocket``
+# encodes each scripted frame with the socket's codec and ``JSON_CODEC``
+# encodes to text. That is how this shipped: the paper trading host sends its
+# ``authorization`` and ``listening`` replies as JSON in **binary** websocket
+# frames, the decoder handed those bytes to msgpack, the frames were dropped
+# as undecodable, ``listening`` never went True, and rule 9's handshake
+# condition halted the engine ~90s after every start and every resume.
+# ``RawFrame`` puts the vendor's exact bytes on the wire.
+
+BINARY_AUTHORIZED = RawFrame(
+    b'{"stream":"authorization",'
+    b'"data":{"status":"authorized","action":"authenticate"}}'
+)
+BINARY_LISTENING = RawFrame(b'{"stream":"listening","data":{"streams":["trade_updates"]}}')
+
+
+@pytest.mark.risk
+async def test_binary_framed_replies_confirm_the_listen() -> None:
+    """Rule 9's handshake condition, fed what the paper host really sends."""
+    client, socket, recorder, _ = build([BINARY_AUTHORIZED, BINARY_LISTENING])
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is True
+    # The binary authorization reply is what triggered the listen request.
+    assert socket.sent == [
+        {"action": "auth", "key": KEY, "secret": SECRET},
+        {"action": "listen", "data": {"streams": [TRADE_UPDATES_STREAM]}},
+    ]
+    assert recorder.opens == [T0]
+
+
+@pytest.mark.risk
+async def test_a_binary_framed_empty_acknowledgement_confirms_nothing() -> None:
+    """The ``{"streams": []}`` guard holds whatever the frame's opcode."""
+    client, _, _, _ = build(
+        [BINARY_AUTHORIZED, RawFrame(b'{"stream":"listening","data":{"streams":[]}}')]
+    )
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert client.listening is False
+
+
+async def test_a_binary_framed_fill_keeps_its_money_exact() -> None:
+    fill = json.dumps(fill_event(price="2.01")).encode("utf-8")
+    client, _, _, received = build([BINARY_AUTHORIZED, BINARY_LISTENING, RawFrame(fill)])
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    assert len(received) == 1
+    assert received[0].fill_price == Decimal("2.01")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"stream":"listening","data":{"streams":["\xff\xfe"]}}',
+        b"definitely not json",
+    ],
+    ids=["invalid-utf8", "not-json"],
+)
+async def test_an_unreadable_binary_frame_is_logged_and_dropped(
+    payload: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 8: an undecodable frame is logged, never silent -- and rule 6."""
+    client, _, _, _ = build([BINARY_AUTHORIZED, RawFrame(payload)])
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+
+    assert client.listening is False
+    records = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", "") == "trade_updates_frame_undecodable"
+    ]
+    assert len(records) == 1
+    for record in caplog.records:
+        rendered = record.getMessage() + repr(record.__dict__)
+        assert KEY not in rendered
+        assert SECRET not in rendered

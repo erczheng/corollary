@@ -82,6 +82,7 @@ from corollary.api.routes import (
     activity_router,
     engine_router,
     markets_router,
+    notifications_router,
     positions_router,
     settings_router,
     ws_router,
@@ -106,7 +107,15 @@ from corollary.engine.execution.interface import (
     BrokerError,
     BrokerRateLimitedError,
 )
-from corollary.engine.runtime import EngineRuntime
+from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
+from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
+from corollary.engine.scheduler import (
+    ContextServices,
+    Scheduler,
+    SchedulerFactory,
+    build_context_scheduler,
+    no_scheduler,
+)
 from corollary.engine.sockets import SocketSupervisor
 from corollary.wire import vendor_detail
 
@@ -408,6 +417,8 @@ def create_app(
     db_engine: Engine | None = None,
     secrets: Sequence[str] | None = None,
     streams: SocketSupervisorFactory = no_socket_supervisor,
+    discord: bool = False,
+    scheduler: SchedulerFactory = no_scheduler,
 ) -> FastAPI:
     """Build the application.
 
@@ -436,6 +447,24 @@ def create_app(
     stream per account, so a suite run during market hours would take the slot
     from the running engine, whose client then records a close and halts
     itself correctly, caused by a test.
+
+    ``discord`` decides whether notifications routed to Discord are
+    **posted**, and it defaults to no for the same reason ``streams`` does:
+    the webhook URL is in the developer's environment, and a test app -- or a
+    ``--reload`` loop halting on every save -- must not page the owner's
+    channel by forgetting an argument. Off does not mean silent: the Discord
+    sink is still installed, disabled, and records a ``dropped``
+    ``notification_delivery`` row naming why for every alert routed to it, so
+    "routed to Discord" and "never sent" are both on the record. The bell's
+    database sink is installed either way.
+
+    ``scheduler`` decides which context jobs the lifespan runs (Phase 3
+    decision 1), and it **defaults to none** for the reason ``streams`` does:
+    the jobs call Finnhub, FRED, Massive and StockTwits with keys from the
+    developer's environment, and a test app must not do that by forgetting an
+    argument. Both shipped apps opt in. The factory is handed a
+    :class:`ContextServices` and the redaction callable -- never the
+    :class:`EngineRuntime` -- so no job can reach rule 9's switch.
     """
 
     @asynccontextmanager
@@ -459,7 +488,76 @@ def create_app(
         # evaluates and finds nothing. That is rule 9 with nothing to judge,
         # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
-        runtime = EngineRuntime(session_factory=lambda: Session(db_engine))
+        # Rule 9's voice (Phase 3 decision 14): a log line, the bell's row,
+        # and the Discord webhook, fanned out so no one sink can silence the
+        # others. The URL is read from the process environment -- never from
+        # `.env`, which the launcher loads -- and handed to the one class that
+        # uses it. The runtime separately reads it for *presence* only.
+        # Started before the watchdog, so the first halt it could raise finds
+        # a running delivery task.
+        #
+        # Discord is optional; the engine is not. Construction is guarded as
+        # well as ``start()``: the sink already treats a malformed or
+        # non-https URL as unavailable without raising, and this catches
+        # whatever else a constructor might raise, so no setting of an
+        # optional channel can abort the lifespan that carries rule 9. The
+        # fallback is a disabled sink with no URL -- it still records a
+        # ``dropped`` row naming why for every alert routed to Discord.
+        try:
+            discord_sink = DiscordNotifier(
+                webhook_url=os.environ.get(DISCORD_WEBHOOK_ENV),
+                session_factory=lambda: Session(db_engine),
+                disabled_reason=(
+                    None
+                    if discord
+                    else (
+                        "this app was built without Discord delivery "
+                        "(create_app(discord=False), e.g. dev_app)"
+                    )
+                ),
+            )
+        except Exception as exc:
+            # Class name only: the message may quote the URL (rule 6).
+            logger.error(
+                "the Discord sink could not be built; alerts routed there "
+                "will be recorded as dropped",
+                extra={
+                    "event": "notification_discord_not_built",
+                    "variable": DISCORD_WEBHOOK_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            discord_sink = DiscordNotifier(
+                webhook_url=None,
+                session_factory=lambda: Session(db_engine),
+                disabled_reason=(
+                    f"the Discord sink could not be built ({type(exc).__name__}); "
+                    f"check {DISCORD_WEBHOOK_ENV}"
+                ),
+            )
+        try:
+            discord_sink.start()
+        except Exception as exc:
+            # Stated, never fatal: the sink then records every alert routed
+            # to it as dropped, which is the trace this failure leaves.
+            logger.error(
+                "the Discord delivery task did not start; alerts routed there "
+                "will be recorded as dropped",
+                extra={
+                    "event": "notification_discord_not_started",
+                    "error_type": type(exc).__name__,
+                },
+            )
+        runtime = EngineRuntime(
+            session_factory=lambda: Session(db_engine),
+            notifier=FanoutNotifier(
+                [
+                    LoggingNotifier(),
+                    DbNotifier(session_factory=lambda: Session(db_engine)),
+                    discord_sink,
+                ]
+            ),
+        )
         app.state.engine_runtime = runtime
         runtime.start()
         runtime.supervise()
@@ -489,15 +587,56 @@ def create_app(
             )
             supervisor = None
         app.state.socket_supervisor = supervisor
+        # The context jobs (Phase 3 decision 1). Built from ContextServices,
+        # which has no runtime in it: news, calendar and macro feeds are not
+        # rule 9 producers, and a job cannot feed a switch it was never
+        # handed. Stated-never-fatal like the sockets above -- and never a
+        # halt either, since a feed that cannot be scheduled is a stale page,
+        # not a lost connection.
+        context_scheduler: Scheduler | None = None
+        try:
+            context_scheduler = scheduler(
+                ContextServices(session_factory=lambda: Session(db_engine)),
+                app.state.secret_values,
+            )
+            if context_scheduler is not None:
+                context_scheduler.start()
+        except Exception as exc:
+            logger.error(
+                "the context scheduler did not start; the app keeps serving "
+                "and every context feed will read stale",
+                extra={
+                    "event": "context_scheduler_not_started",
+                    "rule": (
+                        "a context scheduler that cannot start leaves the API "
+                        "answering and the engine's halt state untouched"
+                    ),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            context_scheduler = None
+        app.state.scheduler = context_scheduler
         try:
             yield
         finally:
-            # Sockets first: they report into the watchdog, and a socket
+            # The context jobs first: they write through the database and,
+            # from later steps, the registry's providers, both closed below.
+            # ``aclose`` never raises -- a job task that died was logged when
+            # it died -- so it cannot skip the steps after it, and the rule 9
+            # alerts still queued in the Discord sink keep their grace period.
+            if context_scheduler is not None:
+                await context_scheduler.aclose()
+            # Then the sockets, ahead of the runtime: they report into the
+            # watchdog, and a socket
             # still reading while the supervisor it reports to is gone is a
             # message recorded against a switch nobody is watching.
             if supervisor is not None:
                 await supervisor.aclose()
             await runtime.aclose()
+            # After the runtime, which is what emits: nothing can enqueue a
+            # new alert once the watchdog has stopped, and whatever is still
+            # queued gets a bounded grace and then a `dropped` row.
+            await discord_sink.aclose()
             await app.state.registry.aclose()
 
     app = FastAPI(
@@ -513,6 +652,18 @@ def create_app(
     # go missing -- and an app serving every route with rule 9's producers
     # quietly absent is exactly the failure this records.
     app.state.socket_factory = streams
+    # Recorded for the same reason: the shipped opt-in to posting on Discord
+    # is the line that can go missing, and a rule 9 alert that quietly stops
+    # reaching the phone is exactly what the delivery table exists to catch.
+    app.state.discord_delivery = discord
+    # And for the same reason again: the shipped opt-in to the context jobs
+    # is the line that can go missing, and a page whose every feed reads
+    # *stale* because nothing ever polled it is the failure this records.
+    app.state.scheduler_factory = scheduler
+    # Replaced in the lifespan; ``None`` until then, and ``None`` there too
+    # when the app was built with no scheduler or it could not start. A later
+    # step's routes read ``status()`` off it for *stale since HH:MM ET*.
+    app.state.scheduler = None
     # Replaced in the lifespan. Present so that a route reading it outside a
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
@@ -555,6 +706,7 @@ def create_app(
     app.include_router(activity_router)
     app.include_router(engine_router)
     app.include_router(markets_router)
+    app.include_router(notifications_router)
     app.include_router(positions_router)
     app.include_router(settings_router)
     app.include_router(ws_router)
@@ -566,7 +718,11 @@ def create_app(
 #: this one, and the opt-in to the vendor sockets is here rather than in
 #: :func:`create_app`'s default so that nothing built for a test can open a
 #: real connection by forgetting an argument.
-app = create_app(streams=build_socket_supervisor)
+app = create_app(
+    streams=build_socket_supervisor,
+    discord=True,
+    scheduler=build_context_scheduler,
+)
 
 #: The same app with **no vendor sockets**, for ``--reload``.
 #:
@@ -594,4 +750,24 @@ app = create_app(streams=build_socket_supervisor)
 #: ``--reload`` -- whenever the sockets or rule 9 are what is being worked
 #: on. ``--env-file`` is still not optional: nothing under ``corollary/``
 #: reads ``.env``, so without it every broker route answers 503.
-dev_app = create_app()
+#:
+#: **No Discord either** (``discord=False``, the default). The bell works --
+#: its database sink is installed -- so frontend work against the bell is
+#: real. But ``--reload`` is exactly the loop that produces self-inflicted
+#: halts, and each one routed to Discord would page the owner's channel: the
+#: alert-fatigue version of the resume reflex above. The disabled sink
+#: records a ``dropped`` delivery row per alert naming why, so the choice is
+#: visible in the data rather than a silent gap.
+#:
+#: **The context scheduler, though, runs here** (Phase 3 decision 1). The
+#: sockets are out because a reload's surplus connection earns a 406 and a
+#: halt; context jobs are REST polls that by construction cannot halt
+#: anything, so that argument does not reach them -- and without them every
+#: News, calendar and macro panel would read *stale* for the whole of the
+#: frontend work those panels need real data for. The reload loop's cost is
+#: bounded by the scheduler itself: a job's first run is its first slot
+#: *after* startup, never an immediate one, so saving a file does not re-fire
+#: every poll. What a save does do is hand the new process a fresh
+#: :func:`~corollary.ratelimit.default_limiter`, which is why no job may rely
+#: on its bucket alone to stay under a vendor's ceiling across restarts.
+dev_app = create_app(scheduler=build_context_scheduler)

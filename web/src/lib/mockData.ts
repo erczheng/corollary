@@ -1380,21 +1380,21 @@ const STOCK_SEEDS: {
   marketCap: number | null
   seed: number
 }[] = [
-  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, avgVolume: 52_000_000, marketCap: 3540, seed: 20263001 },
-  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, avgVolume: 22_000_000, marketCap: 3110, seed: 20263002 },
-  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, avgVolume: 210_000_000, marketCap: 3390, seed: 20263003 },
-  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, avgVolume: 41_000_000, marketCap: 2120, seed: 20263004 },
-  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, avgVolume: 28_000_000, marketCap: 2160, seed: 20263005 },
-  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, avgVolume: 15_000_000, marketCap: 1420, seed: 20263006 },
-  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, avgVolume: 24_000_000, marketCap: 830, seed: 20263007 },
-  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, avgVolume: 92_000_000, marketCap: 760, seed: 20263008 },
-  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, avgVolume: 3_400_000, marketCap: 754, seed: 20263009 },
-  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, avgVolume: 18_000_000, marketCap: 638, seed: 20263010 },
-  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, avgVolume: 9_200_000, marketCap: 623, seed: 20263011 },
-  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, avgVolume: 4_100_000, marketCap: 528, seed: 20263012 },
-  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, avgVolume: 16_000_000, marketCap: 516, seed: 20263013 },
-  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, avgVolume: 2_100_000, marketCap: 392, seed: 20263014 },
-  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, avgVolume: 3_600_000, marketCap: 366, seed: 20263015 },
+  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, avgVolume: 52_000_000, marketCap: 3540e9, seed: 20263001 },
+  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, avgVolume: 22_000_000, marketCap: 3110e9, seed: 20263002 },
+  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, avgVolume: 210_000_000, marketCap: 3390e9, seed: 20263003 },
+  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, avgVolume: 41_000_000, marketCap: 2120e9, seed: 20263004 },
+  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, avgVolume: 28_000_000, marketCap: 2160e9, seed: 20263005 },
+  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, avgVolume: 15_000_000, marketCap: 1420e9, seed: 20263006 },
+  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, avgVolume: 24_000_000, marketCap: 830e9, seed: 20263007 },
+  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, avgVolume: 92_000_000, marketCap: 760e9, seed: 20263008 },
+  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, avgVolume: 3_400_000, marketCap: 754e9, seed: 20263009 },
+  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, avgVolume: 18_000_000, marketCap: 638e9, seed: 20263010 },
+  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, avgVolume: 9_200_000, marketCap: 623e9, seed: 20263011 },
+  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, avgVolume: 4_100_000, marketCap: 528e9, seed: 20263012 },
+  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, avgVolume: 16_000_000, marketCap: 516e9, seed: 20263013 },
+  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, avgVolume: 2_100_000, marketCap: 392e9, seed: 20263014 },
+  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, avgVolume: 3_600_000, marketCap: 366e9, seed: 20263015 },
   // Funds. Every one carries a null market cap on purpose — the column has
   // an em-dash branch and a fixture has to reach it.
   { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust', price: 429.88, avgVolume: 61_000_000, marketCap: null, seed: 20263016 },
@@ -1402,12 +1402,12 @@ const STOCK_SEEDS: {
   { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 218.63, avgVolume: 28_000_000, marketCap: null, seed: 20263018 },
   { symbol: 'XLE', name: 'Energy Select Sector SPDR Fund', price: 91.24, avgVolume: 17_000_000, marketCap: null, seed: 20263019 },
   { symbol: 'ARKK', name: 'ARK Innovation ETF', price: 54.77, avgVolume: 12_000_000, marketCap: null, seed: 20263020 },
-  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, avgVolume: 8_400_000, marketCap: 149, seed: 20263021 },
-  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, avgVolume: 6_200_000, marketCap: 14, seed: 20263022 },
-  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, avgVolume: 9_800_000, marketCap: 21, seed: 20263023 },
-  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, avgVolume: 3_100_000, marketCap: 12, seed: 20263024 },
-  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, avgVolume: 14_000_000, marketCap: 47, seed: 20263025 },
-  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, avgVolume: 11_000_000, marketCap: 33, seed: 20263026 },
+  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, avgVolume: 8_400_000, marketCap: 149e9, seed: 20263021 },
+  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, avgVolume: 6_200_000, marketCap: 14e9, seed: 20263022 },
+  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, avgVolume: 9_800_000, marketCap: 21e9, seed: 20263023 },
+  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, avgVolume: 3_100_000, marketCap: 12e9, seed: 20263024 },
+  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, avgVolume: 14_000_000, marketCap: 47e9, seed: 20263025 },
+  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, avgVolume: 11_000_000, marketCap: 33e9, seed: 20263026 },
 ]
 
 /** **One price per symbol, for the whole terminal.**
@@ -1769,9 +1769,14 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   { event: 'stop_loss_hit', bell: true, discord: true },
   { event: 'daily_loss_halt', bell: true, discord: true },
   { event: 'engine_error', bell: true, discord: true },
+  { event: 'operator_halt', bell: true, discord: true },
+  { event: 'operator_resume', bell: true, discord: true },
   { event: 'price_alert', bell: true, discord: true },
   { event: 'recommendations_ready', bell: true, discord: false },
   { event: 'strategy_promotion', bell: true, discord: false },
+  { event: 'risk_limits_changed', bell: false, discord: true },
+  { event: 'data_feeds_changed', bell: false, discord: true },
+  { event: 'notification_routes_changed', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every
@@ -1781,17 +1786,17 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
  *
  * Newest first, matching the news feed and the activity ledger. */
 export const NOTIFICATIONS: Notification[] = [
-  { id: 'notif-1', time: '2026-08-07T14:42:00Z', event: 'order_rejected', detail: 'NVDA 220C ×4 rejected — max risk per trade (7%) would be exceeded at 9.2%.', read: false, account: 'paper' },
-  { id: 'notif-2', time: '2026-08-07T14:31:00Z', event: 'stop_loss_hit', detail: 'NVDA260821C00220000 ×2 closed at $6.10 — stop loss. −$412.00.', read: false, account: 'paper' },
-  { id: 'notif-3', time: '2026-08-07T14:04:00Z', event: 'order_filled', detail: 'AAPL260821C00195000 ×2 bought to open at $4.10.', read: false, account: 'paper' },
-  { id: 'notif-4', time: '2026-08-07T13:58:00Z', event: 'engine_error', detail: 'Alpaca stream disconnected for 94s — engine halted itself and will not auto-resume.', read: true, account: null },
-  { id: 'notif-5', time: '2026-08-07T13:30:00Z', event: 'price_alert', detail: 'MSFT is within 1% of the entry on a recommended debit spread.', read: true, account: 'paper' },
-  { id: 'notif-6', time: '2026-08-07T12:15:00Z', event: 'recommendations_ready', detail: '6 candidates cleared the scanner for today’s session.', read: true, account: null },
-  { id: 'notif-7', time: '2026-08-06T20:05:00Z', event: 'strategy_promotion', detail: 'Momentum Call Debit Spread has 40 paper trades at a 68% win rate — eligible for promotion.', read: true, account: null },
+  { id: 'notif-1', time: '2026-08-07T14:42:00Z', event: 'order_rejected', severity: 'critical', title: 'Order rejected', detail: 'NVDA 220C ×4 rejected — max risk per trade (7%) would be exceeded at 9.2%.', read: false, account: 'paper', correlationId: 'corr-fixture-1' },
+  { id: 'notif-2', time: '2026-08-07T14:31:00Z', event: 'stop_loss_hit', severity: 'warning', title: 'Stop loss hit', detail: 'NVDA260821C00220000 ×2 closed at $6.10 — stop loss. −$412.00.', read: false, account: 'paper', correlationId: 'corr-fixture-2' },
+  { id: 'notif-3', time: '2026-08-07T14:04:00Z', event: 'order_filled', severity: 'info', title: 'Order filled', detail: 'AAPL260821C00195000 ×2 bought to open at $4.10.', read: false, account: 'paper', correlationId: 'corr-fixture-3' },
+  { id: 'notif-4', time: '2026-08-07T13:58:00Z', event: 'engine_error', severity: 'critical', title: 'Engine halted — Alpaca stream disconnected', detail: 'Alpaca stream disconnected for 94s — engine halted itself and will not auto-resume.', read: true, account: null, correlationId: 'corr-fixture-4' },
+  { id: 'notif-5', time: '2026-08-07T13:30:00Z', event: 'price_alert', severity: 'info', title: 'Price alert on a recommended trade', detail: 'MSFT is within 1% of the entry on a recommended debit spread.', read: true, account: 'paper', correlationId: 'corr-fixture-5' },
+  { id: 'notif-6', time: '2026-08-07T12:15:00Z', event: 'recommendations_ready', severity: 'info', title: 'New recommendations ready', detail: '6 candidates cleared the scanner for today’s session.', read: true, account: null, correlationId: 'corr-fixture-6' },
+  { id: 'notif-7', time: '2026-08-06T20:05:00Z', event: 'strategy_promotion', severity: 'info', title: 'Strategy promotion eligible', detail: 'Momentum Call Debit Spread has 40 paper trades at a 68% win rate — eligible for promotion.', read: true, account: null, correlationId: 'corr-fixture-7' },
   // Unread, and in the *cash* book on purpose: without it the badge is
   // unreachable in one of the two accounts, and "the bell shows a count"
   // would be a state only ever seen in Paper.
-  { id: 'notif-8', time: '2026-08-06T18:40:00Z', event: 'daily_loss_halt', detail: 'Session loss reached 20% of equity — new entries halted. Managed exits still running.', read: false, account: 'cash' },
+  { id: 'notif-8', time: '2026-08-06T18:40:00Z', event: 'daily_loss_halt', severity: 'critical', title: 'Daily loss halt', detail: 'Session loss reached 20% of equity — new entries halted. Managed exits still running.', read: false, account: 'cash', correlationId: 'corr-fixture-8' },
 ]
 
 export const DATA_SOURCES: DataSourceStatus[] = [

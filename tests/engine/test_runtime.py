@@ -54,6 +54,7 @@ import re
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,6 +82,7 @@ from corollary.engine.runtime import (
     EngineRuntime,
     HaltDecision,
     HaltRule,
+    LoggingNotifier,
     MarketsVisibleStatus,
     Notification,
     StreamBudget,
@@ -238,10 +240,27 @@ def resume_engine(engine: Engine) -> None:
     to be that code path: ``api/routes/engine.py:_clear_halt``, reached the
     only way anything reaches it.
     """
+    from fastapi import BackgroundTasks
+
     from corollary.api.routes.engine import resume
 
     with Session(engine) as session:
-        resume(session)
+        resume(session, _route_request(), BackgroundTasks())
+
+
+def _route_request() -> Any:
+    """A request whose app has no runtime: the route's notice is never sent.
+
+    The route schedules its bell/Discord notice as a background task, and a
+    bare ``BackgroundTasks()`` is never run -- which is right here, because
+    these tests are about the runtime's view of the row, not the notice.
+    """
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    app = SimpleNamespace(state=SimpleNamespace(engine_runtime=None))
+    return Request({"type": "http", "app": app})
 
 
 def halt_engine(engine: Engine, reason: str) -> None:
@@ -253,11 +272,13 @@ def halt_engine(engine: Engine, reason: str) -> None:
     the cases below, because prose is what a manual halt puts in
     ``halted_reason`` and prose is not a :class:`HaltRule`.
     """
+    from fastapi import BackgroundTasks
+
     from corollary.api.routes.engine import halt
     from corollary.api.schemas import HaltRequest
 
     with Session(engine) as session:
-        halt(HaltRequest(reason=reason), session)
+        halt(HaltRequest(reason=reason), session, _route_request(), BackgroundTasks())
 
 
 # --------------------------------------------------------------------------
@@ -1637,6 +1658,98 @@ def test_a_halt_emits_one_critical_notification(
     assert sent.at == clock.now
     assert "discord" in sent.channels
     assert "bell" in sent.channels
+
+
+def _notification_records(
+    caplog: pytest.LogCaptureFixture,
+) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records if getattr(r, "event", "") == "engine_notification"
+    ]
+
+
+@pytest.mark.risk
+def test_a_halt_notification_logs_at_critical(
+    db_engine: Engine, clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The rule-9 halt through the real log sink is still a CRITICAL line.
+
+    The log level is mapped from ``severity`` now that operator notices share
+    the sink, and the halt's ``critical`` must map to CRITICAL -- an alert on
+    level >= CRITICAL is how a human hears about a halt with Discord down.
+    """
+    runtime = EngineRuntime(
+        session_factory=lambda: Session(db_engine),
+        now=clock,
+        notifier=LoggingNotifier(),
+        env={},
+    )
+    runtime.start()
+    runtime.record_poll()
+    clock.advance(90)
+    with caplog.at_level(logging.DEBUG, logger="corollary.engine.runtime"):
+        runtime.check_watchdog()
+
+    records = _notification_records(caplog)
+    assert len(records) == 1
+    assert records[0].notification_event == HALT_EVENT
+    assert records[0].levelno == logging.CRITICAL
+
+
+def _notice(severity: str) -> Notification:
+    return Notification(
+        event="operator_resume",
+        severity=severity,
+        title="Engine resumed",
+        body="Resumed from the Settings page.",
+        at=T0,
+        correlation_id="test-correlation-id",
+        channels=("bell",),
+    )
+
+
+def test_an_info_operator_notice_logs_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Decision 20: none of the operator events is a critical event.
+
+    Logged at CRITICAL, every Settings save would fire any alert keyed on
+    level >= CRITICAL, and train the owner to ignore the level rule 9 uses.
+    """
+    with caplog.at_level(logging.DEBUG, logger="corollary.engine.runtime"):
+        LoggingNotifier().emit(_notice("info"))
+
+    records = _notification_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    # The fields are unchanged by the level mapping.
+    assert records[0].severity == "info"
+    assert records[0].notification_event == "operator_resume"
+    assert records[0].correlation_id == "test-correlation-id"
+    assert records[0].channels == ["bell"]
+
+
+@pytest.mark.parametrize(
+    ("severity", "level"),
+    [
+        ("critical", logging.CRITICAL),
+        ("error", logging.ERROR),
+        ("warning", logging.WARNING),
+        ("info", logging.INFO),
+        # Unrecognised must never become quieter by accident.
+        ("page-me-maybe", logging.CRITICAL),
+        ("", logging.CRITICAL),
+    ],
+)
+def test_the_log_level_follows_the_severity(
+    severity: str, level: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="corollary.engine.runtime"):
+        LoggingNotifier().emit(_notice(severity))
+
+    records = _notification_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == level
 
 
 def test_a_halt_does_not_route_to_a_channel_that_is_switched_off(

@@ -35,10 +35,51 @@ describe('severityFor', () => {
     expect(severityFor('strategy_promotion')).toBe('info')
   })
 
+  /** The server's stored severity is the authority for every real event;
+   * this map only has to agree with it where the client builds one. These
+   * two are the ones the engine raises today and the ones CLAUDE.md names. */
+  it('agrees with the engine: engine_error is critical, stop_loss_hit a warning', () => {
+    expect(severityFor('engine_error')).toBe('critical')
+    expect(severityFor('stop_loss_hit')).toBe('warning')
+  })
+
+  it('carries the API severity on every fixture, matching the map', () => {
+    for (const n of NOTIFICATIONS) expect(n.severity).toBe(severityFor(n.event))
+  })
+
   it('classifies every routable event', () => {
     for (const event of EVENTS) {
       expect(['critical', 'warning', 'info']).toContain(severityFor(event))
     }
+  })
+})
+
+/** The owner's rule: "any action i do should be put into the discord". The
+ * engine emits these five under exactly these names, so a rename on either
+ * side is a silent miss — the matrix would show a row nothing ever fires. */
+describe('operator events', () => {
+  const OPERATOR_EVENTS = [
+    ['operator_halt', 'warning', true, true, 'Engine halted by operator'],
+    ['operator_resume', 'info', true, true, 'Engine resumed by operator'],
+    ['risk_limits_changed', 'info', false, true, 'Risk limits changed'],
+    ['data_feeds_changed', 'info', false, true, 'Data feeds changed'],
+    ['notification_routes_changed', 'info', false, true, 'Notification routing changed'],
+  ] as const
+
+  it.each(OPERATOR_EVENTS)('%s is %s, bell %s, discord %s by default', (event, severity, bell, discord, label) => {
+    expect(severityFor(event)).toBe(severity)
+    expect(NOTIFICATION_EVENT_LABEL[event]).toBe(label)
+    expect(routedTo(NOTIFICATION_ROUTES, event, 'bell')).toBe(bell)
+    expect(routedTo(NOTIFICATION_ROUTES, event, 'discord')).toBe(discord)
+  })
+
+  /** A human choosing to halt is not a fault — same split as bearish/error. */
+  it('never dresses an operator halt as critical', () => {
+    expect(severityFor('operator_halt')).not.toBe('critical')
+  })
+
+  it('routes every labelled event exactly once in the default matrix', () => {
+    expect(NOTIFICATION_ROUTES.map((r) => r.event).sort()).toEqual([...EVENTS].sort())
   })
 })
 
@@ -177,9 +218,14 @@ describe('buildNotification', () => {
     expect(n.detail).toBe('AAPL filled')
   })
 
-  it('stores no title of its own, so the label has one home', () => {
-    const n = buildNotification('order_filled', 'pos-1', 'detail', 'paper', '2026-08-18T14:02:00.000Z')
-    expect(Object.keys(n)).not.toContain('title')
+  /** A client-built notification carries every field the API serves, with
+   * the engine-supplied ones derived: title from the label, severity from
+   * the client map, correlation id from the id. */
+  it('fills the API shape, deriving what the engine would have supplied', () => {
+    const n = buildNotification('stop_loss_hit', 'pos-1', 'detail', 'paper', '2026-08-18T14:02:00.000Z')
+    expect(n.title).toBe(NOTIFICATION_EVENT_LABEL.stop_loss_hit)
+    expect(n.severity).toBe('warning')
+    expect(n.correlationId).toBe(n.id)
   })
 
   it('builds distinct ids for two events on different positions at the same instant', () => {

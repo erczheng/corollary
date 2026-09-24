@@ -90,10 +90,12 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Final, TypeVar
+from urllib.parse import urlsplit
 
 import msgpack
 
 __all__ = [
+    "CREDENTIAL_SHAPES",
     "ERROR_BODY_MAX",
     "REDACTED",
     "STORED_DETAIL_MAX",
@@ -105,9 +107,11 @@ __all__ = [
     "clean_params",
     "decode_json",
     "decode_msgpack",
+    "operator_text",
     "require_aware",
     "rfc3339",
     "translating",
+    "url_secrets",
     "vendor_detail",
 ]
 
@@ -216,7 +220,11 @@ _ACCOUNT_NUMBER: Final = re.compile(r"\bPA[0-9A-Z]{10}\b")
 
 
 def vendor_detail(
-    text: str, *, secrets: Sequence[str] = (), limit: int = ERROR_BODY_MAX
+    text: str,
+    *,
+    secrets: Sequence[str] = (),
+    limit: int = ERROR_BODY_MAX,
+    patterns: Sequence[re.Pattern[str]] = (),
 ) -> str:
     """A vendor error body, bounded and de-identified, for an exception message.
 
@@ -240,15 +248,171 @@ def vendor_detail(
     ``"".replace`` splices between every character, so a caller holding half a
     credential pair would otherwise turn a readable error into one
     ``<redacted>`` per character.
+
+    ``patterns`` are further shapes to blank out, applied after the literal
+    secrets and the account number and -- like them -- before truncation.
+    Vendor callers pass none; :func:`operator_text` passes
+    :data:`CREDENTIAL_SHAPES`. A parameter rather than a second redactor for
+    the reason ``limit`` is one: the ordering lives in exactly one place.
     """
     detail = " ".join(text.split())
     for secret in secrets:
         if secret:
             detail = detail.replace(secret, REDACTED)
     detail = _ACCOUNT_NUMBER.sub(REDACTED, detail)
+    for pattern in patterns:
+        detail = pattern.sub(REDACTED, detail)
     if len(detail) <= limit:
         return detail
     return f"{detail[:limit]}… ({len(detail) - limit} characters truncated)"
+
+
+#: The most characters :func:`vendor_detail`'s truncation notice adds past its
+#: ``limit``: ``"… ("``, the count, ``" characters truncated)"`` -- 25 plus the
+#: count's digits.
+_TRUNCATION_NOTICE_MAX: Final = 32
+
+#: Credential **shapes**, redacted from owner-typed free text whether or not
+#: the credential is configured in this process. Literal substitution only
+#: catches a key the environment holds; an owner pasting a key from another
+#: machine, another project, or a rotated-out pair is caught only by shape.
+#:
+#: Tuned to over-redact, because the cost is asymmetric: a halt reason that
+#: reads ``<redacted>`` where the owner typed a UUID is an inconvenience, and a
+#: key in a Discord channel is an incident. Known over-redactions: a UUID or
+#: any other unbroken 32+ character run (a correlation ID pasted into a
+#: reason), and an uppercase 18+ character word beginning ``PK``/``AK``/``CK``.
+#:
+#: In order, each applied to what the one before it left:
+#:
+#: 1. **Any Discord webhook URL**, on every host Discord serves them from
+#:    (``discord.com``, ``discordapp.com``, ``canary.``/``ptb.``), versioned
+#:    API path or not. The whole URL to the next whitespace, so a short token
+#:    goes with it rather than depending on the long-run shape below.
+#: 2. **Anthropic-style keys**, ``sk-ant-`` and everything after it.
+#: 3. **Alpaca key-id shape**: ``PK``/``AK``/``CK`` and 16+ uppercase
+#:    alphanumerics. An **OCC symbol is excluded** by a negative lookahead:
+#:    ``AKAM`` is an optionable root, and naming the contract is the whole
+#:    point of a reason like "halting: AKAM... printed at zero". A key id
+#:    happening to be OCC-shaped (letters, six digits, C/P, eight digits) is
+#:    not a realistic risk.
+#: 4. **Any unbroken run of 32+ base64/hex-ish characters** -- letters,
+#:    digits, ``+ / = _ -``. Catches a secret key, a Discord token outside its
+#:    URL, and any other bearer token. The ``<`` and ``>`` in
+#:    :data:`REDACTED` are outside the class, so an earlier redaction never
+#:    joins its neighbours into a longer run.
+CREDENTIAL_SHAPES: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(
+        r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/\S*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"sk-ant-[A-Za-z0-9_\-]+"),
+    re.compile(r"\b(?![A-Z]{1,5}[0-9]?[0-9]{6}[CP][0-9]{8}\b)[PAC]K[A-Z0-9]{16,}\b"),
+    re.compile(r"[A-Za-z0-9+/=_\-]{32,}"),
+)
+
+
+def url_secrets(url: str) -> tuple[str, ...]:
+    """A secret URL and the parts of it that authenticate, for scrubbing.
+
+    The whole URL, its path, and every path segment long enough to be an id or
+    a token -- so a message that echoes only ``/api/webhooks/<id>/<token>``, or
+    only the token, is still scrubbed. Longest first, so the whole URL is
+    replaced before a part of it can leave the rest behind.
+
+    **Never raises.** ``urlsplit`` raises ``ValueError`` on a malformed value
+    (an unbalanced IPv6 bracket: ``https://[::1/...``), and the callers are
+    the Discord sink's constructor and :func:`operator_text` -- a lifespan
+    and a halt route, neither of which an optional setting may abort. A
+    value ``urlsplit`` refuses still yields its whole literal, plus every
+    16+ character run between ``/``, ``?`` and ``#`` in the raw string. That
+    split has no notion of authority or path, so it can only over-redact:
+    redaction never gets weaker because the value is broken.
+
+    Written for the Discord webhook URL, whose token *is* its last path
+    segment. Lives here rather than in ``engine/notify.py`` because two
+    boundaries need the same derivation -- the Discord sink's own logging and
+    :func:`operator_text` -- and two copies would drift.
+    """
+    if not url:
+        return ()
+    parts = {url}
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        segments = re.split(r"[/?#]", url)
+    else:
+        if path:
+            parts.add(path)
+        segments = path.split("/")
+    for segment in segments:
+        if len(segment) >= 16:
+            parts.add(segment)
+    return tuple(sorted(parts, key=len, reverse=True))
+
+
+def _is_http_url(value: str) -> bool:
+    """Whether a configured secret is an ``http(s)`` URL, without ever raising.
+
+    ``urlsplit`` decides when it can. When it raises on a malformed value the
+    raw prefix decides instead, so a broken webhook URL is still expanded
+    through :func:`url_secrets` and its token redacted on its own -- the
+    answer errs toward expanding, which can only over-redact.
+    """
+    try:
+        return urlsplit(value).scheme.lower() in ("http", "https")
+    except ValueError:
+        return value.strip().lower().startswith(("http://", "https://"))
+
+
+def operator_text(
+    text: str, *, secrets: Sequence[str] = (), limit: int = ERROR_BODY_MAX
+) -> str:
+    """Owner-typed free text, de-identified and bounded, before anything keeps it.
+
+    The boundary for text a *person* typed -- a halt reason today, any future
+    free-text field tomorrow -- as :func:`vendor_detail` is for text a vendor
+    sent. Rule 6: a key pasted by mistake must not reach a stored row, a log
+    line, the bell or Discord. Apply it **once, where the text enters**, and
+    hand every sink the result; a per-sink scrub is one a new sink forgets.
+
+    ``secrets`` are the configured credential values (``app.state
+    .secret_values()``). Any that is an ``http(s)`` URL is expanded through
+    :func:`url_secrets`, so a configured webhook's token is redacted on its
+    own, not only as part of the full URL. :data:`CREDENTIAL_SHAPES` then
+    catches credentials this process was never configured with.
+
+    ``limit`` is the destination's width, and the result **never exceeds
+    it** -- unlike :func:`vendor_detail`, whose truncation notice rides on
+    top. Redaction can lengthen text (a short secret becomes the ten
+    characters of :data:`REDACTED`), so a reason the schema admitted at the
+    column's width can come out wider than the column. Text that fits is
+    returned whole; text that does not is cut short enough for the notice.
+    """
+    expanded: set[str] = set()
+    for secret in secrets:
+        if not secret:
+            continue
+        # The literal value is redacted whatever happens next. Neither helper
+        # below can raise -- both absorb urlsplit's ValueError on a malformed
+        # value (``https://[bad``) -- because the caller is the halt route,
+        # and a halt that 500s and records nothing over a scrubbing detail is
+        # worse than any line this protects.
+        expanded.add(secret)
+        if _is_http_url(secret):
+            expanded.update(url_secrets(secret))
+    ordered = tuple(sorted(expanded, key=len, reverse=True))
+    detail = vendor_detail(
+        text, secrets=ordered, patterns=CREDENTIAL_SHAPES, limit=limit
+    )
+    if len(detail) <= limit:
+        return detail
+    return vendor_detail(
+        text,
+        secrets=ordered,
+        patterns=CREDENTIAL_SHAPES,
+        limit=max(limit - _TRUNCATION_NOTICE_MAX, 0),
+    )
 
 
 # --------------------------------------------------------------------------

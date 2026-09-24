@@ -11,12 +11,28 @@ socket is a second protocol to drift from the first.
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from corollary.sockets import Codec, SocketClosed, VendorSocket
 
 T0 = datetime(2026, 9, 14, 13, 30, 0, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class RawFrame:
+    """A frame :class:`FakeSocket` hands over exactly as given, not re-encoded.
+
+    Every other scripted frame is encoded with the socket's own codec, which
+    means a JSON socket's double could only ever emit *text* -- and Alpaca's
+    paper trading host sends its JSON replies in *binary* websocket frames.
+    No test could express that, so the decoder that dropped them shipped and
+    halted the engine 90s after every start. This is how a test says "the
+    vendor put these exact bytes (or this exact text) on the wire".
+    """
+
+    payload: str | bytes | bytearray | memoryview
 
 
 class Clock:
@@ -131,6 +147,8 @@ class FakeSocket:
                     frame()
                     continue
                 self.reads += 1
+                if isinstance(frame, RawFrame):
+                    return frame.payload  # type: ignore[return-value]  # bytearray/memoryview on purpose
                 return self._codec.encode(frame)
             if not self._hold_open:
                 raise self._on_exhausted

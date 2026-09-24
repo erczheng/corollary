@@ -1,0 +1,1511 @@
+{
+  "recorded_at": "2026-09-24T04:36:34+00:00",
+  "request": "https://api.stocktwits.com/api/2/streams/symbol/AAPL.json",
+  "status_code": 200,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {
+    ".messages": 30,
+    ".messages[].tokenized_body": 10,
+    ".messages[].reshare_message.message.tokenized_body": 12
+  },
+  "body": {
+    "symbol": {
+      "id": 686,
+      "symbol": "AAPL",
+      "symbol_mic": "AAPL.XNAS",
+      "symbol_display": "AAPL",
+      "exchange": "NASDAQ",
+      "region": "US",
+      "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+      "title": "Apple Inc",
+      "aliases": [],
+      "deeplink": "symbol/AAPL",
+      "external_id": null,
+      "is_following": false,
+      "watchlist_count": 994769,
+      "has_pricing": true,
+      "instrument_class": "Stock",
+      "live_event": false,
+      "trade_status": "FRACTIONAL"
+    },
+    "cursor": {
+      "more": true,
+      "since": 664979539,
+      "max": 664970030
+    },
+    "regions": [],
+    "filters": [],
+    "messages": [
+      {
+        "id": 664979539,
+        "body": "meta&#39;s new portable VR hardware concept is taking a totally different path.\npositioned right between quest 3 and vision pro at $1,299, but with a twist: to shave off weight, it offloads the chip, battery, and 128GB storage into a pocket puck via a fiber optic cable.\nnot coming until spring 2027, but the strategy is clear-zuck is sacrificing the all-in-one form factor to win on comfort and price against apple. compute offloading might actually be the move for mass adoption.\n$META     $AAPL",
+        "tokenized_body": [
+          {
+            "type": "text",
+            "data": {
+              "text": "meta's new portable VR hardware concept is taking a totally different path.\npositioned right between quest 3 and vision pro at $1,299, but with a twist: to shave off weight, it offloads the chip, battery, and 128GB storage into a pocket puck via a fiber optic cable.\nnot coming until spring 2027, but the strategy is clear-zuck is sacrificing the all-in-one form factor to win on comfort and price against apple. compute offloading might actually be the move for mass adoption.\n"
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$META",
+              "symbol": "META",
+              "symbol_display": "META",
+              "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+              "deeplink": "symbol/META"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": "     "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$AAPL",
+              "symbol": "AAPL",
+              "symbol_display": "AAPL",
+              "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+              "deeplink": "symbol/AAPL"
+            }
+          }
+        ],
+        "created_at": "2026-09-24T03:17:56Z",
+        "discussion": false,
+        "source": {
+          "id": 1149,
+          "title": "StockTwits for iOS",
+          "url": "http://www.stocktwits.com/mobile"
+        },
+        "prices": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "price": "734.00"
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "price": "336.94"
+          }
+        ],
+        "mentioned_users": [],
+        "entities": {
+          "media": [],
+          "sentiment": {
+            "basic": "Bullish"
+          },
+          "discussable": null
+        },
+        "user": {
+          "id": 0,
+          "username": "<redacted>",
+          "name": "<redacted>",
+          "avatar_url": "<redacted>",
+          "avatar_url_ssl": "<redacted>",
+          "join_date": "<redacted>",
+          "official": false,
+          "identity": "<redacted>",
+          "home_country": "<redacted>",
+          "followers": 0,
+          "following": 0,
+          "ideas": 0,
+          "watchlist_stocks_count": 0,
+          "like_count": 0,
+          "plus_tier": "<redacted>",
+          "premium_room": "<redacted>",
+          "trade_app": false,
+          "trade_status": "<redacted>"
+        },
+        "symbols": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "symbol_display": "META",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+            "title": "Meta Platforms Inc",
+            "aliases": [
+              "FBOOK",
+              "MTVS",
+              "FB"
+            ],
+            "deeplink": "symbol/META",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 611080,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -0.78,
+            "volume_change": 18.65
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "symbol_display": "AAPL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+            "title": "Apple Inc",
+            "aliases": [],
+            "deeplink": "symbol/AAPL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 994769,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 4.6,
+            "volume_change": -2.53
+          }
+        ]
+      },
+      {
+        "id": 664979417,
+        "body": "$SPY ok boss, you check back when you get an iPhone built in your garage 🤏🏽 $AAPL",
+        "tokenized_body": [
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$SPY",
+              "symbol": "SPY",
+              "symbol_display": "SPY",
+              "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+              "deeplink": "symbol/SPY"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " ok boss, you check back when you get an iPhone built in your garage 🤏🏽 "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$AAPL",
+              "symbol": "AAPL",
+              "symbol_display": "AAPL",
+              "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+              "deeplink": "symbol/AAPL"
+            }
+          }
+        ],
+        "created_at": "2026-09-24T03:13:00Z",
+        "discussion": false,
+        "source": {
+          "id": 1149,
+          "title": "StockTwits for iOS",
+          "url": "http://www.stocktwits.com/mobile"
+        },
+        "prices": [
+          {
+            "id": 7271,
+            "symbol": "SPY",
+            "symbol_mic": "SPY.ARCX",
+            "price": "767.33"
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "price": "336.94"
+          }
+        ],
+        "conversation": {
+          "parent_message_id": 664979417,
+          "in_reply_to_message_id": null,
+          "parent": true,
+          "replies": 1
+        },
+        "reshare_message": {
+          "reshared_count": 1,
+          "reshared_deleted": false,
+          "reshared_user_deleted": false,
+          "parent_reshared_deleted": false,
+          "message": {
+            "id": 664979213,
+            "body": "$SPY everything is going to get open sourced and there will be no moats.",
+            "tokenized_body": [
+              {
+                "type": "cashTag",
+                "data": {
+                  "text": "$SPY",
+                  "symbol": "SPY",
+                  "symbol_display": "SPY",
+                  "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+                  "deeplink": "symbol/SPY"
+                }
+              },
+              {
+                "type": "text",
+                "data": {
+                  "text": " everything is going to get open sourced and there will be no moats."
+                }
+              }
+            ],
+            "created_at": "2026-09-24T03:05:39Z",
+            "discussion": false,
+            "user": {
+              "id": 0,
+              "username": "<redacted>",
+              "name": "<redacted>",
+              "avatar_url": "<redacted>",
+              "avatar_url_ssl": "<redacted>",
+              "join_date": "<redacted>",
+              "official": false,
+              "identity": "<redacted>",
+              "followers": 0,
+              "following": 0,
+              "ideas": 0,
+              "watchlist_stocks_count": 0,
+              "like_count": 0,
+              "plus_tier": "<redacted>",
+              "premium_room": "<redacted>",
+              "trade_app": false,
+              "trade_status": "<redacted>",
+              "subscribers_count": 0,
+              "subscribed_to_count": 0,
+              "following_stocks": 0,
+              "location": "<redacted>",
+              "bio": null,
+              "website_url": null
+            },
+            "source": {
+              "id": 2269,
+              "title": "StockTwits Web",
+              "url": "https://stocktwits.com"
+            },
+            "symbols": [
+              {
+                "id": 7271,
+                "symbol": "SPY",
+                "symbol_mic": "SPY.ARCX",
+                "symbol_display": "SPY",
+                "exchange": "NYSEArca",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+                "title": "SPDR S&P 500 ETF Trust",
+                "aliases": [],
+                "deeplink": "symbol/SPY",
+                "external_id": null,
+                "is_following": false,
+                "watchlist_count": 637909,
+                "has_pricing": true,
+                "instrument_class": "ExchangeTradedFund",
+                "live_event": false,
+                "sector": "Miscellaneous",
+                "industry": "InvestmentTrustsOrMutualFunds",
+                "trending": false,
+                "trending_score": 3.87616,
+                "trends": null,
+                "trade_status": "FRACTIONAL",
+                "features": {
+                  "alerts_price": true,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": false
+                },
+                "cusip": "78462F103",
+                "isin": "US78462F1030",
+                "sentiment_change": 1.93,
+                "volume_change": -8.65,
+                "should_seo_index": true
+              }
+            ],
+            "prices": [
+              {
+                "id": 7271,
+                "symbol": "SPY",
+                "symbol_mic": "SPY.ARCX",
+                "price": "767.33"
+              }
+            ],
+            "likes": {
+              "total": 1,
+              "user_ids": [
+                1523447
+              ]
+            },
+            "mentioned_users": [],
+            "entities": {
+              "media": [
+                {
+                  "id": 14748046,
+                  "type": "gif",
+                  "thumb": null,
+                  "medium": null,
+                  "large": null,
+                  "original": null,
+                  "url": null,
+                  "height": null,
+                  "width": null,
+                  "ratio": null,
+                  "provider": "giphy",
+                  "provider_id": "WRQBXSCnEFJIuxktnw"
+                }
+              ],
+              "giphy": {
+                "id": "WRQBXSCnEFJIuxktnw"
+              },
+              "sentiment": null,
+              "discussable": null
+            }
+          }
+        },
+        "mentioned_users": [],
+        "entities": {
+          "media": [],
+          "sentiment": {
+            "basic": "Bullish"
+          },
+          "discussable": null
+        },
+        "user": {
+          "id": 0,
+          "username": "<redacted>",
+          "name": "<redacted>",
+          "avatar_url": "<redacted>",
+          "avatar_url_ssl": "<redacted>",
+          "join_date": "<redacted>",
+          "official": false,
+          "identity": "<redacted>",
+          "home_country": "<redacted>",
+          "followers": 0,
+          "following": 0,
+          "ideas": 0,
+          "watchlist_stocks_count": 0,
+          "like_count": 0,
+          "plus_tier": "<redacted>",
+          "premium_room": "<redacted>",
+          "trade_app": false,
+          "trade_status": "<redacted>"
+        },
+        "symbols": [
+          {
+            "id": 7271,
+            "symbol": "SPY",
+            "symbol_mic": "SPY.ARCX",
+            "symbol_display": "SPY",
+            "exchange": "NYSEArca",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+            "title": "SPDR S&P 500 ETF Trust",
+            "aliases": [],
+            "deeplink": "symbol/SPY",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 637910,
+            "has_pricing": true,
+            "instrument_class": "ExchangeTradedFund",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 1.82,
+            "volume_change": -8.48
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "symbol_display": "AAPL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+            "title": "Apple Inc",
+            "aliases": [],
+            "deeplink": "symbol/AAPL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 994769,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 4.6,
+            "volume_change": -2.53
+          }
+        ]
+      },
+      {
+        "id": 664978761,
+        "body": "$META $GOOGL $GOOG $AAPL $OPEAZZX.P",
+        "tokenized_body": [
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$META",
+              "symbol": "META",
+              "symbol_display": "META",
+              "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+              "deeplink": "symbol/META"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$GOOGL",
+              "symbol": "GOOGL",
+              "symbol_display": "GOOGL",
+              "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+              "deeplink": "symbol/GOOGL"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$GOOG",
+              "symbol": "GOOG",
+              "symbol_display": "GOOG",
+              "logo_url": "https://logos.stocktwits-cdn.com/GOOG.png",
+              "deeplink": "symbol/GOOG"
+            }
+          }
+        ],
+        "created_at": "2026-09-24T02:50:08Z",
+        "discussion": false,
+        "source": {
+          "id": 2269,
+          "title": "StockTwits Web",
+          "url": "https://stocktwits.com"
+        },
+        "prices": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "price": "734.00"
+          },
+          {
+            "id": 11938,
+            "symbol": "GOOGL",
+            "symbol_mic": "GOOGL.XNAS",
+            "price": "339.05"
+          },
+          {
+            "id": 2044,
+            "symbol": "GOOG",
+            "symbol_mic": "GOOG.XNAS",
+            "price": "335.92"
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "price": "336.94"
+          }
+        ],
+        "reshare_message": {
+          "reshared_count": 1,
+          "reshared_deleted": false,
+          "reshared_user_deleted": false,
+          "parent_reshared_deleted": false,
+          "message": {
+            "id": 664978271,
+            "body": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is &#39;A Game-Changer&#39;\n\n$META $GOOGL $GOOG $AAPL $OPEAZZX.P\n\nhttps://stocktwits.com/news/equity/markets/meta-stock-slips-after-connect-launches-but-analysts-believe-muse-ai-is-a-game-changer/cZM7NDjRBBj",
+            "tokenized_body": [
+              {
+                "type": "text",
+                "data": {
+                  "text": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is 'A Game-Changer'\n\n"
+                }
+              },
+              {
+                "type": "cashTag",
+                "data": {
+                  "text": "$META",
+                  "symbol": "META",
+                  "symbol_display": "META",
+                  "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+                  "deeplink": "symbol/META"
+                }
+              },
+              {
+                "type": "text",
+                "data": {
+                  "text": " "
+                }
+              },
+              {
+                "type": "cashTag",
+                "data": {
+                  "text": "$GOOGL",
+                  "symbol": "GOOGL",
+                  "symbol_display": "GOOGL",
+                  "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+                  "deeplink": "symbol/GOOGL"
+                }
+              },
+              {
+                "type": "text",
+                "data": {
+                  "text": " "
+                }
+              }
+            ],
+            "created_at": "2026-09-24T02:33:50Z",
+            "discussion": false,
+            "user": {
+              "id": 0,
+              "username": "<redacted>",
+              "name": "<redacted>",
+              "avatar_url": "<redacted>",
+              "avatar_url_ssl": "<redacted>",
+              "join_date": "<redacted>",
+              "official": true,
+              "identity": "<redacted>",
+              "home_country": "<redacted>",
+              "followers": 0,
+              "following": 0,
+              "ideas": 0,
+              "watchlist_stocks_count": 0,
+              "like_count": 0,
+              "plus_tier": "<redacted>",
+              "premium_room": "<redacted>",
+              "trade_app": false,
+              "trade_status": "<redacted>",
+              "subscribers_count": 0,
+              "subscribed_to_count": 0,
+              "following_stocks": 0,
+              "location": null,
+              "bio": "<redacted>",
+              "website_url": "<redacted>"
+            },
+            "source": {
+              "id": 7039,
+              "title": "StocktwitsNews",
+              "url": "https://www.stocktwits.com/"
+            },
+            "symbols": [
+              {
+                "id": 7871,
+                "symbol": "META",
+                "symbol_mic": "META.XNAS",
+                "symbol_display": "META",
+                "exchange": "NASDAQ",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+                "title": "Meta Platforms Inc",
+                "aliases": [
+                  "FBOOK",
+                  "MTVS",
+                  "FB"
+                ],
+                "deeplink": "symbol/META",
+                "external_id": null,
+                "is_following": false,
+                "watchlist_count": 611068,
+                "has_pricing": true,
+                "instrument_class": "Stock",
+                "live_event": false,
+                "sector": "TechnologyServices",
+                "industry": "InternetSoftwareOrServices",
+                "trending": true,
+                "trending_score": 10.5475,
+                "trends": {
+                  "all": 2,
+                  "region": 2,
+                  "exchange": 2,
+                  "class_all": 2,
+                  "class_equity": 2,
+                  "summary": "Metas Muse AI agent and its reported early user traction are driving attention, with traders weighing its potential to expand Metas consumer AI and advertising business against doubts about monetization, privacy, and heavy AI spending. Meta Connects new glasses and other device announcements drew mixed reviews, while the event prompted debate over whether the recent rally can continue or may give way to a sell-the-news pullback.",
+                  "summary_at": "2026-09-23T22:52:48-04:00"
+                },
+                "trade_status": "FRACTIONAL",
+                "features": {
+                  "alerts_price": true,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": true
+                },
+                "cusip": "30303M102",
+                "isin": "US30303M1027",
+                "sentiment_change": -0.94,
+                "volume_change": 17.54,
+                "should_seo_index": true
+              },
+              {
+                "id": 11938,
+                "symbol": "GOOGL",
+                "symbol_mic": "GOOGL.XNAS",
+                "symbol_display": "GOOGL",
+                "exchange": "NASDAQ",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+                "title": "Alphabet Inc Class A",
+                "aliases": [],
+                "deeplink": "symbol/GOOGL",
+                "external_id": null,
+                "is_following": false,
+                "watchlist_count": 231108,
+                "has_pricing": true,
+                "instrument_class": "Stock",
+                "live_event": false,
+                "sector": "TechnologyServices",
+                "industry": "InternetSoftwareOrServices",
+                "trending": true,
+                "trending_score": 11.44,
+                "trends": {
+                  "all": 1,
+                  "region": 1,
+                  "exchange": 1,
+                  "class_all": 1,
+                  "class_equity": 1,
+                  "summary": "Alphabets sharp selloff is fueling debate over whether Metas Muse AI launch could threaten Googles search and AI position; many traders view the competitive risk as overstated, while others see it as a reason for pressure on GOOGL. Rising Treasury yields and expectations of further rate hikes are also cited as weighing on growth stocks broadly.",
+                  "summary_at": "2026-09-23T22:52:46-04:00"
+                },
+                "trade_status": "FRACTIONAL",
+                "features": {
+                  "alerts_price": true,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": true
+                },
+                "cusip": "02079K305",
+                "isin": "US02079K3059",
+                "sentiment_change": -0.61,
+                "volume_change": 37.28,
+                "should_seo_index": true
+              },
+              {
+                "id": 2044,
+                "symbol": "GOOG",
+                "symbol_mic": "GOOG.XNAS",
+                "symbol_display": "GOOG",
+                "exchange": "NASDAQ",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/GOOG.png",
+                "title": "Alphabet Inc - Ordinary Shares - Class C",
+                "aliases": [],
+                "deeplink": "symbol/GOOG",
+                "external_id": null,
+                "is_following": false,
+                "watchlist_count": 312001,
+                "has_pricing": true,
+                "instrument_class": "Stock",
+                "live_event": false,
+                "sector": "TechnologyServices",
+                "industry": "InternetSoftwareOrServices",
+                "trending": true,
+                "trending_score": 8.81626,
+                "trends": {
+                  "all": 3,
+                  "region": 3,
+                  "exchange": 3,
+                  "class_all": 3,
+                  "class_equity": 3,
+                  "summary": "Traders are attributing GOOGs sharp pullback partly to fears that Metas Muse AI agent could outcompete Gemini and pull users away, though others argue the selloff is excessive and are buying the dip. Rising Treasury yields and rate-hike concerns are also cited as broader pressure on tech stocks.",
+                  "summary_at": "2026-09-23T23:07:42-04:00"
+                },
+                "trade_status": "FRACTIONAL",
+                "features": {
+                  "alerts_price": true,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": true
+                },
+                "cusip": "02079K107",
+                "isin": "US02079K1079",
+                "sentiment_change": -3.92,
+                "volume_change": 31.26,
+                "should_seo_index": true
+              },
+              {
+                "id": 686,
+                "symbol": "AAPL",
+                "symbol_mic": "AAPL.XNAS",
+                "symbol_display": "AAPL",
+                "exchange": "NASDAQ",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+                "title": "Apple Inc",
+                "aliases": [],
+                "deeplink": "symbol/AAPL",
+                "external_id": null,
+                "is_following": false,
+                "watchlist_count": 994760,
+                "has_pricing": true,
+                "instrument_class": "Stock",
+                "live_event": false,
+                "sector": "ElectronicTechnology",
+                "industry": "TelecommunicationsEquipment",
+                "trending": false,
+                "trending_score": -0.546804,
+                "trends": null,
+                "trade_status": "FRACTIONAL",
+                "features": {
+                  "alerts_price": true,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": true
+                },
+                "cusip": "037833100",
+                "isin": "US0378331005",
+                "sentiment_change": 4.61,
+                "volume_change": -2.59,
+                "should_seo_index": true
+              },
+              {
+                "id": 278164,
+                "symbol": "OPEAZZX.P",
+                "symbol_mic": "OPEAZZX.P",
+                "symbol_display": "OPEAZZX",
+                "exchange": "PRIVATE",
+                "region": "US",
+                "logo_url": "https://logos.stocktwits-cdn.com/OPEAZZX.P.png",
+                "title": "OpenAI",
+                "aliases": [],
+                "deeplink": "symbol/OPEAZZX.P",
+                "external_id": "company-30839e0b-2730-4495-839f-1bf638fa9cca",
+                "is_following": false,
+                "watchlist_count": 2430,
+                "has_pricing": true,
+                "instrument_class": "PRIVATE",
+                "live_event": false,
+                "sector": null,
+                "industry": null,
+                "trending": false,
+                "trending_score": 2.40578,
+                "trends": null,
+                "features": {
+                  "alerts_price": false,
+                  "social_data": true,
+                  "trending_messages": true,
+                  "earnings": false,
+                  "has_fundraising": true
+                },
+                "cusip": null,
+                "isin": null,
+                "sentiment_change": -25.0,
+                "volume_change": -5.36,
+                "should_seo_index": true
+              }
+            ],
+            "prices": [
+              {
+                "id": 7871,
+                "symbol": "META",
+                "symbol_mic": "META.XNAS",
+                "price": "734.00"
+              },
+              {
+                "id": 11938,
+                "symbol": "GOOGL",
+                "symbol_mic": "GOOGL.XNAS",
+                "price": "339.05"
+              },
+              {
+                "id": 2044,
+                "symbol": "GOOG",
+                "symbol_mic": "GOOG.XNAS",
+                "price": "335.92"
+              },
+              {
+                "id": 686,
+                "symbol": "AAPL",
+                "symbol_mic": "AAPL.XNAS",
+                "price": "336.94"
+              }
+            ],
+            "links": [
+              {
+                "title": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is 'A Game-Changer'",
+                "url": "https://stocktwits.com/news/equity/markets/meta-stock-slips-after-connect-launches-but-analysts-believe-muse-ai-is-a-game-changer/cZM7NDjRBBj",
+                "shortened_url": "https://stkt.co/LnBfa7QL",
+                "shortened_expanded_url": "stocktwits.com/news-article...",
+                "description": "Meta's latest hardware push puts its Muse AI vision at the center of its next-generation devices.",
+                "image": "https://news.stocktwits-cdn.com/large_Getty_Images_2296206791_e35100f116.jpg",
+                "created_at": "2026-09-24T02:33:51Z",
+                "video_url": null,
+                "source": {
+                  "name": "Stocktwits",
+                  "website": "https://stocktwits.com"
+                }
+              }
+            ],
+            "mentioned_users": [],
+            "entities": {
+              "media": [],
+              "sentiment": null,
+              "discussable": null
+            }
+          }
+        },
+        "mentioned_users": [],
+        "entities": {
+          "media": [],
+          "sentiment": null,
+          "discussable": null
+        },
+        "user": {
+          "id": 0,
+          "username": "<redacted>",
+          "name": "<redacted>",
+          "avatar_url": "<redacted>",
+          "avatar_url_ssl": "<redacted>",
+          "join_date": "<redacted>",
+          "official": false,
+          "identity": "<redacted>",
+          "home_country": "<redacted>",
+          "followers": 0,
+          "following": 0,
+          "ideas": 0,
+          "watchlist_stocks_count": 0,
+          "like_count": 0,
+          "plus_tier": "<redacted>",
+          "premium_room": "<redacted>",
+          "trade_app": false,
+          "trade_status": "<redacted>"
+        },
+        "likes": {
+          "total": 2,
+          "user_ids": [
+            4081025,
+            7042992
+          ]
+        },
+        "symbols": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "symbol_display": "META",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+            "title": "Meta Platforms Inc",
+            "aliases": [
+              "FBOOK",
+              "MTVS",
+              "FB"
+            ],
+            "deeplink": "symbol/META",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 611080,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -0.78,
+            "volume_change": 18.65
+          },
+          {
+            "id": 11938,
+            "symbol": "GOOGL",
+            "symbol_mic": "GOOGL.XNAS",
+            "symbol_display": "GOOGL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+            "title": "Alphabet Inc Class A",
+            "aliases": [],
+            "deeplink": "symbol/GOOGL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 231124,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -0.38,
+            "volume_change": 40.14
+          },
+          {
+            "id": 2044,
+            "symbol": "GOOG",
+            "symbol_mic": "GOOG.XNAS",
+            "symbol_display": "GOOG",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/GOOG.png",
+            "title": "Alphabet Inc - Ordinary Shares - Class C",
+            "aliases": [],
+            "deeplink": "symbol/GOOG",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 312007,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -3.94,
+            "volume_change": 31.84
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "symbol_display": "AAPL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+            "title": "Apple Inc",
+            "aliases": [],
+            "deeplink": "symbol/AAPL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 994769,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 4.6,
+            "volume_change": -2.53
+          },
+          {
+            "id": 278164,
+            "symbol": "OPEAZZX.P",
+            "symbol_mic": "OPEAZZX.P",
+            "symbol_display": "OPEAZZX",
+            "exchange": "PRIVATE",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/OPEAZZX.P.png",
+            "title": "OpenAI",
+            "aliases": [],
+            "deeplink": "symbol/OPEAZZX.P",
+            "external_id": "company-30839e0b-2730-4495-839f-1bf638fa9cca",
+            "is_following": false,
+            "watchlist_count": 2430,
+            "has_pricing": true,
+            "instrument_class": "PRIVATE",
+            "live_event": false,
+            "sentiment_change": -25.0,
+            "volume_change": 0.0
+          }
+        ]
+      },
+      {
+        "id": 664978271,
+        "body": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is &#39;A Game-Changer&#39;\n\n$META $GOOGL $GOOG $AAPL $OPEAZZX.P\n\nhttps://stocktwits.com/news/equity/markets/meta-stock-slips-after-connect-launches-but-analysts-believe-muse-ai-is-a-game-changer/cZM7NDjRBBj",
+        "tokenized_body": [
+          {
+            "type": "text",
+            "data": {
+              "text": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is 'A Game-Changer'\n\n"
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$META",
+              "symbol": "META",
+              "symbol_display": "META",
+              "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+              "deeplink": "symbol/META"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$GOOGL",
+              "symbol": "GOOGL",
+              "symbol_display": "GOOGL",
+              "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+              "deeplink": "symbol/GOOGL"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          }
+        ],
+        "created_at": "2026-09-24T02:33:50Z",
+        "discussion": false,
+        "source": {
+          "id": 7039,
+          "title": "StocktwitsNews",
+          "url": "https://www.stocktwits.com/"
+        },
+        "prices": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "price": "734.00"
+          },
+          {
+            "id": 11938,
+            "symbol": "GOOGL",
+            "symbol_mic": "GOOGL.XNAS",
+            "price": "339.05"
+          },
+          {
+            "id": 2044,
+            "symbol": "GOOG",
+            "symbol_mic": "GOOG.XNAS",
+            "price": "335.92"
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "price": "336.94"
+          }
+        ],
+        "links": [
+          {
+            "title": "META Stock Slips After Connect Launches, But Analysts Believe Muse AI Is 'A Game-Changer'",
+            "url": "https://stocktwits.com/news/equity/markets/meta-stock-slips-after-connect-launches-but-analysts-believe-muse-ai-is-a-game-changer/cZM7NDjRBBj",
+            "shortened_url": "https://stkt.co/LnBfa7QL",
+            "shortened_expanded_url": "stocktwits.com/news-article...",
+            "description": "Meta's latest hardware push puts its Muse AI vision at the center of its next-generation devices.",
+            "image": "https://news.stocktwits-cdn.com/large_Getty_Images_2296206791_e35100f116.jpg",
+            "created_at": "2026-09-24T02:33:51Z",
+            "video_url": null,
+            "source": {
+              "name": "Stocktwits",
+              "website": "https://stocktwits.com"
+            }
+          }
+        ],
+        "mentioned_users": [],
+        "entities": {
+          "media": [],
+          "sentiment": null,
+          "discussable": null
+        },
+        "user": {
+          "id": 0,
+          "username": "<redacted>",
+          "name": "<redacted>",
+          "avatar_url": "<redacted>",
+          "avatar_url_ssl": "<redacted>",
+          "join_date": "<redacted>",
+          "official": true,
+          "identity": "<redacted>",
+          "home_country": "<redacted>",
+          "followers": 0,
+          "following": 0,
+          "ideas": 0,
+          "watchlist_stocks_count": 0,
+          "like_count": 0,
+          "plus_tier": "<redacted>",
+          "premium_room": "<redacted>",
+          "trade_app": false,
+          "trade_status": "<redacted>"
+        },
+        "reshares": {
+          "reshared_count": 1,
+          "user_ids": [
+            9238961
+          ]
+        },
+        "symbols": [
+          {
+            "id": 7871,
+            "symbol": "META",
+            "symbol_mic": "META.XNAS",
+            "symbol_display": "META",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/META.png",
+            "title": "Meta Platforms Inc",
+            "aliases": [
+              "FBOOK",
+              "MTVS",
+              "FB"
+            ],
+            "deeplink": "symbol/META",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 611080,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -0.78,
+            "volume_change": 18.65
+          },
+          {
+            "id": 11938,
+            "symbol": "GOOGL",
+            "symbol_mic": "GOOGL.XNAS",
+            "symbol_display": "GOOGL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/GOOGL.png",
+            "title": "Alphabet Inc Class A",
+            "aliases": [],
+            "deeplink": "symbol/GOOGL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 231124,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -0.38,
+            "volume_change": 40.14
+          },
+          {
+            "id": 2044,
+            "symbol": "GOOG",
+            "symbol_mic": "GOOG.XNAS",
+            "symbol_display": "GOOG",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/GOOG.png",
+            "title": "Alphabet Inc - Ordinary Shares - Class C",
+            "aliases": [],
+            "deeplink": "symbol/GOOG",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 312007,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": -3.94,
+            "volume_change": 31.84
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "symbol_display": "AAPL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+            "title": "Apple Inc",
+            "aliases": [],
+            "deeplink": "symbol/AAPL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 994769,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 4.6,
+            "volume_change": -2.53
+          },
+          {
+            "id": 278164,
+            "symbol": "OPEAZZX.P",
+            "symbol_mic": "OPEAZZX.P",
+            "symbol_display": "OPEAZZX",
+            "exchange": "PRIVATE",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/OPEAZZX.P.png",
+            "title": "OpenAI",
+            "aliases": [],
+            "deeplink": "symbol/OPEAZZX.P",
+            "external_id": "company-30839e0b-2730-4495-839f-1bf638fa9cca",
+            "is_following": false,
+            "watchlist_count": 2430,
+            "has_pricing": true,
+            "instrument_class": "PRIVATE",
+            "live_event": false,
+            "sentiment_change": -25.0,
+            "volume_change": 0.0
+          }
+        ]
+      },
+      {
+        "id": 664978106,
+        "body": "$QQQ $NVDA $SPY $TSLA $AAPL  load verify merger news with billion dollar company open world and also a 15 cent divy info below tomm vote 29 of September for divy to be paid oct 2 .",
+        "tokenized_body": [
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$QQQ",
+              "symbol": "QQQ",
+              "symbol_display": "QQQ",
+              "logo_url": "https://logos.stocktwits-cdn.com/QQQ.png",
+              "deeplink": "symbol/QQQ"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$NVDA",
+              "symbol": "NVDA",
+              "symbol_display": "NVDA",
+              "logo_url": "https://logos.stocktwits-cdn.com/NVDA.png",
+              "deeplink": "symbol/NVDA"
+            }
+          },
+          {
+            "type": "text",
+            "data": {
+              "text": " "
+            }
+          },
+          {
+            "type": "cashTag",
+            "data": {
+              "text": "$SPY",
+              "symbol": "SPY",
+              "symbol_display": "SPY",
+              "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+              "deeplink": "symbol/SPY"
+            }
+          }
+        ],
+        "created_at": "2026-09-24T02:28:22Z",
+        "discussion": false,
+        "source": {
+          "id": 2269,
+          "title": "StockTwits Web",
+          "url": "https://stocktwits.com"
+        },
+        "prices": [
+          {
+            "id": 9581,
+            "symbol": "QQQ",
+            "symbol_mic": "QQQ.XNAS",
+            "price": "740.80"
+          },
+          {
+            "id": 2925,
+            "symbol": "NVDA",
+            "symbol_mic": "NVDA.XNAS",
+            "price": "225.04"
+          },
+          {
+            "id": 7271,
+            "symbol": "SPY",
+            "symbol_mic": "SPY.ARCX",
+            "price": "767.33"
+          },
+          {
+            "id": 8660,
+            "symbol": "TSLA",
+            "symbol_mic": "TSLA.XNAS",
+            "price": "380.13"
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "price": "336.94"
+          }
+        ],
+        "mentioned_users": [],
+        "entities": {
+          "media": [
+            {
+              "id": 14747816,
+              "type": "image",
+              "thumb": "https://media.stocktwits-cdn.com/api/3/media/14747816/thumb.webp",
+              "medium": "https://media.stocktwits-cdn.com/api/3/media/14747816/medium.webp",
+              "large": "https://media.stocktwits-cdn.com/api/3/media/14747816/large.webp",
+              "original": "https://media.stocktwits-cdn.com/api/3/media/14747816/original.png",
+              "url": "https://media.stocktwits-cdn.com/api/3/media/14747816/default.webp",
+              "height": 1604,
+              "width": 720,
+              "ratio": 0.448878,
+              "provider": null,
+              "provider_id": null
+            },
+            {
+              "id": 14747817,
+              "type": "image",
+              "thumb": "https://media.stocktwits-cdn.com/api/3/media/14747817/thumb.webp",
+              "medium": "https://media.stocktwits-cdn.com/api/3/media/14747817/medium.webp",
+              "large": "https://media.stocktwits-cdn.com/api/3/media/14747817/large.webp",
+              "original": "https://media.stocktwits-cdn.com/api/3/media/14747817/original.png",
+              "url": "https://media.stocktwits-cdn.com/api/3/media/14747817/default.webp",
+              "height": 1604,
+              "width": 720,
+              "ratio": 0.448878,
+              "provider": null,
+              "provider_id": null
+            }
+          ],
+          "chart": {
+            "id": 14747816,
+            "type": "image",
+            "thumb": "https://media.stocktwits-cdn.com/api/3/media/14747816/thumb.webp",
+            "medium": "https://media.stocktwits-cdn.com/api/3/media/14747816/medium.webp",
+            "large": "https://media.stocktwits-cdn.com/api/3/media/14747816/large.webp",
+            "original": "https://media.stocktwits-cdn.com/api/3/media/14747816/original.png",
+            "url": "https://media.stocktwits-cdn.com/api/3/media/14747816/default.webp",
+            "height": 1604,
+            "width": 720,
+            "ratio": 0.448878
+          },
+          "sentiment": null,
+          "discussable": null
+        },
+        "user": {
+          "id": 0,
+          "username": "<redacted>",
+          "name": "<redacted>",
+          "avatar_url": "<redacted>",
+          "avatar_url_ssl": "<redacted>",
+          "join_date": "<redacted>",
+          "official": false,
+          "identity": "<redacted>",
+          "home_country": "<redacted>",
+          "followers": 0,
+          "following": 0,
+          "ideas": 0,
+          "watchlist_stocks_count": 0,
+          "like_count": 0,
+          "plus_tier": "<redacted>",
+          "premium_room": "<redacted>",
+          "trade_app": false,
+          "trade_status": "<redacted>"
+        },
+        "likes": {
+          "total": 1,
+          "user_ids": [
+            10326660
+          ]
+        },
+        "symbols": [
+          {
+            "id": 9581,
+            "symbol": "QQQ",
+            "symbol_mic": "QQQ.XNAS",
+            "symbol_display": "QQQ",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/QQQ.png",
+            "title": "Invesco QQQ Trust Series 1",
+            "aliases": [
+              "QQQQ"
+            ],
+            "deeplink": "symbol/QQQ",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 280129,
+            "has_pricing": true,
+            "instrument_class": "ExchangeTradedFund",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 0.36,
+            "volume_change": -4.48
+          },
+          {
+            "id": 2925,
+            "symbol": "NVDA",
+            "symbol_mic": "NVDA.XNAS",
+            "symbol_display": "NVDA",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/NVDA.png",
+            "title": "NVIDIA Corp",
+            "aliases": [],
+            "deeplink": "symbol/NVDA",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 668230,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 0.42,
+            "volume_change": -6.62
+          },
+          {
+            "id": 7271,
+            "symbol": "SPY",
+            "symbol_mic": "SPY.ARCX",
+            "symbol_display": "SPY",
+            "exchange": "NYSEArca",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/SPY.png",
+            "title": "SPDR S&P 500 ETF Trust",
+            "aliases": [],
+            "deeplink": "symbol/SPY",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 637910,
+            "has_pricing": true,
+            "instrument_class": "ExchangeTradedFund",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 1.82,
+            "volume_change": -8.48
+          },
+          {
+            "id": 8660,
+            "symbol": "TSLA",
+            "symbol_mic": "TSLA.XNAS",
+            "symbol_display": "TSLA",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/TSLA.png",
+            "title": "Tesla Inc",
+            "aliases": [],
+            "deeplink": "symbol/TSLA",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 1066634,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "earnings_cta": "res_earn_tab",
+            "earnings_id": "e92cb3fb-d89f-4af7-b63e-e499b0ca84a4",
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 3.24,
+            "volume_change": -4.21
+          },
+          {
+            "id": 686,
+            "symbol": "AAPL",
+            "symbol_mic": "AAPL.XNAS",
+            "symbol_display": "AAPL",
+            "exchange": "NASDAQ",
+            "region": "US",
+            "logo_url": "https://logos.stocktwits-cdn.com/AAPL.png",
+            "title": "Apple Inc",
+            "aliases": [],
+            "deeplink": "symbol/AAPL",
+            "external_id": null,
+            "is_following": false,
+            "watchlist_count": 994769,
+            "has_pricing": true,
+            "instrument_class": "Stock",
+            "live_event": false,
+            "trade_status": "FRACTIONAL",
+            "sentiment_change": 4.6,
+            "volume_change": -2.53
+          }
+        ]
+      }
+    ],
+    "response": {
+      "status": 200
+    }
+  }
+}

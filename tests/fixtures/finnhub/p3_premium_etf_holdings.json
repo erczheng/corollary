@@ -1,0 +1,10 @@
+{
+  "recorded_at": "2026-09-24T04:37:06+00:00",
+  "request": "https://finnhub.io/api/v1/etf/holdings?symbol=XLK",
+  "status_code": 403,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {},
+  "body": {
+    "error": "You don't have access to this resource."
+  }
+}

@@ -261,6 +261,10 @@ describe('isCriticalEvent', () => {
    * the same distinction CLAUDE.md draws between `bearish` and `error`. */
   it('does not treat a stop loss as critical', () => {
     expect(isCriticalEvent('stop_loss_hit')).toBe(false)
+    // PRD §10's three only — a human halt or a config change is not an alarm.
+    for (const e of ['operator_halt', 'operator_resume', 'risk_limits_changed', 'data_feeds_changed', 'notification_routes_changed'] as const) {
+      expect(isCriticalEvent(e)).toBe(false)
+    }
   })
 
   it('classifies every routable event without throwing', () => {

@@ -1,0 +1,16 @@
+{
+  "recorded_at": "2026-09-24T04:37:13+00:00",
+  "request": "https://finnhub.io/api/v1/quote?symbol=VIX",
+  "status_code": 200,
+  "content_type": "application/json; charset=utf-8",
+  "body": {
+    "c": 0,
+    "d": null,
+    "dp": null,
+    "h": 0,
+    "l": 0,
+    "o": 0,
+    "pc": 0,
+    "t": 0
+  }
+}

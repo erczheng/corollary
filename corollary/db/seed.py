@@ -85,12 +85,25 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     ("daily_loss_halt", "discord", True),
     ("engine_error", "bell", True),
     ("engine_error", "discord", True),
+    # The owner's own actions (migration 0006). A halt or resume is worth the
+    # bell; a settings change is a record for Discord, and the Settings page
+    # already shows it in the audit log.
+    ("operator_halt", "bell", True),
+    ("operator_halt", "discord", True),
+    ("operator_resume", "bell", True),
+    ("operator_resume", "discord", True),
     ("price_alert", "bell", True),
     ("price_alert", "discord", True),
     ("recommendations_ready", "bell", True),
     ("recommendations_ready", "discord", False),
     ("strategy_promotion", "bell", True),
     ("strategy_promotion", "discord", False),
+    ("risk_limits_changed", "bell", False),
+    ("risk_limits_changed", "discord", True),
+    ("data_feeds_changed", "bell", False),
+    ("data_feeds_changed", "discord", True),
+    ("notification_routes_changed", "bell", False),
+    ("notification_routes_changed", "discord", True),
 )
 
 

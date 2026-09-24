@@ -36,6 +36,7 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "DataSourceStatus": schemas.DataSourceStatus,
     "IntradayPoint": schemas.IntradayPoint,
     "ManagedExit": schemas.ManagedExit,
+    "Notification": schemas.NotificationItem,
     "NotificationRoute": schemas.NotificationRoute,
     "OptionContract": schemas.OptionContract,
     "Position": schemas.Position,

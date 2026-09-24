@@ -1,0 +1,101 @@
+{
+  "recorded_at": "2026-09-24T04:37:09+00:00",
+  "request": "https://finnhub.io/api/v1/calendar/earnings?from=2026-09-24&to=2026-10-15",
+  "status_code": 200,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {
+    ".earningsCalendar": 295
+  },
+  "body": {
+    "earningsCalendar": [
+      {
+        "symbol": "AA",
+        "date": "2026-10-15",
+        "hour": "amc",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": 1.563,
+        "epsActual": null,
+        "revenueEstimate": 3954667932,
+        "revenueActual": null
+      },
+      {
+        "symbol": "AAL",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": -0.3546,
+        "epsActual": null,
+        "revenueEstimate": 16301668791,
+        "revenueActual": null
+      },
+      {
+        "symbol": "AIMUF",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 2,
+        "year": 2026,
+        "epsEstimate": null,
+        "epsActual": null,
+        "revenueEstimate": null,
+        "revenueActual": null
+      },
+      {
+        "symbol": "ALK",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": 0.5879,
+        "epsActual": null,
+        "revenueEstimate": 4356691792,
+        "revenueActual": null
+      },
+      {
+        "symbol": "AMTB",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": 0.5791,
+        "epsActual": null,
+        "revenueEstimate": 105337950,
+        "revenueActual": null
+      },
+      {
+        "symbol": "ATLO",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": 0.6936,
+        "epsActual": null,
+        "revenueEstimate": null,
+        "revenueActual": null
+      },
+      {
+        "symbol": "BALY",
+        "date": "2026-10-15",
+        "hour": "amc",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": -1.467,
+        "epsActual": null,
+        "revenueEstimate": 820632585,
+        "revenueActual": null
+      },
+      {
+        "symbol": "BANF",
+        "date": "2026-10-15",
+        "hour": "",
+        "quarter": 3,
+        "year": 2026,
+        "epsEstimate": 1.9798,
+        "epsActual": null,
+        "revenueEstimate": 191449920,
+        "revenueActual": null
+      }
+    ]
+  }
+}

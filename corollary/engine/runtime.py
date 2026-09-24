@@ -173,7 +173,7 @@ import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Final, Protocol
@@ -218,6 +218,7 @@ __all__ = [
     "MarketsVisibleStatus",
     "Notification",
     "Notifier",
+    "OperatorNotice",
     "StreamBudget",
     "StreamPlans",
     "Watchdog",
@@ -742,6 +743,43 @@ class Notification:
     #: human switched every channel off for this event, which the PRD permits
     #: and which is logged rather than overridden.
     channels: tuple[str, ...]
+    #: The book the event happened in, or ``None`` for one that belongs to no
+    #: book -- every engine event, this halt included. ``None`` shows in both
+    #: books' bells, which is what stops an engine fault being hidden by
+    #: whichever account happens to be selected.
+    account: str | None = None
+    #: Generated when the notification is raised, so every sink records
+    #: against the same id without waiting on another: the Discord sink's
+    #: delivery rows name the ``notification`` row the database sink writes,
+    #: and neither has to run first. A uuid4 hex; ``notification.id``.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorNotice:
+    """A record of something the owner did, for the bell and Discord.
+
+    The owner, 2026-09-24: *"any action i do should be put into the
+    discord."* Built by the API route that performed the action, **after**
+    its commit, and handed to :meth:`EngineRuntime.notify_operator_action`,
+    which routes it through the same ``_channels_for`` and the same
+    :class:`Notifier` a rule-9 halt uses. There is no second path.
+
+    Carries no channels: which channels it reaches is decided at emit time
+    from ``notification_route``, never by the caller.
+    """
+
+    event: str
+    severity: str
+    title: str
+    body: str
+    at: datetime
+    #: The route's own correlation id, so the action's log lines and its
+    #: notification trace to each other.
+    correlation_id: str
+    #: ``None`` for every operator action today: engine state, risk limits,
+    #: feeds and routing are global, not per book.
+    account: str | None = None
 
 
 class Notifier(Protocol):
@@ -750,15 +788,24 @@ class Notifier(Protocol):
     def emit(self, notification: Notification) -> None: ...
 
 
+#: ``Notification.severity`` to a stdlib log level, for :class:`LoggingNotifier`.
+#: A severity missing from this map logs at CRITICAL -- see ``emit``.
+_LOG_LEVEL_FOR_SEVERITY: Final[dict[str, int]] = {
+    "critical": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "info": logging.INFO,
+}
+
+
 class LoggingNotifier:
     """The default sink: a structured log line per notification.
 
-    The ``notification`` table does not exist yet -- it is the tenth table and
-    lands with the notifications work -- and the Discord transport is not
-    written either. That is a gap in *delivery*, not in the decision: the
-    event, the severity and the resolved channels are all computed here and
-    handed over whole, so wiring a real sink is a constructor argument rather
-    than a change to the halt path.
+    The real sinks -- the ``notification`` table and the Discord webhook --
+    live in ``engine/notify.py`` and are wired by the API's lifespan, which
+    hands :class:`EngineRuntime` a ``FanoutNotifier`` holding this one plus
+    both. This stays the *default* so a runtime built with no notifier (every
+    test that is not about delivery) still leaves a record of each alert.
 
     Logging rather than raising on an unconfigured channel is deliberate. A
     dead-man's switch whose alerting raises would turn one fault into two, and
@@ -766,14 +813,26 @@ class LoggingNotifier:
     """
 
     def emit(self, notification: Notification) -> None:
-        logger.critical(
+        # The level follows the severity. Operator notices (a resume, a feed
+        # change) share this sink with the rule-9 halt, and logging them all at
+        # CRITICAL would fire any level >= CRITICAL alert on every Settings
+        # save -- training the owner to ignore the level a halt uses.
+        #
+        # An unknown severity falls back to CRITICAL, never to something
+        # quieter: an alert nobody recognised must not become quieter by
+        # accident. Too loud is noticed and fixed; too quiet is not noticed.
+        level = _LOG_LEVEL_FOR_SEVERITY.get(notification.severity, logging.CRITICAL)
+        logger.log(
+            level,
             "%s: %s",
             notification.title,
             notification.body,
             extra={
                 "event": "engine_notification",
                 "notification_event": notification.event,
+                "notification_id": notification.id,
                 "severity": notification.severity,
+                "account": notification.account,
                 "channels": list(notification.channels),
                 "title": notification.title,
                 "body": notification.body,
@@ -2665,15 +2724,9 @@ class EngineRuntime:
                 "event": "engine_halted",
                 # ``rule`` carries the enum, here and everywhere in this file:
                 # a value you can count, filter and alert on. Prose lives
-                # under ``policy``.
-                #
-                # **Mismatch worth someone's attention.**
-                # ``api/routes/engine.py`` emits this same ``engine_halted``
-                # event with a *sentence* in ``rule``, so a query filtering on
-                # ``event=engine_halted`` and grouping by ``rule`` gets enums
-                # for automatic halts and prose for manual ones. That file is
-                # not this step's to edit; whoever owns it should move its
-                # sentence under ``policy`` too.
+                # under ``policy``. ``api/routes/engine.py`` emits this same
+                # ``engine_halted`` event for an operator's halt, with its own
+                # enum (``OperatorRule``) under ``rule`` for the same reason.
                 "rule": decision.rule.value,
                 "reason": decision.reason,
                 "inputs": dict(decision.inputs),
@@ -3101,6 +3154,73 @@ class EngineRuntime:
             return tuple(NOTIFICATION_CHANNELS)
         return tuple(channel for channel in NOTIFICATION_CHANNELS if channel in enabled)
 
+    def notify_operator_action(self, notice: OperatorNotice) -> Notification:
+        """Route and deliver one notice of a human action. **Never raises.**
+
+        The public seam the API's state-changing routes use (halt, resume, and
+        the three settings writes), so the owner's actions reach the bell and
+        Discord through the *same* routing gate and the *same* fan-out as a
+        rule-9 halt -- decision 14: two paths to one channel, and the second
+        is the one that drifts.
+
+        The gate is read here, at emission, never at render: a caller that
+        changed ``notification_route`` has committed by the time this runs,
+        so the new routing governs the notice about itself.
+
+        A record, never a mechanism. This reads routing and emits; it touches
+        no engine state, and nothing here can end a halt.
+
+        Returns the notification it built, whether or not delivery worked --
+        the sinks record their own outcomes.
+        """
+        channels = self._channels_for(notice.event)
+        notification = Notification(
+            event=notice.event,
+            severity=notice.severity,
+            title=notice.title,
+            body=notice.body,
+            at=notice.at,
+            correlation_id=notice.correlation_id,
+            channels=channels,
+            account=notice.account,
+        )
+        logger.info(
+            "operator action notified: %s",
+            notice.title,
+            extra={
+                "event": "operator_notice",
+                "notification_event": notice.event,
+                "notification_id": notification.id,
+                "channels": list(channels),
+                "at": notice.at.isoformat(),
+                "correlation_id": notice.correlation_id,
+            },
+        )
+        # The action this describes has already committed. A sink that raised
+        # must not turn it into an error response, so -- as in ``_emit`` --
+        # this catches the notifier that does not isolate itself, and logs by
+        # class name only (rule 6: a sink's exception text may carry the
+        # webhook URL).
+        try:
+            self._notifier.emit(notification)
+        except Exception as exc:
+            logger.error(
+                "the notifier raised delivering an operator notice; the action stands",
+                extra={
+                    "event": "operator_notice_delivery_failed",
+                    "policy": (
+                        "a notifier failure is logged and never raised into "
+                        "the route that performed the action"
+                    ),
+                    "error_type": type(exc).__name__,
+                    "notification_event": notice.event,
+                    "notification_id": notification.id,
+                    "at": notice.at.isoformat(),
+                    "correlation_id": notice.correlation_id,
+                },
+            )
+        return notification
+
     def _emit(
         self,
         *,
@@ -3158,4 +3278,30 @@ class EngineRuntime:
                     "correlation_id": correlation_id,
                 },
             )
-        self._notifier.emit(notification)
+        # Rule 9's alert must never become rule 9's failure. The halt is
+        # already persisted by the time this runs, but ``halt`` still has its
+        # bookkeeping to do after this call -- ``_announced`` and friends,
+        # which the watchdog's gate reads -- so a sink that raised here would
+        # leave the gate believing a halt it never finished recording. The
+        # shipped ``FanoutNotifier`` isolates its own sinks; this catches the
+        # notifier that does not. Logged by class name only: a sink's
+        # exception text is not ours to vouch for, and the Discord sink's
+        # would carry its webhook URL (rule 6).
+        try:
+            self._notifier.emit(notification)
+        except Exception as exc:
+            logger.error(
+                "the notifier raised delivering a halt alert; the halt stands",
+                extra={
+                    "event": "engine_notification_failed",
+                    "policy": (
+                        "a notifier failure is logged and never raised into "
+                        "the halt path"
+                    ),
+                    "error_type": type(exc).__name__,
+                    "notification_event": HALT_EVENT,
+                    "notification_id": notification.id,
+                    "at": at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )

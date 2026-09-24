@@ -82,7 +82,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated, Any, Final, NamedTuple, cast, get_args
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from pydantic import BeforeValidator, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -93,6 +93,12 @@ from corollary.api.deps import (
     ServiceRegistry,
     SessionDep,
     service_registry,
+)
+from corollary.api.operator import (
+    AuditChange,
+    OperatorEvent,
+    notify_after_response,
+    settings_notice,
 )
 from corollary.api.schemas import (
     ApiKeyPresence,
@@ -527,8 +533,12 @@ def _audit(
     new: str,
     at: datetime,
     correlation_id: str,
-) -> None:
+) -> AuditChange:
     """Record one changed cell, in the one log that spans all three tables.
+
+    Returns exactly what it wrote. The route's notification to the bell and
+    Discord is built from these returns and nothing else, so the audit log and
+    the message cannot disagree about what changed.
 
     PRD §8.7: *"one log rather than three -- on a bad day the question is
     simply whether anything changed first."*
@@ -563,6 +573,7 @@ def _audit(
             "correlation_id": correlation_id,
         },
     )
+    return AuditChange(category=category, field=field, previous=previous, new=new)
 
 
 def _reject_duplicates(
@@ -654,7 +665,12 @@ def read_limits(session: SessionDep) -> list[RiskLimit]:
 
 
 @router.put("/limits", summary="Edit a ceiling. The engine still enforces it.")
-def write_limits(body: RiskLimitsUpdate, session: SessionDep) -> list[RiskLimit]:
+def write_limits(
+    body: RiskLimitsUpdate,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
+) -> list[RiskLimit]:
     """Validate every update, then apply them all or none of them.
 
     Atomic on purpose. Half-applying a set of ceilings leaves the engine
@@ -693,6 +709,7 @@ def write_limits(body: RiskLimitsUpdate, session: SessionDep) -> list[RiskLimit]
                 correlation_id=correlation_id,
             ) from exc
 
+    changes: list[AuditChange] = []
     for update in body.limits:
         row = session.get(RiskLimitRow, update.key)
         if row is None:
@@ -705,17 +722,30 @@ def write_limits(body: RiskLimitsUpdate, session: SessionDep) -> list[RiskLimit]
         else:
             previous = _money_text(row.value)
             row.value = update.value
-        _audit(
-            session,
-            category="risk",
-            field=update.key,
-            previous=previous,
-            new=_money_text(update.value),
-            at=at,
-            correlation_id=correlation_id,
+        changes.append(
+            _audit(
+                session,
+                category="risk",
+                field=update.key,
+                previous=previous,
+                new=_money_text(update.value),
+                at=at,
+                correlation_id=correlation_id,
+            )
         )
 
     session.commit()
+    # After the commit, from the audit values, once for the whole request.
+    notify_after_response(
+        request,
+        background,
+        settings_notice(
+            OperatorEvent.RISK_LIMITS_CHANGED,
+            changes,
+            at=at,
+            correlation_id=correlation_id,
+        ),
+    )
     return _limits(session)
 
 
@@ -852,7 +882,11 @@ def read_feeds(session: SessionDep, env: EnvDep) -> list[DataFeed]:
 
 @router.put("/feeds", summary="Select a feed, within what the plan may serve")
 def write_feeds(
-    body: DataFeedsUpdate, session: SessionDep, env: EnvDep
+    body: DataFeedsUpdate,
+    session: SessionDep,
+    env: EnvDep,
+    request: Request,
+    background: BackgroundTasks,
 ) -> list[DataFeed]:
     """Store a feed selection, refusing anything the plan cannot serve.
 
@@ -916,6 +950,7 @@ def write_feeds(
             )
         resolved.append((meta, value))
 
+    changes: list[AuditChange] = []
     for meta, value in resolved:
         _feed_warning(meta, value, correlation_id=correlation_id)
         row = session.get(DataFeedRow, meta.env_var)
@@ -927,16 +962,19 @@ def write_feeds(
         else:
             previous = row.value
             row.value = value
-        _audit(
-            session,
-            category="feed",
-            # The stored key, which for this table *is* the variable name.
-            # ``models.AuditLog`` names ALPACA_OPTIONS_FEED as its own example.
-            field=meta.env_var,
-            previous=previous,
-            new=value,
-            at=at,
-            correlation_id=correlation_id,
+        changes.append(
+            _audit(
+                session,
+                category="feed",
+                # The stored key, which for this table *is* the variable
+                # name. ``models.AuditLog`` names ALPACA_OPTIONS_FEED as its
+                # own example.
+                field=meta.env_var,
+                previous=previous,
+                new=value,
+                at=at,
+                correlation_id=correlation_id,
+            )
         )
         if (env.get(meta.env_var) or "").strip().lower() != value:
             logger.warning(
@@ -957,6 +995,18 @@ def write_feeds(
             )
 
     session.commit()
+    # Feed names and values only -- the audit values, never ``env``, so no key
+    # or plan credential can reach the message (rule 6).
+    notify_after_response(
+        request,
+        background,
+        settings_notice(
+            OperatorEvent.DATA_FEEDS_CHANGED,
+            changes,
+            at=at,
+            correlation_id=correlation_id,
+        ),
+    )
     return _feeds(session, env)
 
 
@@ -971,7 +1021,8 @@ def _routes(session: Session) -> list[NotificationRoute]:
     The table stores a row per ``(event, channel)`` so adding SMS later is a
     data change; the page edits a matrix. A **missing** pair reads as off,
     which is the behavioural truth -- an unconfigured route delivers nothing --
-    and is logged, because seeding guarantees all sixteen.
+    and is logged, because seeding guarantees a row for every event ×
+    channel pair.
     """
     stored = {
         (row.event, row.channel): row.enabled
@@ -1029,7 +1080,10 @@ def read_routes(session: SessionDep) -> list[NotificationRoute]:
 
 @router.put("/routes", summary="Route an event to a channel, or stop routing it")
 def write_routes(
-    body: NotificationRoutesUpdate, session: SessionDep
+    body: NotificationRoutesUpdate,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
 ) -> list[NotificationRoute]:
     """Apply a routing change, auditing the cells that actually changed.
 
@@ -1048,6 +1102,7 @@ def write_routes(
         correlation_id=correlation_id,
     )
 
+    changes: list[AuditChange] = []
     for update in body.routes:
         for channel, enabled in (("bell", update.bell), ("discord", update.discord)):
             row = session.get(NotificationRouteRow, (update.event, channel))
@@ -1063,14 +1118,16 @@ def write_routes(
             else:
                 previous = _on_off(row.enabled)
                 row.enabled = enabled
-            _audit(
-                session,
-                category="notification",
-                field=f"{update.event}.{channel}",
-                previous=previous,
-                new=_on_off(enabled),
-                at=at,
-                correlation_id=correlation_id,
+            changes.append(
+                _audit(
+                    session,
+                    category="notification",
+                    field=f"{update.event}.{channel}",
+                    previous=previous,
+                    new=_on_off(enabled),
+                    at=at,
+                    correlation_id=correlation_id,
+                )
             )
 
         if (
@@ -1095,6 +1152,20 @@ def write_routes(
             )
 
     session.commit()
+    # Scheduled after the commit, and routed when it runs: the new routing
+    # governs the notification about itself. Switching Discord off for
+    # ``notification_routes_changed`` means this change is not posted; the
+    # audit log above is the complete record either way.
+    notify_after_response(
+        request,
+        background,
+        settings_notice(
+            OperatorEvent.NOTIFICATION_ROUTES_CHANGED,
+            changes,
+            at=at,
+            correlation_id=correlation_id,
+        ),
+    )
     return _routes(session)
 
 

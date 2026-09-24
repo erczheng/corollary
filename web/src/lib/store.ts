@@ -393,9 +393,18 @@ interface UIState {
   /** Which Alpaca plan is in force. A fact about the account rather than a
    * preference — it gates which feed values are legal. */
   dataPlan: DataPlan
-  /** The bell feed. Not account-keyed like `activity` is: each notification
-   * carries its own `account`, because an engine fault belongs to no book
-   * and has to appear in both. */
+  /** The Phase 1 fixture feed — **no longer the bell's.** Since Phase 3 step 1
+   * `NotificationBell` reads `GET /api/notifications` through
+   * `useNotifications`, and nothing written here reaches it: a fill invented
+   * by the mock broker below must never sit in the same panel as a real
+   * engine halt. Left in place (with `tick()`'s emission, its routing gate and
+   * the two actions below) only because removing it is outside that step's
+   * scope and its tests still pin the emit-time gate; nothing renders it.
+   * Delete the slice once `store.tick()` itself is retired.
+   *
+   * Not account-keyed like `activity` is: each notification carries its own
+   * `account`, because an engine fault belongs to no book and has to appear
+   * in both. */
   notifications: Notification[]
   /** Edits one ceiling and records it.
    *

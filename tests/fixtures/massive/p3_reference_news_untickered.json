@@ -1,0 +1,220 @@
+{
+  "recorded_at": "2026-09-24T04:37:19+00:00",
+  "request": "https://api.massive.com/v2/reference/news?limit=1000",
+  "status_code": 200,
+  "content_type": "application/json",
+  "truncated": {
+    ".results": 1000,
+    ".results[].keywords": 6
+  },
+  "body": {
+    "results": [
+      {
+        "id": "1a8283e29205f0885fdd99ca99c053a338960a0dd956e4aa9d9c75fe7483f0dd",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "41Caijing and Cifnews (Xiamen) Cross-border E-commerce Co., Ltd Successfully Host Bringing New Products to the World Event on Crowdfunding and Global Growth",
+        "author": "Not Specified",
+        "published_utc": "2026-09-24T03:35:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3367934/0/en/41caijing-and-cifnews-xiamen-cross-border-e-commerce-co-ltd-successfully-host-bringing-new-products-to-the-world-event-on-crowdfunding-and-global-growth.html",
+        "tickers": [
+          "META"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/2e82c6eb-fdb2-4998-87c6-4de7fa46de58",
+        "description": "41Caijing, Cifnews, Meta, and NEW WAVES jointly hosted an event in Dongguan discussing how crowdfunding brands can leverage a GEO+PR strategy to build global consumer trust. The event highlighted how AI-powered search is shifting brand credibility from short-term advertising to long-term media assets, with PR becoming essential for sustained organic search visibility rather than one-off promotional efforts.",
+        "keywords": [
+          "crowdfunding",
+          "global expansion",
+          "PR strategy",
+          "AI search",
+          "brand credibility"
+        ],
+        "insights": [
+          {
+            "ticker": "META",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a co-organizer of the event but with no specific details about their role, contributions, or business implications discussed in the article."
+          }
+        ]
+      },
+      {
+        "id": "bd968f2b4dbb36df23b8bfbeb5a6fc2078830a28c7ebd6afa9b6cecec857520e",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "MoneyHero Adds Critical Illness Comparison on Hong Kong Insurance Marketplace",
+        "author": "Moneyhero Limited",
+        "published_utc": "2026-09-24T03:30:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3367932/0/en/moneyhero-adds-critical-illness-comparison-on-hong-kong-insurance-marketplace.html",
+        "tickers": [
+          "FWDYY",
+          "ZURVY",
+          "MNY",
+          "MNYWW"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/bd9e54de-3bef-4be0-8478-e1b842daa9e6",
+        "description": "MoneyHero has launched a critical illness insurance comparison marketplace in Hong Kong, featuring 13 plans from five insurers (Blue, Bowtie, FWD, OneDegree, and Zurich) with coverage up to HK$4 million. The launch expands MoneyHero's insurance offerings beyond life and travel insurance, supporting its strategy to grow high-margin verticals and deepen member engagement.",
+        "keywords": [
+          "critical illness insurance",
+          "Hong Kong",
+          "insurance marketplace",
+          "fintech",
+          "product expansion"
+        ],
+        "insights": [
+          {
+            "ticker": "FWDYY",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "FWD is included as one of five insurers offering critical illness plans. Partnership provides market access but no distinct impact information is provided."
+          },
+          {
+            "ticker": "ZURVY",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Zurich is listed as one of five insurance partners. The partnership provides distribution but lacks specific details on impact or performance."
+          },
+          {
+            "ticker": "MNY",
+            "sentiment": "positive",
+            "sentiment_reasoning": "The company successfully launched a new insurance product line as planned, expanding its high-margin insurance vertical. The launch demonstrates execution on its product roadmap and reflects growing consumer demand, supporting its growth strategy in the APAC region."
+          },
+          {
+            "ticker": "MNYWW",
+            "sentiment": "positive",
+            "sentiment_reasoning": "The company successfully launched a new insurance product line as planned, expanding its high-margin insurance vertical. The launch demonstrates execution on its product roadmap and reflects growing consumer demand, supporting its growth strategy in the APAC region."
+          }
+        ]
+      },
+      {
+        "id": "7560a69704ab34faaf924be017f93f289502f2f62f98fecbf7c1b14a81f4e244",
+        "publisher": {
+          "name": "The Motley Fool",
+          "homepage_url": "https://www.fool.com/",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/themotleyfool.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/themotleyfool.ico"
+        },
+        "title": "Vanguard Real Estate ETF vs State Street SPDR: Diversification or Cost",
+        "author": "John Ballard",
+        "published_utc": "2026-09-24T03:26:01Z",
+        "article_url": "https://www.fool.com/coverage/etfs/2026/09/23/vanguard-real-estate-etf-vs-state-street-spdr-diversification-or-cost/?source=iedfolrf0000001",
+        "tickers": [
+          "VNQ",
+          "XLRE",
+          "WELL",
+          "PLD",
+          "EQIX"
+        ],
+        "image_url": "https://g.foolcdn.com/image/?url=https%3A%2F%2Fcdn.content.foolcdn.com%2Fimages%2F1umn9qeh%2Fproduction%2F4db1f9dc6b521047b90577456a50b49560e87c49-1401x1251.png%3Fw%3D800%26q%3D75%26fit%3Dmax%26auto%3Dformat&w=1200&op=resize",
+        "description": "Vanguard Real Estate ETF (VNQ) and State Street Real Estate Select Sector SPDR ETF (XLRE) offer different approaches to real estate investing. VNQ provides broader diversification with 139 holdings and a higher 3.7% dividend yield but charges 0.13% in expenses. XLRE focuses on 30 large-cap stocks with a lower 0.08% expense ratio. Both delivered similar 5-year returns, but Vanguard's larger $70.8B asset base and higher yield make it the more solid long-term choice despite its slightly higher fees.",
+        "keywords": [
+          "real estate ETF",
+          "REIT",
+          "diversification",
+          "expense ratio",
+          "dividend yield"
+        ],
+        "insights": [
+          {
+            "ticker": "VNQ",
+            "sentiment": "positive",
+            "sentiment_reasoning": "Recommended as the better choice due to superior diversification (139 holdings vs 30), higher dividend yield (3.7%), larger asset base ($70.8B providing greater liquidity), and similar performance to competitor despite marginally higher expense ratio."
+          },
+          {
+            "ticker": "XLRE",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Presented as a viable but less optimal alternative; offers the advantage of lower expense ratio (0.08%) and concentrated large-cap focus, but lacks the diversification, yield, and liquidity advantages of VNQ."
+          },
+          {
+            "ticker": "WELL",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a top holding in both ETFs (10.23% in VNQ, 11.19% in XLRE), indicating it is a significant component of real estate sector exposure but no independent analysis provided."
+          },
+          {
+            "ticker": "PLD",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Listed as a major holding in both funds (8.08% in VNQ, 8.70% in XLRE), representing core real estate portfolio exposure without specific sentiment commentary."
+          },
+          {
+            "ticker": "EQIX",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Identified as a significant holding in both ETFs (6.39% in VNQ, 6.84% in XLRE), indicating relevance to real estate sector but no independent evaluation provided."
+          }
+        ]
+      },
+      {
+        "id": "c3efb3627ff5f66b89bd989c4301f6fccbe31d408f723b529e081533b2a72e98",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "PHH, BYAH DEADLINE: ROSEN, NATIONAL INVESTOR COUNSEL, Encourages Park Ha Biological Technology Co., Ltd. Investors to Secure Counsel Before Important September 28 Deadline in Securities Class Action - PHH, BYAH",
+        "author": "Rosen Law Firm",
+        "published_utc": "2026-09-24T02:44:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3367929/673/en/phh-byah-deadline-rosen-national-investor-counsel-encourages-park-ha-biological-technology-co-ltd-investors-to-secure-counsel-before-important-september-28-deadline-in-securities-c.html",
+        "tickers": [
+          "BYAH"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/745335af-3a3a-4fb5-84c0-fdedc9adf092",
+        "description": "A securities class action lawsuit has been filed against Park Ha Biological Technology Co., Ltd. for allegedly making materially false statements and failing to disclose a fraudulent stock promotion scheme involving social media misinformation and artificially manipulated trading activity. Investors who purchased securities between December 27, 2024 and July 8, 2025 are encouraged to seek legal counsel before the September 28, 2026 lead plaintiff deadline.",
+        "keywords": [
+          "securities class action",
+          "fraudulent stock promotion",
+          "misleading statements",
+          "stock manipulation",
+          "lead plaintiff deadline"
+        ],
+        "insights": [
+          {
+            "ticker": "BYAH",
+            "sentiment": "negative",
+            "sentiment_reasoning": "The company is the subject of a securities class action lawsuit alleging fraudulent stock promotion schemes, materially false statements, undisclosed trading manipulation, and artificially structured IPO designed to enable market manipulation. These serious allegations of fraud and deception warrant a negative sentiment."
+          }
+        ]
+      },
+      {
+        "id": "1fdd4479ca6b1c736391264c42bd08cffdc434aa4da2d017f8d5d896198f1d1b",
+        "publisher": {
+          "name": "The Motley Fool",
+          "homepage_url": "https://www.fool.com/",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/themotleyfool.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/themotleyfool.ico"
+        },
+        "title": "AST SpaceMobile Pushed Commercial Launch to 2027. Here's How Long Its Cash Lasts Until Then",
+        "author": "Reuben Gregg Brewer",
+        "published_utc": "2026-09-24T02:15:00Z",
+        "article_url": "https://www.fool.com/investing/2026/09/23/ast-spacemobile-pushed-commercial-launch-to-2027-h/?source=iedfolrf0000001",
+        "tickers": [
+          "ASTS"
+        ],
+        "image_url": "https://g.foolcdn.com/image/?url=https%3A%2F%2Fg.foolcdn.com%2Feditorial%2Fimages%2F888483%2F23_04_13-us-dollar-banknotes-on-fire-and-falling-down-_mf-dload.jpg&w=1200&op=resize",
+        "description": "AST SpaceMobile delayed its 45-satellite commercial launch to 2027 but raised $1.15 billion in convertible bonds to strengthen its liquidity position to $3.7 billion. At current burn rates of approximately $1.6 billion annually, the company has sufficient cash to reach its 2027 launch target, though it faces significant competition from SpaceX's established Starlink network.",
+        "keywords": [
+          "satellite broadband",
+          "commercial launch delay",
+          "funding",
+          "liquidity",
+          "space infrastructure"
+        ],
+        "insights": [
+          {
+            "ticker": "ASTS",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "The company faces a launch delay (negative), but successfully raised substantial capital and has sufficient cash runway to reach its 2027 target (positive). The overall outlook is mixed—adequate funding mitigates near-term concerns, but execution risk and competition from SpaceX remain."
+          }
+        ]
+      }
+    ],
+    "status": "OK",
+    "request_id": "6280fb6bc111ea0cdf54eb268177cd18",
+    "count": 1000,
+    "next_url": "https://api.massive.com/v2/reference/news?cursor=YXA9MjAyNi0wOS0xOFQyMSUzQTQ1JTNBMDVaJmFzPTliMjZmYWRlMGJmNjNlZDMxN2ZiYzBhYTg4MGMwMzY4ZTAzNzc5NWE2YjE5ZjNmNTQ3ODY3NmEzOTcyNjQ4MDYmbGltaXQ9MTAwMCZvcmRlcj1kZXNjZW5kaW5n"
+  }
+}

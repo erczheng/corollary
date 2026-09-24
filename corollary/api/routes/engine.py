@@ -41,20 +41,57 @@ restating them.
 import logging
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Sequence
+from enum import StrEnum
+from typing import Final, NamedTuple
 
-from fastapi import APIRouter
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from corollary.api.deps import SessionDep
+from corollary.api.operator import halt_notice, notify_after_response, resume_notice
 from corollary.api.schemas import EngineStateResponse, HaltRequest
 from corollary.db.models import EngineState
 from corollary.engine.state import engine_state
+from corollary.wire import operator_text
 
-__all__ = ["router"]
+__all__ = ["HALTED_REASON_WIDTH", "OperatorRule", "router"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/engine", tags=["engine"])
+
+#: ``engine_state.halted_reason`` is ``String(256)``. The scrubbed reason is
+#: bounded to it: redaction can lengthen text (a short secret becomes the ten
+#: characters of ``<redacted>``), so a reason the schema admitted at full
+#: width could otherwise come out wider than the column.
+#: ``tests/api/test_halt_reason_redaction.py`` pins this to the column.
+HALTED_REASON_WIDTH: Final = 256
+
+
+class OperatorRule(StrEnum):
+    """Why this module logged a state change. One value per case, never prose.
+
+    ``rule`` on a log record is a thing you count, filter and alert on, as it
+    is in ``engine/runtime.py`` -- where the *automatic* ``engine_halted``
+    carries a ``HaltRule``. The sentence explaining the policy goes under
+    ``policy``. Named to match the notification events they accompany.
+    """
+
+    #: A human halted the engine through ``POST /api/engine/halt``.
+    OPERATOR_HALT = "operator_halt"
+    #: The same, on an engine already halted with a stated reason: the newest
+    #: reason is stored and the one it replaced is logged.
+    OPERATOR_HALT_REPLACED = "operator_halt_replaced"
+    #: A human ended a halt -- the only way one ends (rule 9).
+    OPERATOR_RESUME = "operator_resume"
+
+
+class _EndedHalt(NamedTuple):
+    """What a resume found, for the record of it."""
+
+    was_halted: bool
+    previous_reason: str | None
+    previous_at: datetime | None
 
 
 def _response(state: EngineState) -> EngineStateResponse:
@@ -66,33 +103,97 @@ def _response(state: EngineState) -> EngineStateResponse:
     )
 
 
-def _clear_halt(state: EngineState, *, at: datetime, correlation_id: str) -> None:
+def _clear_halt(
+    state: EngineState, *, request: Request, at: datetime, correlation_id: str
+) -> _EndedHalt:
     """End a halt. **The only code in this package that does.**
 
     Private, and named so a grep over ``corollary/`` reads as an assertion.
     ``tests/api/test_engine_routes.py`` pins both this name and the literal
     assignment below to this one file.
+
+    Returns what it found, so the resume route can say which halt ended. The
+    notification that says so is a record, sent after the commit; nothing it
+    does can end a halt.
+
+    The reason it found is returned **scrubbed** (:func:`_scrubbed_stored_reason`),
+    since the row may predate the entry scrub or come from the runtime's own
+    halt; the log line below and the resume notice both read that one copy.
     """
-    previous_reason = state.halted_reason
-    previous_at = state.halted_at
+    ended = _EndedHalt(
+        was_halted=state.halted,
+        previous_reason=_scrubbed_stored_reason(request, state.halted_reason),
+        previous_at=state.halted_at,
+    )
     state.halted = False
     state.halted_reason = None
     state.halted_at = None
     logger.warning(
         "engine resumed by an explicit request (previous reason: %s)",
-        previous_reason,
+        ended.previous_reason,
         extra={
             "event": "engine_resumed",
-            "rule": (
+            "rule": OperatorRule.OPERATOR_RESUME.value,
+            "policy": (
                 "a halt ends only at POST /api/engine/resume -- never on "
                 "reconnect, never on restart (CLAUDE.md rule 9)"
             ),
-            "previous_reason": previous_reason,
-            "previous_halted_at": previous_at.isoformat() if previous_at else None,
+            "was_halted": ended.was_halted,
+            "previous_reason": ended.previous_reason,
+            "previous_halted_at": (
+                ended.previous_at.isoformat() if ended.previous_at else None
+            ),
             "at": at.isoformat(),
             "correlation_id": correlation_id,
         },
     )
+    return ended
+
+
+def _scrubbed_reason(request: Request, typed: str) -> str:
+    """The halt reason as it may be kept: de-identified and column-bounded.
+
+    Configured secrets come from ``app.state.secret_values`` -- the same
+    per-request read of ``SECRET_ENV_VARS`` the error envelope uses.
+
+    **An app without that state still halts.** Unlike the activity route,
+    which refuses to serve vendor text it cannot redact, this route falls back
+    to no configured secrets: failing a halt to protect a log line would trade
+    the thing rule 9 exists for against the thing rule 6 exists for, and the
+    credential *shapes* still apply either way. ``create_app`` always sets it.
+    """
+    return operator_text(
+        typed, secrets=_configured_secrets(request), limit=HALTED_REASON_WIDTH
+    )
+
+
+def _configured_secrets(request: Request) -> Sequence[str]:
+    """The configured secret values, or none on an app without that state.
+
+    One lookup and one fallback, shared by the entry scrub and the read-side
+    scrub, so the two can never redact against different sets.
+    """
+    provider = getattr(request.app.state, "secret_values", None)
+    return provider() if callable(provider) else ()
+
+
+def _scrubbed_stored_reason(request: Request, stored: str | None) -> str | None:
+    """A reason read back from ``engine_state``, scrubbed for display and logs.
+
+    The entry scrub covers what *this* route writes. ``halted_reason`` can
+    also hold text it never saw -- a row written before that scrub existed,
+    or by the runtime's own halt -- and the halt and resume routes echo it as
+    ``previous_reason`` into log lines, the bell and Discord (rule 6). So it
+    is scrubbed once, where the route reads it, with the same secrets and the
+    same fallback as :func:`_scrubbed_reason`.
+
+    **Display only.** The stored row is left exactly as found; nothing here
+    writes it back. ``None`` stays ``None`` so the notices' "not recorded"
+    branches still fire -- the scrub must not invent an empty reason.
+    """
+    if stored is None:
+        return None
+    return _scrubbed_reason(request, stored)
 
 
 # --------------------------------------------------------------------------
@@ -106,7 +207,12 @@ def read_state(session: SessionDep) -> EngineStateResponse:
 
 
 @router.post("/halt", summary="Stop new entries, with a stated reason")
-def halt(body: HaltRequest, session: SessionDep) -> EngineStateResponse:
+def halt(
+    body: HaltRequest,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
+) -> EngineStateResponse:
     """Halt the engine and record why.
 
     Rule 7: this stops new entries. Existing positions keep their managed
@@ -119,62 +225,114 @@ def halt(body: HaltRequest, session: SessionDep) -> EngineStateResponse:
     the one it replaced, so the first cause survives in the record. Keeping
     the old reason instead would make the endpoint silently ignore an
     operator, which is worse than losing the earlier line from the response.
+
+    The owner's action is then told to the bell and Discord
+    (``operator_halt``), after the commit and after the response -- a
+    notification never delays or fails a halt.
+
+    **The reason is scrubbed once, here, before anything keeps it** (rule 6).
+    It is owner-typed free text, and a key pasted into it by mistake would
+    otherwise reach ``engine_state``, two log lines, the bell and Discord
+    verbatim. :func:`_scrubbed_reason` runs first and ``body.reason`` is not
+    read again, so every sink carries the same text and a sink added later
+    cannot be the one that forgot to scrub.
     """
     at = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
+    reason = _scrubbed_reason(request, body.reason)
     state = engine_state(session)
+    # The stored reason this halt replaces, scrubbed once where it is read
+    # (it may predate the entry scrub, or be the runtime's). Both log lines
+    # and the notice take this copy; the raw ``state.halted_reason`` is not
+    # echoed anywhere below, and it is overwritten, not scrubbed in place.
+    previous_reason = _scrubbed_stored_reason(request, state.halted_reason)
 
-    if state.halted and state.halted_reason is not None:
+    if state.halted and previous_reason is not None:
         logger.info(
             "engine was already halted; replacing the stated reason",
             extra={
                 "event": "engine_halt_repeated",
-                "rule": "the newest reason is served; the replaced one is logged",
-                "previous_reason": state.halted_reason,
+                "rule": OperatorRule.OPERATOR_HALT_REPLACED.value,
+                "policy": "the newest reason is served; the replaced one is logged",
+                "previous_reason": previous_reason,
                 "previous_halted_at": (
                     state.halted_at.isoformat() if state.halted_at else None
                 ),
-                "reason": body.reason,
+                "reason": reason,
                 "at": at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
 
-    previous_reason = state.halted_reason
+    was_halted = state.halted
+    previous_at = state.halted_at
     state.halted = True
-    state.halted_reason = body.reason
+    state.halted_reason = reason
     state.halted_at = at
     session.commit()
 
     logger.warning(
         "engine halted: %s",
-        body.reason,
+        reason,
         extra={
             "event": "engine_halted",
-            "rule": (
+            "rule": OperatorRule.OPERATOR_HALT.value,
+            "policy": (
                 "halt stops new entries and is recorded with its reason and "
                 "timestamp (CLAUDE.md rules 7 and 8)"
             ),
-            "reason": body.reason,
+            "reason": reason,
             "previous_reason": previous_reason,
             "at": at.isoformat(),
             "correlation_id": correlation_id,
         },
     )
+    notify_after_response(
+        request,
+        background,
+        halt_notice(
+            # The stored value, as committed -- never the request's.
+            reason=state.halted_reason or reason,
+            was_halted=was_halted,
+            previous_reason=previous_reason,
+            previous_at=previous_at,
+            at=at,
+            correlation_id=correlation_id,
+        ),
+    )
     return _response(state)
 
 
 @router.post("/resume", summary="End a halt -- the only way one ends")
-def resume(session: SessionDep) -> EngineStateResponse:
+def resume(
+    session: SessionDep, request: Request, background: BackgroundTasks
+) -> EngineStateResponse:
     """Clear the halt. Explicit, human, and reachable from nowhere else.
 
     Deliberately takes no body and no confirmation token. The confirmation
     that matters is the one the UI asks for before it calls this; adding a
     second here would only make the endpoint feel safe enough to call from
     code, which is exactly what rule 9 forbids.
+
+    ``operator_resume`` is sent after the commit, naming the halt that ended:
+    a record of a human's recovery step, never a mechanism for one.
     """
     at = datetime.now(timezone.utc)
+    correlation_id = str(uuid.uuid4())
     state = engine_state(session)
-    _clear_halt(state, at=at, correlation_id=str(uuid.uuid4()))
+    ended = _clear_halt(
+        state, request=request, at=at, correlation_id=correlation_id
+    )
     session.commit()
+    notify_after_response(
+        request,
+        background,
+        resume_notice(
+            was_halted=ended.was_halted,
+            previous_reason=ended.previous_reason,
+            previous_at=ended.previous_at,
+            at=at,
+            correlation_id=correlation_id,
+        ),
+    )
     return _response(state)

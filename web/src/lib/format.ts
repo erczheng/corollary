@@ -238,10 +238,15 @@ export function formatInteger(value: number): string {
  * an em dash rather than $0.00B, which would read as a fund worth nothing
  * and would sort below every real company. The unit is part of the value
  * here, so it is not left to the column header. */
-export function formatMarketCap(billions: number | null): string {
-  if (billions === null) return '—'
-  if (billions >= 1000) return `$${(billions / 1000).toFixed(2)}T`
-  return `$${billions.toLocaleString('en-US')}B`
+export function formatMarketCap(dollars: number | null): string {
+  // Dollars, as the wire carries them: the server scales Finnhub's millions
+  // with an exact Decimal. This took billions while the column was a fixture,
+  // and read a live $5.43T as "$5434790884.05T".
+  if (dollars === null) return '—'
+  if (dollars >= 1e12) return `$${(dollars / 1e12).toFixed(2)}T`
+  if (dollars >= 1e9) return `$${(dollars / 1e9).toFixed(2)}B`
+  if (dollars >= 1e6) return `$${(dollars / 1e6).toFixed(2)}M`
+  return `$${dollars.toLocaleString('en-US')}`
 }
 
 /** Implied volatility, stored as a decimal and read as a percentage. One

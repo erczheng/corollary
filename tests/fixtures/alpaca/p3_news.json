@@ -1,0 +1,150 @@
+{
+  "recorded_at": "2026-09-24T04:37:16+00:00",
+  "request": "https://data.alpaca.markets/v1beta1/news?limit=5&symbols=AAPL",
+  "status_code": 200,
+  "content_type": "application/json",
+  "body": {
+    "news": [
+      {
+        "author": "Ananya Gairola",
+        "content": "",
+        "created_at": "2026-09-24T03:23:08Z",
+        "headline": "Meta Stock Expected to be 'Flat to Down' on 'Connect' Keynote, Says Gene Munster: Muse is 'Bad News' for Google, Says Analyst",
+        "id": 61962894,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/24/Penang--Malaysia---18-Dec-2021-Meta-Plat.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/24/Penang--Malaysia---18-Dec-2021-Meta-Plat.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/24/Penang--Malaysia---18-Dec-2021-Meta-Plat.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Meta’s new VR glasses impressed some analysts, but weak Muse adoption data raised concerns about its stock outlook.",
+        "symbols": [
+          "AAPL",
+          "AMZN",
+          "META"
+        ],
+        "updated_at": "2026-09-24T03:23:08Z",
+        "url": "https://www.benzinga.com/markets/tech/26/09/61962894/meta-stock-gene-munster-connect-keynote-google-bad-news"
+      },
+      {
+        "author": "Benzinga Insights",
+        "content": "",
+        "created_at": "2026-09-23T20:30:19Z",
+        "headline": "Here's How Much $1000 Invested In Apple 20 Years Ago Would Be Worth Today",
+        "id": 61958804,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/07/10/valuestock_1.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/07/10/valuestock_1.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/07/10/valuestock_1.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Apple (NASDAQ:AAPL) has outperformed the market over the past 20 years by 18.2% on an annualized basis producing an average annual return of 27.36%. Currently, Apple has a market capitalization of $4.94 trillion.",
+        "symbols": [
+          "AAPL"
+        ],
+        "updated_at": "2026-09-23T20:30:19Z",
+        "url": "https://www.benzinga.com/news/26/09/61958804/here-s-how-much-1000-invested-apple-20-years-ago-would-be-worth-today"
+      },
+      {
+        "author": "Chris Katje",
+        "content": "",
+        "created_at": "2026-09-23T19:45:42Z",
+        "headline": "Meta’s Muse ‘A Game Changer’ Says Dan Ives: ‘Investors Discounted Meta and Zuckerberg'",
+        "id": 61957441,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Ljubljana--Slovenia---21-January-2023-Me.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Ljubljana--Slovenia---21-January-2023-Me.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Ljubljana--Slovenia---21-January-2023-Me.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Dan Ives is bullish on Meta stock after the launch of Muse.",
+        "symbols": [
+          "AAPL",
+          "META"
+        ],
+        "updated_at": "2026-09-23T19:45:42Z",
+        "url": "https://www.benzinga.com/trading-ideas/long-ideas/26/09/61957441/metas-muse-a-game-changer-says-dan-ives-investors-discounted-meta-and-zuckerberg"
+      },
+      {
+        "author": "Benzinga Insights",
+        "content": "",
+        "created_at": "2026-09-23T17:35:18Z",
+        "headline": "10 Information Technology Stocks Whale Activity In Today’s Session",
+        "id": 61954152,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/11/06/aggregated_options_2.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/11/06/aggregated_options_2.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2025/11/06/aggregated_options_2.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "This whale alert can help traders discover the next big trading opportunities.\nWhales are entities with large sums of money and we track their transactions here at Benzinga on our options activity scanner.\nTraders often",
+        "symbols": [
+          "AAPL",
+          "APH",
+          "CIFR",
+          "CRM",
+          "CRWD",
+          "MSTR",
+          "NBIS",
+          "NVDA",
+          "QMCO",
+          "U"
+        ],
+        "updated_at": "2026-09-23T17:35:18Z",
+        "url": "https://www.benzinga.com/markets/options/26/09/61954152/10-information-technology-stocks-whale-activity-today-s-session"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T17:25:43Z",
+        "headline": "B of A Securities Reiterates Buy on Apple, Maintains $370 Price Target",
+        "id": 61953899,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "AAPL"
+        ],
+        "updated_at": "2026-09-23T17:25:43Z",
+        "url": "https://www.benzinga.com/news/26/09/61953899/b-securities-reiterates-buy-apple-maintains-370-price-target"
+      }
+    ],
+    "next_page_token": "<redacted>"
+  }
+}
