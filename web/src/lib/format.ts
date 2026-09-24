@@ -249,6 +249,15 @@ export function formatMarketCap(dollars: number | null): string {
   return `$${dollars.toLocaleString('en-US')}`
 }
 
+/** The Markets table's market-cap cell: the figure, "ETF" for a fund, or
+ * `null` for a company whose figure is unavailable (the cell renders that as
+ * an unlabelled dash). `isFund` comes from the server's curated universe and
+ * is never inferred from the null, which also means a vendor outage. */
+export function formatMarketCapCell(dollars: number | null, isFund: boolean): string | null {
+  if (dollars !== null) return formatMarketCap(dollars)
+  return isFund ? 'ETF' : null
+}
+
 /** Implied volatility, stored as a decimal and read as a percentage. One
  * decimal place: the chain's smirk moves in tenths, and rounding to whole
  * points flattens adjacent strikes into a tie. */

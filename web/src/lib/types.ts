@@ -630,6 +630,10 @@ export interface StockQuote {
    * dash and the ranking sorts nulls last rather than treating them as
    * zero. */
   marketCap: number | null
+  /** An exchange-traded fund, from the server's curated universe. Never
+   * inferred from a null `marketCap`, which also means a vendor outage or a
+   * symbol not fetched yet — only a fund's empty cell reads "ETF". */
+  isFund: boolean
 }
 
 /** Which of the one quote map's two writers put a price there.

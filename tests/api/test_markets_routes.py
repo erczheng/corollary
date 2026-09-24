@@ -1144,6 +1144,34 @@ def test_a_companys_market_cap_is_dollars_and_a_funds_is_null(
     assert table[1]["marketCap"] is None
 
 
+def test_is_fund_comes_from_the_universe_not_from_a_null_market_cap(
+    make_market_client: MarketClient,
+) -> None:
+    """The Markets table labels a fund's empty cell "ETF", so the flag has to
+    be a fact about the symbol. A null market cap is three things on the wire
+    -- a fund, a vendor outage, a symbol not yet fetched -- and deriving
+    "fund" from it would label NVDA an ETF during a Finnhub outage."""
+    fundamentals = FakeFundamentals(
+        {
+            "NVDA": MarketCap.unavailable("NVDA", "GET /stock/profile2 returned 503"),
+            "SPY": MarketCap.not_filed("SPY", "a fund files no share count"),
+        }
+    )
+    client, _ = make_market_client(market_data_routes(), fundamentals=fundamentals)
+
+    table = rows(client, "/api/markets/stocks", symbols="NVDA,SPY")
+
+    assert [(row["symbol"], row["marketCap"], row["isFund"]) for row in table] == [
+        ("NVDA", None, False),
+        ("SPY", None, True),
+    ]
+
+
+def test_the_universe_marks_exactly_its_five_funds() -> None:
+    funds = {entry.symbol for entry in markets_routes.UNIVERSE if entry.fund}
+    assert funds == {"SPY", "QQQ", "IWM", "XLE", "ARKK"}
+
+
 def test_a_market_cap_that_could_not_be_fetched_is_null_not_a_guess(
     make_market_client: MarketClient,
 ) -> None:

@@ -56,7 +56,7 @@ import {
   formatExpiry,
   formatInteger,
   formatIv,
-  formatMarketCap,
+  formatMarketCapCell,
   formatPct,
   formatTimeET,
   formatUsd,
@@ -1065,17 +1065,33 @@ function StocksAndEtfs({
                           `${rel.toFixed(2)}×`
                         )}
                       </td>
-                      {/* A fund has no market cap. formatMarketCap renders
-                          the em dash, and sortStocks sorts those rows last
-                          rather than treating them as zero. */}
-                      <td
-                        className={`${TD} whitespace-nowrap text-right text-data-md ${
-                          s.marketCap === null ? 'text-on-surface-variant' : 'text-on-surface'
-                        }`}
-                        title={s.marketCap === null ? 'A fund has no market capitalisation' : ''}
-                      >
-                        {formatMarketCap(s.marketCap)}
-                      </td>
+                      {/* A fund has no market cap and reads "ETF"; a company
+                          with no figure is a vendor outage or not fetched yet,
+                          and reads as an unlabelled dash. Both sort last
+                          rather than being treated as zero. */}
+                      {(() => {
+                        const cap = formatMarketCapCell(s.marketCap, s.isFund)
+                        return (
+                          <td
+                            className={`${TD} whitespace-nowrap text-right text-data-md ${
+                              s.marketCap === null ? 'text-on-surface-variant' : 'text-on-surface'
+                            }`}
+                          >
+                            {cap === null ? (
+                              <Unavailable reason="market cap unavailable from the vendor" />
+                            ) : s.marketCap === null ? (
+                              <span
+                                className="font-label"
+                                title="An exchange-traded fund has no market capitalisation"
+                              >
+                                {cap}
+                              </span>
+                            ) : (
+                              cap
+                            )}
+                          </td>
+                        )
+                      })()}
                       <td className={`${TD} whitespace-nowrap text-right`}>
                         <button
                           type="button"
