@@ -1,0 +1,15 @@
+Fund Name:,The Health Care Select Sector SPDR® Fund (SYNTHETIC TEST FIXTURE)
+Ticker Symbol:,XLV
+Holdings:,As of 22-Sep-2026
+,,,,,,,
+Name,Ticker,Identifier,SEDOL,Weight,Sector,Shares Held,Local Currency
+ELI LILLY + CO,LLY,SYN000000,S000000,30,Health Care,1000.00,USD
+JOHNSON + JOHNSON,JNJ,SYN000001,S000001,20,Health Care,2000.00,USD
+ABBVIE INC,ABBV,SYN000002,S000002,17,Health Care,3000.00,USD
+UNITEDHEALTH GROUP INC,UNH,SYN000003,S000003,13,Health Care,4000.00,USD
+ABBOTT LABORATORIES,ABT,SYN000004,S000004,11,Health Care,5000.00,USD
+MERCK + CO. INC.,MRK,SYN000005,S000005,9,Health Care,6000.00,USD
+US DOLLAR,-,-,-,0.12,-,1234567.00,USD
+,,,,,,,
+"Past performance is not a guarantee of future results. SYNTHETIC TEST FIXTURE: invented weights, not State Street data."
+Holdings are subject to change.

@@ -1,0 +1,15 @@
+Fund Name:,The Materials Select Sector SPDR® Fund (SYNTHETIC TEST FIXTURE)
+Ticker Symbol:,XLB
+Holdings:,As of 22-Sep-2026
+
+Name,Ticker,Identifier,SEDOL,Weight,Sector,Shares Held,Local Currency
+LINDE PLC,LIN,SYN000000,S000000,30,Materials,1000.00,USD
+SHERWIN WILLIAMS CO/THE,SHW,SYN000001,S000001,20,Materials,2000.00,USD
+AIR PRODUCTS + CHEMICALS INC,APD,SYN000002,S000002,16,Materials,3000.00,USD
+ECOLAB INC,ECL,SYN000003,S000003,14,Materials,4000.00,USD
+NEWMONT CORP,NEM,SYN000004,S000004,11,Materials,5000.00,USD
+FREEPORT MCMORAN INC,FCX,SYN000005,S000005,9,Materials,6000.00,USD
+US DOLLAR,-,-,-,0.12,-,1234567.00,USD
+
+"Past performance is not a guarantee of future results. SYNTHETIC TEST FIXTURE: invented weights, not State Street data."
+Holdings are subject to change.
