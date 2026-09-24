@@ -109,6 +109,13 @@ from corollary.engine.execution.interface import (
 )
 from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
 from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
+from corollary.engine.scheduler import (
+    ContextServices,
+    Scheduler,
+    SchedulerFactory,
+    build_context_scheduler,
+    no_scheduler,
+)
 from corollary.engine.sockets import SocketSupervisor
 from corollary.wire import vendor_detail
 
@@ -411,6 +418,7 @@ def create_app(
     secrets: Sequence[str] | None = None,
     streams: SocketSupervisorFactory = no_socket_supervisor,
     discord: bool = False,
+    scheduler: SchedulerFactory = no_scheduler,
 ) -> FastAPI:
     """Build the application.
 
@@ -449,6 +457,14 @@ def create_app(
     ``notification_delivery`` row naming why for every alert routed to it, so
     "routed to Discord" and "never sent" are both on the record. The bell's
     database sink is installed either way.
+
+    ``scheduler`` decides which context jobs the lifespan runs (Phase 3
+    decision 1), and it **defaults to none** for the reason ``streams`` does:
+    the jobs call Finnhub, FRED, Massive and StockTwits with keys from the
+    developer's environment, and a test app must not do that by forgetting an
+    argument. Both shipped apps opt in. The factory is handed a
+    :class:`ContextServices` and the redaction callable -- never the
+    :class:`EngineRuntime` -- so no job can reach rule 9's switch.
     """
 
     @asynccontextmanager
@@ -543,10 +559,47 @@ def create_app(
             )
             supervisor = None
         app.state.socket_supervisor = supervisor
+        # The context jobs (Phase 3 decision 1). Built from ContextServices,
+        # which has no runtime in it: news, calendar and macro feeds are not
+        # rule 9 producers, and a job cannot feed a switch it was never
+        # handed. Stated-never-fatal like the sockets above -- and never a
+        # halt either, since a feed that cannot be scheduled is a stale page,
+        # not a lost connection.
+        context_scheduler: Scheduler | None = None
+        try:
+            context_scheduler = scheduler(
+                ContextServices(session_factory=lambda: Session(db_engine)),
+                app.state.secret_values,
+            )
+            if context_scheduler is not None:
+                context_scheduler.start()
+        except Exception as exc:
+            logger.error(
+                "the context scheduler did not start; the app keeps serving "
+                "and every context feed will read stale",
+                extra={
+                    "event": "context_scheduler_not_started",
+                    "rule": (
+                        "a context scheduler that cannot start leaves the API "
+                        "answering and the engine's halt state untouched"
+                    ),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            context_scheduler = None
+        app.state.scheduler = context_scheduler
         try:
             yield
         finally:
-            # Sockets first: they report into the watchdog, and a socket
+            # The context jobs first: they write through the database and,
+            # from later steps, the registry's providers, both closed below.
+            # ``aclose`` never raises -- a job task that died was logged when
+            # it died -- so it cannot skip the steps after it, and the rule 9
+            # alerts still queued in the Discord sink keep their grace period.
+            if context_scheduler is not None:
+                await context_scheduler.aclose()
+            # Then the sockets, ahead of the runtime: they report into the
+            # watchdog, and a socket
             # still reading while the supervisor it reports to is gone is a
             # message recorded against a switch nobody is watching.
             if supervisor is not None:
@@ -575,6 +628,14 @@ def create_app(
     # is the line that can go missing, and a rule 9 alert that quietly stops
     # reaching the phone is exactly what the delivery table exists to catch.
     app.state.discord_delivery = discord
+    # And for the same reason again: the shipped opt-in to the context jobs
+    # is the line that can go missing, and a page whose every feed reads
+    # *stale* because nothing ever polled it is the failure this records.
+    app.state.scheduler_factory = scheduler
+    # Replaced in the lifespan; ``None`` until then, and ``None`` there too
+    # when the app was built with no scheduler or it could not start. A later
+    # step's routes read ``status()`` off it for *stale since HH:MM ET*.
+    app.state.scheduler = None
     # Replaced in the lifespan. Present so that a route reading it outside a
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
@@ -629,7 +690,11 @@ def create_app(
 #: this one, and the opt-in to the vendor sockets is here rather than in
 #: :func:`create_app`'s default so that nothing built for a test can open a
 #: real connection by forgetting an argument.
-app = create_app(streams=build_socket_supervisor, discord=True)
+app = create_app(
+    streams=build_socket_supervisor,
+    discord=True,
+    scheduler=build_context_scheduler,
+)
 
 #: The same app with **no vendor sockets**, for ``--reload``.
 #:
@@ -665,4 +730,16 @@ app = create_app(streams=build_socket_supervisor, discord=True)
 #: alert-fatigue version of the resume reflex above. The disabled sink
 #: records a ``dropped`` delivery row per alert naming why, so the choice is
 #: visible in the data rather than a silent gap.
-dev_app = create_app()
+#:
+#: **The context scheduler, though, runs here** (Phase 3 decision 1). The
+#: sockets are out because a reload's surplus connection earns a 406 and a
+#: halt; context jobs are REST polls that by construction cannot halt
+#: anything, so that argument does not reach them -- and without them every
+#: News, calendar and macro panel would read *stale* for the whole of the
+#: frontend work those panels need real data for. The reload loop's cost is
+#: bounded by the scheduler itself: a job's first run is its first slot
+#: *after* startup, never an immediate one, so saving a file does not re-fire
+#: every poll. What a save does do is hand the new process a fresh
+#: :func:`~corollary.ratelimit.default_limiter`, which is why no job may rely
+#: on its bucket alone to stay under a vendor's ceiling across restarts.
+dev_app = create_app(scheduler=build_context_scheduler)
