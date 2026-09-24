@@ -1410,8 +1410,9 @@ label-volume measurement:** over at least five sessions of recorded headlines,
 how many directional labels per session the rules patterns and Massive's
 insights produce on the watch universe, and Massive's neutral share. Plus a
 human read of StockTwits' and Massive's terms for automated access.
-- *Status:* **done 2026-09-24, except the two human terms reads** (StockTwits,
-  Massive — URLs in *Not verified*). All probes ran, including the full
+- *Status:* **done 2026-09-24.** The two human terms reads (StockTwits,
+  Massive — URLs in *Not verified*) were done by the owner on 2026-09-24, who
+  raised no objection to either source. All probes ran, including the full
   one-hour StockTwits poll (180 requests, no 429, no challenge), and the label
   volume is measured over ten sessions. Decision 13's second-risk condition
   was checked and is **not triggered as measured**: the strict rules estimate
@@ -1431,10 +1432,15 @@ human read of StockTwits' and Massive's terms for automated access.
 **1. Notifications land; rule 9's halt alert is delivered.**
 - *Status:* **done 2026-09-24** (45171a1 backend, 787fe80 bell).
   Hung-webhook-does-not-delay-halt, failed-delivery recording and webhook
-  redaction are pinned in `risk` tests. **Not run: the live forced watchdog
-  halt on `:app` producing a bell entry and a Discord embed** — left for the
-  owner, because it halts the engine against the configured database and
-  posts to the real webhook. *Depends on:* nothing.
+  redaction are pinned in `risk` tests. **Live checks on `:app`, 2026-09-24,
+  against a scratch database, at the owner's request:** a test embed through
+  `DiscordNotifier` was delivered (`HTTP 204`); a manual halt and resume
+  (decision 20) each landed on the bell and in Discord (`HTTP 204`).
+  **Still outstanding: the forced *watchdog* halt.** Attempted overnight by
+  freezing the process for 120 s — correctly, nothing fired: outside a session
+  the sockets are closed and the connection condition is unarmed (the session
+  gate in `engine/sockets.py`). It can only be forced during regular trading
+  hours. *Depends on:* nothing.
 - *Files:* `corollary/engine/notify.py`, `corollary/engine/runtime.py` (wire
   the notifier), `corollary/db/models.py`, migration 0005,
   `corollary/api/routes/notifications.py`, `web/src/components/NotificationBell.tsx`,
