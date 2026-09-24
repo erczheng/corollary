@@ -41,8 +41,9 @@ restating them.
 import logging
 import uuid
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from enum import StrEnum
-from typing import NamedTuple
+from typing import Final, NamedTuple
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
@@ -51,12 +52,20 @@ from corollary.api.operator import halt_notice, notify_after_response, resume_no
 from corollary.api.schemas import EngineStateResponse, HaltRequest
 from corollary.db.models import EngineState
 from corollary.engine.state import engine_state
+from corollary.wire import operator_text
 
-__all__ = ["OperatorRule", "router"]
+__all__ = ["HALTED_REASON_WIDTH", "OperatorRule", "router"]
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/engine", tags=["engine"])
+
+#: ``engine_state.halted_reason`` is ``String(256)``. The scrubbed reason is
+#: bounded to it: redaction can lengthen text (a short secret becomes the ten
+#: characters of ``<redacted>``), so a reason the schema admitted at full
+#: width could otherwise come out wider than the column.
+#: ``tests/api/test_halt_reason_redaction.py`` pins this to the column.
+HALTED_REASON_WIDTH: Final = 256
 
 
 class OperatorRule(StrEnum):
@@ -137,6 +146,23 @@ def _clear_halt(
     return ended
 
 
+def _scrubbed_reason(request: Request, typed: str) -> str:
+    """The halt reason as it may be kept: de-identified and column-bounded.
+
+    Configured secrets come from ``app.state.secret_values`` -- the same
+    per-request read of ``SECRET_ENV_VARS`` the error envelope uses.
+
+    **An app without that state still halts.** Unlike the activity route,
+    which refuses to serve vendor text it cannot redact, this route falls back
+    to no configured secrets: failing a halt to protect a log line would trade
+    the thing rule 9 exists for against the thing rule 6 exists for, and the
+    credential *shapes* still apply either way. ``create_app`` always sets it.
+    """
+    provider = getattr(request.app.state, "secret_values", None)
+    secrets: Sequence[str] = provider() if callable(provider) else ()
+    return operator_text(typed, secrets=secrets, limit=HALTED_REASON_WIDTH)
+
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
@@ -170,9 +196,17 @@ def halt(
     The owner's action is then told to the bell and Discord
     (``operator_halt``), after the commit and after the response -- a
     notification never delays or fails a halt.
+
+    **The reason is scrubbed once, here, before anything keeps it** (rule 6).
+    It is owner-typed free text, and a key pasted into it by mistake would
+    otherwise reach ``engine_state``, two log lines, the bell and Discord
+    verbatim. :func:`_scrubbed_reason` runs first and ``body.reason`` is not
+    read again, so every sink carries the same text and a sink added later
+    cannot be the one that forgot to scrub.
     """
     at = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
+    reason = _scrubbed_reason(request, body.reason)
     state = engine_state(session)
 
     if state.halted and state.halted_reason is not None:
@@ -186,7 +220,7 @@ def halt(
                 "previous_halted_at": (
                     state.halted_at.isoformat() if state.halted_at else None
                 ),
-                "reason": body.reason,
+                "reason": reason,
                 "at": at.isoformat(),
                 "correlation_id": correlation_id,
             },
@@ -196,13 +230,13 @@ def halt(
     previous_reason = state.halted_reason
     previous_at = state.halted_at
     state.halted = True
-    state.halted_reason = body.reason
+    state.halted_reason = reason
     state.halted_at = at
     session.commit()
 
     logger.warning(
         "engine halted: %s",
-        body.reason,
+        reason,
         extra={
             "event": "engine_halted",
             "rule": OperatorRule.OPERATOR_HALT.value,
@@ -210,7 +244,7 @@ def halt(
                 "halt stops new entries and is recorded with its reason and "
                 "timestamp (CLAUDE.md rules 7 and 8)"
             ),
-            "reason": body.reason,
+            "reason": reason,
             "previous_reason": previous_reason,
             "at": at.isoformat(),
             "correlation_id": correlation_id,
@@ -221,7 +255,7 @@ def halt(
         background,
         halt_notice(
             # The stored value, as committed -- never the request's.
-            reason=state.halted_reason or body.reason,
+            reason=state.halted_reason or reason,
             was_halted=was_halted,
             previous_reason=previous_reason,
             previous_at=previous_at,

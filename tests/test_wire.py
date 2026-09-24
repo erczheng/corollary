@@ -26,6 +26,8 @@ from corollary.wire import (
     as_int,
     decode_json,
     decode_msgpack,
+    operator_text,
+    url_secrets,
     vendor_detail,
 )
 
@@ -347,3 +349,94 @@ def test_json_non_finite_arrives_as_a_float_and_is_refused_by_type() -> None:
         as_decimal(decoded["price"])
     with pytest.raises(TypeError):
         as_int(decoded["qty"])
+
+
+# --------------------------------------------------------------------------
+# operator_text -- the boundary for owner-typed free text (rule 6)
+# --------------------------------------------------------------------------
+#
+# Every value below is an obviously fake dummy. The key-shaped ones are
+# assembled from halves so the repository's credential sweep
+# (tests/fixtures/test_record_alpaca.py) does not have to excuse them.
+
+#: Deliberately **shorter than 32 characters**, so the long-run shape cannot
+#: catch it: redacting it proves the configured-URL derivation, not the shape.
+_FAKE_HOOK_TOKEN = "fake-hook-token-xyz0"
+_FAKE_HOOK_ID = "123456789012345678"
+_FAKE_HOOK = f"https://discord.com/api/webhooks/{_FAKE_HOOK_ID}/{_FAKE_HOOK_TOKEN}"
+
+
+def test_operator_text_leaves_plain_prose_untouched() -> None:
+    reason = "checking the AAPL241220C00150000 fill by hand; back after lunch"
+    assert operator_text(reason) == reason
+
+
+def test_operator_text_keeps_an_occ_symbol_that_starts_like_a_key_id() -> None:
+    # AKAM is an optionable root and ``AK`` is a live key-id prefix. Naming the
+    # contract is the point of such a reason, so the key-id shape excludes OCC.
+    reason = "halting: AKAM251219C00150000 printed at zero"
+    assert operator_text(reason) == reason
+
+
+def test_operator_text_redacts_a_configured_secret() -> None:
+    out = operator_text(
+        "pasted dummy-secret-xyz by mistake", secrets=("dummy-secret-xyz",)
+    )
+    assert out == f"pasted {REDACTED} by mistake"
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        _FAKE_HOOK,
+        f"/api/webhooks/{_FAKE_HOOK_ID}/{_FAKE_HOOK_TOKEN}",
+        f"{_FAKE_HOOK_ID}/{_FAKE_HOOK_TOKEN}",
+        _FAKE_HOOK_TOKEN,
+    ],
+)
+def test_operator_text_redacts_every_part_of_a_configured_webhook(
+    fragment: str,
+) -> None:
+    out = operator_text(f"see {fragment} now", secrets=(_FAKE_HOOK,))
+    assert _FAKE_HOOK_TOKEN not in out
+    assert REDACTED in out
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        # Unconfigured webhook URLs, on every host Discord serves them from.
+        "https://discord.com/api/webhooks/1/short",
+        "https://canary.discord.com/api/webhooks/1/short",
+        "https://ptb.discordapp.com/api/v10/webhooks/1/short",
+        # Anthropic-shaped key.
+        "sk-ant-api03-filler",
+        # Alpaca key-id shape, paper and live.
+        "PK" + "PLANTEDPLANTED00",
+        "AK" + "PLANTEDPLANTED00",
+        # Long unbroken base64/hex-ish runs.
+        "0123456789abcdef" * 2,
+        "ZmFrZS1ub3Qt" + "YS1zZWNyZXQ+" + "anVzdC1maWxs/ZXI=",
+    ],
+)
+def test_operator_text_redacts_unconfigured_credential_shapes(credential: str) -> None:
+    out = operator_text(f"oops {credential} pasted")
+    assert out == f"oops {REDACTED} pasted"
+
+
+def test_operator_text_fits_its_limit_even_when_redaction_lengthens_it() -> None:
+    # A three-character secret becomes ten characters, so a 255-character
+    # reason grows past the column. The bound holds *after* redaction.
+    reason = " ".join(["abc"] * 64)
+    assert len(reason) == 255
+    out = operator_text(reason, secrets=("abc",), limit=256)
+    assert len(out) <= 256
+    assert "abc" not in out
+
+
+def test_url_secrets_splits_a_webhook_into_its_authenticating_parts() -> None:
+    parts = url_secrets(_FAKE_HOOK)
+    assert parts[0] == _FAKE_HOOK
+    assert _FAKE_HOOK_TOKEN in parts
+    assert _FAKE_HOOK_ID in parts
+    assert url_secrets("") == ()

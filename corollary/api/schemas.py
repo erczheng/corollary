@@ -48,7 +48,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 from pydantic.alias_generators import to_camel
 
 __all__ = [
@@ -1482,7 +1482,25 @@ class HaltRequest(ApiModel):
 
     #: Bounded at the width of ``engine_state.halted_reason``. A longer reason
     #: is a 422 rather than a value the database silently reshapes.
+    #:
+    #: The route then scrubs it (``corollary.wire.operator_text``) before it
+    #: is stored, logged or notified -- this bound is on what was *typed*, and
+    #: the scrub re-bounds what is *kept*.
     reason: str = Field(min_length=1, max_length=256)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_has_words(cls, value: str) -> str:
+        """Refuse a reason that is only whitespace.
+
+        ``min_length=1`` admits ``"   "``, which records a halt nobody can
+        explain -- the exact state this field exists to prevent. Stripped
+        with ``str.strip()``, so Unicode whitespace (a no-break space) counts
+        as empty too. The value itself is returned untouched.
+        """
+        if not value.strip():
+            raise ValueError("a halt reason must contain more than whitespace")
+        return value
 
 
 # --------------------------------------------------------------------------

@@ -47,14 +47,13 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.orm import Session
 
 from corollary.db.models import NotificationDelivery, NotificationRecord
 from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, Notification, Notifier
-from corollary.wire import ERROR_BODY_MAX, vendor_detail
+from corollary.wire import ERROR_BODY_MAX, url_secrets, vendor_detail
 
 __all__ = [
     "BELL_CHANNEL",
@@ -372,7 +371,7 @@ class DiscordNotifier:
         disabled_reason: str | None = None,
     ) -> None:
         self._url = (webhook_url or "").strip()
-        self._secrets = _url_secrets(self._url)
+        self._secrets = url_secrets(self._url)
         self._session_factory = session_factory
         self._now = now
         self._transport = transport
@@ -742,26 +741,6 @@ class _RedactWebhook(logging.Filter):
             record.msg = vendor_detail(rendered, secrets=self._secrets)
             record.args = ()
         return True
-
-
-def _url_secrets(url: str) -> tuple[str, ...]:
-    """The webhook URL and the parts of it that authenticate, for scrubbing.
-
-    The whole URL, its path, and every path segment long enough to be an id or
-    a token -- so a message that echoes only ``/api/webhooks/<id>/<token>``, or
-    only the token, is still scrubbed. Longest first, so the whole URL is
-    replaced before a part of it can leave the rest behind.
-    """
-    if not url:
-        return ()
-    parts = {url}
-    path = urlsplit(url).path
-    if path:
-        parts.add(path)
-    for segment in path.split("/"):
-        if len(segment) >= 16:
-            parts.add(segment)
-    return tuple(sorted(parts, key=len, reverse=True))
 
 
 # --------------------------------------------------------------------------
