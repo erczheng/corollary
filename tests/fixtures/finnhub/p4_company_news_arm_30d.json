@@ -1,0 +1,147 @@
+{
+  "recorded_at": "2026-09-24T18:19:03+00:00",
+  "request": "https://finnhub.io/api/v1/company-news?symbol=ARM&from=2026-08-25&to=2026-09-24",
+  "status_code": 200,
+  "stats": {
+    "row_count": 142,
+    "rows_with_related": 142,
+    "max_id": 142384126
+  },
+  "truncated": {
+    ".": 142
+  },
+  "body": [
+    {
+      "category": "company",
+      "datetime": 1790264970,
+      "headline": "Bank of America Just Told Investors to Sell UPS, and the Reason Has Nothing to Do With Package Volume",
+      "id": 142383568,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Bank of America just cut UPS to sell, and the catalyst has nothing to do with shipping demand or Amazon competition. The real threat is a regulatory change that turns UPS's fastest, highest-volume lanes into a compliance liability that surcharges alone may not fix.",
+      "url": "https://finnhub.io/api/news?id=74e8876303db6d63210a507bb2870a295de2020c22454941c86a55435f86ed48"
+    },
+    {
+      "category": "company",
+      "datetime": 1790264879,
+      "headline": "Chip Stocks Retreat. Qualcomm Secures Apple Licensing Deal.",
+      "id": 142383496,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Chip stocks fell along with the broader market on Thursday as the U.S. and China held trade talks in Washington, D.C.",
+      "url": "https://finnhub.io/api/news?id=95606b2f24edb079100c62699b0cd9585584bb99e5d350a0245b3066522adaf1"
+    },
+    {
+      "category": "company",
+      "datetime": 1790260373,
+      "headline": "Critical Role of ARM Holdings (ARM) In Powering the Next Wave of Agentic AI",
+      "id": 142383929,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Tran Capital Management, an investment management company, released its second-quarter investor letter for its “Multi Cap Growth Strategy”. You can download a copy of the letter here. In Q2, the Strategy returned 17.5% net (YTD 10.5%), outperforming the S&P 500 (15.2%) and Bloomberg U.S. Mid Cap Index (11.1%). Patient discipline during Q1’s sell-off drove these […]",
+      "url": "https://finnhub.io/api/news?id=01478180a00b2c35729450285a564968df1797592e29f0704bef216ca038b1dc"
+    },
+    {
+      "category": "company",
+      "datetime": 1790256650,
+      "headline": "Prediction: Arm Is Our Top Pick With 83% Upside Driven by Data Center Royalty Boom",
+      "id": 142379515,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Arm's IP now sits inside the AI hardware powering every major hyperscaler, yet the market may still be treating it like a chip company from the smartphone era. Here is why that disconnect creates one of the more compelling setups in semiconductors right now.",
+      "url": "https://finnhub.io/api/news?id=a7f6c51230d0671e7ab2025e39e0d72c7eddde8d4980932e5f67e7a113b8977e"
+    },
+    {
+      "category": "company",
+      "datetime": 1790253706,
+      "headline": "Meta's AI Agents Are Putting CPUs In Data Centers, But That's Not Bullish For Intel",
+      "id": 142384126,
+      "image": "https://static.seekingalpha.com/cdn/s3/uploads/getty_images/1341285836/image_1341285836.jpg?io=getty-c-w1536",
+      "related": "ARM",
+      "source": "SeekingAlpha",
+      "summary": "Intel Corporation is rated a Hold due to supply constraints, aggressive capital needs, and limited upside at current valuation. Click for more on INTC.",
+      "url": "https://finnhub.io/api/news?id=6369ad7450b6da70a0861f619d7db06180c4082a34e8f4dfbc7535398ff82df7"
+    },
+    {
+      "category": "company",
+      "datetime": 1790226075,
+      "headline": "SoftBank Launches $11.1 Billion Bond Sale to Fund Final $10 Billion OpenAI Investment Tranche",
+      "id": 142382305,
+      "image": "https://cdn.benzinga.com/files/images/story/2026/09/24/Tokyo--Japan---May-1--2019-Softbank-Grou.jpg?width=2048&height=1536",
+      "related": "ARM",
+      "source": "Benzinga",
+      "summary": "Japan&#39;s SoftBank launches an $11.1 billion bond sale to fund its final $10 billion OpenAI investment tranche.",
+      "url": "https://finnhub.io/api/news?id=e608e928309b08ccb59818f6aab37679238dd8b44dd973877d68bd08421b0476"
+    },
+    {
+      "category": "company",
+      "datetime": 1790199608,
+      "headline": "Arm vs. Taiwan Semiconductor Manufacturing: Which Chip Stock Is a Better Buy in 2026?",
+      "id": 142365371,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Arm's royalty model compounds reliably across billions of devices. TSMC's factories build the chips that power every major AI system in the world. Both are essential, but only one is truly irreplaceable.",
+      "url": "https://finnhub.io/api/news?id=6716aa599d281c90ee171b57ba0516a8ed5d5cd5298fc1912bb39d58dd984e6f"
+    },
+    {
+      "category": "company",
+      "datetime": 1790189559,
+      "headline": "SoftBank Is Raising $11 Billion for OpenAI. Its Arm Stake Backs a $25 Billion Loan Facility",
+      "id": 142364020,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "Masayoshi Son is turning SoftBank’s public-market assets into fuel for his OpenAI bet. On September 21, SoftBank launched more than $11 billion of dollar and euro bonds as it prepared for another $10 billion OpenAI installment. The financing follows a broader credit line backed by Arm Holdings plc (NASDAQ:ARM), while SoftBank sold its entire roughly […]",
+      "url": "https://finnhub.io/api/news?id=fec2d7296db6de14c116510aac29b2161c2a5b74baf451b7b01dd805a13c802b"
+    },
+    {
+      "category": "company",
+      "datetime": 1790188319,
+      "headline": "Arm Falls as Agentic AI Multiplies Server-Core Demand",
+      "id": 142364391,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "More cores can expand royalties, but architecture share and chip mix control the financial result.",
+      "url": "https://finnhub.io/api/news?id=d5769081a1ea8ed8af21b2a1101f3970d0dbc8d16bc1186cb9a5e795c7618067"
+    },
+    {
+      "category": "company",
+      "datetime": 1790177458,
+      "headline": "ARM Vs. AMD: Who Is Going to Win the Agentic AI CPU Revival War?",
+      "id": 142361929,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "AMD and Arm both just posted earnings that position them as the backbone of agentic AI computing, but their paths into the same data center could not be more different. One is booking record revenue while the other bets its future on a chip that has yet to ship.",
+      "url": "https://finnhub.io/api/news?id=cc1374b88d4dd7624be3b8168b49c0f2d35d523382984a1371e69cea4f3bcef0"
+    },
+    {
+      "category": "company",
+      "datetime": 1790173827,
+      "headline": "Arm Just Jumped 36% Now Its Valuation Is Raising Eyebrows",
+      "id": 142362333,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "ARM",
+      "source": "Yahoo",
+      "summary": "The stock trades at roughly 143 times forward earnings, according to Investing.com data.",
+      "url": "https://finnhub.io/api/news?id=c251dee5c81e07dc6c2921d10af45f03749e6d6e8c17e251c75c917798e66bbc"
+    },
+    {
+      "category": "company",
+      "datetime": 1790166300,
+      "headline": "Virtus SGA U.S. Large Cap Growth Q2 2026 Contributors And Detractors",
+      "id": 142362505,
+      "image": "https://static.seekingalpha.com/cdn/s3/uploads/getty_images/2220498289/image_2220498289.jpg?io=getty-c-w1536",
+      "related": "ARM",
+      "source": "SeekingAlpha",
+      "summary": "The largest contributors to Virtus SGA U.S. Large Cap Growth fund's performance were Arm Holdings, Alphabet, and Nvidia. Read more here.",
+      "url": "https://finnhub.io/api/news?id=bf65ff61b032f70df6989b96ed88274a3fda8a8a21d5041c6b8c903d28ab36b1"
+    }
+  ]
+}

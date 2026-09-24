@@ -1,0 +1,11 @@
+{
+  "recorded_at": "2026-09-24T18:44:23+00:00",
+  "request": "https://api.massive.com/v2/reference/news?limit=3&order=asc&sort=published_utc&published_utc.gt=2026-09-24T12%3A44%3A23Z",
+  "status_code": 401,
+  "note": "Recorded with a deliberately invalid key supplied in the process environment (not .env). This is Massive's answer to a key it does not recognise. It is NOT necessarily the answer to a valid key calling an endpoint above its plan: that case was not recorded, so a plan refusal's status and body are unverified.",
+  "body": {
+    "status": "ERROR",
+    "request_id": "8cd92c360e0822848d962e890f86c1e4",
+    "error": "Unknown API Key"
+  }
+}
