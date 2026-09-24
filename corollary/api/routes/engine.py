@@ -104,7 +104,7 @@ def _response(state: EngineState) -> EngineStateResponse:
 
 
 def _clear_halt(
-    state: EngineState, *, at: datetime, correlation_id: str
+    state: EngineState, *, request: Request, at: datetime, correlation_id: str
 ) -> _EndedHalt:
     """End a halt. **The only code in this package that does.**
 
@@ -115,10 +115,14 @@ def _clear_halt(
     Returns what it found, so the resume route can say which halt ended. The
     notification that says so is a record, sent after the commit; nothing it
     does can end a halt.
+
+    The reason it found is returned **scrubbed** (:func:`_scrubbed_stored_reason`),
+    since the row may predate the entry scrub or come from the runtime's own
+    halt; the log line below and the resume notice both read that one copy.
     """
     ended = _EndedHalt(
         was_halted=state.halted,
-        previous_reason=state.halted_reason,
+        previous_reason=_scrubbed_stored_reason(request, state.halted_reason),
         previous_at=state.halted_at,
     )
     state.halted = False
@@ -158,9 +162,38 @@ def _scrubbed_reason(request: Request, typed: str) -> str:
     the thing rule 9 exists for against the thing rule 6 exists for, and the
     credential *shapes* still apply either way. ``create_app`` always sets it.
     """
+    return operator_text(
+        typed, secrets=_configured_secrets(request), limit=HALTED_REASON_WIDTH
+    )
+
+
+def _configured_secrets(request: Request) -> Sequence[str]:
+    """The configured secret values, or none on an app without that state.
+
+    One lookup and one fallback, shared by the entry scrub and the read-side
+    scrub, so the two can never redact against different sets.
+    """
     provider = getattr(request.app.state, "secret_values", None)
-    secrets: Sequence[str] = provider() if callable(provider) else ()
-    return operator_text(typed, secrets=secrets, limit=HALTED_REASON_WIDTH)
+    return provider() if callable(provider) else ()
+
+
+def _scrubbed_stored_reason(request: Request, stored: str | None) -> str | None:
+    """A reason read back from ``engine_state``, scrubbed for display and logs.
+
+    The entry scrub covers what *this* route writes. ``halted_reason`` can
+    also hold text it never saw -- a row written before that scrub existed,
+    or by the runtime's own halt -- and the halt and resume routes echo it as
+    ``previous_reason`` into log lines, the bell and Discord (rule 6). So it
+    is scrubbed once, where the route reads it, with the same secrets and the
+    same fallback as :func:`_scrubbed_reason`.
+
+    **Display only.** The stored row is left exactly as found; nothing here
+    writes it back. ``None`` stays ``None`` so the notices' "not recorded"
+    branches still fire -- the scrub must not invent an empty reason.
+    """
+    if stored is None:
+        return None
+    return _scrubbed_reason(request, stored)
 
 
 # --------------------------------------------------------------------------
@@ -208,15 +241,20 @@ def halt(
     correlation_id = str(uuid.uuid4())
     reason = _scrubbed_reason(request, body.reason)
     state = engine_state(session)
+    # The stored reason this halt replaces, scrubbed once where it is read
+    # (it may predate the entry scrub, or be the runtime's). Both log lines
+    # and the notice take this copy; the raw ``state.halted_reason`` is not
+    # echoed anywhere below, and it is overwritten, not scrubbed in place.
+    previous_reason = _scrubbed_stored_reason(request, state.halted_reason)
 
-    if state.halted and state.halted_reason is not None:
+    if state.halted and previous_reason is not None:
         logger.info(
             "engine was already halted; replacing the stated reason",
             extra={
                 "event": "engine_halt_repeated",
                 "rule": OperatorRule.OPERATOR_HALT_REPLACED.value,
                 "policy": "the newest reason is served; the replaced one is logged",
-                "previous_reason": state.halted_reason,
+                "previous_reason": previous_reason,
                 "previous_halted_at": (
                     state.halted_at.isoformat() if state.halted_at else None
                 ),
@@ -227,7 +265,6 @@ def halt(
         )
 
     was_halted = state.halted
-    previous_reason = state.halted_reason
     previous_at = state.halted_at
     state.halted = True
     state.halted_reason = reason
@@ -283,7 +320,9 @@ def resume(
     at = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
     state = engine_state(session)
-    ended = _clear_halt(state, at=at, correlation_id=correlation_id)
+    ended = _clear_halt(
+        state, request=request, at=at, correlation_id=correlation_id
+    )
     session.commit()
     notify_after_response(
         request,
