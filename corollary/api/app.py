@@ -82,6 +82,7 @@ from corollary.api.routes import (
     activity_router,
     engine_router,
     markets_router,
+    notifications_router,
     positions_router,
     settings_router,
     ws_router,
@@ -106,7 +107,8 @@ from corollary.engine.execution.interface import (
     BrokerError,
     BrokerRateLimitedError,
 )
-from corollary.engine.runtime import EngineRuntime
+from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
+from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
 from corollary.engine.sockets import SocketSupervisor
 from corollary.wire import vendor_detail
 
@@ -408,6 +410,7 @@ def create_app(
     db_engine: Engine | None = None,
     secrets: Sequence[str] | None = None,
     streams: SocketSupervisorFactory = no_socket_supervisor,
+    discord: bool = False,
 ) -> FastAPI:
     """Build the application.
 
@@ -436,6 +439,16 @@ def create_app(
     stream per account, so a suite run during market hours would take the slot
     from the running engine, whose client then records a close and halts
     itself correctly, caused by a test.
+
+    ``discord`` decides whether notifications routed to Discord are
+    **posted**, and it defaults to no for the same reason ``streams`` does:
+    the webhook URL is in the developer's environment, and a test app -- or a
+    ``--reload`` loop halting on every save -- must not page the owner's
+    channel by forgetting an argument. Off does not mean silent: the Discord
+    sink is still installed, disabled, and records a ``dropped``
+    ``notification_delivery`` row naming why for every alert routed to it, so
+    "routed to Discord" and "never sent" are both on the record. The bell's
+    database sink is installed either way.
     """
 
     @asynccontextmanager
@@ -459,7 +472,48 @@ def create_app(
         # evaluates and finds nothing. That is rule 9 with nothing to judge,
         # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
-        runtime = EngineRuntime(session_factory=lambda: Session(db_engine))
+        # Rule 9's voice (Phase 3 decision 14): a log line, the bell's row,
+        # and the Discord webhook, fanned out so no one sink can silence the
+        # others. The URL is read from the process environment -- never from
+        # `.env`, which the launcher loads -- and handed to the one class that
+        # uses it. The runtime separately reads it for *presence* only.
+        # Started before the watchdog, so the first halt it could raise finds
+        # a running delivery task.
+        discord_sink = DiscordNotifier(
+            webhook_url=os.environ.get(DISCORD_WEBHOOK_ENV),
+            session_factory=lambda: Session(db_engine),
+            disabled_reason=(
+                None
+                if discord
+                else (
+                    "this app was built without Discord delivery "
+                    "(create_app(discord=False), e.g. dev_app)"
+                )
+            ),
+        )
+        try:
+            discord_sink.start()
+        except Exception as exc:
+            # Stated, never fatal: the sink then records every alert routed
+            # to it as dropped, which is the trace this failure leaves.
+            logger.error(
+                "the Discord delivery task did not start; alerts routed there "
+                "will be recorded as dropped",
+                extra={
+                    "event": "notification_discord_not_started",
+                    "error_type": type(exc).__name__,
+                },
+            )
+        runtime = EngineRuntime(
+            session_factory=lambda: Session(db_engine),
+            notifier=FanoutNotifier(
+                [
+                    LoggingNotifier(),
+                    DbNotifier(session_factory=lambda: Session(db_engine)),
+                    discord_sink,
+                ]
+            ),
+        )
         app.state.engine_runtime = runtime
         runtime.start()
         runtime.supervise()
@@ -498,6 +552,10 @@ def create_app(
             if supervisor is not None:
                 await supervisor.aclose()
             await runtime.aclose()
+            # After the runtime, which is what emits: nothing can enqueue a
+            # new alert once the watchdog has stopped, and whatever is still
+            # queued gets a bounded grace and then a `dropped` row.
+            await discord_sink.aclose()
             await app.state.registry.aclose()
 
     app = FastAPI(
@@ -513,6 +571,10 @@ def create_app(
     # go missing -- and an app serving every route with rule 9's producers
     # quietly absent is exactly the failure this records.
     app.state.socket_factory = streams
+    # Recorded for the same reason: the shipped opt-in to posting on Discord
+    # is the line that can go missing, and a rule 9 alert that quietly stops
+    # reaching the phone is exactly what the delivery table exists to catch.
+    app.state.discord_delivery = discord
     # Replaced in the lifespan. Present so that a route reading it outside a
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
@@ -555,6 +617,7 @@ def create_app(
     app.include_router(activity_router)
     app.include_router(engine_router)
     app.include_router(markets_router)
+    app.include_router(notifications_router)
     app.include_router(positions_router)
     app.include_router(settings_router)
     app.include_router(ws_router)
@@ -566,7 +629,7 @@ def create_app(
 #: this one, and the opt-in to the vendor sockets is here rather than in
 #: :func:`create_app`'s default so that nothing built for a test can open a
 #: real connection by forgetting an argument.
-app = create_app(streams=build_socket_supervisor)
+app = create_app(streams=build_socket_supervisor, discord=True)
 
 #: The same app with **no vendor sockets**, for ``--reload``.
 #:
@@ -594,4 +657,12 @@ app = create_app(streams=build_socket_supervisor)
 #: ``--reload`` -- whenever the sockets or rule 9 are what is being worked
 #: on. ``--env-file`` is still not optional: nothing under ``corollary/``
 #: reads ``.env``, so without it every broker route answers 503.
+#:
+#: **No Discord either** (``discord=False``, the default). The bell works --
+#: its database sink is installed -- so frontend work against the bell is
+#: real. But ``--reload`` is exactly the loop that produces self-inflicted
+#: halts, and each one routed to Discord would page the owner's channel: the
+#: alert-fatigue version of the resume reflex above. The disabled sink
+#: records a ``dropped`` delivery row per alert naming why, so the choice is
+#: visible in the data rather than a silent gap.
 dev_app = create_app()

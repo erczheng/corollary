@@ -86,7 +86,9 @@ __all__ = [
     "MarginClassName",
     "MarginSummary",
     "NotificationEvent",
+    "NotificationItem",
     "NotificationRoute",
+    "NotificationSeverity",
     "OptionContract",
     "OptionRight",
     "OrderSide",
@@ -1366,6 +1368,40 @@ class NotificationRoute(ApiModel):
     event: NotificationEvent
     bell: bool
     discord: bool
+
+
+#: ``NotificationSeverity`` in ``web/src/lib/notifications.ts``, and
+#: ``db.models.NOTIFICATION_SEVERITIES`` value for value.
+NotificationSeverity: TypeAlias = Literal["critical", "warning", "info"]
+
+
+class NotificationItem(ApiModel):
+    """One bell entry -- ``Notification`` in ``types.ts``, plus three fields.
+
+    ``detail`` is the stored ``body``, named for the TS field it fills. Three
+    additions the TS interface does not declare yet, listed in
+    ``test_schema_contract.py``'s ``DELIBERATE_ADDITIONS``:
+
+    * ``title`` -- the engine's own heading, which is **not** always the event
+      label: a halt recorded after its fault cleared is titled so, and the
+      label alone would read as a fault happening now.
+    * ``severity`` -- stored as raised, so a later change to the frontend's
+      severity map cannot recolour history.
+    * ``correlation_id`` -- the decision's id, so a bell entry traces to the
+      halt record and the log lines of the same event.
+    """
+
+    id: str
+    time: datetime
+    event: NotificationEvent
+    severity: NotificationSeverity
+    title: str
+    detail: str
+    #: The book it happened in, or ``None`` for an engine event that belongs
+    #: to neither and shows in both.
+    account: AccountMode | None
+    read: bool
+    correlation_id: str
 
 
 class DataFeed(ApiModel):

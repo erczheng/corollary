@@ -173,7 +173,7 @@ import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Final, Protocol
@@ -742,6 +742,16 @@ class Notification:
     #: human switched every channel off for this event, which the PRD permits
     #: and which is logged rather than overridden.
     channels: tuple[str, ...]
+    #: The book the event happened in, or ``None`` for one that belongs to no
+    #: book -- every engine event, this halt included. ``None`` shows in both
+    #: books' bells, which is what stops an engine fault being hidden by
+    #: whichever account happens to be selected.
+    account: str | None = None
+    #: Generated when the notification is raised, so every sink records
+    #: against the same id without waiting on another: the Discord sink's
+    #: delivery rows name the ``notification`` row the database sink writes,
+    #: and neither has to run first. A uuid4 hex; ``notification.id``.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class Notifier(Protocol):
@@ -753,12 +763,11 @@ class Notifier(Protocol):
 class LoggingNotifier:
     """The default sink: a structured log line per notification.
 
-    The ``notification`` table does not exist yet -- it is the tenth table and
-    lands with the notifications work -- and the Discord transport is not
-    written either. That is a gap in *delivery*, not in the decision: the
-    event, the severity and the resolved channels are all computed here and
-    handed over whole, so wiring a real sink is a constructor argument rather
-    than a change to the halt path.
+    The real sinks -- the ``notification`` table and the Discord webhook --
+    live in ``engine/notify.py`` and are wired by the API's lifespan, which
+    hands :class:`EngineRuntime` a ``FanoutNotifier`` holding this one plus
+    both. This stays the *default* so a runtime built with no notifier (every
+    test that is not about delivery) still leaves a record of each alert.
 
     Logging rather than raising on an unconfigured channel is deliberate. A
     dead-man's switch whose alerting raises would turn one fault into two, and
@@ -773,7 +782,9 @@ class LoggingNotifier:
             extra={
                 "event": "engine_notification",
                 "notification_event": notification.event,
+                "notification_id": notification.id,
                 "severity": notification.severity,
+                "account": notification.account,
                 "channels": list(notification.channels),
                 "title": notification.title,
                 "body": notification.body,
@@ -3158,4 +3169,30 @@ class EngineRuntime:
                     "correlation_id": correlation_id,
                 },
             )
-        self._notifier.emit(notification)
+        # Rule 9's alert must never become rule 9's failure. The halt is
+        # already persisted by the time this runs, but ``halt`` still has its
+        # bookkeeping to do after this call -- ``_announced`` and friends,
+        # which the watchdog's gate reads -- so a sink that raised here would
+        # leave the gate believing a halt it never finished recording. The
+        # shipped ``FanoutNotifier`` isolates its own sinks; this catches the
+        # notifier that does not. Logged by class name only: a sink's
+        # exception text is not ours to vouch for, and the Discord sink's
+        # would carry its webhook URL (rule 6).
+        try:
+            self._notifier.emit(notification)
+        except Exception as exc:
+            logger.error(
+                "the notifier raised delivering a halt alert; the halt stands",
+                extra={
+                    "event": "engine_notification_failed",
+                    "policy": (
+                        "a notifier failure is logged and never raised into "
+                        "the halt path"
+                    ),
+                    "error_type": type(exc).__name__,
+                    "notification_event": HALT_EVENT,
+                    "notification_id": notification.id,
+                    "at": at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )

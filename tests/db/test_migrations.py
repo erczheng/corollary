@@ -50,6 +50,9 @@ EXPECTED_TABLES = {
     "mleg_leg",
     # 0004 — the refusals, kept so a gap in P&L can state its cause
     "ledger_rejection",
+    # 0005 -- the bell's rows, and every delivery attempt behind them
+    "notification",
+    "notification_delivery",
 }
 
 
@@ -78,10 +81,24 @@ def test_upgrade_head_creates_every_table_the_models_declare(
     assert EXPECTED_TABLES <= tables
 
 
-def test_upgrade_head_does_not_create_a_later_phase_table(migrated: Engine) -> None:
-    """``notification`` is step 8's, and the last one still outstanding."""
-    tables = set(inspect(migrated).get_table_names())
+def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
+    """The notification tables come and go alone; nothing earlier is touched."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0004")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
     assert "notification" not in tables
+    assert "notification_delivery" not in tables
+    assert EXPECTED_TABLES - {"notification", "notification_delivery"} <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
 
 
 def test_there_is_exactly_one_head(db_path: Path) -> None:
@@ -93,13 +110,12 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0004`` is the head now: it adds ``ledger_rejection``, so that the gap
-    ``0003`` made representable — an exercise whose deliverable could not be
-    verified, booking no realized trade — can state its cause after the
-    process that found it has gone.
+    ``0005`` is the head now: Phase 3 step 1's ``notification`` and
+    ``notification_delivery``, the tables rule 9's halt alert lands in.
+    ``0004`` before it added ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0004"]
+    assert script.get_heads() == ["0005"]
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:

@@ -373,6 +373,9 @@ SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/markets/chain/{underlying}",
     "/api/markets/stocks",
     "/api/markets/underlyings",
+    "/api/notifications",
+    "/api/notifications/{notification_id}/dismiss",
+    "/api/notifications/{notification_id}/read",
     "/api/positions",
     "/api/positions/working",
     "/api/settings/audit",
@@ -417,6 +420,7 @@ def test_the_routes_package_exports_every_router() -> None:
     assert routes.activity_router.prefix == "/api/activity"
     assert routes.engine_router.prefix == "/api/engine"
     assert routes.markets_router.prefix == "/api/markets"
+    assert routes.notifications_router.prefix == "/api/notifications"
     assert routes.positions_router.prefix == "/api/positions"
     assert routes.settings_router.prefix == "/api/settings"
 

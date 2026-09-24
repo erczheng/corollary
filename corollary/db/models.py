@@ -44,6 +44,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import (
@@ -69,6 +70,10 @@ __all__ = [
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
+    "NOTIFICATION_DELIVERY_STATUSES",
+    "NOTIFICATION_SEVERITIES",
+    "NotificationDelivery",
+    "NotificationRecord",
     "NotificationRoute",
     "POSITION_INTENTS",
     "REJECTION_SOURCES",
@@ -91,6 +96,23 @@ AUDIT_CATEGORIES = ("risk", "feed", "notification")
 #: PRD §10's two channels. ``Notifier`` gains more later; adding one is a
 #: migration, which is the point — a typo must not create a third silently.
 NOTIFICATION_CHANNELS = ("bell", "discord")
+
+#: The frontend's ``NotificationSeverity`` union in ``web/src/lib/notifications.ts``,
+#: spelled identically so a row renders without translation. Severity is a
+#: property of the *event*; the engine's halt is ``critical`` by definition.
+NOTIFICATION_SEVERITIES = ("critical", "warning", "info")
+
+#: What happened to one attempt to deliver one notification on one channel.
+#:
+#: * ``delivered`` -- the channel took it (a bell row written, a 2xx from Discord).
+#: * ``failed`` -- an attempt was made and did not land: a timeout, a transport
+#:   error, a non-2xx. A retry is a second row, never an overwrite.
+#: * ``dropped`` -- **no attempt was made**, and the row says why: no webhook
+#:   configured, a build with Discord switched off, the delivery task not
+#:   running, its queue full, or the process shutting down first. Distinct from
+#:   ``failed`` because the remedy is different -- a dropped alert is a
+#:   configuration or lifecycle problem, a failed one is the far end.
+NOTIFICATION_DELIVERY_STATUSES = ("delivered", "failed", "dropped")
 
 #: Which vocabulary a ``ledger_rejection.rule`` is drawn from. Two, because a
 #: refusal to *fetch* and a refusal to *book* are different failures with
@@ -1006,3 +1028,121 @@ class RejectionRecord(Base):
                 "(ingest); a third source means a third enum nobody has read."
             )
         return value
+
+
+class NotificationRecord(Base):
+    """One notification the engine raised, whichever channels it reached.
+
+    Phase 3 decision 14; the table Phase 2's Database section described and
+    never landed. Named ``NotificationRecord`` rather than ``Notification``
+    because :class:`corollary.engine.runtime.Notification` is the in-flight
+    value this row records, and two classes of one name one import apart is a
+    bug waiting for an autocomplete. Same convention as :class:`RejectionRecord`.
+
+    **Written for every notification, not only the bell's.** The bell shows a
+    row only when a ``notification_delivery`` row says the bell received it --
+    decided by the routing *at emit time* and never re-read. That is what lets
+    unchecking a route stop future alerts without erasing ones already
+    received, and it is also why the row exists when the bell is off: the
+    Discord attempts need something to reference, and "the engine raised this
+    and sent it nowhere" is itself a fact worth keeping.
+
+    ``account`` is ``NULL`` for engine and audit events, which belong to no
+    book and show in both -- an engine fault hidden because the other account
+    happens to be selected is the one event you most need to see.
+
+    ``event`` carries **no** CHECK, following ``notification_route.event``:
+    the seeded routes and the engine's constants are the authority, and
+    Phase 3 step 6 adds two events.
+    """
+
+    __tablename__ = "notification"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("severity", NOTIFICATION_SEVERITIES),
+            name="ck_notification_severity",
+        ),
+        CheckConstraint(
+            _in_list_or_null("account", ACCOUNT_MODES),
+            name="ck_notification_account",
+        ),
+        # The bell's read: one book's rows plus the book-less ones, newest
+        # first.
+        Index("ix_notification_account_at", "account", "at"),
+    )
+
+    #: A uuid4 hex, generated when the notification is *raised* rather than
+    #: when this row is inserted, so the Discord sink can record its delivery
+    #: against the same id without waiting on this write -- and so a failed
+    #: write here does not leave Discord with nothing to name. That second
+    #: half holds only because ``notification_delivery.notification_id`` is a
+    #: soft reference, not a foreign key: see :class:`NotificationDelivery`.
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: When the event happened, UTC.
+    at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    account: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    #: Bounded to Discord's embed title limit, which is the tighter of the two
+    #: places it is shown.
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The decision's id, so the bell entry, the halt record and the log
+    #: lines read as the one event they are.
+    correlation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Set once, by an explicit action. Opening the bell marks nothing read
+    #: (PRD section 10): glancing at a badge is not reading the feed.
+    read_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    #: Set once. A dismissed row leaves the bell and stays in the table.
+    dismissed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class NotificationDelivery(Base):
+    """One attempt to deliver one notification on one channel.
+
+    Decision 14: *"an alert that silently did not arrive is the rule 9 failure
+    the routing confirm exists to prevent."* So every attempt is a row --
+    delivered, failed, or dropped without being tried -- and a retry is a new
+    row rather than an update, which keeps "it failed, then it landed"
+    distinguishable from "it landed".
+
+    **``detail`` never carries the webhook URL.** Rule 6: the URL embeds its
+    token, and a secret in a committed row outlives a secret in a log. The
+    writer records a status code, an exception class name, or a
+    ``vendor_detail``-scrubbed vendor message, and nothing else.
+
+    **``notification_id`` is a soft reference -- indexed, deliberately not a
+    foreign key.** ``PRAGMA foreign_keys=ON`` is set on every connection, so
+    a foreign key would make every Discord outcome for an alert whose
+    ``notification`` row failed to write an ``IntegrityError`` -- and the
+    likely cause of that failure is lock contention during a halt, the moment
+    the delivery record matters most. Without it the outcome always lands,
+    and a delivery row with no parent *is* the evidence that the bell write
+    failed. Readers go through ``notification`` (the bell route's ``EXISTS``),
+    so an orphan can never surface as a bell item. The cost is that deleting
+    a ``notification`` row does not cascade; nothing deletes them.
+    """
+
+    __tablename__ = "notification_delivery"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("channel", NOTIFICATION_CHANNELS),
+            name="ck_notification_delivery_channel",
+        ),
+        CheckConstraint(
+            _in_list("status", NOTIFICATION_DELIVERY_STATUSES),
+            name="ck_notification_delivery_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    #: ``notification.id`` -- a soft reference, see the class docstring.
+    notification_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True
+    )
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    #: Bounded by the writer to ``wire.ERROR_BODY_MAX`` plus the truncation
+    #: notice ``vendor_detail`` appends.
+    detail: Mapped[str] = mapped_column(String(400), nullable=False)
