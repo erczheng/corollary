@@ -84,6 +84,108 @@ def test_save_fixture_writes_nothing_the_scan_can_find(
     assert FAKE_KEY not in path.read_text(encoding="utf-8")
 
 
+def test_save_fixture_refuses_an_existing_p3_fixture_without_overwrite(
+    probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-run must not clobber reviewed, committed evidence by default."""
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    existing = tmp_path / "fred" / "p3_test.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("reviewed", encoding="utf-8")
+    with pytest.raises(SystemExit, match="--overwrite") as refused:
+        probe.save_fixture("fred", "p3_test", {"body": "new"})
+    assert "p3_test.json" in str(refused.value)
+    assert existing.read_text(encoding="utf-8") == "reviewed"
+
+
+def test_the_existence_check_does_not_skip_the_secret_scan(
+    probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scrub, then scan, then the existence check, then write -- in that order.
+
+    ``redact`` is stubbed to a no-op to simulate a scrub that missed a key.
+    With overwrite on, the scan must still abort the write; with it off, the
+    scan still runs first, so the refusal names the leak rather than the file.
+    Either way the reviewed file survives untouched.
+    """
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    monkeypatch.setattr(probe, "redact", lambda text: text)
+    existing = tmp_path / "fred" / "p3_test.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("reviewed", encoding="utf-8")
+    with pytest.raises(SystemExit, match="ABORTED"):
+        probe.save_fixture("fred", "p3_test", {"note": FAKE_KEY}, overwrite=True)
+    with pytest.raises(SystemExit, match="ABORTED"):
+        probe.save_fixture("fred", "p3_test", {"note": FAKE_KEY})
+    assert existing.read_text(encoding="utf-8") == "reviewed"
+
+
+def test_save_fixture_overwrites_an_existing_p3_fixture_when_asked(
+    probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    existing = tmp_path / "fred" / "p3_test.json"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("reviewed", encoding="utf-8")
+    out = probe.save_fixture("fred", "p3_test", {"body": "new"}, overwrite=True)
+    assert out == existing
+    assert '"body": "new"' in existing.read_text(encoding="utf-8")
+
+
+def test_save_fixture_writes_a_new_p3_fixture_without_overwrite(
+    probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    out = probe.save_fixture("fred", "p3_fresh", {"body": "new"})
+    assert out == tmp_path / "fred" / "p3_fresh.json"
+    assert '"body": "new"' in out.read_text(encoding="utf-8")
+
+
+def test_overwrite_does_not_lift_the_p3_name_rule(
+    probe: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    with pytest.raises(SystemExit, match="must start with p3_"):
+        probe.save_fixture("finnhub", "profile2_aapl", {"body": {}}, overwrite=True)
+    assert not (tmp_path / "finnhub").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "target", "expected"),
+    [
+        (["probes"], "run_probes", False),
+        (["probes", "--overwrite"], "run_probes", True),
+        (["probes", "--only", "fred", "--overwrite"], "run_probes", True),
+        (["stocktwits-poll"], "run_stocktwits", False),
+        (["stocktwits-poll", "--overwrite", "--duration", "1"], "run_stocktwits", True),
+    ],
+)
+def test_the_cli_passes_overwrite_to_every_fixture_writer(
+    probe: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    argv: list[str], target: str, expected: bool,
+) -> None:
+    """``main`` parses ``--overwrite`` and hands it on; nothing is fetched."""
+    monkeypatch.setattr(probe, "FIXTURES", tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake(*args: object, **kwargs: object) -> None:
+        seen.update(kwargs, called=True)
+
+    monkeypatch.setattr(probe, target, fake)
+    probe.main(argv)
+    assert seen.get("called") is True
+    assert seen.get("overwrite") is expected
+
+
+@pytest.mark.parametrize("cmd", [["labels"], ["scan", "x.json"]])
+def test_overwrite_is_not_offered_where_nothing_writes_a_fixture(
+    probe: ModuleType, cmd: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        probe.main([*cmd, "--overwrite"])
+    assert exc.value.code == 2  # argparse usage error
+
+
 @pytest.mark.parametrize(
     ("headline", "expected"),
     [

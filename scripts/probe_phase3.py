@@ -4,8 +4,13 @@ Run by hand, never by the test suite, and **only through the launcher** so no
 agent ever reads ``.env`` (rule 6)::
 
     uv run --env-file <path-to>/.env python scripts/probe_phase3.py probes
+    uv run --env-file <path-to>/.env python scripts/probe_phase3.py probes --overwrite
     uv run --env-file <path-to>/.env python scripts/probe_phase3.py labels
     uv run python scripts/probe_phase3.py stocktwits-poll --duration 3600
+
+An existing ``p3_*.json`` is committed evidence and is refused by default; a
+deliberate re-probe (``probes``, ``stocktwits-poll``) passes ``--overwrite``
+to replace it. ``labels`` and ``scan`` write no fixture and take no such flag.
 
 Nothing here loads ``.env`` itself. Keys come from ``os.environ`` only.
 
@@ -29,8 +34,9 @@ Safety properties, enforced below rather than intended:
   with a back-off (``Retry-After`` if given), never a retry storm.
 
 Outputs: redacted fixtures under ``tests/fixtures/{finnhub,alpaca,massive,
-stocktwits,fred}/p3_*.json`` (the ``p3_`` prefix is enforced, so an existing
-fixture is never overwritten) and machine-readable results under
+stocktwits,fred}/p3_*.json`` (the ``p3_`` prefix is enforced, so a pre-Phase-3
+fixture is never overwritten, and an existing ``p3_`` one is replaced only
+under ``--overwrite``) and machine-readable results under
 ``.claude/scratch/phase3_probe/`` (gitignored).
 """
 
@@ -193,8 +199,16 @@ def say(message: str) -> None:
     print(redact(message), flush=True)
 
 
-def save_fixture(vendor: str, name: str, envelope: Mapping[str, Any]) -> Path:
-    """Scrub, then scan the text as written, then write. The order is the guarantee."""
+def save_fixture(
+    vendor: str, name: str, envelope: Mapping[str, Any], *, overwrite: bool = False
+) -> Path:
+    """Scrub, then scan the text as written, then write. The order is the guarantee.
+
+    An existing ``p3_*.json`` is reviewed, committed evidence, so it is
+    refused unless ``overwrite`` is passed -- set only by ``--overwrite`` on
+    the command line. The check sits after the scan and before the write:
+    the scrub and the scan always run, and a refusal writes nothing.
+    """
     if not name.startswith("p3_"):
         raise SystemExit(f"refusing fixture name {name!r}: must start with p3_")
     text = redact(json.dumps(envelope, indent=2, ensure_ascii=False, default=str)) + "\n"
@@ -202,6 +216,10 @@ def save_fixture(vendor: str, name: str, envelope: Mapping[str, Any]) -> Path:
     if hits or _SK_TOKEN.search(text) or _WEBHOOK.search(text):
         raise SystemExit(f"ABORTED: {vendor}/{name} still holds {hits}; nothing written")
     out = FIXTURES / vendor / f"{name}.json"
+    if out.exists() and not overwrite:
+        raise SystemExit(
+            f"refusing to overwrite existing fixture {out}: pass --overwrite to replace it"
+        )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     say(f"  wrote tests/fixtures/{vendor}/{name}.json ({len(text):,} bytes)")
@@ -523,7 +541,7 @@ def named_in(headline: str, tickers: Iterable[str]) -> set[str]:
 # --------------------------------------------------------------------------
 
 
-def probe_finnhub(http: Http, today: date, results: dict[str, Any]) -> None:
+def probe_finnhub(http: Http, today: date, results: dict[str, Any], *, overwrite: bool) -> None:
     h = finnhub_headers()
     premium: dict[str, Any] = {}
     for path, params in (
@@ -539,7 +557,7 @@ def probe_finnhub(http: Http, today: date, results: dict[str, Any]) -> None:
         premium[path] = {"status": r.status, "content_type": r.content_type, "head": r.text[:120]}
         body, cut = truncate(r.body) if r.body is not None else (None, {})
         name = "p3_premium_" + path.strip("/").replace("/", "_")
-        save_fixture("finnhub", name, r.envelope(body, truncated=cut))
+        save_fixture("finnhub", name, r.envelope(body, truncated=cut), overwrite=overwrite)
     results["finnhub_premium"] = premium
     one_line("1 finnhub premium", "; ".join(
         f"{p} -> {v['status']} {v['content_type'].split(';')[0]}" if isinstance(v, dict) else f"{p} -> {v}"
@@ -561,7 +579,7 @@ def probe_finnhub(http: Http, today: date, results: dict[str, Any]) -> None:
             "watch_universe_rows": [{k: row.get(k) for k in ("symbol", "date", "hour")} for row in watch_rows],
         }
         body, cut = truncate(r.body, keep=8)
-        save_fixture("finnhub", "p3_calendar_earnings", r.envelope(body, truncated=cut))
+        save_fixture("finnhub", "p3_calendar_earnings", r.envelope(body, truncated=cut), overwrite=overwrite)
         one_line("2 finnhub earnings", f"HTTP {r.status}; {len(rows)} rows, {len(upcoming)} dated >= today, "
                  f"dates {dates[:1]}..{dates[-1:]}; hour values {dict(hours)}", results)
     else:
@@ -571,7 +589,7 @@ def probe_finnhub(http: Http, today: date, results: dict[str, Any]) -> None:
     r = http.get(FINNHUB + "/stock/recommendation", {"symbol": "AAPL"}, h)
     if r is not None:
         body, cut = truncate(r.body, keep=4) if r.body is not None else (None, {})
-        save_fixture("finnhub", "p3_stock_recommendation_aapl", r.envelope(body, truncated=cut))
+        save_fixture("finnhub", "p3_stock_recommendation_aapl", r.envelope(body, truncated=cut), overwrite=overwrite)
         keys = sorted(r.body[0].keys()) if isinstance(r.body, list) and r.body else []
         n = len(r.body) if isinstance(r.body, list) else 0
         one_line("3 finnhub recommendation", f"HTTP {r.status}; {n} periods; keys {keys}", results)
@@ -584,17 +602,17 @@ def probe_finnhub(http: Http, today: date, results: dict[str, Any]) -> None:
             continue
         quotes[sym] = {"status": r.status, "body": r.body if r.body is not None else r.text[:120]}
         safe = sym.replace("^", "caret_").lower()
-        save_fixture("finnhub", f"p3_quote_{safe}", r.envelope())
+        save_fixture("finnhub", f"p3_quote_{safe}", r.envelope(), overwrite=overwrite)
     results["finnhub_quote_index"] = quotes
     one_line("4 finnhub index quote", "; ".join(f"{s} -> {v['status']} {v['body']}" for s, v in quotes.items()), results)
 
 
-def probe_alpaca(http: Http, today: date, now: datetime, results: dict[str, Any]) -> None:
+def probe_alpaca(http: Http, today: date, now: datetime, results: dict[str, Any], *, overwrite: bool) -> None:
     h = alpaca_headers()
     # 5. news shape
     r = http.get(ALPACA_DATA + "/v1beta1/news", {"limit": 5, "symbols": "AAPL"}, h)
     if r is not None:
-        save_fixture("alpaca", "p3_news", r.envelope())
+        save_fixture("alpaca", "p3_news", r.envelope(), overwrite=overwrite)
         news = (r.body or {}).get("news") or [] if isinstance(r.body, dict) else []
         keys = sorted(news[0].keys()) if news else []
         one_line("5 alpaca news", f"HTTP {r.status}; top-level {sorted(r.body.keys()) if isinstance(r.body, dict) else None}; "
@@ -619,7 +637,7 @@ def probe_alpaca(http: Http, today: date, now: datetime, results: dict[str, Any]
             break
     if first is not None:
         body, cut = truncate(first.body, keep=6)
-        save_fixture("alpaca", "p3_corporate_actions_cash_dividend", first.envelope(body, truncated=cut))
+        save_fixture("alpaca", "p3_corporate_actions_cash_dividend", first.envelope(body, truncated=cut), overwrite=overwrite)
         ahead = sorted((date.fromisoformat(row["ex_date"]) - today).days for row in rows if row.get("ex_date"))
         future = [d for d in ahead if d > 0]
         watch = sorted({str(row.get("symbol")) for row in rows if row.get("symbol") in WATCH_TICKERS})
@@ -655,14 +673,14 @@ def probe_alpaca(http: Http, today: date, now: datetime, results: dict[str, Any]
                            "start": day_s, "end": day_s, "limit": 100}, h)
             bars = (rb.body or {}).get("bars") or {} if rb is not None and isinstance(rb.body, dict) else {}
             if rb is not None:
-                save_fixture("alpaca", "p3_option_bars_spy_compare", rb.envelope())
+                save_fixture("alpaca", "p3_option_bars_spy_compare", rb.envelope(), overwrite=overwrite)
             for sym, pb in top:
                 hist = bars.get(sym) or []
                 compare.append({"symbol": sym, "prevDailyBar_t": pb.get("t"), "prevDailyBar_v": pb.get("v"),
                                 "bars_v": hist[0].get("v") if hist else None,
                                 "bars_t": hist[0].get("t") if hist else None})
         body, cut = truncate(r.body, keep=6)
-        save_fixture("alpaca", "p3_option_snapshots_spy_indicative", r.envelope(body, truncated=cut))
+        save_fixture("alpaca", "p3_option_snapshots_spy_indicative", r.envelope(body, truncated=cut), overwrite=overwrite)
         results["alpaca_indicative_volume"] = {
             "status": r.status, "contracts": len(snaps), "with_dailyBar": len(with_bar),
             "dailyBar_v_nonzero": sum(1 for v in vols if v > 0),
@@ -699,7 +717,7 @@ def probe_stock_snapshot_cap(http: Http, symbols: Sequence[str], results: dict[s
     one_line("11 stocks/snapshots cap", json.dumps(out), results)
 
 
-def probe_fred(http: Http, today: date, results: dict[str, Any]) -> None:
+def probe_fred(http: Http, today: date, results: dict[str, Any], *, overwrite: bool) -> None:
     key = need("FRED_API_KEY")
     out: dict[str, Any] = {}
     for series in ("VIXCLS", "BAMLH0A0HYM2", "DGS3MO"):
@@ -710,7 +728,7 @@ def probe_fred(http: Http, today: date, results: dict[str, Any]) -> None:
             continue
         obs = (r.body or {}).get("observations") or [] if isinstance(r.body, dict) else []
         out[series] = {"status": r.status, "latest": [(o.get("date"), o.get("value")) for o in obs[:3]]}
-        save_fixture("fred", f"p3_observations_{series.lower()}", r.envelope())
+        save_fixture("fred", f"p3_observations_{series.lower()}", r.envelope(), overwrite=overwrite)
     r = http.get(FRED + "/releases/dates",
                  {"api_key": key, "file_type": "json", "include_release_dates_with_no_data": "true",
                   "realtime_start": today.isoformat(), "realtime_end": (today + timedelta(days=30)).isoformat(),
@@ -723,12 +741,12 @@ def probe_fred(http: Http, today: date, results: dict[str, Any]) -> None:
                                  "row_keys": keys,
                                  "date_span": [rows[0].get("date"), rows[-1].get("date")] if rows else None}
         body, cut = truncate(r.body, keep=10)
-        save_fixture("fred", "p3_releases_dates", r.envelope(body, truncated=cut))
+        save_fixture("fred", "p3_releases_dates", r.envelope(body, truncated=cut), overwrite=overwrite)
     results["fred"] = out
     one_line("10 fred", json.dumps(out), results)
 
 
-def probe_massive_single(http: Http, results: dict[str, Any]) -> list[str]:
+def probe_massive_single(http: Http, results: dict[str, Any], *, overwrite: bool) -> list[str]:
     r = http.get(MASSIVE + "/v2/reference/news", {"limit": 1000}, massive_headers())
     if r is None:
         one_line("8 massive", "transport error", results)
@@ -740,7 +758,7 @@ def probe_massive_single(http: Http, results: dict[str, Any]) -> list[str]:
     body, cut = truncate(r.body, keep=5)
     if isinstance(body, dict) and "next_url" in body:
         body["next_url"] = safe_url(str(body["next_url"]))
-    save_fixture("massive", "p3_reference_news_untickered", r.envelope(body, truncated=cut))
+    save_fixture("massive", "p3_reference_news_untickered", r.envelope(body, truncated=cut), overwrite=overwrite)
     results["massive_single"] = {"status": r.status, "articles": len(res), "sentiment_values": dict(sentiments),
                                  "published_span": span, "distinct_tickers": len(tickers),
                                  "article_keys": sorted(res[0].keys()) if res else [],
@@ -749,23 +767,23 @@ def probe_massive_single(http: Http, results: dict[str, Any]) -> list[str]:
     return tickers
 
 
-def run_probes(only: str | None = None) -> None:
+def run_probes(only: str | None = None, *, overwrite: bool) -> None:
     now = datetime.now(timezone.utc)
     today = now.date()
     results: dict[str, Any] = {"ran_at": now.isoformat(timespec="seconds")}
     http = Http()
     if only == "fred":  # re-record FRED alone; touches no other host's budget
         try:
-            probe_fred(http, today, results)
+            probe_fred(http, today, results, overwrite=overwrite)
         finally:
             save_scratch("probes_fred.json", results)
             http.close()
         return
     try:
-        probe_finnhub(http, today, results)
-        probe_fred(http, today, results)
-        probe_alpaca(http, today, now, results)
-        tickers = probe_massive_single(http, results)
+        probe_finnhub(http, today, results, overwrite=overwrite)
+        probe_fred(http, today, results, overwrite=overwrite)
+        probe_alpaca(http, today, now, results, overwrite=overwrite)
+        tickers = probe_massive_single(http, results, overwrite=overwrite)
         pool = sorted(set(tickers) | WATCH_TICKERS)
         probe_stock_snapshot_cap(http, [t for t in pool if re.fullmatch(r"[A-Z]{1,5}", t)], results)
     finally:
@@ -1041,7 +1059,7 @@ def run_labels(n_sessions: int, massive_pages: int, from_cache: bool = False) ->
 _INTERESTING_HEADER = re.compile(r"(?i)^(cf-|x-|retry-after|ratelimit|server$|content-type$)")
 
 
-def run_stocktwits(duration: float, interval: float, user_agent: str | None) -> None:
+def run_stocktwits(duration: float, interval: float, user_agent: str | None, *, overwrite: bool) -> None:
     SCRATCH.mkdir(parents=True, exist_ok=True)
     log_path = SCRATCH / "stocktwits_poll.jsonl"
     summary_path = SCRATCH / "stocktwits_poll_summary.json"
@@ -1127,7 +1145,7 @@ def run_stocktwits(duration: float, interval: float, user_agent: str | None) -> 
                         save_fixture("stocktwits", "p3_streams_symbol_sample",
                                      {"recorded_at": entry["t"], "request": f"{STOCKTWITS}/streams/symbol/{sym}.json",
                                       "status_code": r.status_code, "content_type": ctype,
-                                      "truncated": cut, "body": sample})
+                                      "truncated": cut, "body": sample}, overwrite=overwrite)
                         sample_saved = True
             log.write(json.dumps(entry) + "\n")
             log.flush()
@@ -1137,7 +1155,7 @@ def run_stocktwits(duration: float, interval: float, user_agent: str | None) -> 
                 time.sleep(min(wait, max(0.0, duration - (time.monotonic() - started))))
     client.close()
     summary = write_summary(final=True)
-    save_fixture("stocktwits", "p3_poll_summary", summary)
+    save_fixture("stocktwits", "p3_poll_summary", summary, overwrite=overwrite)
     say(json.dumps(summary, indent=1))
 
 
@@ -1184,11 +1202,17 @@ def run_scan(paths: Sequence[str]) -> None:
         raise SystemExit(1)
 
 
+# Offered only on the subcommands that write fixtures (``probes`` and
+# ``stocktwits-poll``); ``labels`` and ``scan`` write none, so they reject it.
+OVERWRITE_HELP: Final = "replace existing tests/fixtures/*/p3_*.json (refused by default)"
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     pr = sub.add_parser("probes")
     pr.add_argument("--only", choices=["fred"], default=None)
+    pr.add_argument("--overwrite", action="store_true", help=OVERWRITE_HELP)
     lab = sub.add_parser("labels")
     lab.add_argument("--sessions", type=int, default=10)
     lab.add_argument("--massive-pages", type=int, default=80)
@@ -1198,17 +1222,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     st.add_argument("--duration", type=float, default=3600.0)
     st.add_argument("--interval", type=float, default=20.0)
     st.add_argument("--user-agent", default=None)
+    st.add_argument("--overwrite", action="store_true", help=OVERWRITE_HELP)
     sc = sub.add_parser("scan")
     sc.add_argument("paths", nargs="+")
     args = parser.parse_args(argv)
     if args.cmd == "scan":
         run_scan(args.paths)
     elif args.cmd == "probes":
-        run_probes(args.only)
+        run_probes(args.only, overwrite=args.overwrite)
     elif args.cmd == "labels":
         run_labels(args.sessions, args.massive_pages, args.from_cache)
     else:
-        run_stocktwits(args.duration, args.interval, args.user_agent)
+        run_stocktwits(args.duration, args.interval, args.user_agent, overwrite=args.overwrite)
 
 
 if __name__ == "__main__":
