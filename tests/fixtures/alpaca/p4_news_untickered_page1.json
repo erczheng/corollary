@@ -1,0 +1,245 @@
+{
+  "body": {
+    "news": [
+      {
+        "author": "Webmaster",
+        "content": "",
+        "created_at": "2026-09-23T13:30:01Z",
+        "headline": "Trading Halt: Halt status updated at 9:30:00 AM ET: Quotation Resumption: IPO security released for quotation",
+        "id": 61945379,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "TXCA"
+        ],
+        "updated_at": "2026-09-23T13:30:04Z",
+        "url": "https://www.benzinga.com/quote/TXCA"
+      },
+      {
+        "author": "Avi Kapoor",
+        "content": "",
+        "created_at": "2026-09-23T13:30:35Z",
+        "headline": "AutoZone Analysts Cut Their Forecasts After Q4 Results",
+        "id": 61945394,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Autozone-Image-by-refrina-via-Shuttersto.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Autozone-Image-by-refrina-via-Shuttersto.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Autozone-Image-by-refrina-via-Shuttersto.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "AutoZone beat Q4 earnings estimates at $56.05 per share, while revenue rose 5.6% to $6.595B; analysts cut price targets.",
+        "symbols": [
+          "AZO"
+        ],
+        "updated_at": "2026-09-23T13:30:35Z",
+        "url": "https://www.benzinga.com/analyst-stock-ratings/price-target/26/09/61945394/autozone-analysts-cut-their-forecasts-after-q4-results"
+      },
+      {
+        "author": "Henry Khederian",
+        "content": "",
+        "created_at": "2026-09-23T13:31:17Z",
+        "headline": "BullFrog AI Stock Surges Wednesday: What's Happening?",
+        "id": 61945420,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Abstract-Images--Candlestick-Charts-For-.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Abstract-Images--Candlestick-Charts-For-.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Abstract-Images--Candlestick-Charts-For-.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "BullFrog AI Holdings is trading higher Wednesday after SEC filings revealed substantial open-market share purchases by its CEO and CFO.",
+        "symbols": [
+          "BFRG"
+        ],
+        "updated_at": "2026-09-23T13:31:17Z",
+        "url": "https://www.benzinga.com/trading-ideas/movers/26/09/61945420/bullfrog-ai-stock-surges-wednesday-whats-happening"
+      },
+      {
+        "author": "Khyathi Dalal",
+        "content": "",
+        "created_at": "2026-09-23T13:32:17Z",
+        "headline": "Bitcoin May Retest Low $60,000s Before $100K, Mark Yusko Says 'Everyone' Should Own It",
+        "id": 61945438,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bitcoin-Coins-On-Reflective-Black-Surfac.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bitcoin-Coins-On-Reflective-Black-Surfac.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bitcoin-Coins-On-Reflective-Black-Surfac.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Mark Yusko expects Bitcoin to dip into the low $60Ks before rallying to $100K, urges 5%-10% exposure, and says his firm exited Solana.",
+        "symbols": [
+          "BTCUSD",
+          "SOLUSD"
+        ],
+        "updated_at": "2026-09-23T13:32:17Z",
+        "url": "https://www.benzinga.com/crypto/cryptocurrency/26/09/61945438/bitcoin-may-retest-low-60000s-before-100k-mark-yusko-says-everyone-should-own-it"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:33:49Z",
+        "headline": "Aurora Innovation Announces 2030 Vision, Sees SAM Expansion: 150B+ VMT, ~40x Growth From Today; Fleet Scale: 30K+ Expected Driverless Trucks In Operation; Revenue: $5B+ Projected Annual Revenue; Unit Economic Profitability: ~60% Target Gross Margin; R&D Efficiency: 7x Anticipated Revenue Return On R&D Investment",
+        "id": 61945460,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "AUR"
+        ],
+        "updated_at": "2026-09-23T13:33:49Z",
+        "url": "https://www.benzinga.com/quote/AUR"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:34:04Z",
+        "headline": "Astrana Health Affirms FY2026 Sales Guidance of $3.800B-$4.100B vs $4.004B Est",
+        "id": 61945475,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "ASTH"
+        ],
+        "updated_at": "2026-09-23T13:34:04Z",
+        "url": "https://www.benzinga.com/news/26/09/61945475/astrana-health-affirms-fy2026-sales-guidance-3-800b-4-100b-vs-4-004b-est"
+      },
+      {
+        "author": "Erica Kollmann",
+        "content": "",
+        "created_at": "2026-09-23T13:34:36Z",
+        "headline": "Quantum Stocks Catch a Bid After IonQ Shows Real-Time Error Correction",
+        "id": 61945487,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Quantum-computing.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Quantum-computing.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Quantum-computing.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "IonQ unveils real-time quantum error-correction decoder running on one CPU, sending its stock and other quantum shares higher.",
+        "symbols": [
+          "HQ",
+          "IBM",
+          "INFQ",
+          "IONQ",
+          "NVDA",
+          "QBTS",
+          "QUBT",
+          "RGTI",
+          "XNDU"
+        ],
+        "updated_at": "2026-09-23T13:34:36Z",
+        "url": "https://www.benzinga.com/trading-ideas/movers/26/09/61945487/quantum-stocks-rally-ionq-real-time-error-correction"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:36:11Z",
+        "headline": "Brightline Interactive Announces 1-For-8 Reverse Stock Split, Effective September 28, 2026",
+        "id": 61945557,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "BTLN"
+        ],
+        "updated_at": "2026-09-23T13:36:11Z",
+        "url": "https://www.benzinga.com/news/26/09/61945557/brightline-interactive-announces-1-8-reverse-stock-split-effective-september-28-2026"
+      },
+      {
+        "author": "Avi Kapoor",
+        "content": "",
+        "created_at": "2026-09-23T13:37:00Z",
+        "headline": "These Analysts Slash Their Forecasts On KB Home Following Q3 Results",
+        "id": 61945693,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Dec-8--2019-Los-Angeles--Ca--Usa.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Dec-8--2019-Los-Angeles--Ca--Usa.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Dec-8--2019-Los-Angeles--Ca--Usa.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "KB Home beats Q3 estimates but cites housing headwinds, guides revenue, and sees analysts cut price targets as shares fall.",
+        "symbols": [
+          "KBH"
+        ],
+        "updated_at": "2026-09-23T13:37:00Z",
+        "url": "https://www.benzinga.com/analyst-stock-ratings/price-target/26/09/61945693/these-analysts-slash-their-forecasts-on-kb-home-following-q3-results"
+      },
+      {
+        "author": "Peace Longe",
+        "content": "",
+        "created_at": "2026-09-23T13:38:37Z",
+        "headline": "World\u2019s Best-Performing Sovereign Wealth Fund CEO Expects US Stock Returns To Slow",
+        "id": 61945779,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Wall-Street.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Wall-Street.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Wall-Street.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "The CEO of New Zealand&#39;s $54.4 billion fund, the world&#39;s top-performing sovereign wealth fund, expects U.S. stock returns to revert to the mean.",
+        "symbols": [],
+        "updated_at": "2026-09-23T13:38:37Z",
+        "url": "https://www.benzinga.com/Opinion/26/09/61945779/worlds-best-performing-sovereign-wealth-fund-ceo-expects-us-stock-returns-to-slow"
+      }
+    ],
+    "next_page_token": "MTc5MDE3MDcxNzAwMDAwMDAwMHw2MTk0NTc3OQ=="
+  },
+  "recorded_at": "2026-09-24T20:16:30+00:00",
+  "request": "/v1beta1/news?start=2026-09-23T13:30:00Z&end=2026-09-23T14:30:00Z&limit=10&sort=asc",
+  "status_code": 200
+}

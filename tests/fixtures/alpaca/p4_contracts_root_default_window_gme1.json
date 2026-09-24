@@ -1,0 +1,9 @@
+{
+  "body": {
+    "next_page_token": null,
+    "option_contracts": []
+  },
+  "recorded_at": "2026-09-24T20:16:33+00:00",
+  "request": "/v2/options/contracts?underlying_symbols=GME&root_symbol=GME1&limit=1",
+  "status_code": 200
+}

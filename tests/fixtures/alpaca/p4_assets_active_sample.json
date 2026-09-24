@@ -1,0 +1,202 @@
+{
+  "body": [
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "NYSE",
+      "fractionable": true,
+      "id": "4894437a-7b7e-5448-86bd-75068bbf32e0",
+      "maintenance_margin_requirement": 100,
+      "margin_requirement_long": "100",
+      "margin_requirement_short": "100",
+      "marginable": true,
+      "name": "GameStop Corp. Class A",
+      "shortable": true,
+      "status": "active",
+      "symbol": "GME",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "NASDAQ",
+      "fractionable": true,
+      "id": "57687506-f0b3-5ad2-9ace-703e900ef4a1",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "NVIDIA Corporation Common Stock",
+      "shortable": true,
+      "status": "active",
+      "symbol": "NVDA",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "options_late_close",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "ARCA",
+      "fractionable": true,
+      "id": "f3c0e66c-8a82-5004-9c12-d373c26c2d06",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "State Street SPDR S&P 500 ETF Trust",
+      "shortable": true,
+      "status": "active",
+      "symbol": "SPY",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "NASDAQ",
+      "fractionable": true,
+      "id": "f8a209f6-9468-5612-bd55-4d3046e65472",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "Apple Inc. Common Stock",
+      "shortable": true,
+      "status": "active",
+      "symbol": "AAPL",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "hard_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": false,
+      "exchange": "NASDAQ",
+      "fractionable": true,
+      "id": "fd04f90e-1986-5ee9-9c6a-99a7b16a1f4d",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "Xerox Holdings Corporation Common Stock",
+      "shortable": false,
+      "status": "active",
+      "symbol": "XRX",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "NYSE",
+      "fractionable": true,
+      "id": "a0a6f6ca-39a3-59aa-b042-c3fe6f67d444",
+      "maintenance_margin_requirement": 100,
+      "margin_requirement_long": "100",
+      "margin_requirement_short": "100",
+      "marginable": true,
+      "name": "AMC ENTERTAINMENT HOLDINGS, INC.",
+      "shortable": true,
+      "status": "active",
+      "symbol": "AMC",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "fractional_eh_enabled",
+        "has_options",
+        "overnight_tradable"
+      ],
+      "borrow_status": "easy_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": true,
+      "exchange": "NYSE",
+      "fractionable": true,
+      "id": "71e30054-3b3a-5b05-a4e1-04a1e15f20b4",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "BERKSHIRE HATHAWAY Class B",
+      "shortable": true,
+      "status": "active",
+      "symbol": "BRK.B",
+      "tradable": true
+    },
+    {
+      "attributes": [
+        "overnight_tradable"
+      ],
+      "borrow_status": "hard_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": false,
+      "exchange": "ARCA",
+      "fractionable": false,
+      "id": "fcb0dc22-e2b3-5bd4-9847-ea87d0d6c7da",
+      "maintenance_margin_requirement": 30,
+      "margin_requirement_long": "30",
+      "margin_requirement_short": "30",
+      "marginable": true,
+      "name": "Alternative Access First Priority CLO Bond ETF",
+      "shortable": false,
+      "status": "active",
+      "symbol": "AAA",
+      "tradable": true
+    },
+    {
+      "attributes": [],
+      "borrow_status": "hard_to_borrow",
+      "class": "us_equity",
+      "easy_to_borrow": false,
+      "exchange": "OTC",
+      "fractionable": false,
+      "id": "deaaef43-7794-5d88-8e5d-e743a3362ba5",
+      "maintenance_margin_requirement": 100,
+      "margin_requirement_long": "100",
+      "margin_requirement_short": "100",
+      "marginable": false,
+      "name": "AIB Acquisition Corporation Rights",
+      "shortable": false,
+      "status": "active",
+      "symbol": "AACRF",
+      "tradable": false
+    }
+  ],
+  "note": "TRIMMED: the unfiltered active us_equity list, reduced to a sample. The full response held 14379 assets, 6305 of them carrying has_options in `attributes`.",
+  "recorded_at": "2026-09-24T20:16:31+00:00",
+  "request": "/v2/assets?status=active&asset_class=us_equity",
+  "status_code": 200,
+  "trimmed_from": 14379
+}

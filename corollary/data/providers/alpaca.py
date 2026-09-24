@@ -73,18 +73,27 @@ import logging
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Final
 
 import httpx
 
-from corollary.calendars import nyse_close_at
+from corollary.calendars import NYSE_TZ, nyse_close_at
+from corollary.data.news.article import (
+    NewsAccessDenied,
+    NewsArticle,
+    NewsFeed,
+    NewsProviderError,
+)
+from corollary.data.news.tradeability import adv_window, has_standard_contract
 from corollary.data.providers.interface import (
     AnalyticsSource,
+    AssetDirectory,
     Bar,
     BarTimeframe,
     ContractStatus,
+    EquityAsset,
     FeedAccessError,
     MarketDataProvider,
     OptionContract,
@@ -97,6 +106,7 @@ from corollary.data.providers.interface import (
     StockSnapshot,
     Trade,
 )
+from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
 from corollary.engine.stream import (
     AcknowledgedSubscription,
     DropRule,
@@ -134,6 +144,7 @@ from corollary.ratelimit import (
     default_limiter,
 )
 from corollary.wire import (
+    WireFormatError,
     as_date,
     as_datetime,
     as_decimal,
@@ -147,7 +158,12 @@ from corollary.wire import (
 )
 
 __all__ = [
+    "ADV_MAX_SYMBOLS",
+    "ALPACA_NEWS_MAX_PAGES",
+    "ALPACA_NEWS_OVERRUN_FACTOR",
+    "ALPACA_NEWS_PAGE_LIMIT",
     "ALPACA_OPTIONS_FEED_ENV",
+    "AlpacaNews",
     "OPTION_STREAM_URL_TEMPLATE",
     "QUOTES_CHANNEL",
     "STOCK_STREAM_URL_TEMPLATE",
@@ -168,6 +184,7 @@ __all__ = [
     "REALTIME_DELAY",
     "STOCK_HISTORICAL_FEEDS",
     "STOCK_REALTIME_FEEDS",
+    "standard_root_params",
 ]
 
 logger = logging.getLogger(__name__)
@@ -227,6 +244,92 @@ _MAX_PAGES: Final = 50
 _OPTION_CHAIN_PAGE_LIMIT: Final = 1000
 _BARS_PAGE_LIMIT: Final = 10_000
 _CONTRACTS_PAGE_LIMIT: Final = 10_000
+
+#: ``/v1beta1/news``'s page ceiling: ``limit`` is documented ``maximum: 50``.
+ALPACA_NEWS_PAGE_LIMIT: Final = 50
+
+#: Pages one :meth:`AlpacaProvider.news` call reads before stopping with
+#: ``complete=False``. 500 articles. Measured 2026-09-24: the untickered feed
+#: carried 741 articles over the complete UTC day 2026-09-23 (15 pages at 50),
+#: so a 60-second poll reads one page and only a cold start or an outage
+#: reaches the cap -- and the ascending order makes stopping there safe.
+ALPACA_NEWS_MAX_PAGES: Final = 10
+
+#: How far past ``max_pages`` one call may read while its cursor cannot yet
+#: advance past ``start`` -- a hard ceiling of ``max_pages x`` this many pages.
+#: Stopping at the cap with the cursor still at ``start`` hands the next call
+#: the same ``start``, which reads the same pages and stops in the same place:
+#: a permanent stall behind which every later article goes unread. So the call
+#: keeps following the keyset token (which orders ties by id) until the cursor
+#: can move. Past this ceiling -- more than 1,500 articles (at the default
+#: cap) sharing one second, or pages of nothing but malformed rows -- it stops
+#: and logs
+#: ``alpaca_news_cursor_stalled`` at ERROR rather than loop without bound.
+#: 3, not more: during a vendor schema change every row is malformed and the
+#: cursor never moves, and each poll then spends ``cap x factor`` pages of the
+#: shared 200/min data bucket the Markets snapshots also draw on.
+ALPACA_NEWS_OVERRUN_FACTOR: Final = 3
+
+#: Symbols per ADV bars request. Decision 21's budget row: 200 symbols x ~21
+#: daily bars is ~4,200 points, under the 10,000-bar page.
+ADV_MAX_SYMBOLS: Final = 200
+
+#: How far out the standard-root check looks for a contract. The contracts
+#: endpoint's ``expiration_date_lte`` **defaults to the next weekend** (its
+#: reference, and ``p4_contracts_root_default_window_xrx.json``: XRX, which
+#: lists no weeklies, answered empty without this). LEAPS reach ~3 years.
+_ROOT_CHECK_HORIZON: Final = timedelta(days=4 * 366)
+
+#: Symbols quoted in the ``alpaca_asset_attributes_missing`` warning; the
+#: count is always the full figure.
+_ATTRIBUTES_SAMPLE: Final = 10
+
+
+def standard_root_params(underlying: str, root: str, *, today: date) -> dict[str, Any]:
+    """The query :meth:`AlpacaProvider.has_standard_root` sends -- the one source for it.
+
+    ``tests/fixtures/record_alpaca_news.py`` builds its root checks from this
+    too, so a fixture recorded from now on is the provider's own request.
+    ``today`` is the New York date. ``underlying`` and ``root`` are equal in
+    the provider; the recorder varies ``root`` (``GME``/``GME1``) to prove the
+    two filters combine.
+    """
+    return {
+        "underlying_symbols": underlying,
+        "root_symbol": root,
+        "status": ContractStatus.ACTIVE.value,
+        "expiration_date_lte": (today + _ROOT_CHECK_HORIZON).isoformat(),
+        "limit": 1,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class AlpacaNews:
+    """One :meth:`AlpacaProvider.news` call's articles and the cursor for the next.
+
+    Mirrors :class:`~corollary.data.providers.massive.MassiveNews`, with one
+    difference that follows from the vendor: Alpaca's ``start`` is
+    **inclusive** and filters on ``updated_at``, so the cursor is an
+    ``updated_at`` and the cursor re-reads the articles stamped
+    with it (idempotent downstream, and it also catches a late tie that
+    Massive's ``.gt`` cannot).
+    """
+
+    #: Newest ``published_at`` first, then by ``vendor_id``; unique by ``vendor_id``.
+    articles: tuple[NewsArticle, ...]
+    #: The next call's ``start``: the newest ``updated_at`` read, truncated to
+    #: the second (no back-off -- ``start`` is inclusive), or the ``start``
+    #: passed in when nothing was. Never below that ``start`` floored to the
+    #: second (a sub-second ``start`` re-reads its own second), never above the
+    #: request's ``end`` (or its clock when no ``end`` was given).
+    cursor: datetime
+    #: ``False`` when the call stopped with a page token pending: at the page
+    #: cap once the cursor had advanced, or at the overrun ceiling when it
+    #: could not (logged ``alpaca_news_cursor_stalled``).
+    complete: bool
+    pages: int
+    #: Rows refused as malformed, each logged as ``alpaca_news_row_skipped``.
+    skipped: int
 
 
 class FeedConfigError(RuntimeError):
@@ -1244,6 +1347,433 @@ class AlpacaProvider(MarketDataProvider):
             )
         return contracts
 
+    # ------------------------------------------------------------- news
+
+    def _scrub(self, text: str) -> str:
+        """Vendor text, bounded and de-identified, for a log line."""
+        return vendor_detail(
+            text, secrets=(self._credentials.key_id, self._credentials.secret_key)
+        )
+
+    async def news(
+        self,
+        *,
+        start: datetime,
+        end: datetime | None = None,
+        max_pages: int = ALPACA_NEWS_MAX_PAGES,
+    ) -> AlpacaNews:
+        """Every Benzinga article whose ``updated_at`` is in ``[start, end]``, ascending.
+
+        Phase 3 decision 21's discovery tier: ``/v1beta1/news`` with **no**
+        ``symbols`` parameter, which returns the whole feed -- measured on
+        2026-09-24 at 741 articles for the UTC day 2026-09-23, 732 distinct
+        tags of which 10 crypto pairs, 24 articles tagged to nothing.
+
+        **What the window filters on.** Measured, not documented: ``start`` and
+        ``end`` select on ``updated_at`` (over that day, one article created
+        before the window was returned because it was updated inside it, and
+        none was returned updated outside it), and ``sort=asc`` orders by
+        ``updated_at`` -- the reference says *"Sort articles by updated
+        date"*. So the returned :attr:`AlpacaNews.cursor` is an
+        ``updated_at``, while each article's ``published_at`` is its
+        ``created_at``: the first publication, which an edit does not move.
+        Dating a story by its last edit would re-date old news as new.
+
+        ``start`` must be aware and is sent floored to the second (it is
+        inclusive, so flooring can only re-read). ``end`` is optional; absent,
+        the vendor defaults it to now. Any aware ``start`` is accepted,
+        including one behind the last cursor, so the poller can re-read an
+        overlap for late arrivals -- the store keys on ``(vendor, vendor_id)``.
+
+        **The cursor.** The newest ``updated_at`` read, truncated to the
+        second, with no back-off: the reference documents ``start`` as *"The
+        inclusive start of the interval"*, and the feed stamps whole seconds
+        (every recorded ``updated_at``; the page tokens are
+        ``<nanoseconds>|<id>`` keys with a zero fraction). So the next call
+        re-reads the newest second in full, and any tie still unread behind a
+        pending token is inside it. The cursor is clamped above to ``end``,
+        or to this request's clock when no ``end`` is given -- a row stamped
+        in the future would otherwise push it past every article not yet
+        written -- and logged (``alpaca_news_cursor_clamped``) when that binds.
+
+        **The cap cannot stall the cursor.** After ``max_pages`` pages with a
+        token pending the call stops only if its cursor has moved past
+        ``start``. If it has not (a page cap's worth of rows tied at the
+        ``start`` second, or pages of malformed rows), stopping would hand the
+        next call the same ``start``, the same pages, and the same stop,
+        forever. So it keeps following the keyset token, which orders ties by
+        id, logging ``alpaca_news_page_cap_overrun`` once; at
+        ``max_pages x`` :data:`ALPACA_NEWS_OVERRUN_FACTOR` pages -- or at
+        once, if the upper clamp sits at or below ``start`` so no page could
+        help -- it stops with ``complete=False`` and logs
+        ``alpaca_news_cursor_stalled`` at ERROR. Never an unbounded loop.
+
+        An article read twice (edited between pages, so re-sorted later)
+        keeps the copy with the newer ``updated_at``: the edit's headline and
+        tags are the current ones.
+
+        Crypto tags (``BTCUSD``) pass through: dropping tags that are not
+        active US equities is the ingest's job, against
+        :meth:`active_equities`. A malformed row is skipped, logged
+        (scrubbed, bounded) and counted, never failing the batch. A failed
+        page -- any page -- raises :class:`NewsProviderError`
+        (:class:`NewsAccessDenied` on a 403), so a partial read is never
+        returned as if it were whole.
+        """
+        _require_aware(start, "start")
+        _require_aware(end, "end")
+        if max_pages < 1:
+            raise ValueError(f"max_pages must be at least 1, got {max_pages}")
+        floor = start.astimezone(timezone.utc).replace(microsecond=0)
+        params: dict[str, Any] = {
+            "start": floor.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": _rfc3339(end),
+            "limit": ALPACA_NEWS_PAGE_LIMIT,
+            "sort": "asc",
+        }
+
+        # The cursor's upper bound: ``end`` if given, else this request's own
+        # clock. Read once, before the first page, so every page of one call
+        # is judged against the same instant.
+        ceiling = (end if end is not None else self._now()).astimezone(timezone.utc).replace(
+            microsecond=0
+        )
+        hard_ceiling = max_pages * ALPACA_NEWS_OVERRUN_FACTOR
+
+        # vendor_id -> (article, its updated_at): an edited duplicate keeps
+        # the copy with the newer updated_at, whichever page it came on.
+        articles: dict[str, tuple[NewsArticle, datetime]] = {}
+        newest: datetime | None = None
+        skipped = 0
+        pages = 0
+        overran = False
+        token: str | None = None
+        while True:
+            payload = await self._news_page({**params, "page_token": token})
+            pages += 1
+            for raw in payload["news"]:
+                decoded = _news_row(raw, self._scrub)
+                if decoded is None:
+                    skipped += 1
+                    continue
+                article, updated_at = decoded
+                held = articles.get(article.vendor_id)
+                if held is None or updated_at > held[1]:
+                    articles[article.vendor_id] = (article, updated_at)
+                if newest is None or updated_at > newest:
+                    newest = updated_at
+            pending = payload.get("next_page_token")
+            token = pending if isinstance(pending, str) and pending else None
+            if token is None:
+                break
+            if pages < max_pages:
+                continue
+            # At or past the cap with a token pending. Stop only if the next
+            # call would start somewhere new.
+            advanced = _news_cursor(newest, floor, ceiling) > floor
+            if advanced:
+                logger.warning(
+                    "alpaca news stopped after %d page(s) (cap %d) with more "
+                    "pending; the next call resumes at the newest updated_at read",
+                    pages,
+                    max_pages,
+                    extra={
+                        "event": "alpaca_news_page_cap",
+                        "rule": (
+                            "a call reads at most max_pages pages once its cursor "
+                            "has advanced; ascending order leaves no hole, and "
+                            "the inclusive start re-reads the newest second"
+                        ),
+                        "pages": pages,
+                        "max_pages": max_pages,
+                        "articles": len(articles),
+                        "feed": NewsFeed.ALPACA_NEWS.value,
+                    },
+                )
+                break
+            if ceiling <= floor or pages >= hard_ceiling:
+                # ceiling <= floor: the cursor is clamped at or below start,
+                # so no further page can move it -- reading on only spends
+                # budget. Otherwise the hard ceiling is reached.
+                logger.error(
+                    "alpaca news cursor cannot advance past start %s after %d "
+                    "page(s); stopping with more pending. The next call will "
+                    "read the same pages -- articles after this point are not "
+                    "being read",
+                    floor.isoformat(),
+                    pages,
+                    extra={
+                        "event": "alpaca_news_cursor_stalled",
+                        "rule": (
+                            "a capped call keeps paging until its cursor can "
+                            "advance, up to max_pages x ALPACA_NEWS_OVERRUN_FACTOR "
+                            "pages, and never past a ceiling at or below start"
+                        ),
+                        "cursor": floor.isoformat(),
+                        "ceiling": ceiling.isoformat(),
+                        "pages": pages,
+                        "max_pages": max_pages,
+                        "hard_ceiling": hard_ceiling,
+                        "articles": len(articles),
+                        "skipped": skipped,
+                        "feed": NewsFeed.ALPACA_NEWS.value,
+                    },
+                )
+                break
+            if not overran:
+                overran = True
+                logger.warning(
+                    "alpaca news reached the %d-page cap with its cursor still at "
+                    "start %s; following the token past the cap until it can advance",
+                    max_pages,
+                    floor.isoformat(),
+                    extra={
+                        "event": "alpaca_news_page_cap_overrun",
+                        "rule": (
+                            "stopping with the cursor at start would stall every "
+                            "later call on the same pages"
+                        ),
+                        "cursor": floor.isoformat(),
+                        "pages": pages,
+                        "max_pages": max_pages,
+                        "hard_ceiling": hard_ceiling,
+                        "feed": NewsFeed.ALPACA_NEWS.value,
+                    },
+                )
+
+        cursor = _news_cursor(newest, floor, ceiling)
+        if newest is not None and newest.replace(microsecond=0) > ceiling:
+            logger.warning(
+                "alpaca news cursor clamped from %s to %s: an updated_at later than %s",
+                newest.isoformat(),
+                ceiling.isoformat(),
+                "the request's end" if end is not None else "now",
+                extra={
+                    "event": "alpaca_news_cursor_clamped",
+                    "rule": (
+                        "the cursor never passes the request's end, or its clock "
+                        "when no end is given -- a future-stamped row would "
+                        "otherwise skip every article before it"
+                    ),
+                    "newest": newest.isoformat(),
+                    "ceiling": ceiling.isoformat(),
+                    "bound": "end" if end is not None else "now",
+                    "feed": NewsFeed.ALPACA_NEWS.value,
+                },
+            )
+        return AlpacaNews(
+            articles=tuple(
+                sorted(
+                    (article for article, _ in articles.values()),
+                    key=lambda a: (-a.published_at.timestamp(), a.vendor_id),
+                )
+            ),
+            cursor=cursor,
+            complete=token is None,
+            pages=pages,
+            skipped=skipped,
+        )
+
+    async def _news_page(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
+        """One news page, with the provider's errors translated to the news ones.
+
+        The poller catches one vendor-neutral type per feed, as it does for
+        Finnhub and Massive. Messages were scrubbed by :meth:`_get` already.
+        """
+        try:
+            payload = await self._get(DATA_BASE_URL, "/v1beta1/news", params)
+        except FeedAccessError as exc:
+            raise NewsAccessDenied(str(exc)) from exc
+        except ProviderError as exc:
+            raise NewsProviderError(str(exc)) from exc
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("news"), list):
+            raise NewsProviderError(
+                "GET /v1beta1/news answered without a news list: "
+                f"{self._scrub(repr(payload))}"
+            )
+        return payload
+
+    # ---------------------------------------------------- reference data
+
+    async def active_equities(self) -> AssetDirectory:
+        """Every active US equity, with its name and whether it has options.
+
+        ``GET /v2/assets?status=active&asset_class=us_equity`` on the
+        **trading** host, one request. Decision 21 budgets it as
+        ``attributes=has_options``, and that filter is deliberately not sent:
+        measured on 2026-09-24, the unfiltered list (14,379 assets) carries an
+        ``attributes`` array on every row, and the 6,305 rows naming
+        ``has_options`` are exactly the filtered response's rows. So one
+        unfiltered request answers both questions -- *is this tag an active
+        US equity at all* (the ingest's tag filter, and the watch routes'
+        validation) and *does it have options* -- where the filtered request
+        would leave every non-optionable equity looking like a non-equity.
+
+        A row that is malformed, not ``active`` or not ``us_equity`` is
+        skipped, logged and counted in :attr:`AssetDirectory.skipped`. A
+        symbol listed twice keeps its first row, logged.
+        """
+        payload = await self._get(
+            self._credentials.trading_base_url,
+            "/v2/assets",
+            {"status": "active", "asset_class": "us_equity"},
+        )
+        if not isinstance(payload, list):
+            raise ProviderError(
+                "GET /v2/assets answered without an asset list: "
+                f"{self._scrub(repr(payload))}"
+            )
+        assets: dict[str, EquityAsset] = {}
+        skipped = 0
+        no_attributes: list[str] = []
+        for raw in payload:
+            asset = _equity_asset(raw, self._scrub)
+            if asset is None:
+                skipped += 1
+                continue
+            key = normalize_symbol(asset.symbol)
+            if key in assets:
+                skipped += 1
+                _log_asset_skipped(
+                    self._scrub(repr(asset.symbol)),
+                    "the symbol is listed twice; the first row is kept",
+                )
+                continue
+            assets[key] = asset
+            # _equity_asset accepted it, so ``raw`` is a Mapping.
+            if raw.get("attributes") is None:
+                no_attributes.append(asset.symbol)
+        if no_attributes:
+            sample = [self._scrub(s) for s in no_attributes[:_ATTRIBUTES_SAMPLE]]
+            logger.warning(
+                "%d active equity row(s) carried no attributes array and read as "
+                "has_options=False: %s",
+                len(no_attributes),
+                ", ".join(sample),
+                extra={
+                    "event": "alpaca_asset_attributes_missing",
+                    "rule": (
+                        "a row without attributes fails closed (no options), "
+                        "counted and logged so a vendor change cannot empty the "
+                        "optionable set silently"
+                    ),
+                    "count": len(no_attributes),
+                    "sample": sample,
+                },
+            )
+        return AssetDirectory(
+            assets=tuple(assets.values()),
+            skipped=skipped,
+            missing_attributes=len(no_attributes),
+        )
+
+    async def has_standard_root(self, ticker: str) -> bool:
+        """Whether a live standard contract exists on ``ticker``: root and underlying both ``ticker``.
+
+        Decision 21's second tradeability check. ``has_options`` alone does
+        not answer it: AIFU carried ``has_options`` on 2026-09-24 while its
+        only live contracts were ``AIFU1`` (adjusted), and this answers
+        ``False`` for it (``p4_contracts_root_adjusted_only.json``).
+
+        One request on the trading host: ``/v2/options/contracts`` with
+        ``underlying_symbols`` = ``root_symbol`` = ``ticker`` and ``limit=1``.
+        **That the two filters combine is verified** by
+        ``p4_contracts_root_gme1.json``: ``underlying_symbols=GME&
+        root_symbol=GME1`` returned a GME1 contract first, although GME's own
+        earlier expiry would have sorted ahead of it had ``root_symbol`` been
+        ignored. The answer is still decided by
+        :func:`~corollary.data.news.tradeability.has_standard_contract` over
+        what came back, so if the vendor ever stops honouring ``root_symbol``
+        an adjusted contract answers ``False`` -- failing closed -- rather
+        than passing.
+
+        ``expiration_date_lte`` is sent on purpose: it **defaults to the next
+        weekend**, and without it a name with no weekly expiry this week
+        (XRX on 2026-09-24) reads as having no standard contract at all.
+
+        A ticker that is not an equity symbol raises ``ValueError`` before any
+        request -- a comma in it would widen ``underlying_symbols`` to several
+        names. A class share (``BRK.B``) is asked about and answers ``False``,
+        because OCC writes its root without the dot; ``has_standard_contract``
+        documents that exclusion. A failed request raises, and so does a
+        contract row that cannot be read -- as :class:`ProviderError`, never a
+        bare ``KeyError``/``ValueError``: *unchecked* is not *no*, and the
+        caller records it as ``None``. The query is
+        :func:`standard_root_params`, which the fixture recorder shares.
+        """
+        symbol = normalize_symbol(ticker)
+        if not EQUITY_SYMBOL_RE.fullmatch(symbol):
+            raise ValueError(f"{ticker!r} is not an equity symbol of the form AAPL or BRK.B")
+        payload = await self._get(
+            self._credentials.trading_base_url,
+            "/v2/options/contracts",
+            standard_root_params(symbol, symbol, today=self._now().astimezone(NYSE_TZ).date()),
+        )
+        rows = payload.get("option_contracts") if isinstance(payload, Mapping) else None
+        if not isinstance(rows, list):
+            raise ProviderError(
+                "GET /v2/options/contracts answered without a contract list: "
+                f"{self._scrub(repr(payload))}"
+            )
+        try:
+            contracts = [_option_contract(raw) for raw in rows]
+        except (
+            ProviderError, KeyError, ValueError, TypeError, ArithmeticError, AttributeError
+        ) as exc:
+            # A malformed row is *unchecked*, never *no*: raised as the
+            # provider's own error so a caller catching ProviderError records
+            # None instead of crashing. Scrubbed and bounded -- which also
+            # truncates the unbounded payload repr _option_contract quotes;
+            # that diagnostic matters for sizing, not for a yes/no root check.
+            raise ProviderError(
+                f"a contract row for {symbol} could not be read, so its standard "
+                f"root is unchecked: {type(exc).__name__}: {self._scrub(str(exc))}"
+            ) from None  # the cause's text is unscrubbed; this message carries it
+        return has_standard_contract(symbol, contracts)
+
+    async def adv_daily_bars(
+        self, symbols: Sequence[str], *, session_date: date
+    ) -> dict[str, list[Bar]]:
+        """Daily bars covering the ADV window before ``session_date``, on the historical feed.
+
+        Decision 21's volume and close inputs. The window is
+        :func:`~corollary.data.news.tradeability.adv_window` -- the 20 exchange
+        sessions strictly before ``session_date`` from the market calendar --
+        so the request runs from midnight New York on its first session to
+        one second before midnight New York on ``session_date``. Alpaca stamps
+        a daily bar at midnight New York, so the ``session_date`` bar (still
+        forming during the day) is excluded by the request itself.
+
+        **Always** :attr:`FeedConfig.stock_historical` (``sip`` on this plan),
+        through :meth:`stock_bars`, never the realtime feed and never
+        snapshot volume: an IEX-computed 1,000,000 would be filtering on a
+        fortieth of real volume (CLAUDE.md, ``min_avg_volume``).
+
+        At most :data:`ADV_MAX_SYMBOLS` symbols a call; more raises rather
+        than splitting silently, because the caller owns the batching and
+        its budget. Symbols are normalised; a non-equity symbol raises.
+        """
+        if len(symbols) > ADV_MAX_SYMBOLS:
+            raise ValueError(
+                f"{len(symbols)} symbols in one ADV request; the ceiling is "
+                f"{ADV_MAX_SYMBOLS}. Batch them."
+            )
+        normalised = [normalize_symbol(s) for s in symbols]
+        bad = [s for s in normalised if not EQUITY_SYMBOL_RE.fullmatch(s)]
+        if bad:
+            raise ValueError(f"not equity symbols: {bad!r}")
+        if not normalised:
+            return {}
+        window = adv_window(session_date)
+        start = datetime.combine(window[0], time(0), tzinfo=NYSE_TZ)
+        end = datetime.combine(session_date, time(0), tzinfo=NYSE_TZ) - timedelta(seconds=1)
+        return await self.stock_bars(
+            list(dict.fromkeys(normalised)),
+            timeframe=BarTimeframe.DAY,
+            start=start.astimezone(timezone.utc),
+            end=end.astimezone(timezone.utc),
+        )
+
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -1369,6 +1899,147 @@ def _plain(value: Decimal | None) -> str | None:
 
 
 _clean_params = clean_params
+
+
+# --------------------------------------------------------------------------
+# News and asset rows (Phase 3 step 4)
+# --------------------------------------------------------------------------
+
+_Scrub = Callable[[str], str]
+
+
+def _row_text(row: Mapping[str, Any], name: str, *, required: bool) -> str | None:
+    value = row.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} is a {type(value).__name__}, not a string")
+    return value
+
+
+def _row_instant(row: Mapping[str, Any], name: str) -> datetime:
+    try:
+        return as_datetime(row.get(name))
+    except (WireFormatError, OverflowError) as exc:
+        # OverflowError: an extreme offset (``0001-01-01T00:30:00+01:00``)
+        # overflows the UTC conversion. Neither a ValueError nor a
+        # WireFormatError, and escaping would fail every poll from the same
+        # cursor -- a permanent silent outage. Same catch as ``massive.py``.
+        raise ValueError(f"{name}: {exc}") from exc
+
+
+def _news_cursor(newest: datetime | None, floor: datetime, ceiling: datetime) -> datetime:
+    """The next call's ``start``: the newest ``updated_at`` read, bounded both ways.
+
+    Truncated to the second, which loses nothing: the feed stamps whole
+    seconds (every recorded ``updated_at``, and the page tokens' nanosecond
+    keys, ``1790170717000000000|61945779``, have a zero fraction), and
+    ``start`` is inclusive, so the next call re-reads that whole second.
+    Clamped above to ``ceiling`` (the request's ``end``, else its clock) and
+    below to ``floor`` (the ``start`` sent). Nothing read gives ``floor``.
+    """
+    candidate = floor if newest is None else newest.replace(microsecond=0)
+    return max(min(candidate, ceiling), floor)
+
+
+def _news_row(row: Any, scrub: _Scrub) -> tuple[NewsArticle, datetime] | None:
+    """One news row as ``(article, updated_at)``, or ``None`` -- logged -- if malformed.
+
+    ``published_at`` is ``created_at`` and the second element is
+    ``updated_at``, the key the feed filters and sorts on (see
+    :meth:`AlpacaProvider.news`). A row without ``updated_at`` falls back to
+    ``created_at`` for the cursor -- an article is updated no earlier than it
+    is created, so that can only hold the cursor back, never skip. The
+    publisher is ``source`` (the outlet, ``benzinga``); ``author`` is a person
+    at it and is not carried.
+    """
+    raw_id = row.get("id") if isinstance(row, Mapping) else None
+    try:
+        if not isinstance(row, Mapping):
+            raise ValueError(f"row is a {type(row).__name__}, not an object")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)):
+            raise ValueError(f"id is a {type(raw_id).__name__}, not an integer or string")
+        created_at = _row_instant(row, "created_at")
+        updated_at = (
+            _row_instant(row, "updated_at") if row.get("updated_at") is not None else created_at
+        )
+        symbols = row.get("symbols") or []
+        if not isinstance(symbols, list) or not all(isinstance(t, str) for t in symbols):
+            raise ValueError("symbols is not a list of strings")
+        article = NewsArticle(
+            vendor="alpaca",
+            vendor_id=str(raw_id),
+            feed=NewsFeed.ALPACA_NEWS,
+            url=_row_text(row, "url", required=True) or "",
+            headline=_row_text(row, "headline", required=True) or "",
+            summary=_row_text(row, "summary", required=False),
+            publisher=_row_text(row, "source", required=False),
+            published_at=created_at,
+            tickers=tuple(symbols),
+        )
+        return article, updated_at.astimezone(timezone.utc)
+    except ValueError as exc:
+        quoted_id = scrub(repr(raw_id))
+        cause = scrub(str(exc))
+        logger.warning(
+            "alpaca news row skipped (id %s): %s",
+            quoted_id,
+            cause,
+            extra={
+                "event": "alpaca_news_row_skipped",
+                "rule": "a news row that cannot be read is skipped and logged, never stored half-read",
+                "feed": NewsFeed.ALPACA_NEWS.value,
+                "vendor_id": quoted_id,
+                "cause": cause,
+            },
+        )
+        return None
+
+
+def _equity_asset(row: Any, scrub: _Scrub) -> EquityAsset | None:
+    """One ``/v2/assets`` row, or ``None`` -- logged -- if malformed or not an active US equity."""
+    raw_symbol = row.get("symbol") if isinstance(row, Mapping) else None
+    try:
+        if not isinstance(row, Mapping):
+            raise ValueError(f"row is a {type(row).__name__}, not an object")
+        symbol = normalize_symbol(_row_text(row, "symbol", required=True) or "")
+        if not symbol:
+            raise ValueError("symbol is blank")
+        if row.get("class") != "us_equity":
+            raise ValueError(f"class is {row.get('class')!r}, not 'us_equity'")
+        if row.get("status") != "active":
+            raise ValueError(f"status is {row.get('status')!r}, not 'active'")
+        tradable = row.get("tradable")
+        if not isinstance(tradable, bool):
+            raise ValueError(f"tradable is a {type(tradable).__name__}, not a boolean")
+        attributes = row.get("attributes") or []
+        if not isinstance(attributes, list) or not all(isinstance(a, str) for a in attributes):
+            raise ValueError("attributes is not a list of strings")
+        return EquityAsset(
+            symbol=symbol,
+            name=(_row_text(row, "name", required=False) or "").strip(),
+            tradable=tradable,
+            has_options="has_options" in attributes,
+            exchange=(_row_text(row, "exchange", required=False) or "").strip(),
+        )
+    except ValueError as exc:
+        _log_asset_skipped(scrub(repr(raw_symbol)), scrub(str(exc)))
+        return None
+
+
+def _log_asset_skipped(symbol: str, cause: str) -> None:
+    """Both arguments arrive already scrubbed by the caller."""
+    logger.warning(
+        "alpaca asset row skipped (symbol %s): %s",
+        symbol,
+        cause,
+        extra={
+            "event": "alpaca_asset_row_skipped",
+            "rule": "an asset row that is malformed or not an active US equity is skipped and logged",
+            "symbol": symbol,
+            "cause": cause,
+        },
+    )
 
 
 # --------------------------------------------------------------------------

@@ -46,7 +46,10 @@ def dotenv_uses(path: Path) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize("recorder", ["record_finnhub.py", "record_massive.py"])
+@pytest.mark.parametrize(
+    "recorder",
+    ["record_finnhub.py", "record_massive.py", "record_alpaca_news.py"],
+)
 def test_a_news_recorder_never_loads_the_env_file(recorder: str) -> None:
     path = FIXTURES / recorder
     assert path.exists(), f"{path} moved; this guard would pass over nothing"
@@ -56,16 +59,8 @@ def test_a_news_recorder_never_loads_the_env_file(recorder: str) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "record_alpaca.py still calls load_dotenv on its default path. It is "
-        "outside the Phase 3 step 4 news unit, so it is recorded here rather "
-        "than changed; strict, so the day it is fixed this turns red and the "
-        "marker comes off."
-    ),
-)
 def test_the_alpaca_recorder_never_loads_the_env_file() -> None:
+    """Was a strict xfail until unit 4AL removed ``load_dotenv`` from it."""
     assert dotenv_uses(FIXTURES / "record_alpaca.py") == []
 
 

@@ -1,0 +1,213 @@
+{
+  "body": {
+    "news": [
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:39:20Z",
+        "headline": "DA Davidson Maintains Buy on AutoZone, Lowers Price Target to $3500",
+        "id": 61945818,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "AZO"
+        ],
+        "updated_at": "2026-09-23T13:39:20Z",
+        "url": "https://www.benzinga.com/news/26/09/61945818/da-davidson-maintains-buy-autozone-lowers-price-target-3500"
+      },
+      {
+        "author": "Surbhi Jain",
+        "content": "",
+        "created_at": "2026-09-23T13:40:59Z",
+        "headline": "EXCLUSIVE: Meta\u2019s AI Rally Needs More Than Muse Downloads",
+        "id": 61945912,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/The-Meta-Ai-Logo-Is-Displayed-On-A-Smart.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/The-Meta-Ai-Logo-Is-Displayed-On-A-Smart.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/The-Meta-Ai-Logo-Is-Displayed-On-A-Smart.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Meta\u2019s Muse is driving downloads and a sharp stock rally. Allen Bond says investors still need proof that Meta\u2019s AI spending can generate sufficient returns.",
+        "symbols": [
+          "META"
+        ],
+        "updated_at": "2026-09-23T13:40:59Z",
+        "url": "https://www.benzinga.com/trading-ideas/long-ideas/26/09/61945912/meta-ai-rally-muse-downloads"
+      },
+      {
+        "author": "Namrata Sen",
+        "content": "",
+        "created_at": "2026-09-23T13:41:15Z",
+        "headline": "CoreWeave\u2019s Debt Fears Are \u2018Peaking,\u2019 Top Analyst Says \u2014 Sees 38% Upside Amid \u2018Durability\u2019 of AI Compute Demand",
+        "id": 61945942,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bearded-Man-Trader-Wearing-Eyeglasses-Si.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bearded-Man-Trader-Wearing-Eyeglasses-Si.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Bearded-Man-Trader-Wearing-Eyeglasses-Si.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "UBS initiates CoreWeave coverage with a Buy rating and $120 target, citing durable AI compute demand despite debt concerns.",
+        "symbols": [
+          "ARKK",
+          "ARKW",
+          "CRWV"
+        ],
+        "updated_at": "2026-09-23T13:41:15Z",
+        "url": "https://www.benzinga.com/markets/tech/26/09/61945942/coreweaves-debt-fears-are-peaking-top-analyst-says-sees-38-upside-amid-durability-of-ai-compute-demand"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:43:48Z",
+        "headline": "DA Davidson Maintains Neutral on Fastly, Raises Price Target to $23",
+        "id": 61946058,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "FSLY"
+        ],
+        "updated_at": "2026-09-23T13:43:48Z",
+        "url": "https://www.benzinga.com/news/26/09/61946058/da-davidson-maintains-neutral-fastly-raises-price-target-23"
+      },
+      {
+        "author": "Lekha Gupta",
+        "content": "",
+        "created_at": "2026-09-23T13:43:58Z",
+        "headline": "Surf Air Mobility Adds Second OperatorOS Customer With SkyDance Air",
+        "id": 61946086,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Surf-Air-Mobility.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Surf-Air-Mobility.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Surf-Air-Mobility.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Surf Air Mobility shares trade higher after signing SkyDance Air for OperatorOS, marking the company\u2019s second commercial contract for the platform.",
+        "symbols": [
+          "PLTR",
+          "SRFM"
+        ],
+        "updated_at": "2026-09-23T13:43:58Z",
+        "url": "https://www.benzinga.com/trading-ideas/movers/26/09/61946086/surf-air-mobility-adds-second-operatoros-customer-with-skydance-air"
+      },
+      {
+        "author": "RIPS",
+        "content": "",
+        "created_at": "2026-09-23T13:44:44Z",
+        "headline": "How To Trade SPY, QQQ, AAPL, MSFT, NVDA, GOOGL, META, And TSLA",
+        "id": 61946137,
+        "images": [
+          {
+            "size": "large",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Apple-Logo.jpg?width=2048&height=1536"
+          },
+          {
+            "size": "small",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Apple-Logo.jpg?width=1024&height=768"
+          },
+          {
+            "size": "thumb",
+            "url": "https://cdn.benzinga.com/files/images/story/2026/09/23/Apple-Logo.jpg?width=250&height=187"
+          }
+        ],
+        "source": "benzinga",
+        "summary": "Good Morning Traders!\n\n\n\nToday\u2019s economic calendar remains relatively limited, with the primary focus on the September Preliminary S&amp;P Global Manufacturing, Services, and Composite PMIs at 9:45AM ET. These reports",
+        "symbols": [],
+        "updated_at": "2026-09-23T13:44:44Z",
+        "url": "https://www.benzinga.com/Opinion/26/09/61946137/how-to-trade-spy-qqq-aapl-msft-nvda-googl-meta-and-tsla-18"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:45:14Z",
+        "headline": "'Activist Toms Capital urges Devon Energy in letter to explore alternatives, including a sale' - CNBC",
+        "id": 61946167,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "DVN"
+        ],
+        "updated_at": "2026-09-23T13:45:14Z",
+        "url": "https://www.benzinga.com/news/26/09/61946167/activist-toms-capital-urges-devon-energy-letter-explore-alternatives-including-sale-cnbc"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:46:09Z",
+        "headline": "USA S&P Global Manufacturing PMI For September 57.0 Vs 53.6 Est",
+        "id": 61946215,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "SPY"
+        ],
+        "updated_at": "2026-09-23T13:46:09Z",
+        "url": "https://www.benzinga.com/quote/SPY"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:46:18Z",
+        "headline": "USA S&P Global Services PMI For September 58.7 Vs 55.8 Est.",
+        "id": 61946237,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "SPY"
+        ],
+        "updated_at": "2026-09-23T13:46:18Z",
+        "url": "https://www.benzinga.com/quote/SPY"
+      },
+      {
+        "author": "Benzinga Newsdesk",
+        "content": "",
+        "created_at": "2026-09-23T13:46:46Z",
+        "headline": "USA S&P Global Composite PMI For September 58.4 Vs 56.0 Prior",
+        "id": 61946262,
+        "images": [],
+        "source": "benzinga",
+        "summary": "",
+        "symbols": [
+          "SPY"
+        ],
+        "updated_at": "2026-09-23T13:46:46Z",
+        "url": "https://www.benzinga.com/quote/SPY"
+      }
+    ],
+    "next_page_token": "MTc5MDE3MTIwNjAwMDAwMDAwMHw2MTk0NjI2Mg=="
+  },
+  "recorded_at": "2026-09-24T20:16:30+00:00",
+  "request": "/v1beta1/news?start=2026-09-23T13:30:00Z&end=2026-09-23T14:30:00Z&limit=10&sort=asc&page_token=<page1 token>",
+  "status_code": 200
+}
