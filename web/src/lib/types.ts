@@ -621,7 +621,10 @@ export interface StockQuote {
    * now" actually means: 4x its usual volume is a stock something is
    * happening to, where raw volume only ever finds the same mega caps. */
   avgVolume: number | null
-  /** Billions of dollars, or **null for a fund**. An ETF has no market
+  /** **Dollars**, as the server sends them (it scales Finnhub's millions
+   * exactly), or **null for a fund**. Not billions: the Phase 1 fixtures used
+   * billions, and reading live dollars that way printed NVDA as
+   * "$5434790884.05T". An ETF has no market
    * capitalisation. Rendering that as 0 would sort SPY below every real
    * company and read as a fund worth nothing, so the column shows an em
    * dash and the ranking sorts nulls last rather than treating them as

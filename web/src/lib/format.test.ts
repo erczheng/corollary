@@ -3,6 +3,7 @@ import {
   formatDateET,
   formatDateOnly,
   formatExpiry,
+  formatMarketCap,
   formatSessionDateTimeET,
   formatSessionDay,
   formatSignedNumber,
@@ -118,5 +119,24 @@ describe('formatSessionDateTimeET', () => {
     // indistinguishable.
     expect(formatSessionDateTimeET('2026-09-14T13:30:00Z')).toContain('Mon, Sep 14, 2026')
     expect(formatSessionDateTimeET('2026-09-14T13:30:00Z')).toContain('9:30 AM')
+  })
+})
+
+/** The wire carries market cap in **dollars** -- the server scales Finnhub's
+ * millions with an exact Decimal. Read as billions, NVDA's $5.43T printed as
+ * "$5434790884.05T". These are the live values that exposed it. */
+describe('formatMarketCap', () => {
+  it('formats a dollar figure in trillions', () => {
+    expect(formatMarketCap(5_434_790_884_052)).toBe('$5.43T')
+    expect(formatMarketCap(4_918_530_438_281)).toBe('$4.92T')
+  })
+
+  it('formats billions and millions', () => {
+    expect(formatMarketCap(23_285_494_048)).toBe('$23.29B')
+    expect(formatMarketCap(850_000_000)).toBe('$850.00M')
+  })
+
+  it('renders a fund as an em dash, never $0', () => {
+    expect(formatMarketCap(null)).toBe('—')
   })
 })
