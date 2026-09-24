@@ -1015,9 +1015,12 @@ class AlpacaTradeUpdateStream(VendorStream):
             name=TRADE_UPDATES_STREAM,
             url=trade_updates_url(credentials),
             # JSON, which Alpaca's trading stream documents alongside
-            # msgpack. The decoder reads whichever the *frame* is, because
-            # the paper host answers in binary frames -- so an upgrade of the
-            # vendor's default cannot silently stop this socket working.
+            # msgpack. The decoder reads every frame by this socket's codec,
+            # not by the frame's opcode: the paper host answers in *binary*
+            # frames whose payload is UTF-8 JSON, and a JSON socket decodes
+            # those as JSON. Dispatching on the opcode sent them to msgpack,
+            # dropped the authorization and listening replies, and halted the
+            # engine on rule 9's handshake condition after every start.
             codec=JSON_CODEC,
             activity=activity,
             connect=connect,
