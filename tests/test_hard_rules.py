@@ -146,6 +146,26 @@ RECORDERS = tuple(sorted(FIXTURES.glob(RECORDER_GLOB)))
 #: The recorders that exist today. The glob must find at least these.
 KNOWN_RECORDERS = frozenset({"record_alpaca.py", "record_finnhub.py"})
 
+#: The hand-run scripts under ``scripts/``. Same standing as the recorders,
+#: and in scope for the same reason: ``scripts/probe_phase3.py`` loads keyed
+#: credentials for Alpaca, Finnhub, FRED, Massive and StockTwits and calls
+#: every one of them live. It sat outside every guard in this file -- the
+#: exact miss :data:`RECORDER_GLOB`'s note records for ``record_finnhub.py``
+#: -- until the Phase 3 step 0 audit named it, and the spec has step 5 edit it
+#: again to re-measure while holding those keys.
+#:
+#: Globbed, not listed, so the next script is covered on the day it is
+#: written; non-recursive, for the reason given for the recorders. The floor
+#: :data:`KNOWN_SCRIPTS` is checked by :func:`scripts` at every point of use,
+#: because a glob over a renamed directory returns nothing and ``_sources``
+#: would see nothing wrong with that.
+SCRIPTS = REPO_ROOT / "scripts"
+SCRIPT_GLOB = "*.py"
+SCRIPT_FILES = tuple(sorted(SCRIPTS.glob(SCRIPT_GLOB)))
+
+#: The scripts that exist today. The glob must find at least these.
+KNOWN_SCRIPTS = frozenset({"probe_phase3.py"})
+
 #: The package's own two vendor directories -- the files that reach Alpaca
 #: through a ``self._client`` attribute.
 #:
@@ -189,7 +209,8 @@ VENDOR_PACKAGES = (
 #: widening to reach it:
 #: :func:`test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist`
 #: walks :func:`vendor_surface` -- ``engine/execution`` and
-#: ``data/providers`` entire, ``sockets.py``, and every fixture recorder --
+#: ``data/providers`` entire, ``sockets.py``, every fixture recorder and
+#: every ``scripts/*.py`` --
 #: so an action added here for a *quote* stream is one the **order** socket
 #: may also say. ``unsubscribe`` is safe under that reading because it
 #: narrows a read wherever it is sent, and because Alpaca's trading stream
@@ -238,13 +259,33 @@ def recorders() -> tuple[Path, ...]:
     return RECORDERS
 
 
+def scripts() -> tuple[Path, ...]:
+    """Every ``scripts/*.py``, with the glob's floor checked *here*.
+
+    The same shape as :func:`recorders` and for the same reason: the check
+    has to run wherever the scope is used, so no single test is load-bearing
+    for the guards that walk it.
+    """
+    found = {path.name for path in SCRIPT_FILES}
+    missing = sorted(KNOWN_SCRIPTS - found)
+    if missing:
+        raise AssertionError(
+            f"the script glob {SCRIPT_GLOB!r} under {_where(SCRIPTS)} found "
+            f"{sorted(found)}, which is missing {missing}. A script that loads "
+            ".env and calls a live vendor is in no guard's scope until it is "
+            "in this one."
+        )
+    return SCRIPT_FILES
+
+
 def vendor_surface() -> tuple[Path, ...]:
     """Everything in the tree that may speak to a data vendor at all.
 
-    The package's two vendor directories plus every recorder. Not a constant,
-    so the recorder half can never silently be empty: see :func:`recorders`.
+    The package's two vendor directories plus every recorder and every
+    ``scripts/*.py``. Not a constant, so neither globbed half can silently be
+    empty: see :func:`recorders` and :func:`scripts`.
     """
-    return VENDOR_PACKAGES + recorders()
+    return VENDOR_PACKAGES + recorders() + scripts()
 
 #: Verbs that change something at the other end. ``request`` and ``send`` are
 #: here because both take the method as an argument, so an audit that only
@@ -647,6 +688,23 @@ def test_every_fixture_recorder_is_inside_the_vendor_surface() -> None:
 
 
 @pytest.mark.risk
+def test_every_script_is_inside_the_vendor_surface() -> None:
+    """The floor under :data:`SCRIPT_FILES`' glob, stated with its reason.
+
+    ``scripts/probe_phase3.py`` holds five vendors' live keys and was in no
+    guard's scope when it was written. :func:`scripts` raises on a missing
+    known script at every point of use, so this test is the named copy of
+    that rule rather than the only thing enforcing it.
+    """
+    found = {path.name for path in scripts()}
+    assert found >= KNOWN_SCRIPTS, (
+        f"the script glob found {sorted(found)}, which is missing "
+        f"{sorted(KNOWN_SCRIPTS - found)}."
+    )
+    assert set(scripts()) <= set(vendor_surface())
+
+
+@pytest.mark.risk
 def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     """The files that touch Alpaca are read-only in this phase.
 
@@ -660,7 +718,8 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     credentials, and a recorder that could POST is a write path to the broker
     sitting outside ``RiskManager.approve()``. **All** of them are in scope,
     found by :data:`RECORDERS`, because the second one was in scope of
-    nothing while its own docstring said otherwise.
+    nothing while its own docstring said otherwise. So is every
+    ``scripts/*.py`` (:func:`scripts`), for the same reason a third time.
 
     One test rather than one per verb: the failure message names the verb and
     the line, so parametrising bought identity in the report and nothing in
@@ -731,8 +790,8 @@ def test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist() -> Non
     """What the three sockets may *say*, across the whole vendor surface.
 
     **Three sockets, one allowlist.** The scope is :func:`vendor_surface` --
-    ``engine/execution`` and ``data/providers`` entire, ``sockets.py``, and
-    every fixture recorder -- so this is not the quote streams' guard with
+    ``engine/execution`` and ``data/providers`` entire, ``sockets.py``, every
+    fixture recorder and every ``scripts/*.py`` -- so this is not the quote streams' guard with
     the trading socket alongside: it is one set governing all three, and an
     action added to :data:`SOCKET_ACTIONS` for one of them is an action the
     **order** socket may also carry. The name this test used to have listed
@@ -858,10 +917,14 @@ def test_the_vendor_sdk_is_imported_nowhere() -> None:
     instead, and so does the recorder. Importing
     ``corollary.data.providers.alpaca`` is a different thing and is allowed
     everywhere: that module is ours.
+
+    The recorders and ``scripts/*.py`` are walked through :func:`recorders`
+    and :func:`scripts`, not the bare glob constants, so an emptied glob
+    raises here instead of shrinking the scope to the package alone.
     """
     offenders = {
         _where(path)
-        for path in _sources(PACKAGE, *RECORDERS)
+        for path in _sources(PACKAGE, *recorders(), *scripts())
         if "alpaca" in _imported_roots(_tree(path))
     }
     assert offenders == set(), f"the vendor SDK is imported in {sorted(offenders)}"

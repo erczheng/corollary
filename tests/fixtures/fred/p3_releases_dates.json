@@ -1,0 +1,80 @@
+{
+  "recorded_at": "2026-09-24T04:38:36+00:00",
+  "request": "https://api.stlouisfed.org/fred/releases/dates?file_type=json&include_release_dates_with_no_data=true&realtime_start=2026-09-24&realtime_end=2026-10-24&limit=1000&sort_order=asc",
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "truncated": {
+    ".release_dates": 842
+  },
+  "body": {
+    "realtime_start": "2026-09-24",
+    "realtime_end": "2026-10-24",
+    "order_by": "release_date",
+    "sort_order": "asc",
+    "count": 842,
+    "offset": 0,
+    "limit": 1000,
+    "release_dates": [
+      {
+        "release_id": 742,
+        "release_name": "Bankrate Monitor (BRM) National Index",
+        "release_last_updated": "2026-09-17 09:01:33-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 200,
+        "release_name": "CBOE Market Statistics",
+        "release_last_updated": "2026-09-23 08:37:38-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 441,
+        "release_name": "Coinbase Cryptocurrencies",
+        "release_last_updated": "2026-09-23 19:05:29-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 86,
+        "release_name": "Commercial Paper",
+        "release_last_updated": "2026-09-23 12:01:46-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 72,
+        "release_name": "Daily Treasury Inflation-Indexed Securities",
+        "release_last_updated": "2026-09-23 20:15:47-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 197,
+        "release_name": "Dow Jones Averages",
+        "release_last_updated": "2026-09-23 17:02:57-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 279,
+        "release_name": "Economic Policy Uncertainty",
+        "release_last_updated": "2026-09-23 08:02:28-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 502,
+        "release_name": "Euro Short Term Rate",
+        "release_last_updated": "2026-09-23 03:32:31-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 378,
+        "release_name": "Federal Funds Data",
+        "release_last_updated": "2026-09-23 08:02:27-05",
+        "date": "2026-09-24"
+      },
+      {
+        "release_id": 101,
+        "release_name": "FOMC Press Release",
+        "release_last_updated": "2026-09-23 07:01:32-05",
+        "date": "2026-09-24"
+      }
+    ]
+  }
+}

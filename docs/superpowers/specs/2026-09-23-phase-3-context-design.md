@@ -64,7 +64,10 @@ verified. **Spec** means read from the vendor's published documentation or
 OpenAPI document. **Probed** means observed today against the live service.
 **No keyed probe was run in this session** — the planning agent cannot read
 `.env` (rule 6's deny, by design) — so every keyed claim below is spec, and
-step 0 of the order of work turns the ones that matter into probes.
+step 0 of the order of work turns the ones that matter into probes. **Step 0
+ran them on 2026-09-24** (`scripts/probe_phase3.py`, keys through the
+launcher's `--env-file`, redacted fixtures under `tests/fixtures/*/p3_*.json`);
+each result is marked **Probed, 2026-09-24** in the subsection it belongs to.
 
 ### Finnhub marks what it charges for, in its own OpenAPI document
 
@@ -107,6 +110,31 @@ revenueEstimate, revenueActual}` — `hour` is a session code, not a time (see
 strongBuy, strongSell}`: counts of analysts, not percentages, which
 `SectorConsensus` in `types.ts` currently models as percentages summing to 100.
 
+**Probed, 2026-09-24, against this project's key.**
+
+- **The premium flags hold, but the failure is a 403, not a 502.**
+  `/calendar/economic`, `/etf/holdings`, `/stock/dividend` and
+  `/stock/dividend2` each answered **HTTP 403, `application/json`**,
+  `{"error":"You don't have access to this resource."}` — not the HTML 502 PRD
+  §9 recorded for `/news-sentiment`. A client must read a JSON 403 as "not on
+  this plan", distinct from a transport failure.
+- **`/calendar/earnings` returns upcoming dates on the free tier.** Today → +21
+  days: 295 rows, every one dated on or after today (2026-09-24 → 2026-10-15).
+  **`hour` is empty on most rows**: `""` 242, `bmo` 32, `amc` 21 — 82% carry no
+  session at all, and no `dmh` was seen. An earnings row states its date, and
+  its session only when the vendor has one.
+- `/stock/recommendation` (AAPL): 4 monthly periods, integer counts, exactly
+  the `RecommendationTrend` shape above.
+- **No index quote on the free tier.** `/quote?symbol=^VIX` and `^GSPC` answer
+  **200** with `{"error":"Market data subscription required for CFD
+  indices."}`; `VIX` answers 200 with an **all-zero quote** (`c: 0, t: 0`) — an
+  unknown symbol, not a price. Market Pulse gets no intraday VIX from Finnhub,
+  and a zero quote must read as absent, never as a VIX of 0.
+- **`/company-news` caps a response at ~250 rows** (248–250 observed for NVDA,
+  MSFT, META, AAPL and LLY over 14 days; NVDA alone had 1,261 articles in that
+  window). A request that returns the cap is truncated and must be split by
+  date.
+
 ### Alpaca news: Benzinga only, polled from the data host
 
 **Spec.** `GET https://data.alpaca.markets/v1beta1/news` — `symbols`, `start`,
@@ -121,6 +149,10 @@ number is true.
 
 Alpaca also offers a news **websocket**. Decision 2 declines it.
 
+**Probed, 2026-09-24.** 200, top-level `{news, next_page_token}`, article keys
+exactly the list above. Over ten sessions on the 66-name watch universe it
+returned 1,564 articles in 32 pages of 50, with no 429.
+
 ### Alpaca corporate actions: the fields exist; future dates are undocumented
 
 **Spec.** `GET https://data.alpaca.markets/v1/corporate-actions` — `symbols`,
@@ -131,11 +163,58 @@ says *"Alpaca has no guarantees on the creation time of corporate actions"* and
 **does not say whether an announced dividend appears before its ex-date**. A
 calendar that is *"forward-looking only"* (§8.3) needs exactly that. Step 0.
 
+**Probed, 2026-09-24.** `types=cash_dividend`, `start`=today, `end`=today+60d:
+
+- **Announced dividends do appear before their ex-date.** 1,079 rows had an
+  `ex_date` strictly after today: median **7 days** ahead, maximum **50 days**,
+  44% within the first week. 23 watch-universe names were among them
+  (including SPY, QQQ, NVDA, META, JPM). Decision 7's condition is met.
+  **The horizon figures are censored by the query window, not a measure of
+  how far ahead Alpaca publishes.** The query stopped at `end`=today+60d, so
+  every row returned had its window date inside +60 days, which caps the
+  visible `ex_date` at roughly 60 days less the ex-to-pay gap. The median of 7
+  and the maximum of 50 are both bounded by that; they do not show that a
+  dividend rarely surfaces more than five weeks out. Step 7 sizes its query
+  window by re-probing with a longer `end`, not from these figures.
+- **The `start`/`end` window does not filter on `ex_date`.** 3,580 rows came
+  back, most of them with an `ex_date` *before* `start`, and their
+  process/payable dates inside the window — the filter appears to be on one of
+  those. Filter on `ex_date` client-side.
+- **`rate` is a JSON number** (`0.255`), not a string. Parse it from the raw
+  text to `Decimal` (`parse_float=Decimal`); never let it pass through a float.
+- **The step 0 fixtures are not byte-exact.** Every file the probe recorded
+  under `tests/fixtures/` was re-serialised from parsed JSON, so its numbers
+  have already been through a float. A test of `parse_float=Decimal` must
+  record the raw response text rather than rely on these files for exact
+  decimal bytes.
+
 ### Alpaca serves no index
 
 **Spec.** Nothing in the `llms.txt` index covers indexes, VIX or SPX. Carried
 from the Phase 2 work: the equity endpoints serve ETFs (SPY, TLT, the SPDR
 sector funds), not the indexes behind them.
+
+### Alpaca snapshots: `indicative` volume is real session volume, dated
+
+**Probed, 2026-09-24.**
+
+- **Option snapshot, SPY, ≤10 DTE, `feed` from `ALPACA_OPTIONS_FEED`:** one page
+  of 1,000 contracts (it paginates — `next_page_token` was set). 896 carry a
+  `dailyBar`, every one with `v > 0`, 10.9M contracts in total.
+  **`prevDailyBar.v` equalled `/v1beta1/options/bars` 1Day volume exactly on
+  5/5 of the most active contracts** (2026-09-22), so it is the same session
+  volume the historical bars carry, not an artefact of the indicative feed.
+- **But `dailyBar` is the contract's last *traded* session, not today's.** 697
+  of the 896 were dated 2026-09-23, the last session. The other 199 were dated
+  anywhere from 2026-08-11 to 2026-09-22. A put/call proxy that sums
+  `dailyBar.v` without filtering on `dailyBar.t` mixes stale sessions into
+  today's ratio.
+- **`/v2/stocks/snapshots` shows no cap on `symbols` up to 1,000.** Lists of
+  100, 500 and 1,000 all answered 200, returning 93, 476 and 931 entries. The
+  cause of the shortfall is **inferred, not verified**: the script recorded
+  only counts, not which symbols were missing. Symbols Alpaca does not list
+  would explain it, but with `feed=iex` a listed symbol with no IEX trade
+  could be missing too, and so could truncation.
 
 ### Massive news carries a per-ticker sentiment and a reason
 
@@ -147,6 +226,21 @@ news is *"updated hourly"* and that the free Stocks plan carries **2 years** of
 history. The PRD's probe verified **5 requests/minute** (a 429 on the fifth
 call). A single untickered request with `limit=1000` returns every recent
 article across all tickers, which is what makes 5/min enough for a feed.
+
+**Probed, 2026-09-24.**
+
+- Untickered `limit=1000`: 200, 1,000 articles spanning **5.3 days**, 1,246
+  distinct tickers. That is about 190 articles a day (2,663 over 14 calendar
+  days), so one call covers several days. `Authorization: Bearer` works, which
+  keeps the key out of the URL, and `next_url` is a cursor carrying no key.
+  Four calls 13s apart drew no 429.
+- **`sentiment` takes four values, not three:** `positive`, `neutral`,
+  `negative` and **`mixed`**. `mixed` is rare (3 of 7,843 insights over ten
+  sessions) but real, and it is neither directional value. The mapping has to
+  say so explicitly. **The recorded Massive fixture contains no `mixed`
+  insight**, so nothing on disk exercises it yet. Step 5 must record a fixture
+  that contains one.
+- Insight keys are exactly `{ticker, sentiment, sentiment_reasoning}`.
 
 ### StockTwits: keyless, working, and noisier than the PRD assumes
 
@@ -168,6 +262,25 @@ article across all tickers, which is what makes 5/min enough for a feed.
   `volume_change` — StockTwits' own derived figures, with no published
   definition. Decision 10 declines them.
 
+**Probed, 2026-09-24 — one hour at the planned cadence.** 180 requests, one
+every 20s, round-robin across the 26 Markets symbols, `since=<newest id seen>`,
+from 04:36:34 to 05:36:34 UTC, with one `httpx` client keeping its cookies and
+the default `python-httpx/0.28.1` user agent:
+
+- **All 180 answered 200 JSON.** No 429, no 403, no HTML, no `cf-mitigated`, no
+  challenge.
+- **Still no rate-limit headers.** The only `cf-` headers were `cf-ray` and
+  `cf-cache-status`. Cloudflare set `__cf_bm` four times across the hour
+  (refreshed about every 30 minutes) and `_cfuvid` once. The limit and its key
+  (IP or cookie) stay unconfirmed from the response side, but 180/hour drew
+  nothing.
+- **41.6% of messages were labelled** (371 of 892), inside the PRD's
+  "roughly 30–50%", against 20% for the single 2026-09-23 sample.
+- **Overnight caveat:** the hour was 00:36–01:36 ET. After the first round only
+  112 new messages arrived across 154 polls, so this measured the cadence
+  against the limit, not intraday message volume. `cursor.more` was true only
+  on the first, cursorless round.
+
 ### FRED
 
 **Spec.**
@@ -187,40 +300,78 @@ article across all tickers, which is what makes 5/min enough for a feed.
 - `DGS3MO` is the 3-month bill, which `pricing/blackscholes.py` already names as
   the replacement for its placeholder `DEFAULT_RISK_FREE_RATE = 0.0425`.
 
+**Probed, 2026-09-24.**
+
+- `VIXCLS`, `BAMLH0A0HYM2` and `DGS3MO` all answered 200. Fetched at 04:37 UTC
+  on 2026-09-24, the latest observation of each was **2026-09-22** (14.21, 2.68,
+  4.16). The 2026-09-23 close was not yet published, consistent with the
+  next-morning publication above. Values arrive as strings, so they parse
+  straight to `Decimal`, with one exception: FRED marks a missing observation
+  with the string `"."`, which means *no observation* and raises in
+  `Decimal(".")`. It must be handled before the `Decimal` conversion, not
+  caught after it. None appears in these fixtures. `DGS3MO` feeds step 3's
+  risk-free rate, so the gap has to be handled there.
+- **`/releases/dates` returns dates only, confirmed.** With
+  `include_release_dates_with_no_data=true`, today → +30d gave 842 rows, every
+  `date` in `YYYY-MM-DD` form. Row keys are `{date, release_id,
+  release_last_updated, release_name}`. `release_last_updated` is a timestamp
+  of the last revision, not a scheduled time.
+- **FRED's key has no header form.** It travels in the query string, so every
+  FRED URL carries the key, and nothing may log one unredacted, exception
+  messages included (`httpx` errors quote the request URL).
+
 ### Not verified
 
-Carried forward as implementation-time checks, most of them step 0:
+Carried forward as implementation-time checks, most of them step 0. Step 0 ran
+on 2026-09-24. What it resolved is struck through here, with the result moved to
+its subsection above. What remains is left standing, with a note on what is
+still open.
 
-- **Every Finnhub premium/free flag above, against this project's key.** The
-  document is consistent with the one probe we have; that is one data point.
-  Expect an HTML 502 on the premium ones, per PRD §9.
-- Whether Finnhub's free `/quote` answers for `^VIX` or any index symbol. If it
-  does, Market Pulse can show an intraday VIX; the composite uses daily closes
-  either way.
-- Whether `/calendar/earnings` returns **upcoming** dates on the free tier
-  (*"new updates"* is ambiguous), and what `hour` holds — `bmo`/`amc`/`dmh` in
-  the docs' examples, which is a session, not a time. §8.3 asks for *"exact
-  scheduled times"*; an earnings row will carry a session label instead,
-  stated as such.
-- Whether Alpaca corporate actions returns announced dividends before
-  `ex_date`, and how far ahead.
-- StockTwits' real rate limit, whether it is per IP or per session cookie
-  (Cloudflare sets `__cf_bm`), and whether a scheduled poll draws a challenge.
-  **Also its terms of use for automated access to the public endpoints** —
-  decision 15 of the Phase 2 spec is the precedent: CBOE's data was free,
-  reachable and forbidden to automate. Not checked here; step 0.
-- Whether `dailyBar.v` on the `indicative` option snapshot is real session
-  volume, which the put/call proxy the owner chose (Q2) depends on.
-- Massive's terms for the free tier, and whether `sentiment` takes values beyond
-  `positive`/`neutral`/`negative`.
-- **How many directional labels rules and Massive actually produce per session
-  on the watch universe, and what share of Massive's insights are `neutral`.**
-  Neutral labels are excluded from accuracy (Q5), so a source that is mostly
-  neutral fills its sample slowly. Every timing in *Done when* is an estimate
-  until step 0 measures this, and is to be replaced by the measurement.
-- Whether `/v2/stocks/snapshots` caps the `symbols` list — already a Phase 2
-  *Not verified* item. Phase 3 needs it for the ~500-symbol breadth universe
-  only on the daily bars path, which paginates, so it does not block.
+- ~~**Every Finnhub premium/free flag above, against this project's key.**~~
+  Resolved: the flags hold, and the premium answer is a JSON 403, not an HTML
+  502. See the Finnhub subsection.
+- ~~Whether Finnhub's free `/quote` answers for `^VIX` or any index symbol.~~
+  Resolved: it does not ("subscription required for CFD indices"). See the
+  Finnhub subsection.
+- ~~Whether `/calendar/earnings` returns **upcoming** dates on the free tier,
+  and what `hour` holds.~~ Resolved: upcoming dates yes; `hour` is empty on 82%
+  of rows and otherwise `bmo`/`amc`. See the Finnhub subsection.
+- ~~Whether Alpaca corporate actions returns announced dividends before
+  `ex_date`, and how far ahead.~~ Resolved: yes. How far ahead is still open:
+  the median of 7 and maximum of 50 days are censored by the probe's +60-day
+  window, and step 7 re-probes with a longer `end`. The window does not filter
+  on `ex_date`. See the corporate actions subsection.
+- ~~StockTwits' real rate limit, whether it is per IP or per session cookie, and
+  whether a scheduled poll draws a challenge.~~ Resolved as far as a keyless
+  client can see it: an hour at 180/hour drew no 429 and no challenge. The
+  response still carries no rate-limit header, so the limit itself and its key
+  remain unpublished. See the StockTwits subsection.
+  **Still open, a human read: StockTwits' terms of use for automated access to
+  the public endpoints.** Decision 15 of the Phase 2 spec is the precedent:
+  CBOE's data was free, reachable and forbidden to automate. Terms page:
+  `https://stocktwits.com/about/legal/terms/`. No separate API or developer
+  terms page is linked from it. Not read for a legal conclusion by any agent.
+- ~~Whether `dailyBar.v` on the `indicative` option snapshot is real session
+  volume.~~ Resolved: yes, it matches historical bars exactly, but `dailyBar`
+  is the last *traded* session, so it must be filtered on `dailyBar.t`. See the
+  Alpaca snapshots subsection.
+- ~~Whether Massive's `sentiment` takes values beyond
+  `positive`/`neutral`/`negative`.~~ Resolved: it also takes `mixed`. See the
+  Massive subsection. **Still open, a human read: Massive's terms for the free
+  tier.** Terms pages: `https://massive.com/legal/terms-of-service`, with
+  `https://massive.com/legal/individuals-terms-of-service` and
+  `https://massive.com/legal/website-terms-of-service` linked from it. No
+  separate market-data or API acceptable-use page was found. Not read for a
+  legal conclusion by any agent.
+- ~~**How many directional labels rules and Massive actually produce per
+  session on the watch universe, and what share of Massive's insights are
+  `neutral`.**~~ Measured over ten sessions: see *Done when*, where the
+  measurement replaces the estimates. The rules figure is still an
+  **estimate** from draft patterns, and step 5 re-measures it with the real
+  ones.
+- ~~Whether `/v2/stocks/snapshots` caps the `symbols` list.~~ Resolved: no cap
+  up to 1,000, though the cause of the missing entries is inferred, not
+  verified. See the Alpaca snapshots subsection.
 
 ---
 
@@ -1177,7 +1328,18 @@ label-volume measurement:** over at least five sessions of recorded headlines,
 how many directional labels per session the rules patterns and Massive's
 insights produce on the watch universe, and Massive's neutral share. Plus a
 human read of StockTwits' and Massive's terms for automated access.
-- *Status:* not started. *Depends on:* nothing.
+- *Status:* **done 2026-09-24, except the two human terms reads** (StockTwits,
+  Massive — URLs in *Not verified*). All probes ran, including the full
+  one-hour StockTwits poll (180 requests, no 429, no challenge), and the label
+  volume is measured over ten sessions. Decision 13's second-risk condition
+  was checked and is **not triggered as measured**: the strict rules estimate
+  is 4.2 labels per session, of which Finnhub `/company-news` supplies 3.7 —
+  measured across the whole 66-name watch universe. It therefore holds only if
+  step 4 ingests Finnhub company news for that whole universe; *Feeds and
+  budgets* still budgets company news for ~30 symbols, and at that scope the
+  figure was not measured and may not clear 1.5. An Alpaca-only rules tier, at
+  1.2, would trigger it. Either case goes back to the owner.
+  *Depends on:* nothing.
 - *Files:* `scripts/probe_phase3.py`, `tests/fixtures/{finnhub,alpaca,massive,stocktwits,fred}/`.
 - *Done when:* every *Not verified* item above is struck through or moved to
   Constraints with its result, the estimates in *Done when* are replaced by the
@@ -1185,7 +1347,12 @@ human read of StockTwits' and Massive's terms for automated access.
   labels per session — decision 13's second risk has gone back to the owner.
 
 **1. Notifications land; rule 9's halt alert is delivered.**
-- *Status:* not started. *Depends on:* nothing.
+- *Status:* **done 2026-09-24** (45171a1 backend, 787fe80 bell).
+  Hung-webhook-does-not-delay-halt, failed-delivery recording and webhook
+  redaction are pinned in `risk` tests. **Not run: the live forced watchdog
+  halt on `:app` producing a bell entry and a Discord embed** — left for the
+  owner, because it halts the engine against the configured database and
+  posts to the real webhook. *Depends on:* nothing.
 - *Files:* `corollary/engine/notify.py`, `corollary/engine/runtime.py` (wire
   the notifier), `corollary/db/models.py`, migration 0005,
   `corollary/api/routes/notifications.py`, `web/src/components/NotificationBell.tsx`,
@@ -1196,7 +1363,9 @@ human read of StockTwits' and Massive's terms for automated access.
   today.
 
 **2. Scheduler and rate-limit hosts.**
-- *Status:* not started. *Depends on:* nothing.
+- *Status:* **done 2026-09-24** (9f659f5 rate-limit windows and hosts, a898760
+  scheduler). The rule 9 isolation tests are `risk`-marked and run the
+  shipped job set. *Depends on:* nothing.
 - *Files:* `corollary/engine/scheduler.py`, `corollary/ratelimit.py`,
   `corollary/api/app.py`.
 - *Done when:* a calendar-clocked no-op job runs in the lifespan across a
@@ -1317,16 +1486,37 @@ Concretely, on a trading-day morning against the live paper account:
 Settings shows n and eligibility — not a score.** The audit starts empty (Q7),
 and a label is gradable a trading day after publication at the earliest.
 
-**How long until it can act — estimates, to be replaced by step 0's
-measurement.** Trailing 28 calendar days holds ~19–20 sessions, and every
-graded label is graded in both windows, so the binding count is directional
-labels per session per source:
+**How long until it can act — measured by step 0, 2026-09-24.** Trailing 28
+calendar days holds ~19–20 sessions, and every graded label is graded in both
+windows, so the binding count is directional labels per session per source.
+Measured from history over the **ten completed sessions 2026-09-10 → 2026-09-23**.
+An article counts toward the first session whose close is at or after its
+publication, with session boundaries taken from `calendars.py`. The watch
+universe was **66 tickers**: the 26 Markets names ∪ a **hand-written
+approximation** of decision 6's sector-leader seed, which does not exist until
+step 4. Open-position underlyings were omitted, and `MARKET` contributed
+nothing, since no vendor tags it and the draft patterns are company events.
 
-| Source | Assumed directional labels / session on the watch universe | First run eligible to demote (≥30 in 28 days) | First possible re-promotion after a demotion (≥100 since) |
+| Source | Measured directional labels / session on the watch universe | First run eligible to demote (≥30 in each window, trailing 28 days) | First possible re-promotion after a demotion (≥100 since) |
 |---|---|---|---|
-| Massive | 5–15 (after excluding neutral) | ~2–6 sessions of labels → the **first or second Saturday** after launch | ~7–20 sessions → **~2–4 weeks** after the demotion |
-| Rules | 1.5–3 | ~10–20 sessions → **~2–4 weeks** after launch | ~33–67 sessions → **~7–14 weeks** after the demotion |
-| Rules | < 1.5 | **never** under the trailing-28-day rule — stays `unaudited` (decision 13, second risk) | n/a |
+| Massive (vendor insights) | **71.4** mean (37–132). **Neutral share 47.1%** (63.6 neutral per session), and `mixed` is excluded. Directional labels skew **88% positive** (627 : 87). | Even the slowest session clears 30, so it is eligible at the **first Saturday audit** after launch that has one full session's 1d windows matured | ~2 sessions (at most 3 on the slowest days) → the **first Saturday audit after the demotion** |
+| Rules — **draft-pattern estimate**, credited only where the headline names the ticker, deduplicated across vendors by normalised headline | **4.2** mean (1–7). Counted as distinct (session, ticker, direction) events, **2.9** (1–4). A hand read of the matches put precision at ~85–90%, i.e. ~3.6 true labels | ~7–11 sessions → the **second or third Saturday** after launch (~1.5–2.5 weeks). ~82 labels in a trailing 28 days, well clear of 30 | ~24–35 sessions → **~5–7 weeks** after the demotion |
+| Rules — **draft-pattern estimate**, credited to every vendor-tagged ticker (upper bound) | 8.4 (article, ticker) pairs, 7.0 articles (4–14) | ~4 sessions → the **first or second Saturday** | ~12 sessions → **~2.5 weeks** |
+
+These figures were measured on 2026-09-24 by `scripts/probe_phase3.py labels
+--sessions 10`. The raw output behind them was not retained; re-running that
+command reproduces the measurement, and step 5 re-measures anyway.
+
+**Against decision 13's second risk (1.5 directional labels per session): the
+rules estimate is above it**, under both attributions, and above it on nine of
+the ten sessions under the strict one (the minimum was 1, on 2026-09-17).
+**That depends on ingesting Finnhub `/company-news` for the watch universe.**
+Per vendor, the strict estimate is Finnhub 3.7, Alpaca 1.2 and Massive's own
+headlines 0.2. An Alpaca-only rules tier would sit **below 1.5**, and that
+configuration goes back to the owner. The rules figures are an estimate from
+draft regexes in `scripts/probe_phase3.py`, not step 5's patterns, and **step 5
+must re-measure** them. This does not resolve the second risk. It says the
+risk is not triggered by what could be measured before the patterns exist.
 
 The social baseline needs 30 sessions and the put/call component 60. *"Self-audit
 producing a figure that can act"* is a later, dated event per source, and

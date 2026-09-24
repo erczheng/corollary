@@ -1,0 +1,10 @@
+{
+  "recorded_at": "2026-09-24T04:37:05+00:00",
+  "request": "https://finnhub.io/api/v1/calendar/economic?from=2026-09-24&to=2026-10-01",
+  "status_code": 403,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {},
+  "body": {
+    "error": "You don't have access to this resource."
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "recorded_at": "2026-09-24T04:37:18+00:00",
+  "request": "https://data.alpaca.markets/v1/corporate-actions?types=cash_dividend&start=2026-09-24&end=2026-11-23&limit=1000",
+  "status_code": 200,
+  "content_type": "application/json",
+  "truncated": {
+    ".corporate_actions.cash_dividends": 1000
+  },
+  "body": {
+    "corporate_actions": {
+      "cash_dividends": [
+        {
+          "cusip": "00846U101",
+          "ex_date": "2026-10-06",
+          "foreign": false,
+          "id": "9588dcc7-aea4-42d4-b598-a4abccd21890",
+          "payable_date": "2026-10-28",
+          "process_date": "2026-10-28",
+          "rate": 0.255,
+          "record_date": "2026-10-06",
+          "special": false,
+          "symbol": "A"
+        },
+        {
+          "cusip": "00768Y206",
+          "ex_date": "2026-09-22",
+          "foreign": false,
+          "id": "b5b5b6e2-97f6-4fb3-b082-51655b6efa30",
+          "payable_date": "2026-09-29",
+          "process_date": "2026-09-29",
+          "rate": 0.3573,
+          "record_date": "2026-09-22",
+          "special": false,
+          "symbol": "AADR"
+        },
+        {
+          "cusip": "001317205",
+          "ex_date": "2026-09-04",
+          "foreign": true,
+          "id": "f07e6b49-9468-457b-8df2-4e7114d55f68",
+          "payable_date": "2026-10-02",
+          "process_date": "2026-10-02",
+          "rate": 0.244331,
+          "record_date": "2026-09-04",
+          "special": false,
+          "symbol": "AAGIY"
+        },
+        {
+          "cusip": "10948W103",
+          "ex_date": "2026-09-11",
+          "foreign": false,
+          "id": "86d05c50-f33c-407a-8e74-8358827c585d",
+          "payable_date": "2026-09-25",
+          "process_date": "2026-09-25",
+          "rate": 0.1,
+          "record_date": "2026-09-11",
+          "special": false,
+          "symbol": "AAMI"
+        },
+        {
+          "cusip": "000360206",
+          "ex_date": "2026-09-04",
+          "foreign": false,
+          "id": "6f8700bf-ee98-4f56-8647-01f6348efc01",
+          "payable_date": "2026-09-25",
+          "process_date": "2026-09-25",
+          "rate": 0.1,
+          "record_date": "2026-09-04",
+          "special": false,
+          "symbol": "AAON"
+        },
+        {
+          "cusip": "00751Y106",
+          "ex_date": "2026-10-09",
+          "foreign": false,
+          "id": "3d300f69-484e-4c8d-bcb8-c6a10f5c46aa",
+          "payable_date": "2026-10-23",
+          "process_date": "2026-10-23",
+          "rate": 0.25,
+          "record_date": "2026-10-09",
+          "special": false,
+          "symbol": "AAP"
+        }
+      ]
+    },
+    "next_page_token": "<redacted>"
+  }
+}
