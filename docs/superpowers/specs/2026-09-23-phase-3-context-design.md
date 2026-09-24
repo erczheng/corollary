@@ -8,6 +8,11 @@ decisions below. Two of them differ from the draft's recommendation — Q1 (no
 LLM sentiment tier in Phase 3) and Q6 (automatic re-promotion at 66%) — and the
 spec is rewritten around them rather than annotated. One sample-size rule in
 Q6 is a parent-session assumption the owner can override, and is labelled so.
+**Amended 2026-09-24 with Q9** (news scope, answered after step 0): company
+news covers the whole watch universe, and a market-wide discovery tier surfaces
+off-watch-list names in the news. Decision 21 carries it; decisions 3, 4, 12,
+13 and 20 are amended in place, and every detail the owner did not state is
+labelled a parent-session assumption.
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -373,6 +378,50 @@ still open.
   up to 1,000, though the cause of the missing entries is inferred, not
   verified. See the Alpaca snapshots subsection.
 
+**Added with Q9 (decision 21), 2026-09-24 — spec-read, not probed.** The
+planning session cannot read `.env`, so none of these ran against a key.
+
+- **Whether Alpaca `/v1beta1/news` with no `symbols` returns every Benzinga
+  article, and how many a day.** The reference marks `symbols` optional and says
+  the endpoint *"returns the latest news articles across stocks and crypto"*;
+  it does not say that omitting `symbols` means the whole feed. Step 0 probed
+  only the symbol-filtered form. Its 1,564 watch-universe articles over 14
+  calendar days are ~112 a day, which is already close to the *"about 130 a
+  day"* the Constraints subsection quotes for the whole feed. The full feed is
+  therefore probably larger than 130 a day, and the storage estimate in
+  decision 21 assumes 200–500. Crypto tags (`BTCUSD` and the like) will arrive
+  too and are dropped at ingest. Step 4 measures the volume.
+- **Finnhub `/news?category=general` mostly carries no ticker.** Finnhub's
+  OpenAPI sample response has `"related": ""` on a single-company headline
+  (*"Square surges after reporting 64% jump in revenue…"*). If that is typical,
+  market news is almost entirely `MARKET` items and **contributes almost no
+  discovery candidates**, because a candidate needs a ticker. The endpoint also
+  takes `category=merger`, which this spec does not add, since those rows are
+  likely untagged as well. Step 4 records the share of rows with a non-empty
+  `related`.
+- **Finnhub `/company-news` is *"only available for North American
+  companies"*** (OpenAPI description). ARM (Arm Holdings, a UK issuer with a US
+  listing) is in the Markets universe and may return nothing. Step 4 checks
+  each watch symbol returns rows at least once, and logs the ones that never do.
+- **Finnhub's 30-calls-per-second ceiling** (OpenAPI *Rate Limits*: *"On top of
+  all plan's limit, there is a 30 API calls/ second limit"*) is **not enforced
+  by the shared limiter.** A full 60-token bucket admits a 60-call burst. The
+  watch tier spreads its requests, so it never bursts. The existing profile2
+  cold start (26 calls) sits under 30. Decision 6's weekly consensus job (55
+  calls) must stay spread across the minute, as decision 6 already says.
+- **Alpaca's `has_options` asset attribute**, read from the assets reference:
+  *"The underlying equity has listed options available on the platform"*. It
+  does not distinguish an underlying with standard contracts from one whose
+  only chains are adjusted. Hence decision 21's second check: a contract with
+  `root_symbol` equal to the ticker. That `underlying_symbols` and
+  `root_symbol` combine as a filter on one request is **not verified**, and
+  step 4's fixture establishes it.
+- **Every article-volume and storage figure in decision 21 is an estimate.**
+  Step 0's per-symbol Finnhub counts were not retained (only the per-session
+  label figures were). Step 4 measures the real daily volume per feed, and the
+  retention window is revisited if the measurement is more than twice the
+  estimate.
+
 ---
 
 ## Owner decisions — 2026-09-24
@@ -495,6 +544,35 @@ notification read and dismissing it, which are excluded because reading the
 bell must not page Discord. Every route is editable in the routing matrix like
 every other event.
 
+**Q9 — News scope: company news on the whole watch universe, plus a
+market-wide discovery tier (asked after step 0).** Step 0 found that the rules
+tier clears decision 13's ~1.5 directional labels per session only when Finnhub
+`/company-news` covers the whole ~66-name watch universe: 4.2 measured, 3.7 of
+it from Finnhub. *Feeds and budgets* had budgeted ~30 symbols. Asked which
+scope to use, the owner answered, verbatim: *"realistically I want news for all
+companies that I could make money on so having something scrape through and
+find articles that could hint at any movements + 66 would be nice."*
+
+Carried through as decision 21. The answer has two parts, and they are handled
+separately:
+
+- **"+ 66"**: Finnhub company news is polled per symbol for the whole watch
+  universe. That is the configuration step 0 measured, so **decision 13's
+  second risk is not triggered as measured**. Step 5 still re-measures with the
+  real patterns.
+- **"find articles that could hint at any movements"**: a market-wide
+  discovery tier, read from the vendor firehoses that already tag tickers
+  (Alpaca's untickered Benzinga feed, Finnhub market news, Massive's untickered
+  news). It surfaces off-watch-list names with a high-signal event as
+  **discovery candidates** on the News page. It does **not** trigger trades.
+
+The owner said *"scrape"*. It is read loosely: **the market-wide sweep goes
+through vendor feeds, not a scraper of publisher sites.** Decision 21 records
+why. The details the owner did not state are all **parent-session assumptions
+the owner can override**, and each is labelled where it appears in decision 21:
+the tradeability thresholds, the manual-watch cap, the retention window, the
+audit's discovery cap, and the panel's ranking.
+
 ---
 
 ## Decisions
@@ -557,9 +635,20 @@ per `types.ts`.
 a ticker outside the seed files under `Other`; `MARKET` under `Macro`
 (`MACRO_SECTOR`, already in `types.ts`).
 
-**Retention: keep everything.** ~500 articles a day is ~180k rows a year,
-trivial for SQLite, and the audit needs the old labels. The UI's lookbacks
-(`today` / `3d` / `1w` / `2w` / `all`, in `lib/news.ts`) read from the store.
+**Provenance includes the feed.** `news_article.feed` records which poll
+fetched the row: `alpaca_news`, `finnhub_company`, `finnhub_market` or
+`massive_news`. A vendor has more than one feed after Q9, and *"Finnhub"* alone
+no longer says whether the story came from a watch-tier poll or the market-wide
+one.
+
+**Retention: amended by Q9 (decision 21).** The first draft said *keep
+everything* at ~500 articles a day. Under Q9's scope the store takes an
+estimated **1,500–2,000 articles a day**, so that figure no longer holds.
+Decision 21 sets the retention rule: full rows for 90 days, then only what the
+audit or the watch universe needs is kept. Labels and outcomes are never
+pruned. The UI's lookbacks (`today` / `3d` / `1w` / `2w` / `all`, in
+`lib/news.ts`) read from the store. After Q9, `all` means *everything
+retained*.
 
 Rejected: dedupe on headline alone (wire services retitle), and keeping only
 the canonical row (orphans vendor labels).
@@ -568,10 +657,13 @@ the canonical row (orphans vendor labels).
 
 Owner decision Q1: rules and Massive, no LLM tier.
 
-A headline in the watch universe (decision 12) is labelled by every source that
-can reach it — the rules tier on every headline, Massive on the articles it
-carries an `insights[]` entry for — and each label is its own `sentiment_label`
-row. The feed displays one, by precedence **rules → vendor**: a deterministic
+Every headline in the store is labelled by every source that can reach it: the
+rules tier on every headline, and Massive on the articles it carries an
+`insights[]` entry for. Each label is its own `sentiment_label` row. The first
+draft limited labelling to the watch universe (decision 12). **Q9 removes that
+limit.** The discovery tier needs labels on off-watch tickers to find anything,
+and rules labels are free to compute. Which ticker a rules label attaches to
+follows step 5's attribution rule, extended to off-watch names in decision 21. The feed displays one, by precedence **rules → vendor**: a deterministic
 match on *"guidance cut"* outranks a vendor's read of the same story. The
 self-audit grades every row, which is what produces §9's *"accuracy per source
 and per tier"* rather than accuracy for whichever label happened to win display.
@@ -714,6 +806,12 @@ probe's 6-of-30 is the reason that count is not decoration.
 Context only, never a trigger: nothing in Phase 3 or the Phase 4 plan reads it
 as an input.
 
+**The social watch set does not grow with Q9.** It stays the Markets universe
+plus open-position underlyings. Discovery candidates are not polled on
+StockTwits, and neither are decision 21's manual watches. 180 requests an hour
+over ~30 symbols is ~6 polls per symbol per hour, and every symbol added thins
+that for all the rest.
+
 Rejected: StockTwits' `volume_change`/`sentiment_change` (undocumented
 definitions — a number we cannot explain is not one we should print as a
 velocity); `trending_score` (a ranking, not a rate); backfilling the baseline
@@ -726,17 +824,43 @@ symbol and refreshes weekly (monthly source, weekly check, so a new month is
 picked up within a week). The panel shows counts rolled into buy / hold / sell
 (`strongBuy` into buy, `strongSell` into sell) and the period as-of.
 `SectorConsensus`'s percentages are derived from counts at the API, not stored.
+The consensus set stays decision 6's 55 sector leaders under Q9. Discovery
+candidates and manual watches get no consensus call.
 
 ### 12. The self-audit's mechanics
 
-**What is graded.** Every directional label (`bullish` / `bearish`) on a ticker
-in the **watch universe**: the Markets universe ∪ open-position underlyings ∪
-decision 6's sector leaders ∪ `MARKET`. `neutral` labels are graded for the
-record and excluded from accuracy, with their count reported (owner decision
-Q5). Labels outside the watch universe are stored and displayed but not graded —
-grading every ticker a vendor tags would mean minute bars for hundreds of
-symbols a week, which is the Phase 2 bars-page arithmetic at a scale that
-collides with the Markets poll.
+**What is graded — amended by Q9.** Two sets:
+
+1. **Every** directional label (`bullish` / `bearish`) on a ticker in the
+   **watch universe**, uncapped. The watch universe is the Markets universe ∪
+   open-position underlyings ∪ decision 6's sector leaders ∪ decision 21's
+   manual watches ∪ `MARKET`.
+2. **Discovery labels, capped**: directional labels on off-watch tickers that
+   pass decision 21's tradeability filter, for **at most 250 tickers per run**.
+   The 250 are taken in order of that run's directional label count,
+   descending, with ties broken by symbol so the choice is deterministic. *The
+   250 is a parent-session assumption the owner can override*; the arithmetic
+   is in *Feeds and budgets*. Restricting to tradeable tickers keeps the graded
+   set to names an options trader could act on. It also keeps it to names
+   liquid enough to have a clean SIP minute bar at the reference instant.
+
+A label outside both sets is stored and displayed, **never silently dropped
+from the audit**. It gets a `label_outcome` row with a `skip_reason`
+(`off_watch_untradeable` or `discovery_cap`) and no prices, so the run records
+what it did not grade and does not queue the label again. `neutral` labels are
+graded for the record and excluded from accuracy, with their count reported
+(owner decision Q5).
+
+**Discovery labels count toward a source's ≥30 / ≥100 floors** and are graded
+exactly as watch labels are: the same reference price, windows and
+excess-return rule. They are that source's labels, and a per-source accuracy
+that left out most of the source's output would describe a different source.
+**Transitions act on the combined figure.** `sentiment_accuracy` also stores
+the watch-only and discovery-only splits, and Settings shows them. That way a
+source dragged down by small-cap noise off the watch list is visible as such
+before anyone reads the demotion as a verdict on the names Phase 4 will scan.
+*Acting on the combined figure rather than the watch-only one is a
+parent-session assumption the owner can override.*
 
 **What is correct** (owner decision Q5). A label is correct when its sign
 matches the sign of the ticker's return **in excess of SPY's** over the same
@@ -771,9 +895,13 @@ see published live, so no label in the audit was produced with knowledge of its
 own outcome.
 
 Rejected: grading at raw clock offsets (a 1h window over a closed market grades
-nothing); grading all tagged tickers (cost, above); computing accuracy over only
-the week just graded (a quiet week with nine labels would swing the figure
-across the floor).
+nothing); grading every tagged ticker uncapped (minute bars for over a thousand
+symbols a week — Massive alone tagged 1,246 distinct tickers in 5.3 days — with
+no bound on the Saturday run); grading only the watch universe, as the first
+draft did (Q9 makes discovery labels a product surface, and a label shown to the
+owner that is never graded is one whose source's accuracy says nothing about
+it); computing accuracy over only the week just graded (a quiet week with nine
+labels would swing the figure across the floor).
 
 ### 13. Per-source demotion with 52/66 hysteresis and automatic re-promotion
 
@@ -854,14 +982,20 @@ source that is truly right 55% of the time is demoted on about a third of
 checks, and at n=100 a truly-60% source re-qualifies on only 13%. A useful
 source sitting demoted for months is the rule working conservatively, not a bug.
 
-**A second known risk, and an open item for step 0:** trailing 28 calendar days
-is about 19–20 sessions, so a source producing fewer than ~1.5 directional
-labels per session **can never become eligible to demote** and stays
-`unaudited` indefinitely. The rules tier is the candidate. The owner's
-trailing-28-day rule is kept as given; if step 0 measures the rules tier below
-that rate, the choice between a longer lookback for that source and accepting a
-permanently unaudited source goes back to the owner rather than being changed
-here.
+**A second known risk — resolved by Q9, not triggered as measured:** trailing
+28 calendar days is about 19–20 sessions, so a source producing fewer than ~1.5
+directional labels per session **can never become eligible to demote** and
+stays `unaudited` indefinitely. The rules tier was the candidate. Step 0
+measured it at 4.2 per session, but only with Finnhub `/company-news` across the
+whole 66-name watch universe. At the ~30 symbols then budgeted it was
+unmeasured, and an Alpaca-only rules tier measured 1.2. **Owner decision Q9
+puts company news on the whole watch universe** (decision 21), which is the
+measured configuration, so the risk is not triggered. Discovery-tier labels
+count toward the floor too (decision 12), and they can only add to the count.
+**Step 5 still re-measures** with the real patterns, and if the watch-universe
+rules rate alone falls below 1.5, the choice between a longer lookback and a
+permanently unaudited source goes back to the owner. The owner's
+trailing-28-day rule is kept as given.
 
 Rejected: a boolean on a config row (loses the reason and the run that caused
 it); deriving the state from the latest accuracy on read (a transition must be
@@ -1009,7 +1143,9 @@ decision 10 of the Phase 2 spec set for IV.
 ### 20. Every operator action notifies; the engine controls reach the bell too
 
 Owner decision Q8. Five new events, emitted through decision 14's one path
-(`_channels_for` → `FanoutNotifier`), never a second notifier:
+(`_channels_for` → `FanoutNotifier`), never a second notifier. Decision 21 adds
+a sixth, `watchlist_changed`, on the same terms as the three config events:
+`info`, bell off, Discord on, emitted by `POST`/`DELETE /api/news/watch/{ticker}`.
 
 | Event | Severity | Bell | Discord | Emitted by |
 |---|---|---|---|---|
@@ -1073,6 +1209,257 @@ the bell's routing gate is server-side); notifying on bell reads (it loops); one
 event for every config change (the owner could not route a risk-limit change
 differently from a feed change).
 
+### 21. News in two tiers: targeted company news on the watch universe, and a market-wide discovery surface
+
+Owner decision Q9. Every threshold, cap and window below that the owner did not
+state is marked *(assumption)*: a parent-session assumption the owner can
+override. The budget arithmetic is in *Feeds and budgets*.
+
+**Watch tier: targeted.** Finnhub `/company-news`, one request per symbol, for
+the whole watch universe (decision 12's definition, which now includes manual
+watches below). At launch that is the 26 Markets names ∪ the step-4 SPDR
+seed's sector leaders ∪ open-position underlyings. That comes to about the 66
+names step 0 measured, which used a hand-written approximation of the seed.
+Each request asks for the previous calendar day through today, which covers
+any date boundary in Finnhub's `from`/`to`.
+
+- **Cadence.** Every 15 minutes from 06:00 ET until one hour after the
+  calendar's close on trading days, and hourly otherwise *(assumption: the
+  06:00 start is there to catch before-open earnings releases, and the close
+  comes from `calendars.py`, so half-days are right)*.
+- **Round-robin, never a burst.** One symbol every 900/W seconds: every 13.6 s
+  at W = 66. That keeps the tier far under Finnhub's 30-per-second ceiling,
+  which the shared limiter does not enforce (*Not verified*).
+- **A response at the ~250-row cap** (step 0) is re-requested for today alone.
+  If today alone is still at the cap, the overflow is lost for that symbol and
+  day. Finnhub's dates cannot be split finer than a day, so this is logged with
+  the symbol and date rather than retried. Alpaca and Massive may still carry
+  those stories.
+
+**Discovery tier: market-wide.** The vendor firehoses already tag tickers
+across the whole market, so three requests' worth of feeds reach it:
+
+- Alpaca `/v1beta1/news` with no `symbols` filter (all of Benzinga), already
+  in *Feeds and budgets* at 60 s. Q9 changes what is kept, not what is polled.
+- Finnhub `/news?category=general`, with the `minId` cursor, every 5 minutes.
+- Massive `/v2/reference/news`, untickered, `limit=1000`, every 15 minutes.
+
+Every article lands in decision 3's one deduplicated store, with its vendor,
+feed and every tag. Tags that are not active US equities in Alpaca's asset list
+(crypto pairs, for one) are dropped at ingest. An article left with no tag at
+all is `MARKET`, which is what most Finnhub market news will be (*Not
+verified*: its `related` field is usually empty). **The rules tier labels
+every article**, and Massive's per-ticker insights are applied as they arrive,
+for every ticker they name (decision 4, as amended).
+
+**Attribution off the watch list** *(assumption)*. A rules label attaches to a
+ticker under step 5's rule: the headline names the ticker. The draft's
+evidence is why vendor tags alone are not enough (Finnhub returned Oracle and
+Grab headlines for ALAB, and a ten-ticker roundup is a label on none of them).
+Off the watch list there is no hand-kept company-name table, so:
+
+- **Company names** come from the asset list's `name`, normalised by stripping
+  legal and share-class suffixes (*Inc.*, *Corporation*, *Common Stock*,
+  *Class A*, and so on).
+- **An article that carries exactly one equity tag** from a feed that tags per
+  article (Alpaca `symbols`, Massive `tickers`) attributes to that ticker.
+- **That single-tag rule never applies to `finnhub_company` rows**, whose tag
+  is the queried symbol, not the vendor's reading of the article.
+- **Massive insights need no attribution rule**, because each one names its
+  own ticker.
+
+**What makes a discovery candidate.** "Find articles that could hint at any
+movements" becomes a **discovery surface, not a trade trigger.** A ticker is a
+candidate, over the page's lookback, when all three hold:
+
+1. **It is outside the watch universe**, at read time.
+2. **A high-signal article names it.** Either a rules label from a
+   discovery-flagged pattern family is attributed to it, or a Massive
+   `positive` or `negative` insight names it. The eight flagged families are
+   earnings beat/miss, guidance raised/cut, analyst upgrade/downgrade, M&A,
+   secondary offering, buyback, executive departure, and FDA
+   approval/rejection. A pattern step 5 adds later is unflagged until someone
+   flags it. `neutral` and `mixed` Massive insights never qualify.
+3. **It passes the tradeability filter**, which exists because the owner
+   trades options. All five checks must hold:
+   - Alpaca's asset list carries `has_options` for it (one daily request,
+     `GET /v2/assets?status=active&attributes=has_options`).
+   - **It is not an adjusted root, and it has standard contracts.** The ticker
+     fails `instruments.py`'s adjusted-root detection, **and** a contract with
+     `root_symbol` equal to the ticker and `size` 100 exists. `has_options`
+     alone is not enough here: an underlying whose only listed chains are
+     adjusted after a reverse split is exactly the kind of name
+     secondary-offering headlines produce, and CLAUDE.md's `AAPL1` warning
+     applies.
+   - **Average daily volume ≥ 1,000,000 shares** over the trailing 20
+     completed sessions *(assumption)*.
+   - **Last close ≥ $5** *(assumption: it keeps the panel from filling with
+     sub-dollar offering news; drop it and only the ADV gate remains)*.
+   - **At least 20 sessions of history** *(assumption: a recent IPO fails
+     rather than being judged on a partial average)*.
+
+   Volume and close come from **daily bars on the historical feed**
+   (`ALPACA_STOCK_FEED_HISTORICAL`, `sip` on this plan), never the realtime
+   `iex` feed and never snapshot volume. CLAUDE.md's `min_avg_volume` warning
+   is the reason: an IEX-computed 1,000,000 would be filtering on a fortieth of
+   real volume.
+
+**Candidates are derived on read, never stored.** They are a query over labels,
+tickers and a stored tradeability cache. A ticker the owner watches leaves the
+panel at once, and there is no candidate table to drift from its inputs.
+`ticker_tradeability` caches one row per ticker per session date:
+
+- It is filled lazily, **only for off-watch tickers that already carry a
+  qualifying signal**, which is what bounds the cost.
+- The `has_options` list refreshes daily at 07:30 ET.
+- The standard-root check and the ADV run once per ticker per session date.
+- A failure is cached for the session too, so a failing ticker is not
+  re-checked every cycle.
+
+**The panel: "Movers in the news"** on the News page. Each row carries:
+
+- the ticker and its sector (`Other` for most, per decision 3)
+- each reason as a named rule family or a Massive direction with its
+  `sentiment_reasoning`, and each reason's direction. **Conflicting directions
+  are shown side by side, never netted.**
+- the article count, the latest article's time, the ADV
+- links to the articles
+- a **Watch** button
+
+**Ranking** *(assumption)*: rows with at least one rules event come first and
+Massive-only rows after, newest qualifying article first within each group.
+Rules events outrank Massive-only labels because Massive's directional insights
+skew 88% positive (step 0), and at ~400 a session market-wide (estimate below)
+they would bury the rules events. The API returns the ranking and the client
+does not re-rank, the same one-sort rule `lib/markets.ts` follows.
+
+**The panel carries no price move.** Its caption says the rows are *flagged by
+news, not confirmed by price*. A move column would mean snapshot requests for
+arbitrary names in session, answered from IEX on this plan, and Phase 3 does
+not add it *(assumption: one batched snapshot call per refresh would be cheap,
+and is the owner's to ask for)*. The panel follows the page's lookback control.
+
+**The feed's default scope narrows** *(assumption)*. With the firehose in the
+store, the main feed defaults to watch-universe tickers plus `MARKET`, with a
+scope toggle to *everything*. Otherwise the owner's own names drown in a
+market-wide stream the discovery panel already summarises.
+
+**Social attention and consensus stay on their own sets** (decisions 10 and
+11). Candidates get no StockTwits poll and no Finnhub recommendation call.
+
+**One-click watch, manual and audit-logged. No automatic promotion.**
+
+- **The routes.** `POST /api/news/watch/{ticker}` adds a manual watch, and
+  `DELETE` removes one. Only manual watches are removable: seed, Markets and
+  position members are not. The ticker must be an active US equity in the
+  asset list.
+- **The cap.** Manual watches may bring the watch universe to **at most 100
+  symbols before position underlyings** *(assumption)*. That is 34 manual
+  watches at the measured 66. One past the ceiling is refused with a 409 that
+  names it.
+- **Audit-logged**, under a new `watchlist` category in the configuration
+  audit log. Decision 9 kept calendar notes out of that log because they govern
+  nothing. A watch is different: it changes what is polled and graded, grading
+  feeds decision 13's transitions, and those govern what Phase 4's scanner may
+  read.
+- **It notifies** `watchlist_changed` (decision 20's terms: `info`, bell off,
+  Discord on). Q8 is *"any action i do should be put into the discord"*.
+- **Removal keeps everything already stored.** The ticker's later labels are
+  simply discovery labels.
+
+**Why nothing is promoted automatically:**
+
+- **The universe would grow without bound.** Massive alone tagged 1,246
+  distinct tickers in 5.3 days, and every watched symbol costs a Finnhub
+  request every 15 minutes. The bucket's absolute ceiling at that cadence is
+  900 symbols with nothing else running, and auto-promotion would reach it in
+  about a week.
+- **The graded set would change without anyone deciding it**, and with it the
+  figure decision 13 acts on.
+
+**Surfaces, never triggers.** Nothing in Phase 3 reads a candidate as an input.
+Deciding what *"could make money"* is Phase 4's scanner's job. Whether the
+scanner ever reads candidates, or the watch universe, is also Phase 4's to
+decide. The conservative reading is that the scanner reads only its own
+universe. **Rule 3: no MCP anywhere in this path.** Ingest, labelling,
+tradeability, the audit and the panel all talk to vendors over REST, through
+the vendor files and the shared limiter.
+
+**No web scraping of publisher sites.** The owner said *"scrape"*. The
+market-wide sweep is done through the vendor firehoses above, and that is a
+deliberate choice, not a stand-in:
+
+- **Publishers' terms.** Automated collection is commonly restricted, and the
+  Phase 2 CBOE finding (free, reachable, forbidden to automate) is the
+  precedent for not assuming otherwise.
+- **Fragility.** A scraper breaks silently on every site redesign, and a
+  context job that fails quietly is decision 1's *stale since* failure made
+  permanent.
+- **No gap to fill.** The vendor feeds already cover the whole market by
+  ticker, tagged, timestamped and deduplicable.
+
+If the owner later wants a source the feeds miss, that is a **vendor
+decision** (Benzinga Pro, or Marketaux from PRD §7's deferred list), made and
+paid for deliberately, not a scraper.
+
+**Storage and retention.** Estimates, until step 4 measures the real volume
+(*Not verified*):
+
+| Feed | Articles a day | Basis |
+|---|---|---|
+| Finnhub watch tier | ~1,000 | NVDA ran ~90 a day and five names reached the 250 cap in 14 days (step 0). Per-symbol counts were not retained. |
+| Alpaca, whole feed | 200–500 | The watch-filtered slice alone was ~112 a day. |
+| Massive | ~190 | Measured. |
+| Finnhub market news | ~100 | Estimate. |
+| **Total** | **~1,500–2,000** | About three times decision 3's first-draft 500. |
+
+Around that, ~3 ticker rows per article, and ~1,000–1,200 labels a day
+(Massive's ~780 insights a session market-wide, from step 0's 7,843 over ten
+sessions, ~400 of them directional at the measured 47% neutral share, plus
+rules). At ~1 KB per article with its indexes, ~50 B per ticker
+row and ~300 B per label (Massive's reasoning is a sentence), that is ~2.7 MB a
+day.
+
+The rule *(assumption: 90 days)*:
+
+- **Full rows for 90 days.** That is ~240 MB rolling, and it covers every UI
+  lookback and every audit window many times over.
+- **Then a nightly job at 03:00 ET** nulls `summary` on every article older
+  than 90 days, and deletes every **canonical group** of which no member
+  carries a label. A group goes as a unit, so no `canonical_id` dangles and no
+  labelled duplicate loses its canonical row.
+- **Labels, outcomes, audit runs and every labelled article's headline, URL,
+  publisher and time are kept indefinitely.** The audit needs them.
+
+That retained remainder grows ~0.3 GB a year, so the database stays under ~1 GB
+after the first year. SQLite handles that comfortably. It is the same file the
+ledger lives in, so backups grow with it. Deleted pages are reused by later
+inserts, so the file plateaus rather than shrinking. **No `VACUUM` is
+scheduled**: it rewrites the whole file under a lock, and the engine is
+running. The prune job is a context job, so it is never a rule-9 producer
+(decision 1).
+
+Rejected:
+
+- **Scraping publisher sites** (above).
+- **Finnhub `/company-news` market-wide.** It is per symbol: 900 symbols per
+  15 minutes is the whole bucket, and the firehoses reach the market in three
+  requests.
+- **A candidate on any label, or without the tradeability filter.** Neutral
+  labels hint at nothing. Unfiltered, the panel fills with names that list no
+  options or trade too thin to fill an options order.
+- **ADV from IEX or snapshot volume** (CLAUDE.md).
+- **Storing candidates** (they would drift from the labels and the watch list
+  that define them).
+- **Automatic promotion to the watch list** (above).
+- **Social and consensus on candidates** (their budgets are decisions 10 and
+  11's).
+- **Candidates as a Phase 3 or automatic Phase 4 scanner input.**
+- **Keeping every article forever at this volume.** ~1 GB a year into the
+  ledger's file, for rows nothing reads.
+- **Buying Benzinga Pro or Marketaux now.** Nothing yet shows the free feeds
+  miss anything.
+
 ---
 
 ## Design
@@ -1089,13 +1476,18 @@ corollary/
 │   │   └── econ_release_times.csv  # Q3: per-release ET times, human-kept
 │   ├── providers/
 │   │   ├── interface.py          # + NewsProvider, CorporateActionsProvider
-│   │   ├── alpaca.py             # + news(), corporate_actions() — Alpaca's surface
+│   │   ├── alpaca.py             # + news(), corporate_actions(), optionable assets,
+│   │   │                         #   standard-root check (decision 21) — Alpaca's surface
 │   │   ├── finnhub.py            # + company_news, market_news, earnings, recommendations
-│   │   ├── massive.py            # the vendor sentiment source (Q1)
+│   │   ├── massive.py            # untickered news (step 4) and its insights (Q1)
 │   │   ├── stocktwits.py
 │   │   └── fred.py               # series + release dates (Q3)
 │   ├── news/
-│   │   ├── ingest.py             # poll, normalise, dedupe → news_article
+│   │   ├── ingest.py             # both tiers: poll, normalise, dedupe → news_article
+│   │   ├── watchlist.py          # the watch universe: seed ∪ Markets ∪ positions ∪ manual
+│   │   ├── tradeability.py       # decision 21's filter — pure — plus its cache refresh
+│   │   ├── discovery.py          # candidates, derived on read, ranked — pure
+│   │   ├── retention.py          # the nightly prune (decision 21)
 │   │   ├── rules.py              # the rules tier: deterministic headline patterns — pure
 │   │   ├── vendor.py             # Massive insights → sentiment_label
 │   │   ├── audit.py              # grading and transitions — pure — plus a runner
@@ -1108,7 +1500,7 @@ corollary/
 │   ├── scheduler.py              # the job set, calendar-clocked
 │   └── notify.py                 # DbNotifier, DiscordNotifier, FanoutNotifier
 └── api/routes/
-    ├── news.py                   # feed, composite, social, consensus
+    ├── news.py                   # feed, movers, watch, composite, social, consensus
     ├── calendar.py               # read + manual geopolitical CRUD
     └── notifications.py
 ```
@@ -1121,18 +1513,22 @@ the protocol stays where it is so the halt path's imports do not move. No
 
 | Feed | Source | Cadence | Host bucket | Spend |
 |---|---|---|---|---|
-| Benzinga headlines | Alpaca `/v1beta1/news`, untickered | 60s in session, 5 min otherwise | `data.alpaca.markets` 200/min | ≤1/min |
-| Company news | Finnhub `/company-news`, per symbol | each symbol every 10 min | `finnhub.io` 60/min | ~3/min for ~30 symbols |
-| Market news | Finnhub `/news?category=general` | 5 min | `finnhub.io` | 0.2/min |
-| Vendor-scored news | Massive `/v2/reference/news`, untickered, `limit=1000` | 15 min | `api.massive.com` 5/min | 0.07/min |
-| Social | StockTwits symbol streams | budgeted round-robin | `api.stocktwits.com` 200/hr | 180/hr |
+| Company news — **watch tier** (Q9) | Finnhub `/company-news`, per symbol, previous day → today | every symbol every 15 min, 06:00 ET → close + 1h on trading days; hourly otherwise; round-robin, one request every 900/W s | `finnhub.io` 60/min (and 30/s, unenforced) | **4.4/min** at W = 66; **≤7.2/min** at the W = 108 ceiling; 1.1–1.8/min overnight |
+| Benzinga headlines — **discovery tier** | Alpaca `/v1beta1/news`, untickered | 60s in session, 5 min otherwise | `data.alpaca.markets` 200/min | ≤1/min, a few pages after a burst |
+| Market news — **discovery tier** | Finnhub `/news?category=general`, `minId` cursor | 5 min | `finnhub.io` | 0.2/min |
+| Vendor-scored news — **discovery tier** | Massive `/v2/reference/news`, untickered, `limit=1000`, from the last `published_utc` seen | 15 min | `api.massive.com` 5/min | 4/hr = 0.07/min (1.3% of the bucket) |
+| Tradeability: optionable list (decision 21) | Alpaca `GET /v2/assets?status=active&attributes=has_options` | daily 07:30 ET | `paper-api.alpaca.markets` 200/min | 1/day |
+| Tradeability: standard root | Alpaca `/v2/options/contracts`, `underlying_symbols` = `root_symbol` = ticker, `limit=1` | once per newly signalled off-watch ticker per session | `paper-api.alpaca.markets` | est. ≤100/day, paced by the limiter |
+| Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 20 sessions, multi-symbol, ≤200 symbols a request (4,000 points, under the 10,000-point page) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.07/min |
+| Social | StockTwits symbol streams — social watch set only (decision 10) | budgeted round-robin | `api.stocktwits.com` 200/hr | 180/hr |
 | Earnings | Finnhub `/calendar/earnings`, 3-week window | daily 07:00 ET | `finnhub.io` | 1/day |
-| Consensus | Finnhub `/stock/recommendation` | weekly | `finnhub.io` | 55/week |
+| Consensus | Finnhub `/stock/recommendation` — sector leaders only (decision 11) | weekly, off-hours, spread across the minute | `finnhub.io` | 55/week |
 | Dividends | Alpaca corporate actions | daily | `data.alpaca.markets` | ≤2/day |
 | FRED series and release dates | `VIXCLS`, `BAMLH0A0HYM2`, `DGS3MO`, `/releases/dates` + per-release observations | daily 10:00 ET, and ~10 min after each scheduled release for its actual | `api.stlouisfed.org` 120/min | ≤20/day |
 | Composite prices | SPY, TLT, sector ETFs, ~500-name universe daily bars | EOD, 16:30 ET | `data.alpaca.markets` | ~1–2 pages/day; ~26 pages once, on the first run's history load |
 | Put/call | SPY chain snapshots | EOD | `data.alpaca.markets` | ~9 pages/day |
-| Audit prices | SIP 1Min bars, watch universe, the week | Saturday | `data.alpaca.markets` | ~40 pages/week |
+| Audit prices | SIP 1Min bars, the week: watch universe (uncapped) + ≤250 tradeable discovery tickers (decision 12) | Saturday | `data.alpaca.markets` | ~40 pages watch + ≤~150 discovery ≈ **≤190 pages/week** |
+| Retention prune | local only | nightly 03:00 ET | — | none |
 | Top sector (Pulse) | sector ETF snapshots | with the Markets poll's cadence when Research is open | `data.alpaca.markets` | shares the Markets request |
 
 **Massive at 5/min is not the binding constraint on label volume.** One
@@ -1143,10 +1539,40 @@ publishers write about watch-universe tickers, which step 0 measures.
 
 **The data bucket is the one that matters.** Decision 18 of the Phase 2 spec
 spends 150/min of it on the Markets poll at 400ms, leaving ~49/min. Phase 3
-adds ≤1/min in session. The EOD composite pages and the Saturday audit run
-outside the session, when the Markets poll is backgrounded or stopped, and wait
-on the bucket rather than refusing — which is how `HostRateLimiter` already
-behaves. Nothing here reprices a Phase 2 cadence.
+adds ≤~1.1/min in session: news plus the ADV batch. The EOD composite pages and
+the Saturday audit run outside the session, when the Markets poll is
+backgrounded or stopped, and wait on the bucket rather than refusing, which is
+how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
+
+**Q9's arithmetic, one line per bucket** (decision 21):
+
+- **`finnhub.io`, 60/min.** Watch tier 66/15 = **4.4/min** (≤108/15 = 7.2/min
+  at the ceiling of 100 watch symbols plus ≤8 position underlyings) + market
+  news 0.2/min = **4.6/min sustained in the window, ≤7.4/min at the ceiling
+  (8–12% of the bucket)**. On top of that sit profile2's 26 a day (Phase 2's
+  daily cache, a sub-30 burst on the first Markets load), earnings at 1 a day,
+  and consensus at 55 a week, spread and off-hours. Overnight the watch tier
+  drops to 1.1–1.8/min. The 30-per-second ceiling is met by spreading
+  requests, not by the limiter (*Not verified*).
+- **`data.alpaca.markets`, 200/min (~49 left after the Markets poll).**
+  In session: untickered news ≤1/min + ADV ≤0.07/min. Saturday: the audit's
+  ~0.6 pages per symbol-week of 1Min bars (Phase 2's ~40 pages ÷ 66 symbols)
+  × (66 watch + ≤250 discovery) ≈ **≤190 pages**. That is ~4 minutes against
+  the 49/min remainder, or ~1 minute against the whole bucket with the market
+  shut.
+- **`paper-api.alpaca.markets`, 200/min.** 1 optionable-list request a day +
+  est. ≤100 standard-root checks a day, spread through it: well under 0.1/min
+  on average.
+- **`api.massive.com`, 5/min.** 4 untickered calls an hour = 0.07/min. One
+  call holds up to 5.3 days of articles (step 0), so a 15-minute cadence cannot
+  leave a gap.
+
+**Why the watch tier is 15 minutes, not the first draft's 10.** At 66 symbols,
+10 minutes would be 6.6/min, and it would stop fitting comfortably once manual
+watches and the ceiling come in. Headlines on the watch set also arrive through
+Alpaca's 60-second firehose. Finnhub's per-symbol poll adds its aggregated
+publishers, and step 0 showed those are what the rules tier's volume rests on.
+It is not a latency path.
 
 The composite's one-time history load is a load of *market prices* for the
 z-score window, not a backfill of labels — Q7's no-backfill governs the
@@ -1158,9 +1584,19 @@ Migrations **0005** onward, one per step that introduces tables. Money-like
 prices and returns use `corollary.db.types.Money` (TEXT, exact `Decimal`, SQL
 comparison refused); every timestamp is `UtcDateTime`.
 
-- `news_article(id, vendor, vendor_id, canonical_id, url, headline, summary,
-  publisher, published_at, ingested_at)`, UNIQUE `(vendor, vendor_id)`.
+- `news_article(id, vendor, vendor_id, feed, canonical_id, url, headline,
+  summary, publisher, published_at, ingested_at)`, UNIQUE `(vendor, vendor_id)`.
+  `feed` ∈ `alpaca_news | finnhub_company | finnhub_market | massive_news`,
+  CHECK-constrained (decision 3). `summary` is nulled after 90 days (decision
+  21).
 - `news_article_ticker(article_id, ticker)`.
+- `watch_symbol(ticker, added_at, removed_at)` — manual watches only (decision
+  21). The rest of the watch universe is derived from the seed, the Markets
+  universe and positions, and is not copied here.
+- `ticker_tradeability(ticker, session_date, has_options, standard_root,
+  avg_volume_20d, last_close, sessions_available, passes, checked_at)`,
+  UNIQUE `(ticker, session_date)`. `last_close` is `Money`. `avg_volume_20d`
+  is an integer share count.
 - `sentiment_label(id, article_id, ticker, source, tier, direction, reasoning,
   rule_id, labeled_at)`, UNIQUE `(article_id, ticker, source)`. `direction` ∈
   `bullish | bearish | neutral`; `tier` ∈ `rules | vendor`, CHECK-constrained.
@@ -1169,13 +1605,17 @@ comparison refused); every timestamp is `UtcDateTime`.
   table stores labels, not their absence.
 - `label_outcome(label_id, window, reference_at, reference_price,
   outcome_at, outcome_price, benchmark_return, excess_return, correct,
-  audit_run_id)`, UNIQUE `(label_id, window)`. `correct` is null for a neutral
-  label (Q5).
-- `audit_run(id, started_at, finished_at, trigger, status, detail)`.
-- `sentiment_accuracy(audit_run_id, source, window, basis, graded, correct,
-  neutral)` — `basis` ∈ `trailing_28d | since_demotion`, so the figure a
-  transition acted on is the figure stored. Counts only; the percentage is
-  derived on read.
+  skip_reason, audit_run_id)`, UNIQUE `(label_id, window)`. `correct` is null
+  for a neutral label (Q5). `skip_reason` ∈ `off_watch_untradeable |
+  discovery_cap`, or null when graded. A skipped row carries no prices
+  (decision 12).
+- `audit_run(id, started_at, finished_at, trigger, status, detail)`. `detail`
+  carries the count of labels and tickers skipped by the discovery cap.
+- `sentiment_accuracy(audit_run_id, source, window, basis, scope, graded,
+  correct, neutral)` — `basis` ∈ `trailing_28d | since_demotion`, so the figure
+  a transition acted on is the figure stored. `scope` ∈ `all | watch |
+  discovery`. Transitions act on `all`, and the splits are for display
+  (decision 12). Counts only; the percentage is derived on read.
 - `sentiment_source_status(source, status, changed_at, reason, audit_run_id)`,
   plus the transitions themselves in `audit_log` (decision 13).
 - `calendar_event(id, kind, source, title, ticker, date, at, estimate, prior,
@@ -1191,19 +1631,27 @@ comparison refused); every timestamp is `UtcDateTime`.
 - `analyst_consensus(symbol, period, strong_buy, buy, hold, sell, strong_sell,
   fetched_at)`.
 - `notification(...)`, `notification_delivery(...)` — decision 14.
-- `AUDIT_CATEGORIES` gains `sentiment`; `notification_route` gains the
-  `sentiment_demoted` and `sentiment_repromoted` rows. Both are
-  CHECK-constrained, so both are migrations — which is the point: a typo does
-  not create a category.
+- `AUDIT_CATEGORIES` gains `sentiment` and `watchlist`; `notification_route`
+  gains the `sentiment_demoted`, `sentiment_repromoted` and `watchlist_changed`
+  rows. Both are CHECK-constrained, so both are migrations — which is the point:
+  a typo does not create a category.
 
 ### API
 
 All read routes are plain `GET`s depending on no broker; the structural guards
 in `tests/api/test_account_mode.py` apply unchanged.
 
-- `GET /api/news` — `lookback`, `ticker`, `sector`, `publisher`, `sentiment`,
-  `sort`, paginated. Each item carries its displayed label, the tier and source
-  that produced it, and whether that source is demoted.
+- `GET /api/news` — `lookback`, `scope` (`watch`, the default, or `all`),
+  `ticker`, `sector`, `publisher`, `sentiment`, `sort`, paginated. Each item
+  carries its displayed label, the tier and source that produced it, and
+  whether that source is demoted.
+- `GET /api/news/movers?lookback=` — decision 21's discovery candidates,
+  ranked server-side. Each carries its reasons, their directions, its articles,
+  ADV and last close, and the tradeability check's session date.
+- `GET /api/news/watch`; `POST`/`DELETE /api/news/watch/{ticker}` — manual
+  watches. The routes are audit-logged, emit `watchlist_changed`, and return
+  409 past the cap. They depend on no broker: the asset list they validate
+  against is the cached one.
 - `GET /api/news/composite` — per component: raw value, z, score, source,
   whether it is a proxy and of what, forming count, as-of; the composite and how
   many components it averages.
@@ -1229,6 +1677,17 @@ in `tests/api/test_account_mode.py` apply unchanged.
   off each panel as it goes real — decision 8 of the Phase 2 spec, applied in
   reverse. The page's marker moves from the title to the panels while the page
   is mixed, as Settings already does.
+- **News — discovery (decision 21):** a *Movers in the news* panel beside the
+  feed, captioned *flagged by news, not confirmed by price*. It shows rows in
+  the server's order, each reason named, conflicting directions side by side,
+  article links, and a **Watch** button. There is no confirm on Watch, because
+  it is additive and reversible. `settings.ts` confirms only the risky
+  direction for the same reason: nagging on the safe one trains dismissal.
+  The panel has
+  designed empty states: *"no off-watch-list name passed the filter since
+  HH:MM"* differs from *"discovery feeds stale since HH:MM"*. The feed gains a
+  *watch list / everything* scope toggle, defaulting to the watch list, and
+  a manual watch can be removed from a small list on the same page.
 - **`SectorConsensus`** changes to counts plus derived percentages; the
   existing `sortConsensus` / `consensusNet` keep working on the percentages.
 - **Calendar:** earnings rows carry a session label rather than a time;
@@ -1244,7 +1703,9 @@ in `tests/api/test_account_mode.py` apply unchanged.
   thresholds (52% to demote, 66% to re-promote) and the dead band between them
   in words. The demotion banner reads from `sentiment_source_status`; a demoted
   source shows its re-promotion progress (*"since demotion: 41 of 100 in the
-  1h window"*). There is **no re-promote button** (Q6). `settings.ts`'s
+  1h window"*). There is **no re-promote button** (Q6). Each cell can be
+  expanded into its watch and discovery split (decision 12), labelled as
+  display only, since transitions act on the combined figure. `settings.ts`'s
   `demotedSources` stops computing demotion from accuracy — the status is the
   server's, and a client-side recomputation is how the page and the engine would
   come to disagree; a `SENTIMENT_REPROMOTE` constant joins `SENTIMENT_FLOOR`.
@@ -1272,6 +1733,44 @@ and the audit's transitions — get the careful coverage.
   yields no row for it.
 - Dedupe: two vendors' copies of one story collapse; two different stories
   with the same headline an hour apart do not.
+- **Discovery (decision 21), pure:**
+  - **What is never a candidate:**
+    - a watch-universe ticker, and a ticker that leaves the panel the moment
+      it is watched
+    - a ticker whose only signal is a Massive `neutral` or `mixed`
+    - a ticker failing any one tradeability check: no `has_options`, an
+      adjusted root, no standard-root contract, ADV at 999,999, a close at
+      $4.99, or 19 sessions of history
+  - **The boundaries pass:** ADV at exactly 1,000,000, a close at exactly $5,
+    and 20 sessions.
+  - **Ranking:** a rules event outranks a Massive-only row regardless of
+    recency; within a group, newest first. The same inputs give the same order.
+  - **Attribution:** a single-tag Alpaca or Massive article attributes to its
+    tag; a single-tag `finnhub_company` row does not.
+- **ADV reads the historical feed.** A test asserts the bars request carries
+  `ALPACA_STOCK_FEED_HISTORICAL`'s value, and fails if it ever carries the
+  realtime feed's.
+- **Watch routes:**
+  - add, remove, the 409 one past the 100-symbol ceiling, and refusal to
+    remove a non-manual member
+  - exactly one `audit_log` row and one `watchlist_changed` emit per change
+  - nothing emitted on a refused request
+- **Retention:**
+  - a labelled article is never deleted, and neither is any member of its
+    canonical group
+  - an unlabelled group older than 90 days is deleted as a unit
+  - `summary` is nulled, not the row
+  - re-running the prune is a no-op
+- **Audit cap:** 251 eligible discovery tickers grade 250, chosen by label
+  count with symbol tie-break, and the 251st's labels get
+  `skip_reason = discovery_cap`. An untradeable off-watch label gets
+  `off_watch_untradeable`. Discovery labels count toward the floors.
+- **The watch tier's cap handling:** a response at the cap re-requests today
+  alone, and a second capped answer is logged, not retried.
+- Rule 3 needs no new test. `tests/test_hard_rules.py`'s
+  `test_no_module_imports_or_invokes_an_mcp_client` scans every module under
+  `corollary/`, so the new `data/news/` modules are covered the moment they
+  exist, and it must stay green.
 - `components.py` / `composite.py`: each component against a hand-computed
   fixture; orientation (VIX up ⇒ lower score); a forming component is excluded
   and counted; the composite equals the mean of the scores the endpoint prints
@@ -1309,6 +1808,8 @@ and the audit's transitions — get the careful coverage.
   `'provider'` survives.
 - Settings renders unaudited, active, demoted-with-progress and
   insufficient-sample states, and offers no re-promote control.
+- The movers panel renders loading, both empty states, stale and populated. It
+  keeps the server's order, and Watch removes the row on success.
 - Research and the chain ticket disable Execute from the engine-state query,
   not the store.
 - `npm run typecheck` and `npm run test` pass.
@@ -1333,10 +1834,27 @@ by this spec; these are the amendments it owes.
     confirmed against the key in step 0.
   - Dividends from Alpaca corporate actions (or removed, per step 0).
   - News sentiment row: *Rules + Massive (vendor); LLM tier from Phase 4*.
+  - **News row, two tiers** (Q9, decision 21): *watch tier:* Finnhub
+    `/company-news` per symbol for the watch universe. *Discovery tier:*
+    Alpaca news untickered (all Benzinga), Finnhub market news, and Massive
+    news untickered. Everything is ticker-tagged and deduplicated into one
+    store. Add the note that the market-wide sweep is through vendor feeds, and
+    that there is no scraping of publisher sites. A source the feeds miss is a
+    vendor decision (Benzinga Pro, or Marketaux, which is already on the
+    deferred list).
 - **PRD §8.3** — the composite's proxies stated, its daily cadence and *"N of 7
   components"*; social baseline forms over 30 sessions; earnings carry a
   session, not a time; consensus as counts; economic releases show no
   consensus.
+  - **Live feed** defaults to the watch list plus `MARKET`, with an
+    *everything* scope.
+  - **A new *Movers in the news* bullet.** It lists off-watch-list tickers
+    with a high-signal rules event or a directional Massive label, filtered
+    to names with standard listed options, ≥1M shares SIP ADV and a ≥$5
+    close. Each row gives its reason and its articles, plus a one-click,
+    audit-logged Watch. The panel surfaces and never triggers, it carries no
+    price move, and nothing is promoted to the watch list automatically.
+  - Social attention and consensus stay on their own sets.
 - **PRD §8.5** — VIX on Market Pulse is the last close unless an intraday
   source is confirmed in step 0.
 - **PRD §8.7** — the accuracy readout carries sample sizes and eligibility,
@@ -1357,7 +1875,12 @@ by this spec; these are the amendments it owes.
     as all of it and is replaced. The 52% floor is stated as PRD-given with no
     empirical derivation.
   - No backfill; the audit starts empty.
-- **PRD §10** — two rows: `Sentiment source demoted` (bell ✓ Discord ✓,
+  - What is graded: the watch universe uncapped, plus ≤250 tradeable
+    discovery tickers a run. Discovery labels count toward the floors. The
+    watch/discovery split is displayed, and transitions act on the combined
+    figure (decision 12).
+- **PRD §10** — a `Watch list changed` row (bell off, Discord ✓, info),
+  decision 21. Then two rows: `Sentiment source demoted` (bell ✓ Discord ✓,
   warning) and `Sentiment source re-promoted` (bell ✓ Discord ✓, info).
   Five more, from decision 20: `Engine halted by operator` (bell ✓ Discord ✓,
   warning), `Engine resumed by operator` (bell ✓ Discord ✓, info), `Risk limits
@@ -1367,6 +1890,9 @@ by this spec; these are the amendments it owes.
 - **PRD §11** — Phase 3's done-criterion (below). And under Phase 4: the LLM
   sentiment tier (decision 18), and the scanner reading the demotion flag once
   per scan (decision 13).
+- **CLAUDE.md, Working with market data** — one sentence beside the
+  `min_avg_volume` warning: decision 21's discovery ADV filter is the first
+  consumer of that rule, and it reads `ALPACA_STOCK_FEED_HISTORICAL`.
 - **CLAUDE.md, Layout** — `data/news/`, `data/macro/`, `data/seeds/`,
   `data/calendar.py`, `engine/notify.py`, `engine/scheduler.py` no longer a
   stub, and the new routes.
@@ -1392,9 +1918,11 @@ Same form as the Phase 2 list: each entry gives **Status**, **Depends on**,
 targets, **`master`**. **A step's status changes in the same commit as the
 thing it describes** — the Phase 2 spec records why that rule exists.
 
-Nothing below is blocked on an owner question any longer. Step 0 can still
-send one question back — the rules tier's volume against the demotion window
-(decision 13's second known risk).
+Nothing below is blocked on an owner question any longer. The one question
+step 0 could send back — the rules tier's volume against the demotion window
+(decision 13's second known risk) — was put to the owner as Q9 and answered:
+company news covers the whole watch universe, and a discovery tier is added
+(decision 21). Step 5's re-measurement can still reopen it.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -1467,41 +1995,89 @@ human read of StockTwits' and Massive's terms for automated access.
 - *Done when:* the chain's derived greeks state which rate they used and use
   FRED's when it is reachable.
 
-**4. News ingestion: Alpaca and Finnhub, deduplicated, served.**
+**4. News ingestion, both tiers: watch and discovery, deduplicated, served;
+tradeability and the watch list.**
 - *Status:* not started. *Depends on:* 0, 2.
-- *Files:* `corollary/data/news/ingest.py`, the two provider files,
-  `corollary/data/seeds/spdr_holdings.csv` (for sector), migration for
-  `news_article*`, `corollary/api/routes/news.py`, News feed panel.
-- *Done when:* the News feed shows today's real headlines with ticker,
-  publisher and sector, lookbacks work, and the feed panel's marker is off.
-  Every label reads `Unclassified` until step 5 — honestly.
+- *Files:*
+  - `corollary/data/news/{ingest,watchlist,tradeability,retention}.py`
+  - `corollary/data/providers/{alpaca,finnhub,massive}.py`: Massive moves here
+    from step 5 for article ingestion, and its insights stay step 5's
+  - `corollary/data/seeds/spdr_holdings.csv` (for sector and the watch
+    universe)
+  - migrations for `news_article*` (with `feed`), `watch_symbol`,
+    `ticker_tradeability`, the `watchlist` audit category and the
+    `watchlist_changed` route
+  - `corollary/api/routes/news.py` (feed with `scope`, and the watch routes),
+    `corollary/engine/scheduler.py` (the poll set and the nightly prune)
+  - News feed panel and the manual-watch list, `web/src/lib/notifications.ts`
+    (the new event)
+- *Done when:*
+  - **The feed.** It shows today's real headlines with ticker, publisher and
+    sector, on the watch list by default and everything on toggle. Lookbacks
+    work, and the feed panel's marker is off. Every label reads
+    `Unclassified` until step 5, honestly.
+  - **The watch tier** polls Finnhub `/company-news` for the whole watch
+    universe, at least 66 symbols, round-robin at 15 minutes, and no symbol
+    goes unpolled.
+  - **All three discovery feeds** land with provenance.
+  - **The tradeability cache** fills for signalled tickers, which in this step
+    means any off-watch ticker, since labels arrive in step 5. It is tested at
+    every boundary against recorded fixtures, including a `has_options`
+    underlying with only adjusted contracts.
+  - **The measurements.** Step 4 records each feed's real articles per day, the
+    share of Finnhub market-news rows with a non-empty `related`, and every
+    watch symbol that never returns Finnhub rows (*Not verified*).
+  - **The watch routes** round-trip with their audit row and Discord notice.
+  - **The prune** runs on a fixture.
+  - *The discovery panel itself is step 5's.* A candidate needs a label, and
+    labels land in step 5.
 
-**5. Sentiment labelling: rules and Massive; `SentimentTier` resolved.**
+**5. Sentiment labelling: rules and Massive; `SentimentTier` resolved; the
+discovery panel.**
 - *Status:* not started. *Depends on:* 4.
-- *Files:* `corollary/data/news/{rules,vendor}.py`,
-  `corollary/data/providers/massive.py`, migration for `sentiment_label`,
+- *Files:* `corollary/data/news/{rules,vendor,discovery}.py`,
+  `corollary/data/providers/massive.py` (insights), migration for
+  `sentiment_label`, `GET /api/news/movers`, the *Movers in the news* panel,
   `web/src/lib/{types,mockData}.ts`, `web/src/lib/news.test.ts`,
   `corollary/data/news/__init__.py`.
-- *Done when:* the feed carries real labels from both sources, each naming its
-  tier, rules taking display precedence, everything else honestly
-  `Unclassified`; no `'llm'` or `'provider'` survives the typecheck.
+- *Done when:*
+  - **Labels.** The feed carries real labels from both sources, each naming
+    its tier, rules taking display precedence, everything else honestly
+    `Unclassified`. Rules and Massive label every article in the store, not
+    only the watch universe, with decision 21's off-watch attribution. No
+    `'llm'` or `'provider'` survives the typecheck.
+  - **The panel is real.** It lists off-watch tickers with a flagged rules
+    event or a directional Massive label, **only those passing the
+    tradeability filter**, each with its reason and articles, ranked
+    rules-first. Its marker is off.
+  - **The re-measurement.** The rules tier's per-session volume is
+    re-measured with the real patterns, on the watch universe and in total.
+    If the watch-universe figure alone is below 1.5, decision 13's second risk
+    goes back to the owner.
 
 **6. The self-audit and the demotion state.**
 - *Status:* not started. *Depends on:* 1 (for the two alerts), 5.
 - *Carries:* Q5 (excess-return scoring, neutral excluded), Q6 (per source,
   52/66 hysteresis, automatic re-promotion, ≥30 / ≥100 floors), Q7 (no
-  backfill) — all decided.
+  backfill) — all decided. Q9 widens what is graded (decision 12: discovery
+  labels, capped at 250 tickers a run, counted toward the floors).
 - *Files:* `corollary/data/news/audit.py`, `corollary/engine/scheduler.py`,
   migrations for `label_outcome`, `audit_run`, `sentiment_accuracy`,
   `sentiment_source_status`, the `sentiment` audit category and the two
   notification routes, `corollary/api/routes/settings.py`,
   `web/src/pages/Settings.tsx`, `web/src/lib/settings.ts`.
-- *Done when:* the Saturday job has run once for real and written a run row;
-  Settings shows each source's status, graded counts per window and how many
-  more labels each needs to become eligible; every transition in decision 13's
-  table is exercised in test with its audit row and notification; and the
-  readout's marker is off. **It is not a done-criterion that a score exists** —
-  see *Done when*.
+- *Done when:*
+  - **The run.** The Saturday job has run once for real and written a run
+    row. It graded the watch universe and ≤250 tradeable discovery tickers,
+    recorded the rest with their `skip_reason`, and stayed within the data
+    bucket without refusing.
+  - **Settings** shows each source's status, graded counts per window, its
+    watch/discovery split, and how many more labels each needs to become
+    eligible.
+  - **The transitions.** Every transition in decision 13's table is exercised
+    in test with its audit row and notification.
+  - **The marker.** The readout's marker is off.
+  - **It is not a done-criterion that a score exists** — see *Done when*.
 
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
@@ -1569,6 +2145,14 @@ Concretely, on a trading-day morning against the live paper account:
 5. No panel on News, Pulse or the accuracy readout carries a fixture marker
    unless it is still a fixture.
 6. A forced halt reaches the bell and Discord.
+7. **The News page surfaces off-watch-list movers with their reason** (Q9,
+   decision 21). Overnight and this morning's names outside the watch list
+   carry a high-signal rules event or a directional Massive label, and appear
+   only if they have standard listed options, ≥1M shares of SIP average volume
+   and a ≥$5 close. Each row names why it is there and links its articles. One
+   click watches a name, and the audit log and Discord both record it. Nothing
+   joins the watch list on its own, and nothing on the panel is an input to
+   anything.
 
 **On day one, *"self-audit job running"* means the job runs on schedule and
 Settings shows n and eligibility — not a score.** The audit starts empty (Q7),
@@ -1600,11 +2184,35 @@ rules estimate is above it**, under both attributions, and above it on nine of
 the ten sessions under the strict one (the minimum was 1, on 2026-09-17).
 **That depends on ingesting Finnhub `/company-news` for the watch universe.**
 Per vendor, the strict estimate is Finnhub 3.7, Alpaca 1.2 and Massive's own
-headlines 0.2. An Alpaca-only rules tier would sit **below 1.5**, and that
-configuration goes back to the owner. The rules figures are an estimate from
-draft regexes in `scripts/probe_phase3.py`, not step 5's patterns, and **step 5
-must re-measure** them. This does not resolve the second risk. It says the
-risk is not triggered by what could be measured before the patterns exist.
+headlines 0.2. An Alpaca-only rules tier would sit **below 1.5**. **Owner
+decision Q9 settles the configuration:** company news covers the whole watch
+universe (decision 21), which is what was measured, so the risk is **not
+triggered as measured**. The rules figures are an estimate from draft regexes
+in `scripts/probe_phase3.py`, not step 5's patterns, and **step 5 must
+re-measure** them.
+
+**What discovery labels do to this table** (decision 12: they count toward the
+floors and are graded identically). The table above counts watch-universe
+labels only, so every figure in it is a floor. Discovery labels can only move
+eligibility earlier.
+
+- **Massive** changes nothing that matters. It is already eligible at the
+  first Saturday audit. Market-wide it produces ~400 directional labels a
+  session against ~71 on the watch universe, so its ≥100 re-promotion floor is
+  reached within one session of a demotion.
+- **The rules tier** is where it shows. Its market-wide volume is unmeasured,
+  because step 0 applied the draft patterns to watch-universe tickers only.
+  With the discovery tier's per-article attribution it will plausibly clear 30
+  graded labels in each window within the first week. That would move the
+  **first eligible demotion check from the second or third Saturday to the
+  first**, and re-promotion after a demotion from ~5–7 weeks to plausibly 2–3.
+  **Step 5's re-measurement replaces these estimates**, reported separately
+  for the watch universe and in total.
+- **The caveat.** The ≤250-ticker audit cap bounds how many discovery labels
+  are graded a week. At ~400 Massive directional labels a session, the cap
+  binds for Massive and not for rules.
+- **What it costs.** A source's combined accuracy is then mostly off-watch
+  names. Settings shows the split for exactly that reason.
 
 The social baseline needs 30 sessions and the put/call component 60. *"Self-audit
 producing a figure that can act"* is a later, dated event per source, and
@@ -1627,3 +2235,18 @@ historical option bars — Phase 5's Parquet download is where that becomes chea
 No Alpha Vantage, Marketaux, Reddit or X (PRD §7). No change to the three
 *"Submits to the risk manager"* surfaces (Phase 6). No purchase of Finnhub
 premium.
+
+From Q9 (decision 21):
+
+- **No web scraping of publisher sites.** The market-wide sweep is the vendor
+  firehoses, and a missing source is a vendor decision. No Benzinga Pro or
+  Marketaux purchase.
+- **No automatic promotion to the watch list.** Watching is one manual,
+  audit-logged click, capped at a 100-symbol watch universe before position
+  underlyings.
+- **No discovery candidate is a trade trigger or a scanner input** in Phase 3,
+  and none becomes one in Phase 4 without Phase 4 deciding it.
+- **Nothing extra for candidates:** no price-move column on the movers panel,
+  no StockTwits polling or analyst consensus for candidates or manual watches,
+  and no Finnhub `/company-news` beyond the watch universe.
+- **No `VACUUM` job.**
