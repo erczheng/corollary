@@ -176,6 +176,7 @@ from corollary.api.schemas import (
     OptionContract,
     OptionRight,
     PricePoint,
+    RateProvenance,
     SessionState,
     StockQuote,
     UnderlyingQuote,
@@ -194,6 +195,7 @@ from corollary.data.providers.interface import (
 from corollary.data.providers.interface import (
     OptionContract as ContractTerms,
 )
+from corollary.pricing.rates import RateProvenance as PricingRateProvenance
 from corollary.data.providers.fundamentals import (
     FundamentalsError,
     FundamentalsProvider,
@@ -548,6 +550,12 @@ _RIGHT: Final[Mapping[OptionType, OptionRight]] = {
 _ANALYTICS_SOURCE: Final[Mapping[ProviderAnalyticsSource, AnalyticsSource]] = {
     ProviderAnalyticsSource.VENDOR: "vendor",
     ProviderAnalyticsSource.DERIVED: "derived",
+}
+
+#: The pricing layer's provenance, spelled the way the wire spells it.
+_RATE_PROVENANCE: Final[Mapping[PricingRateProvenance, RateProvenance]] = {
+    PricingRateProvenance.FRED_DGS3MO: "fred_dgs3mo",
+    PricingRateProvenance.DEFAULT: "default",
 }
 
 
@@ -2450,6 +2458,10 @@ def _chain_row(
     )
     last = _contract_last(snapshot)
     iv, iv_source = _analytics(snapshot)
+    # Decision 19: the rate a derived IV was solved at, stated beside it --
+    # and only beside a derived one, so the three fields agree with
+    # ``iv_source`` by construction.
+    rate = snapshot.analytics_rate if iv_source == "derived" else None
     return OptionContract(
         symbol=occ_symbol,
         strike=occ.strike,
@@ -2471,6 +2483,9 @@ def _chain_row(
         open_interest=None if terms is None else terms.open_interest,
         iv=iv,
         iv_source=iv_source,
+        risk_free_rate=None if rate is None else rate.rate,
+        risk_free_rate_source=None if rate is None else _RATE_PROVENANCE[rate.provenance],
+        risk_free_rate_date=None if rate is None else rate.observation_date,
     )
 
 

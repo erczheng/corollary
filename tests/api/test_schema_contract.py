@@ -56,8 +56,12 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
 DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     # Decision 10: vendor analytics pass through where Alpaca's own solve
     # succeeds and are derived where it does not, and a chain must record
-    # which of the two a number came from.
-    "OptionContract": frozenset({"ivSource"}),
+    # which of the two a number came from. Phase 3 decision 19: a derived one
+    # also states the risk-free rate it was solved at, and where that came
+    # from (FRED DGS3MO and its date, or the default).
+    "OptionContract": frozenset(
+        {"ivSource", "riskFreeRate", "riskFreeRateSource", "riskFreeRateDate"}
+    ),
 }
 
 #: Named TS unions this API reproduces. Values, not just names -- a dropped

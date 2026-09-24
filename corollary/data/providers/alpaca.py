@@ -109,13 +109,13 @@ from corollary.engine.stream import (
 from corollary.instruments import is_adjusted_root, parse_occ_symbol
 from corollary.pricing.blackscholes import (
     DEFAULT_DIVIDEND_YIELD,
-    DEFAULT_RISK_FREE_RATE,
     Analytics,
     AnalyticsUnavailable,
     CloseAt,
     derive_analytics,
     years_to_expiry,
 )
+from corollary.pricing.rates import RiskFreeRate, RiskFreeRateSource
 from corollary.sockets import (
     JSON_CODEC,
     MSGPACK_CODEC,
@@ -598,7 +598,7 @@ class AlpacaProvider(MarketDataProvider):
         feeds: FeedConfig,
         client: httpx.AsyncClient | None = None,
         limiter: HostRateLimiter | None = None,
-        risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+        risk_free_rate: RiskFreeRateSource | None = None,
         dividend_yield: float = DEFAULT_DIVIDEND_YIELD,
         now: Callable[[], datetime] | None = None,
         close_at: CloseAt | None = None,
@@ -611,7 +611,12 @@ class AlpacaProvider(MarketDataProvider):
         # two providers in one process each believe they hold 200/min against
         # a single server-side ceiling — see `ratelimit.default_limiter`.
         self._limiter = limiter if limiter is not None else default_limiter()
-        self._risk_free_rate = risk_free_rate
+        # Decision 19: the rate derived greeks are solved at is read from
+        # here once per chain, and recorded on every derived snapshot. The
+        # process's one source is shared with the FRED refresh job (see
+        # ``api/deps.py``); a provider built without one prices at the
+        # labelled default, never at an unlabelled constant.
+        self._rates = risk_free_rate if risk_free_rate is not None else RiskFreeRateSource()
         self._dividend_yield = dividend_yield
         self._now = now if now is not None else lambda: datetime.now(timezone.utc)
         # The market calendar enters here and nowhere deeper. `blackscholes`
@@ -640,6 +645,16 @@ class AlpacaProvider(MarketDataProvider):
     def limiter(self) -> HostRateLimiter:
         """The budget this provider spends against. Shared by default."""
         return self._limiter
+
+    @property
+    def rates(self) -> RiskFreeRateSource:
+        """The risk-free rate source derived analytics are solved at (decision 19)."""
+        return self._rates
+
+    @property
+    def risk_free_rates(self) -> RiskFreeRateSource:
+        """:attr:`rates`, through the interface the registry checks it by."""
+        return self._rates
 
     async def aclose(self) -> None:
         """Close the transport, but only if we opened it."""
@@ -1100,6 +1115,9 @@ class AlpacaProvider(MarketDataProvider):
         spot = (await self.stock_snapshots([underlying])).get(underlying)
         spot_price = spot.price if spot is not None else None
         now = self._now()
+        # Once per chain, so every row of one response is solved at one rate
+        # even if a refresh lands while it is being built.
+        rate = self._rates.current()
 
         enriched: dict[str, OptionSnapshot] = {}
         dropped: list[str] = []
@@ -1115,7 +1133,8 @@ class AlpacaProvider(MarketDataProvider):
             enriched[symbol] = self._with_analytics(snapshot, occ_strike=occ.strike,
                                                     expiration=occ.expiration,
                                                     is_call=occ.option_type is OptionType.CALL,
-                                                    spot=spot_price, now=now)
+                                                    spot=spot_price, now=now,
+                                                    rate=rate)
         if dropped:
             # Never silently. An adjusted contract vanishing without a word is
             # how a chain quietly stops matching the broker's position list.
@@ -1135,6 +1154,7 @@ class AlpacaProvider(MarketDataProvider):
         is_call: bool,
         spot: Decimal | None,
         now: datetime,
+        rate: RiskFreeRate,
     ) -> OptionSnapshot:
         if snapshot.analytics_source is AnalyticsSource.VENDOR:
             return snapshot
@@ -1151,12 +1171,12 @@ class AlpacaProvider(MarketDataProvider):
             strike=occ_strike,
             years=years_to_expiry(expiration, now, close_at=self._close_at),
             is_call=is_call,
-            rate=self._risk_free_rate,
+            rate=rate.rate,
             dividend_yield=self._dividend_yield,
         )
         if isinstance(result, AnalyticsUnavailable):
             return _unavailable(snapshot, result.reason)
-        return _derived(snapshot, result)
+        return _derived(snapshot, result, rate)
 
     async def option_contracts(
         self,
@@ -1290,10 +1310,13 @@ def _unavailable(snapshot: OptionSnapshot, reason: str) -> OptionSnapshot:
         greeks=None,
         analytics_source=AnalyticsSource.UNAVAILABLE,
         analytics_note=reason,
+        analytics_rate=None,
     )
 
 
-def _derived(snapshot: OptionSnapshot, analytics: Analytics) -> OptionSnapshot:
+def _derived(
+    snapshot: OptionSnapshot, analytics: Analytics, rate: RiskFreeRate
+) -> OptionSnapshot:
     from dataclasses import replace
 
     return replace(
@@ -1302,6 +1325,7 @@ def _derived(snapshot: OptionSnapshot, analytics: Analytics) -> OptionSnapshot:
         greeks=analytics.greeks,
         analytics_source=AnalyticsSource.DERIVED,
         analytics_note="",
+        analytics_rate=rate,
     )
 
 

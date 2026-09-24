@@ -25,8 +25,10 @@ import importlib.util
 import inspect
 import logging
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import get_type_hints
 
@@ -44,6 +46,7 @@ from corollary.engine.scheduler import (
     AtTime,
     ContextServices,
     EveryWhileOpen,
+    JobSkipped,
     JobStatus,
     ScheduledJob,
     Scheduler,
@@ -52,6 +55,15 @@ from corollary.engine.scheduler import (
     on_weekdays,
     trading_days,
 )
+from corollary.data.macro.risk_free import store_observations
+from corollary.data.providers.fred import (
+    FredCredentials,
+    FredObservation,
+    FredProvider,
+)
+from corollary.pricing.rates import RateProvenance, RiskFreeRateSource
+from corollary.ratelimit import FRED_HOST, HostRateLimiter
+from tests.data.providers.test_fred_provider import FAKE_KEY, fixture_body_text
 from tests.engine.test_runtime import read_state, resume_engine
 
 UTC = timezone.utc
@@ -84,14 +96,25 @@ class FakeClock:
 
     Past ``stop_at`` the driver stops and sets :attr:`parked`: the scheduler
     is quiescent and its status can be read without racing it.
+
+    ``wait_for_threads``: a job body that offloads blocking work with
+    ``asyncio.to_thread`` -- as the scheduler's docstring requires -- is
+    neither runnable on the loop nor asleep on this clock while the thread
+    runs, so fifty ``sleep(0)`` yields do not settle it and the driver could
+    park, or advance time, under it. With the flag set, the driver also waits
+    (in real time, bounded) until every live ``context-job:`` task is asleep
+    here before it moves the clock.
     """
 
-    def __init__(self, start: datetime, *, stop_at: datetime) -> None:
+    def __init__(
+        self, start: datetime, *, stop_at: datetime, wait_for_threads: bool = False
+    ) -> None:
         self.now = start
         self.stop_at = stop_at
         self.parked = asyncio.Event()
         self._waiting: list[tuple[datetime, int, asyncio.Future[None]]] = []
         self._sequence = 0
+        self._wait_for_threads = wait_for_threads
 
     def __call__(self) -> datetime:
         return self.now
@@ -105,10 +128,26 @@ class FakeClock:
         )
         await wake
 
+    def _every_job_is_asleep(self) -> bool:
+        live = [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name().startswith("context-job:") and not task.done()
+        ]
+        return len(self._waiting) >= len(live)
+
     async def drive(self) -> None:
         while True:
             for _ in range(50):
                 await asyncio.sleep(0)
+            if self._wait_for_threads:
+                deadline = asyncio.get_running_loop().time() + 10.0
+                while not self._every_job_is_asleep():
+                    assert asyncio.get_running_loop().time() < deadline, (
+                        "a context job neither finished nor slept on the clock "
+                        "within 10s"
+                    )
+                    await asyncio.sleep(0.001)
             if not self._waiting or self._waiting[0][0] > self.stop_at:
                 self.now = max(self.now, self.stop_at)
                 self.parked.set()
@@ -624,11 +663,229 @@ async def test_aclose_is_safe_before_and_after_start() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_shipped_job_set_is_one_calendar_clocked_probe() -> None:
-    """Step 2 ships a no-op; the feeds' jobs arrive in their own steps."""
+def test_the_shipped_job_set_is_the_probe_and_the_daily_fred_refresh() -> None:
+    """Step 2 shipped the no-op; step 3 adds FRED ``DGS3MO`` at 10:00 ET on trading days.
+
+    The FRED job ships whether or not FRED is configured -- without a key its
+    body does nothing -- so the isolation tests below always run it.
+    """
     jobs = context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
-    assert [job.name for job in jobs] == ["calendar_probe"]
-    assert isinstance(jobs[0].schedule, EveryWhileOpen)
+    assert [job.name for job in jobs] == ["calendar_probe", "fred_dgs3mo"]
+    probe, fred = jobs
+    assert isinstance(probe.schedule, EveryWhileOpen)
+    assert probe.catch_up is None
+    assert fred.schedule == AtTime(time(10, 0), trading_days)
+    assert fred.catch_up is not None
+    assert fred.inputs["host"] == FRED_HOST
+    assert fred.inputs["series_id"] == "DGS3MO"
+
+
+# --------------------------------------------------------------------------
+# Catch-up at start
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_catch_up_runs_once_at_start_before_the_first_slot() -> None:
+    clock = FakeClock(WED_1500_ET, stop_at=datetime(2026, 11, 25, 21, 0, tzinfo=UTC))
+    body = Recorder(clock)
+    caught_up = Recorder(clock)
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="with_catch_up",
+                schedule=EveryWhileOpen(timedelta(minutes=15)),
+                run=body,
+                rule="test",
+                catch_up=caught_up,
+            )
+        ],
+        secrets=no_secrets,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    await run_until_parked(scheduler, clock)
+    assert caught_up.ran == [WED_1500_ET]
+    assert body.ran and body.ran[0] == WED_1500_ET + timedelta(minutes=15)
+    status = scheduler.status()["with_catch_up"]
+    assert status.runs == 1 + len(body.ran)
+    assert status.failures == 0
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_failing_catch_up_is_logged_and_the_schedule_still_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = FakeClock(WED_1500_ET, stop_at=datetime(2026, 11, 25, 21, 0, tzinfo=UTC))
+    body = Recorder(clock)
+
+    async def broken_catch_up() -> None:
+        raise RuntimeError("FRED said no to api_key=sekrit-value")
+
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="fred_like",
+                schedule=EveryWhileOpen(timedelta(minutes=15)),
+                run=body,
+                rule="the risk-free rate; stale when this fails",
+                inputs={"host": FRED_HOST},
+                catch_up=broken_catch_up,
+            )
+        ],
+        secrets=lambda: ("sekrit-value",),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    with caplog.at_level(logging.DEBUG, logger=scheduler_module.__name__):
+        await run_until_parked(scheduler, clock)
+
+    assert body.ran  # the schedule was not abandoned
+    status = scheduler.status()["fred_like"]
+    assert status.failures == 1
+    assert status.last_error_type == "RuntimeError"
+    [failure] = [
+        r for r in caplog.records if getattr(r, "event", None) == "context_job_failed"
+    ]
+    assert getattr(failure, "phase") == "catch_up"
+    assert getattr(failure, "scheduled_for") is None
+    assert "sekrit-value" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# A run that fetched nothing is skipped, never a success
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_run_is_recorded_as_skipped_and_never_as_a_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``last_success`` is when the data was last known good; a skip is not that.
+
+    Recorded as a success, a feed with no key -- or a catch-up that correctly
+    did nothing -- would read as refreshed at every slot, and a *stale since*
+    display would call it fresh when nothing was ever fetched.
+    """
+    clock = FakeClock(WED_1500_ET, stop_at=datetime(2026, 11, 25, 21, 0, tzinfo=UTC))
+    ran: list[datetime] = []
+
+    async def body() -> JobSkipped:
+        ran.append(clock())
+        return JobSkipped("nothing configured to fetch from")
+
+    async def catch_up() -> JobSkipped:
+        return JobSkipped("the stored rows are current")
+
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="skips",
+                schedule=EveryWhileOpen(timedelta(minutes=15)),
+                run=body,
+                rule="test",
+                catch_up=catch_up,
+            )
+        ],
+        secrets=no_secrets,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    with caplog.at_level(logging.INFO, logger=scheduler_module.__name__):
+        await run_until_parked(scheduler, clock)
+
+    status = scheduler.status()["skips"]
+    assert ran, "the body never ran; widen the window"
+    assert status.last_success is None
+    assert status.runs == 0
+    assert status.failures == 0
+    assert not status.failing
+    assert status.skips == 1 + len(ran)
+    assert status.last_skipped == ran[-1]
+    assert status.last_skip_reason == "nothing configured to fetch from"
+    skipped = [
+        r for r in caplog.records if getattr(r, "event", None) == "context_job_skipped"
+    ]
+    assert [getattr(r, "phase") for r in skipped] == ["catch_up"] + ["scheduled"] * len(ran)
+    assert getattr(skipped[0], "reason") == "the stored rows are current"
+
+
+@pytest.mark.asyncio
+async def test_without_a_fred_key_the_shipped_fred_job_never_reports_a_success(
+    db_engine: Engine,
+) -> None:
+    """Case A: ``FRED_API_KEY`` unset. Catch-up and the 10:00 ET run both skip."""
+    services = ContextServices(session_factory=lambda: Session(db_engine), fred=None)
+    clock = FakeClock(WED_1500_ET, stop_at=HALF_DAY_CLOSE)
+    scheduler = build_context_scheduler(
+        services, no_secrets, clock=clock, sleep=clock.sleep
+    )
+    await run_until_parked(scheduler, clock)
+
+    status = scheduler.status()["fred_dgs3mo"]
+    assert status.last_success is None
+    assert status.runs == 0
+    assert status.failures == 0
+    # Start-up, then Friday 10:00 ET (Thanksgiving has no slot).
+    assert status.skips == 2
+    assert status.last_skipped == datetime(2026, 11, 27, 15, 0, tzinfo=UTC)
+    assert status.last_skip_reason is not None
+    assert "FRED_API_KEY" in status.last_skip_reason
+
+
+class _CountingFred:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def observations(
+        self, series_id: str, *, limit: int = 10
+    ) -> list[FredObservation]:
+        self.calls += 1
+        return []
+
+
+@pytest.mark.asyncio
+async def test_a_catch_up_on_a_current_table_is_skipped_not_counted_a_success(
+    db_engine: Engine,
+) -> None:
+    """Case B: the table already holds a current row, so boot fetches nothing.
+
+    The catch-up reads the scheduler's own clock, so "current" is judged
+    against Wed 25 Nov here: two sessions back is Mon 23 Nov, and the stored
+    Tue 24 Nov row is newer.
+    """
+    with Session(db_engine) as session:
+        store_observations(
+            session,
+            [FredObservation("DGS3MO", date(2026, 11, 24), value=None)],
+            fetched_at=WED_1500_ET,
+        )
+        store_observations(
+            session,
+            [FredObservation("DGS3MO", date(2026, 11, 23), value=Decimal("3.91"))],
+            fetched_at=WED_1500_ET,
+        )
+        session.commit()
+    fred = _CountingFred()
+    services = ContextServices(session_factory=lambda: Session(db_engine), fred=fred)
+    clock = FakeClock(
+        WED_1500_ET,
+        stop_at=datetime(2026, 11, 25, 21, 0, tzinfo=UTC),
+        wait_for_threads=True,
+    )
+    scheduler = build_context_scheduler(
+        services, no_secrets, clock=clock, sleep=clock.sleep
+    )
+    await run_until_parked(scheduler, clock)
+
+    assert fred.calls == 0
+    status = scheduler.status()["fred_dgs3mo"]
+    assert status.last_success is None
+    assert status.runs == 0
+    assert status.skips == 1
+    assert status.last_skip_reason is not None
+    assert "2026-11-24" in status.last_skip_reason
 
 
 # --------------------------------------------------------------------------
@@ -715,6 +972,30 @@ class _WatchedRuntime:
         assert self.notifier.sent == []
         assert self.runtime.watchdog.last_activity_at == self.activity_before
         assert self.runtime.watchdog.heartbeat_armed is self.armed_before
+
+
+@asynccontextmanager
+async def _recorded_fred() -> AsyncIterator[FredProvider]:
+    """A FRED provider that serves the recorded DGS3MO response and nothing else.
+
+    The provider does not close a client it was handed, so this closes both.
+    """
+    body = fixture_body_text("p3_observations_dgs3mo").encode("utf-8")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == FRED_HOST, request.url.host
+        return httpx.Response(200, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = FredProvider(
+            credentials=FredCredentials(api_key=FAKE_KEY),
+            client=client,
+            limiter=HostRateLimiter(per_host={}),
+        )
+        try:
+            yield provider
+        finally:
+            await provider.aclose()
 
 
 def _alpaca_news_failure() -> httpx.ConnectError:
@@ -817,31 +1098,59 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     watched = _WatchedRuntime(db_engine, monkeypatch, halted=halted_before)
     state_before = _state_snapshot(db_engine)
 
-    services = ContextServices(session_factory=lambda: Session(db_engine))
-    shipped = context_jobs(services)
-    assert shipped, "no shipped jobs: this test would prove nothing"
+    # FRED configured, served from the recorded fixture: the FRED job's real
+    # body -- HTTP, parse, upsert through the writable session, adopt -- runs
+    # here rather than its no-key no-op.
+    async with _recorded_fred() as fred:
+        rates = RiskFreeRateSource()
+        services = ContextServices(
+            session_factory=lambda: Session(db_engine), fred=fred, rates=rates
+        )
+        shipped = context_jobs(services)
+        assert shipped, "no shipped jobs: this test would prove nothing"
 
-    def raising(job: ScheduledJob) -> ScheduledJob:
-        async def run() -> None:
-            await job.run()
-            raise _alpaca_news_failure()
+        def raising(job: ScheduledJob) -> ScheduledJob:
+            async def run() -> None:
+                await job.run()
+                raise _alpaca_news_failure()
 
-        return dataclasses.replace(job, run=run)
+            # A start-up catch-up is a body too, and runs through its own failure
+            # path (``phase="catch_up"``); it must raise here as well, or that
+            # path would never be exercised with a shipped job's rule and inputs.
+            original_catch_up = job.catch_up
+            if original_catch_up is None:
+                return dataclasses.replace(job, run=run)
 
-    jobs = shipped if mode == "as_shipped" else [raising(job) for job in shipped]
+            async def catch_up() -> None:
+                await original_catch_up()
+                raise _alpaca_news_failure()
 
-    # Wednesday afternoon, across Thanksgiving, into Friday's half-day: every
-    # in-session and pre-market slot a shipped job could have fires here.
-    clock = FakeClock(WED_1500_ET, stop_at=HALF_DAY_CLOSE + timedelta(hours=1))
-    scheduler = Scheduler(jobs, secrets=no_secrets, clock=clock, sleep=clock.sleep)
-    await run_until_parked(scheduler, clock)
+            return dataclasses.replace(job, run=run, catch_up=catch_up)
+
+        jobs = shipped if mode == "as_shipped" else [raising(job) for job in shipped]
+
+        # Wednesday afternoon, across Thanksgiving, into Friday's half-day: every
+        # in-session and pre-market slot a shipped job could have fires here.
+        # The FRED body writes SQLite on a worker thread; see ``wait_for_threads``.
+        clock = FakeClock(
+            WED_1500_ET,
+            stop_at=HALF_DAY_CLOSE + timedelta(hours=1),
+            wait_for_threads=True,
+        )
+        scheduler = Scheduler(jobs, secrets=no_secrets, clock=clock, sleep=clock.sleep)
+        await run_until_parked(scheduler, clock)
 
     status = scheduler.status()
     for job in shipped:
-        attempts = status[job.name].runs + status[job.name].failures
+        attempts = (
+            status[job.name].runs + status[job.name].failures + status[job.name].skips
+        )
         assert attempts >= 1, f"{job.name} never ran; widen the window"
         if mode == "each_raises":
             assert status[job.name].last_error_type == "ConnectError"
+    # The FRED body really ran: the recorded 2026-09-22 close is in use.
+    assert rates.current().provenance is RateProvenance.FRED_DGS3MO
+    assert rates.current().observation_date == date(2026, 9, 22)
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
@@ -880,6 +1189,8 @@ def _contributing_modules(jobs: list[ScheduledJob]) -> set[str]:
     modules = {scheduler_module.__name__}
     for job in jobs:
         modules.add(_module_of(job.run))
+        if job.catch_up is not None:
+            modules.add(_module_of(job.catch_up))
         modules.add(_module_of(job.schedule))
         days = getattr(job.schedule, "days", None)
         if days is not None:

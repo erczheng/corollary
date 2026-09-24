@@ -32,6 +32,7 @@ every one of them. That bounds how many rows the Activity page can afford to
 load, and the bound is real rather than an optimisation to defer.
 """
 
+import datetime as dt
 from decimal import Decimal
 from datetime import datetime
 from typing import Any, Mapping, NamedTuple
@@ -40,6 +41,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Index,
     Integer,
@@ -67,6 +69,7 @@ __all__ = [
     "ENGINE_STATE_ID",
     "FILL_SIDES",
     "Fill",
+    "FredObservationRecord",
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
@@ -1146,3 +1149,46 @@ class NotificationDelivery(Base):
     #: Bounded by the writer to ``wire.ERROR_BODY_MAX`` plus the truncation
     #: notice ``vendor_detail`` appends.
     detail: Mapped[str] = mapped_column(String(400), nullable=False)
+
+
+class FredObservationRecord(Base):
+    """One FRED observation of one series, as last fetched.
+
+    Phase 3 step 3; ``DGS3MO`` is the first series stored, as the risk-free
+    rate's source (decision 19), and later steps add ``VIXCLS`` and
+    ``BAMLH0A0HYM2`` beside it. Named ``...Record`` because
+    :class:`corollary.data.providers.fred.FredObservation` is the value this row
+    records -- the :class:`NotificationRecord` convention.
+
+    **One row per ``(series_id, date)``, upserted.** FRED revises
+    observations, and a re-fetch overwrites what it finds; nothing here is an
+    append-only history.
+
+    **``value`` is ``NULL`` when FRED reported ``"."`` -- no observation.**
+    Stored rather than skipped, so a retraction (a value FRED later replaces
+    with ``"."``) overwrites the stale number instead of leaving it to be read
+    as current. Readers filter ``value IS NOT NULL``; that is a presence test,
+    which ``Money`` permits, not a comparison of the stored text.
+
+    **Not exported.** ICE's notice on ``BAMLH0A0HYM2`` prohibits reproduction
+    of the raw series, so no route serves this table as CSV or in bulk;
+    derived figures only.
+    """
+
+    __tablename__ = "fred_observation"
+    __table_args__ = (
+        CheckConstraint(
+            _money_shape("value", nullable=True), name="ck_fred_observation_value"
+        ),
+    )
+
+    series_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: The observation's date -- the session it describes, not when it was
+    #: published or fetched. A date, not an instant.
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    #: In the series' own units (``DGS3MO`` is percent). ``Money`` for its
+    #: exact-decimal storage; SQL comparison of it is refused.
+    value: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: When this row was last written from a FRED response, UTC. The durable
+    #: answer to "how fresh is this feed", which survives a restart.
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

@@ -49,6 +49,7 @@ from enum import StrEnum
 
 from corollary.instruments import OptionType, is_adjusted_root
 from corollary.pricing.blackscholes import Greeks
+from corollary.pricing.rates import RiskFreeRate, RiskFreeRateSource
 
 __all__ = [
     "AnalyticsSource",
@@ -301,6 +302,11 @@ class OptionSnapshot:
     analytics_source: AnalyticsSource
     #: Why analytics are absent, when they are. Empty otherwise.
     analytics_note: str = ""
+    #: The risk-free rate a ``DERIVED`` IV and greeks were solved at, with its
+    #: provenance -- FRED ``DGS3MO`` and its observation date, or the stated
+    #: default (Phase 3 decision 19). ``None`` for ``VENDOR`` analytics, which
+    #: used no rate of ours, and for ``UNAVAILABLE``, which used none at all.
+    analytics_rate: RiskFreeRate | None = None
 
     @property
     def volume(self) -> int | None:
@@ -424,6 +430,17 @@ class MarketDataProvider(ABC):
     * **Anything that places an order.** Rule 1 — there is exactly one path to
       ``submit_order`` and it is not a data provider.
     """
+
+    @property
+    def risk_free_rates(self) -> RiskFreeRateSource | None:
+        """The rate source this provider derives analytics at, or ``None``.
+
+        ``None`` -- the default -- is a provider that derives nothing. One
+        that does returns its source, so the composition root can prove it is
+        the same one the FRED job updates (``api/deps.py``); two sources would
+        price every chain at the default long after an observation was stored.
+        """
+        return None
 
     @abstractmethod
     async def latest_stock_quotes(

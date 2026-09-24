@@ -54,9 +54,11 @@ from corollary.data.providers.fundamentals import (
     FundamentalsProvider,
     UnavailableFundamentals,
 )
+from corollary.data.providers.fred import FRED_API_KEY_ENV, FredCredentialsError, FredProvider
 from corollary.data.providers.interface import MarketDataProvider
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
+from corollary.pricing.rates import RiskFreeRateSource
 
 __all__ = [
     "AccountMode",
@@ -137,6 +139,7 @@ def missing_live_credentials(env: Mapping[str, str]) -> tuple[str, ...]:
 BrokerFactory = Callable[[], BrokerAccount]
 ProviderFactory = Callable[[], MarketDataProvider]
 FundamentalsFactory = Callable[[], FundamentalsProvider]
+FredFactory = Callable[[], FredProvider]
 
 
 def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
@@ -158,6 +161,15 @@ def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
         return UnavailableFundamentals(str(exc))
 
 
+class RiskFreeRateSplitError(RuntimeError):
+    """The market-data provider reads a different rate source from the registry's.
+
+    The FRED job updates the registry's; the provider prices chains at its
+    own. Nothing would fail -- every chain would just say ``default`` long
+    after an observation was stored -- so the pair is refused outright.
+    """
+
+
 class ServiceRegistry:
     """The brokers and the provider, built at most once each and closed once.
 
@@ -177,9 +189,26 @@ class ServiceRegistry:
         brokers: Mapping[AccountMode, BrokerFactory],
         provider: ProviderFactory,
         fundamentals: FundamentalsFactory | None = None,
+        fred: FredFactory | None = None,
+        rates: RiskFreeRateSource | None = None,
         missing_live_credentials: Sequence[str] = (),
     ) -> None:
         self._factories: dict[AccountMode, BrokerFactory] = dict(brokers)
+        #: The process's one risk-free rate (Phase 3 decision 19): the
+        #: market-data provider reads it per chain, the FRED job updates it,
+        #: and the lifespan seeds it from ``fred_observation``. One per
+        #: registry, so a test registry is never priced at another's rate.
+        #: A provider that derives analytics must hold **this** source: pass
+        #: the provider's own as ``rates``, or build the provider from this
+        #: one (``from_env`` does). :attr:`provider` raises
+        #: :class:`RiskFreeRateSplitError` on the first use of a split pair.
+        self.rates: RiskFreeRateSource = rates if rates is not None else RiskFreeRateSource()
+        #: Optional, like fundamentals: no factory -- a test registry, or no
+        #: way to build one -- is FRED unavailable, and the rate stays the
+        #: labelled default until an observation has been stored.
+        self._fred_factory: FredFactory | None = fred
+        self._fred: FredProvider | None = None
+        self._fred_resolved = False
         self._provider_factory = provider
         #: Optional because it is the one service whose absence is a designed
         #: state rather than a failure -- see :func:`_fundamentals_from_env`.
@@ -223,10 +252,13 @@ class ServiceRegistry:
             brokers[AccountMode.CASH] = lambda: AlpacaBroker(
                 credentials=AlpacaCredentials.live_from_env(source)
             )
+        rates = RiskFreeRateSource()
         return cls(
             brokers=brokers,
-            provider=lambda: AlpacaProvider.from_env(source),
+            provider=lambda: AlpacaProvider.from_env(source, risk_free_rate=rates),
             fundamentals=lambda: _fundamentals_from_env(source),
+            fred=lambda: FredProvider.from_env(source),
+            rates=rates,
             missing_live_credentials=missing,
         )
 
@@ -290,7 +322,31 @@ class ServiceRegistry:
         held the whole bucket.
         """
         if self._provider is None:
-            self._provider = self._provider_factory()
+            built = self._provider_factory()
+            # Read defensively: every real provider subclasses
+            # ``MarketDataProvider`` and has the property, but the suite's
+            # duck-typed doubles do not, and one that derives nothing has
+            # nothing to split.
+            theirs = getattr(built, "risk_free_rates", None)
+            if isinstance(theirs, RiskFreeRateSource) and theirs is not self.rates:
+                logger.error(
+                    "the market-data provider reads a different risk-free rate "
+                    "source from the one the FRED job updates; refusing it",
+                    extra={
+                        "event": "risk_free_rate_split",
+                        "rule": (
+                            "one risk-free rate source per process, shared by "
+                            "the provider and the FRED job (decision 19)"
+                        ),
+                        "provider": type(built).__name__,
+                    },
+                )
+                raise RiskFreeRateSplitError(
+                    f"{type(built).__name__} was built with its own risk-free "
+                    "rate source, not the registry's; pass its source as "
+                    "ServiceRegistry(rates=...) or build it from registry.rates"
+                )
+            self._provider = built
         return self._provider
 
     @property
@@ -305,6 +361,52 @@ class ServiceRegistry:
             self._fundamentals = self._fundamentals_factory()
         return self._fundamentals
 
+    def fred_provider(self) -> FredProvider | None:
+        """The one FRED client, built on first call -- or ``None``, said once.
+
+        **Never raises**: FRED is optional and the lifespan that calls this
+        carries rule 9. A missing ``FRED_API_KEY`` is logged once, as a
+        warning naming the variable (never a value), and every later call
+        answers ``None`` quietly; so does anything else a constructor raises,
+        logged by class name only, since its message could quote the key.
+        """
+        if self._fred_resolved:
+            return self._fred
+        self._fred_resolved = True
+        if self._fred_factory is None:
+            logger.debug(
+                "this registry was built without a FRED provider",
+                extra={"event": "fred_not_configured"},
+            )
+            return None
+        try:
+            self._fred = self._fred_factory()
+        except FredCredentialsError:
+            logger.warning(
+                "FRED is unavailable: %s is not set. Derived greeks use the "
+                "latest stored DGS3MO observation if one exists, else the "
+                "0.0425 default, and say which",
+                FRED_API_KEY_ENV,
+                extra={
+                    "event": "fred_unavailable",
+                    "rule": (
+                        "a missing optional vendor key leaves that vendor "
+                        "unavailable and never stops the app booting"
+                    ),
+                    "variable": FRED_API_KEY_ENV,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "the FRED provider could not be built; FRED is unavailable",
+                extra={
+                    "event": "fred_unavailable",
+                    "variable": FRED_API_KEY_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return self._fred
+
     async def aclose(self) -> None:
         """Close whatever was actually built. Called from the lifespan.
 
@@ -317,9 +419,13 @@ class ServiceRegistry:
             built.append(self._provider)
         if self._fundamentals is not None:
             built.append(self._fundamentals)
+        if self._fred is not None:
+            built.append(self._fred)
         self._brokers.clear()
         self._provider = None
         self._fundamentals = None
+        self._fred = None
+        self._fred_resolved = False
         for service in built:
             close = getattr(service, "aclose", None)
             if close is None:

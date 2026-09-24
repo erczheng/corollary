@@ -59,6 +59,7 @@ from corollary.engine.execution.interface import (
     OrderQueryStatus,
     PortfolioHistory,
 )
+from corollary.pricing.rates import RiskFreeRateSource
 from corollary.ratelimit import ALPACA_PAPER_TRADING_HOST, HostRateLimiter
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "alpaca"
@@ -558,6 +559,7 @@ def make_market_client(
         *,
         now: datetime = MARKET_DATA_RECORDED_AT,
         fundamentals: FundamentalsProvider | None = None,
+        risk_free_rate: RiskFreeRateSource | None = None,
     ) -> tuple[TestClient, RecordingTransport]:
         transport = RecordingTransport(route)
         provider = AlpacaProvider(
@@ -570,10 +572,15 @@ def make_market_client(
                 requests_per_minute=10_000, clock=lambda: 0.0, sleep=_never_sleep
             ),
             now=lambda: now,
+            risk_free_rate=risk_free_rate,
         )
         registry = ServiceRegistry(
             brokers={AccountMode.PAPER: lambda: paper_broker},
             provider=lambda: provider,
+            # The provider's own source: the registry refuses a split pair
+            # (``RiskFreeRateSplitError``), and the FRED job would otherwise
+            # update a source this provider never reads.
+            rates=provider.rates,
             # Absent unless a test asks for one, so the registry's own
             # "no fundamentals vendor configured" path is what the rest of
             # the suite exercises -- which is also the shipped state when

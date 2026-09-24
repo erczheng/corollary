@@ -1140,6 +1140,15 @@ placeholder only when FRED is unreachable, and the chain's derived greeks
 record which one they used — the same *measured versus derived* discipline
 decision 10 of the Phase 2 spec set for IV.
 
+*As built (step 3):* "unreachable" is read as **no observation ever stored**.
+During a FRED outage the latest stored observation keeps being used, and its
+date travels with the rate, so staleness is visible rather than replaced by
+the placeholder. The placeholder is no longer a default argument anywhere in
+`pricing/`: it exists once, as `pricing/rates.py`'s `FALLBACK_RISK_FREE_RATE`,
+labelled `default`, and every pricing entry point requires a rate. `DGS3MO` is
+a bond-equivalent yield used without conversion to continuous compounding
+(about 8bp at 4%).
+
 ### 20. Every operator action notifies; the engine controls reach the bell too
 
 Owner decision Q8. Five new events, emitted through decision 14's one path
@@ -1989,7 +1998,13 @@ human read of StockTwits' and Massive's terms for automated access.
   passes.
 
 **3. FRED client; risk-free rate from `DGS3MO`.**
-- *Status:* not started. *Depends on:* 2.
+- *Status:* **done 2026-09-24.** Derived chain analytics carry
+  `riskFreeRate` / `riskFreeRateSource` (`fred_dgs3mo` | `default`) /
+  `riskFreeRateDate`, and use the latest stored `DGS3MO` observation whenever
+  one exists; `fred_observation` is migration 0007. A refresh that fetches
+  nothing (no `FRED_API_KEY`, gaps only, table current) is recorded by the
+  scheduler as a skip, never a success. The FRED job and its startup catch-up
+  run inside the `risk`-marked rule 9 isolation test. *Depends on:* 2.
 - *Files:* `corollary/data/providers/fred.py`, `corollary/data/providers/alpaca.py`,
   `corollary/pricing/blackscholes.py`, migration for `fred_observation`.
 - *Done when:* the chain's derived greeks state which rate they used and use

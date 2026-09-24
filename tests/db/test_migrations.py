@@ -53,6 +53,8 @@ EXPECTED_TABLES = {
     # 0005 -- the bell's rows, and every delivery attempt behind them
     "notification",
     "notification_delivery",
+    # 0007 -- FRED observations, the risk-free rate's source (decision 19)
+    "fred_observation",
 }
 
 
@@ -92,7 +94,12 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
     eng.dispose()
     assert "notification" not in tables
     assert "notification_delivery" not in tables
-    assert EXPECTED_TABLES - {"notification", "notification_delivery"} <= tables
+    # Everything newer than 0004 goes with it -- 0007's table included.
+    assert EXPECTED_TABLES - {
+        "notification",
+        "notification_delivery",
+        "fred_observation",
+    } <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -110,12 +117,13 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0006`` is the head now: the routing for the owner's own actions.
-    ``0005`` before it added ``notification`` and ``notification_delivery``,
+    ``0007`` is the head now: ``fred_observation``, the risk-free rate's
+    source. ``0006`` before it seeded the routing for the owner's own actions,
+    ``0005`` added ``notification`` and ``notification_delivery``,
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0006"]
+    assert script.get_heads() == ["0007"]
 
 
 _OPERATOR_EVENTS = {
@@ -175,6 +183,25 @@ def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
     routes = _route_rows(url)
     assert routes[("operator_halt", "bell")] is False
     assert routes[("operator_halt", "discord")] is True
+
+
+def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
+    """``fred_observation`` comes and goes alone; nothing earlier is touched."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0006")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert "fred_observation" not in tables
+    assert EXPECTED_TABLES - {"fred_observation"} <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:

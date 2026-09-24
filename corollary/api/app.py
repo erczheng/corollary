@@ -100,6 +100,7 @@ from corollary.data.providers.interface import (
     ProviderError,
     RateLimitedError,
 )
+from corollary.data.macro.risk_free import seed_rate_source
 from corollary.db.seed import seed
 from corollary.db.session import get_engine
 from corollary.engine.execution.interface import (
@@ -359,6 +360,39 @@ def _bootstrap_database(db_engine: Engine) -> None:
         )
 
 
+def _seed_risk_free_rate(app: FastAPI, db_engine: Engine) -> None:
+    """Adopt the stored ``DGS3MO`` rate at startup. **Never raises.**
+
+    The likely failure is the one ``_bootstrap_database`` names: a database
+    not yet migrated to 0007, so ``fred_observation`` does not exist. That is
+    not self-healing -- every daily FRED job would fetch and then fail at the
+    upsert -- so the log names the migration rather than promising a refresh,
+    and carries a scrubbed detail so "no such table" is visible in it.
+    """
+    try:
+        seed_rate_source(lambda: Session(db_engine), app.state.registry.rates)
+    except Exception as exc:
+        try:
+            detail = vendor_detail(str(exc), secrets=app.state.secret_values())
+        except Exception:
+            detail = "(the error could not be rendered)"
+        logger.error(
+            "the stored risk-free rate could not be read; derived greeks use the "
+            "0.0425 default, labelled, and FRED refreshes cannot be stored until "
+            "this is fixed -- if the database is not migrated, run "
+            "`uv run alembic upgrade head`",
+            extra={
+                "event": "risk_free_rate_seed_failed",
+                "rule": (
+                    "an unreadable rate table degrades the greeks to the "
+                    "labelled default, it does not stop the process"
+                ),
+                "error_type": type(exc).__name__,
+                "detail": detail,
+            },
+        )
+
+
 #: How the lifespan gets its vendor sockets. A factory rather than an object,
 #: because the supervisor needs the :class:`EngineRuntime` the lifespan
 #: builds, and a factory rather than a boolean because a test has to be able
@@ -488,6 +522,11 @@ def create_app(
         # evaluates and finds nothing. That is rule 9 with nothing to judge,
         # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
+        # Decision 19: the risk-free rate derived greeks are solved at starts
+        # as the latest stored FRED DGS3MO observation, or the labelled
+        # default when none was ever stored. One indexed read. A failure here
+        # is stated and leaves the default in place; it never stops the app.
+        _seed_risk_free_rate(app, db_engine)
         # Rule 9's voice (Phase 3 decision 14): a log line, the bell's row,
         # and the Discord webhook, fanned out so no one sink can silence the
         # others. The URL is read from the process environment -- never from
@@ -596,7 +635,12 @@ def create_app(
         context_scheduler: Scheduler | None = None
         try:
             context_scheduler = scheduler(
-                ContextServices(session_factory=lambda: Session(db_engine)),
+                ContextServices(
+                    session_factory=lambda: Session(db_engine),
+                    # ``None`` when FRED_API_KEY is unset -- said once, inside.
+                    fred=app.state.registry.fred_provider(),
+                    rates=app.state.registry.rates,
+                ),
                 app.state.secret_values,
             )
             if context_scheduler is not None:

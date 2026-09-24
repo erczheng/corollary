@@ -72,11 +72,29 @@ moves the UTC instant and not the ET one.
 A job's first run is its first slot **after** the scheduler starts, never an
 immediate run at startup. That is what keeps ``dev_app``'s ``--reload`` loop
 from re-firing every job on every save; a job that must catch up after a
-restart decides so itself, from the rows it finds. The slots themselves are
+restart decides so itself, from the rows it finds. That decision is a job's
+optional :attr:`ScheduledJob.catch_up`, run once as the scheduler starts and
+before the first slot, under the same failure handling as a scheduled run --
+and it must be a no-op when the rows say nothing is missing, or it is the
+re-fire-on-every-save this rule exists to prevent. FRED's ``DGS3MO`` job
+fetches at start only while no observation has ever been stored, or the newest
+one is more than two sessions old (a long downtime). The slots themselves are
 **anchored to the session open** (``open + k * interval``), not to the instant
 the process started: anchored to the start, every save would push the first
 run a full interval out, and a developer saving more often than the interval
 would starve the job for the whole session.
+
+A run that fetched nothing is *skipped*, not a success
+------------------------------------------------------
+
+A body returns ``None`` when it did its work, raises when it failed, and
+returns :class:`JobSkipped` with a reason when it completed without fault but
+had nothing to do -- no key configured, or a catch-up that found the rows
+current. A skip moves ``last_skipped`` and ``skips``, never ``last_success``
+or ``runs``: ``last_success`` is what a *stale since* display reads as the
+last time the feed's data was known good, and a slot that fetched nothing
+does not make it so. A skip is not a fault either -- ``failing`` is
+unaffected -- and like every outcome here it never reaches rule 9.
 
 Jobs share the event loop with rule 9's producers
 ------------------------------------------------
@@ -115,6 +133,7 @@ arrives with its own, explicit handle on the runtime when Phase 4 lands.
 """
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -124,6 +143,14 @@ from typing import Protocol
 from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
+from corollary.data.macro.risk_free import (
+    NotRefreshed,
+    ObservationSource,
+    catch_up_dgs3mo,
+    refresh_dgs3mo,
+)
+from corollary.pricing.rates import DGS3MO_SERIES, RiskFreeRateSource
+from corollary.ratelimit import FRED_HOST
 from corollary.wire import vendor_detail
 
 __all__ = [
@@ -131,6 +158,7 @@ __all__ = [
     "ContextServices",
     "DayRule",
     "EveryWhileOpen",
+    "JobSkipped",
     "JobStatus",
     "Schedule",
     "ScheduledJob",
@@ -329,6 +357,22 @@ class AtTime:
 
 
 @dataclass(frozen=True, slots=True)
+class JobSkipped:
+    """What a body returns when it completed without fault and fetched nothing.
+
+    Recorded as a skip with ``reason`` -- never as a success. See the module
+    docstring's *A run that fetched nothing is skipped*.
+    """
+
+    reason: str
+
+
+#: A job body: ``None`` for work done, :class:`JobSkipped` for nothing to do,
+#: an exception for a failure.
+JobBody = Callable[[], Awaitable[JobSkipped | None]]
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduledJob:
     """One job: a name, when it runs, what it runs, and why it matters.
 
@@ -340,9 +384,14 @@ class ScheduledJob:
 
     name: str
     schedule: Schedule
-    run: Callable[[], Awaitable[None]]
+    run: JobBody
     rule: str
     inputs: Mapping[str, str] = field(default_factory=dict)
+    #: Run once when the scheduler starts, before the first slot, with the
+    #: same failure handling as :attr:`run`. It must decide from the rows it
+    #: finds whether anything is missing, and do nothing when not -- see the
+    #: module docstring's *Clocks*.
+    catch_up: JobBody | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,8 +406,13 @@ class JobStatus:
     last_success: datetime | None
     last_failure: datetime | None
     last_error_type: str | None
+    #: Runs that did their work. A skip is not counted here.
     runs: int
     failures: int
+    #: Runs (and catch-ups) that completed without fault and fetched nothing.
+    skips: int = 0
+    last_skipped: datetime | None = None
+    last_skip_reason: str | None = None
 
     @property
     def failing(self) -> bool:
@@ -383,6 +437,9 @@ class _JobRecord:
     last_error_type: str | None = None
     runs: int = 0
     failures: int = 0
+    skips: int = 0
+    last_skipped: datetime | None = None
+    last_skip_reason: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -532,6 +589,9 @@ class Scheduler:
                 last_error_type=record.last_error_type,
                 runs=record.runs,
                 failures=record.failures,
+                skips=record.skips,
+                last_skipped=record.last_skipped,
+                last_skip_reason=record.last_skip_reason,
             )
             for job in self._jobs
             for record in (self._records[job.name],)
@@ -602,6 +662,8 @@ class Scheduler:
         record = self._records[job.name]
         due: datetime | None = None
         await self._calendar_ready.wait()
+        if job.catch_up is not None:
+            await self._run_catch_up(job, job.catch_up, record)
         while True:
             try:
                 upcoming = (
@@ -634,12 +696,15 @@ class Scheduler:
             due = upcoming
             record.last_started = self._now()
             try:
-                await job.run()
+                outcome = await job.run()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self._record_failure(job, record, exc, scheduled_for=due)
             else:
+                if isinstance(outcome, JobSkipped):
+                    self._record_skip(job, record, outcome, phase="scheduled")
+                    continue
                 record.runs += 1
                 record.last_success = self._now()
                 logger.debug(
@@ -652,6 +717,76 @@ class Scheduler:
                     },
                 )
 
+    async def _run_catch_up(
+        self,
+        job: ScheduledJob,
+        catch_up: JobBody,
+        record: _JobRecord,
+    ) -> None:
+        """The job's start-up catch-up, once. A failure is stated, never fatal."""
+        record.last_started = self._now()
+        try:
+            outcome = await catch_up()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_failure(
+                job, record, exc, scheduled_for=None, phase="catch_up"
+            )
+        else:
+            if isinstance(outcome, JobSkipped):
+                self._record_skip(job, record, outcome, phase="catch_up")
+                return
+            record.runs += 1
+            record.last_success = self._now()
+            logger.debug(
+                "context job caught up at start",
+                extra={
+                    "event": "context_job_caught_up",
+                    "job": job.name,
+                    "finished_at": record.last_success.isoformat(),
+                },
+            )
+
+    def _record_skip(
+        self,
+        job: ScheduledJob,
+        record: _JobRecord,
+        skipped: JobSkipped,
+        *,
+        phase: str,
+    ) -> None:
+        """State one skip. **Never raises**, for :meth:`_record_failure`'s reason.
+
+        ``last_success`` and ``runs`` are left alone: nothing was fetched.
+        """
+        try:
+            skipped_at = self._now()
+        except Exception:
+            skipped_at = _utc_now()
+        record.skips += 1
+        record.last_skipped = skipped_at
+        try:
+            reason = str(skipped.reason)
+        except Exception:
+            reason = "(the skip reason could not be rendered)"
+        record.last_skip_reason = reason
+        try:
+            logger.info(
+                "a context job had nothing to fetch; recorded as skipped, not "
+                "as a success",
+                extra={
+                    "event": "context_job_skipped",
+                    "job": job.name,
+                    "phase": phase,
+                    "rule": job.rule,
+                    "reason": reason,
+                    "skipped_at": skipped_at.isoformat(),
+                },
+            )
+        except Exception:
+            pass
+
     def _record_failure(
         self,
         job: ScheduledJob,
@@ -659,6 +794,7 @@ class Scheduler:
         exc: Exception,
         *,
         scheduled_for: datetime | None,
+        phase: str = "scheduled",
     ) -> None:
         """State one failure. **Never raises.**
 
@@ -681,6 +817,7 @@ class Scheduler:
                 extra={
                     "event": "context_job_failed",
                     "job": job.name,
+                    "phase": phase,
                     "rule": job.rule,
                     "inputs": dict(job.inputs),
                     "schedule": job.schedule.describe(),
@@ -724,6 +861,12 @@ class ContextServices:
     """
 
     session_factory: Callable[[], Session]
+    #: FRED, or ``None`` when ``FRED_API_KEY`` is unset -- the lifespan says so
+    #: once at startup, and the FRED job's body then does nothing.
+    fred: ObservationSource | None = None
+    #: The process's risk-free rate, which the FRED job updates and the
+    #: market-data provider reads. A private default is a rate nobody reads.
+    rates: RiskFreeRateSource = field(default_factory=RiskFreeRateSource)
 
 
 async def _calendar_probe() -> None:
@@ -731,8 +874,54 @@ async def _calendar_probe() -> None:
     return None
 
 
-def context_jobs(services: ContextServices) -> list[ScheduledJob]:
-    """The Phase 3 job set. Today one no-op; each feed's step adds its own."""
+#: FRED publishes a daily close the next morning (the 2026-09-22 ``VIXCLS``
+#: close appeared at 08:37 CT on the 23rd); 10:00 ET is after that on an
+#: ordinary day. The spec's *Feeds and budgets* FRED row.
+FRED_DAILY_AT = time(10, 0)
+
+
+def _skipped(outcome: object) -> JobSkipped | None:
+    """A risk-free refresh's outcome as a job outcome: ``NotRefreshed`` skips."""
+    if isinstance(outcome, NotRefreshed):
+        return JobSkipped(outcome.reason)
+    return None
+
+
+async def _fred_dgs3mo_refresh(services: ContextServices) -> JobSkipped | None:
+    """The daily ``fred_dgs3mo`` body."""
+    return _skipped(
+        await refresh_dgs3mo(
+            fred=services.fred,
+            session_factory=services.session_factory,
+            rates=services.rates,
+        )
+    )
+
+
+async def _fred_dgs3mo_catch_up(
+    services: ContextServices, clock: UtcClock
+) -> JobSkipped | None:
+    """The start-up ``fred_dgs3mo`` catch-up, judging staleness on ``clock``."""
+    return _skipped(
+        await catch_up_dgs3mo(
+            fred=services.fred,
+            session_factory=services.session_factory,
+            rates=services.rates,
+            now=clock,
+        )
+    )
+
+
+def context_jobs(
+    services: ContextServices, *, clock: UtcClock = _utc_now
+) -> list[ScheduledJob]:
+    """The Phase 3 job set. Each feed's step adds its own.
+
+    Every job ships whatever the configuration, so the rule 9 isolation
+    tests always run all of them; a job whose vendor is not configured
+    returns :class:`JobSkipped` from its body. ``clock`` is the scheduler's,
+    so a catch-up judges "stale" on the same clock the slots run on.
+    """
     return [
         ScheduledJob(
             name="calendar_probe",
@@ -742,7 +931,23 @@ def context_jobs(services: ContextServices) -> list[ScheduledJob]:
                 "proves the context scheduler runs on the market calendar in "
                 "the lifespan; feeds no page"
             ),
-        )
+        ),
+        ScheduledJob(
+            name="fred_dgs3mo",
+            schedule=AtTime(FRED_DAILY_AT, trading_days),
+            run=functools.partial(_fred_dgs3mo_refresh, services),
+            catch_up=functools.partial(_fred_dgs3mo_catch_up, services, clock),
+            rule=(
+                "the risk-free rate derived greeks are computed at (decision "
+                "19); when this fails the last stored DGS3MO observation stays "
+                "in use, with its date"
+            ),
+            inputs={
+                "host": FRED_HOST,
+                "endpoint": "/fred/series/observations",
+                "series_id": DGS3MO_SERIES,
+            },
+        ),
     ]
 
 
@@ -762,7 +967,9 @@ def build_context_scheduler(
     sleep: Sleeper = asyncio.sleep,
 ) -> Scheduler:
     """The shipped scheduler: :func:`context_jobs` on the real clock."""
-    return Scheduler(context_jobs(services), secrets=secrets, clock=clock, sleep=sleep)
+    return Scheduler(
+        context_jobs(services, clock=clock), secrets=secrets, clock=clock, sleep=sleep
+    )
 
 
 def no_scheduler(
