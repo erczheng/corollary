@@ -900,7 +900,12 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The eight routable events of PRD.md §10.
+/** The routable events: PRD.md §10's eight, plus five operator events.
+ *
+ * The owner's call: "any action i do should be put into the discord". So a
+ * human halt or resume, and every change to risk limits, data feeds or the
+ * routing matrix itself, is an event too. Only actions that reach the server
+ * notify — client-only toggles gain an event when they gain an endpoint.
  *
  * A key, not the display string. The routing matrix, the severity map and
  * the emitted notifications all have to agree about which event this is,
@@ -913,9 +918,14 @@ export type NotificationEvent =
   | 'stop_loss_hit'
   | 'daily_loss_halt'
   | 'engine_error'
+  | 'operator_halt'
+  | 'operator_resume'
   | 'price_alert'
   | 'recommendations_ready'
   | 'strategy_promotion'
+  | 'risk_limits_changed'
+  | 'data_feeds_changed'
+  | 'notification_routes_changed'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -923,9 +933,14 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   stop_loss_hit: 'Stop loss hit',
   daily_loss_halt: 'Daily loss halt',
   engine_error: 'Engine error / dead-man’s switch',
+  operator_halt: 'Engine halted by operator',
+  operator_resume: 'Engine resumed by operator',
   price_alert: 'Price alert on a recommended trade',
   recommendations_ready: 'New recommendations ready',
   strategy_promotion: 'Strategy promotion eligible',
+  risk_limits_changed: 'Risk limits changed',
+  data_feeds_changed: 'Data feeds changed',
+  notification_routes_changed: 'Notification routing changed',
 }
 
 /** Routing per channel.

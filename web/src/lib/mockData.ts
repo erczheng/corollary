@@ -1769,9 +1769,14 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   { event: 'stop_loss_hit', bell: true, discord: true },
   { event: 'daily_loss_halt', bell: true, discord: true },
   { event: 'engine_error', bell: true, discord: true },
+  { event: 'operator_halt', bell: true, discord: true },
+  { event: 'operator_resume', bell: true, discord: true },
   { event: 'price_alert', bell: true, discord: true },
   { event: 'recommendations_ready', bell: true, discord: false },
   { event: 'strategy_promotion', bell: true, discord: false },
+  { event: 'risk_limits_changed', bell: false, discord: true },
+  { event: 'data_feeds_changed', bell: false, discord: true },
+  { event: 'notification_routes_changed', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

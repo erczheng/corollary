@@ -36,16 +36,27 @@ export type { NotificationSeverity }
  * CLAUDE.md is explicit that a losing position must never be rendered as a
  * system failure. Critical is reserved for things that mean the system is not
  * doing what you asked: an order refused by a rule, a session halted on loss,
- * a dead connection. */
+ * a dead connection.
+ *
+ * `operator_halt` is a **warning** for the same reason: a human choosing to
+ * stop new entries is not a fault. It is worth noticing — nothing will open
+ * until someone resumes — which is what separates it from `info`. Resuming
+ * and the three configuration changes are records of a deliberate act, so
+ * `info`. */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
   engine_error: 'critical',
   stop_loss_hit: 'warning',
+  operator_halt: 'warning',
   order_filled: 'info',
+  operator_resume: 'info',
   price_alert: 'info',
   recommendations_ready: 'info',
   strategy_promotion: 'info',
+  risk_limits_changed: 'info',
+  data_feeds_changed: 'info',
+  notification_routes_changed: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

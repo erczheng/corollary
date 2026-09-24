@@ -54,6 +54,35 @@ describe('severityFor', () => {
   })
 })
 
+/** The owner's rule: "any action i do should be put into the discord". The
+ * engine emits these five under exactly these names, so a rename on either
+ * side is a silent miss — the matrix would show a row nothing ever fires. */
+describe('operator events', () => {
+  const OPERATOR_EVENTS = [
+    ['operator_halt', 'warning', true, true, 'Engine halted by operator'],
+    ['operator_resume', 'info', true, true, 'Engine resumed by operator'],
+    ['risk_limits_changed', 'info', false, true, 'Risk limits changed'],
+    ['data_feeds_changed', 'info', false, true, 'Data feeds changed'],
+    ['notification_routes_changed', 'info', false, true, 'Notification routing changed'],
+  ] as const
+
+  it.each(OPERATOR_EVENTS)('%s is %s, bell %s, discord %s by default', (event, severity, bell, discord, label) => {
+    expect(severityFor(event)).toBe(severity)
+    expect(NOTIFICATION_EVENT_LABEL[event]).toBe(label)
+    expect(routedTo(NOTIFICATION_ROUTES, event, 'bell')).toBe(bell)
+    expect(routedTo(NOTIFICATION_ROUTES, event, 'discord')).toBe(discord)
+  })
+
+  /** A human choosing to halt is not a fault — same split as bearish/error. */
+  it('never dresses an operator halt as critical', () => {
+    expect(severityFor('operator_halt')).not.toBe('critical')
+  })
+
+  it('routes every labelled event exactly once in the default matrix', () => {
+    expect(NOTIFICATION_ROUTES.map((r) => r.event).sort()).toEqual([...EVENTS].sort())
+  })
+})
+
 /** These are token class strings, and the two traps CLAUDE.md names are both
  * live here: `error` is not `bearish`, and `neutral` is 4.27:1 and therefore
  * not a text colour at all. */
