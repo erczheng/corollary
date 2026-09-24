@@ -1,5 +1,14 @@
-import type { AccountMode, Notification, NotificationEvent, NotificationRoute } from './types'
+import type {
+  AccountMode,
+  Notification,
+  NotificationEvent,
+  NotificationRoute,
+  NotificationSeverity,
+} from './types'
+import { NOTIFICATION_EVENT_LABEL } from './types'
 import type { NotificationChannel } from './settings'
+
+export type { NotificationSeverity }
 
 /** Everything the bell needs, as pure functions with no React in them.
  *
@@ -10,10 +19,17 @@ import type { NotificationChannel } from './settings'
  * and whether it has been seen.
  */
 
-export type NotificationSeverity = 'critical' | 'warning' | 'info'
-
 /** Severity is a property of the event type, not of the individual
  * notification — a fill is a fill whether it made money or lost it.
+ *
+ * **The server's `severity` wins for every real event.** The engine stores
+ * severity on the row as raised, and the bell colours from `n.severity`, never
+ * from this map — so editing a line here cannot recolour history. This map is
+ * the client's statement of the same policy, used only where the client itself
+ * constructs a notification (`buildNotification`, the Phase 1 fixture feed).
+ * It must agree with the engine on the two that matter most: `engine_error`
+ * is `critical` and `stop_loss_hit` is `warning`; `notifications.test.ts`
+ * pins both.
  *
  * The one that needs saying: `stop_loss_hit` is a **warning**, not critical.
  * A stop firing is an exit doing precisely what it was configured to do, and
@@ -112,8 +128,11 @@ export function unreadCount(all: Notification[], mode: AccountMode): number {
  * deterministic: a seeded session replays with identical ids, so nothing here
  * makes a snapshot test flake.
  *
- * Stores no title. The heading comes from `NOTIFICATION_EVENT_LABEL[event]`,
- * so there is exactly one place where "Order filled" is worded. */
+ * Client-constructed, so the fields the engine would supply are derived: the
+ * title is the event label, the severity comes off the map above, and the
+ * correlation id is the notification id — there is no decision log behind a
+ * fixture event to correlate with. **Nothing built here reaches the bell**,
+ * which reads only `GET /api/notifications`. */
 export function buildNotification(
   event: NotificationEvent,
   key: string,
@@ -121,12 +140,16 @@ export function buildNotification(
   account: AccountMode | null,
   at: string,
 ): Notification {
+  const id = `notif-${event}-${key}-${at}`
   return {
-    id: `notif-${event}-${key}-${at}`,
+    id,
     time: at,
     event,
+    severity: severityFor(event),
+    title: NOTIFICATION_EVENT_LABEL[event],
     detail,
     read: false,
     account,
+    correlationId: id,
   }
 }

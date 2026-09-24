@@ -941,12 +941,19 @@ export interface NotificationRoute {
   discord: boolean
 }
 
-/** One delivered bell notification.
+/** How loud a notification is. Stored by the engine **as raised**, so a later
+ * change to the frontend's event→severity map cannot recolour history — see
+ * `severityFor` in `notifications.ts` for which one wins. */
+export type NotificationSeverity = 'critical' | 'warning' | 'info'
+
+/** One delivered bell notification — the shape `GET /api/notifications`
+ * serves (`NotificationItem` in `corollary/api/schemas.py`, mirrored by
+ * `tests/api/test_schema_contract.py`; keep the names exact).
  *
- * `event` carries the type and the title comes off
- * `NOTIFICATION_EVENT_LABEL`, so a notification never stores its own
- * heading — two copies of "Order filled" is two things to reword and one to
- * forget.
+ * `title` is the **engine's own heading**, which is not always the event
+ * label: a halt recorded after its fault cleared is titled so. The event
+ * label (`NOTIFICATION_EVENT_LABEL`) is what the routing matrix and the
+ * accessible names use; the title is what the row reads.
  *
  * `account` is the book the event happened in, or **null** for an event
  * that belongs to no book: an engine error is not paper's or cash's, and
@@ -956,14 +963,20 @@ export interface NotificationRoute {
  * live misreports which money moved. */
 export interface Notification {
   id: string
+  /** ISO-8601 UTC. Displayed in America/New_York through `format.ts`. */
   time: string
   event: NotificationEvent
+  severity: NotificationSeverity
+  title: string
   /** The specifics: which contract, what price, which rule rejected it.
-   * The event label says what kind of thing happened; this says what
-   * happened. */
+   * The title says what kind of thing happened; this says what happened. */
   detail: string
   read: boolean
   account: AccountMode | null
+  /** Traces the event back through scan → risk → order → fill (CLAUDE.md's
+   * structured logging). Not rendered as prose; carried so a notification
+   * can be matched to its log lines. */
+  correlationId: string
 }
 
 export interface DataSourceStatus {

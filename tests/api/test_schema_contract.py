@@ -58,10 +58,6 @@ DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     # succeeds and are derived where it does not, and a chain must record
     # which of the two a number came from.
     "OptionContract": frozenset({"ivSource"}),
-    # Phase 3 decision 14: the engine's own heading (a late-recorded halt is
-    # titled differently from the event label), the severity as raised, and
-    # the decision's correlation id. The bell's frontend half adopts them.
-    "Notification": frozenset({"title", "severity", "correlationId"}),
 }
 
 #: Named TS unions this API reproduces. Values, not just names -- a dropped

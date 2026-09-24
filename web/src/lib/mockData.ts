@@ -1781,17 +1781,17 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
  *
  * Newest first, matching the news feed and the activity ledger. */
 export const NOTIFICATIONS: Notification[] = [
-  { id: 'notif-1', time: '2026-08-07T14:42:00Z', event: 'order_rejected', detail: 'NVDA 220C ×4 rejected — max risk per trade (7%) would be exceeded at 9.2%.', read: false, account: 'paper' },
-  { id: 'notif-2', time: '2026-08-07T14:31:00Z', event: 'stop_loss_hit', detail: 'NVDA260821C00220000 ×2 closed at $6.10 — stop loss. −$412.00.', read: false, account: 'paper' },
-  { id: 'notif-3', time: '2026-08-07T14:04:00Z', event: 'order_filled', detail: 'AAPL260821C00195000 ×2 bought to open at $4.10.', read: false, account: 'paper' },
-  { id: 'notif-4', time: '2026-08-07T13:58:00Z', event: 'engine_error', detail: 'Alpaca stream disconnected for 94s — engine halted itself and will not auto-resume.', read: true, account: null },
-  { id: 'notif-5', time: '2026-08-07T13:30:00Z', event: 'price_alert', detail: 'MSFT is within 1% of the entry on a recommended debit spread.', read: true, account: 'paper' },
-  { id: 'notif-6', time: '2026-08-07T12:15:00Z', event: 'recommendations_ready', detail: '6 candidates cleared the scanner for today’s session.', read: true, account: null },
-  { id: 'notif-7', time: '2026-08-06T20:05:00Z', event: 'strategy_promotion', detail: 'Momentum Call Debit Spread has 40 paper trades at a 68% win rate — eligible for promotion.', read: true, account: null },
+  { id: 'notif-1', time: '2026-08-07T14:42:00Z', event: 'order_rejected', severity: 'critical', title: 'Order rejected', detail: 'NVDA 220C ×4 rejected — max risk per trade (7%) would be exceeded at 9.2%.', read: false, account: 'paper', correlationId: 'corr-fixture-1' },
+  { id: 'notif-2', time: '2026-08-07T14:31:00Z', event: 'stop_loss_hit', severity: 'warning', title: 'Stop loss hit', detail: 'NVDA260821C00220000 ×2 closed at $6.10 — stop loss. −$412.00.', read: false, account: 'paper', correlationId: 'corr-fixture-2' },
+  { id: 'notif-3', time: '2026-08-07T14:04:00Z', event: 'order_filled', severity: 'info', title: 'Order filled', detail: 'AAPL260821C00195000 ×2 bought to open at $4.10.', read: false, account: 'paper', correlationId: 'corr-fixture-3' },
+  { id: 'notif-4', time: '2026-08-07T13:58:00Z', event: 'engine_error', severity: 'critical', title: 'Engine halted — Alpaca stream disconnected', detail: 'Alpaca stream disconnected for 94s — engine halted itself and will not auto-resume.', read: true, account: null, correlationId: 'corr-fixture-4' },
+  { id: 'notif-5', time: '2026-08-07T13:30:00Z', event: 'price_alert', severity: 'info', title: 'Price alert on a recommended trade', detail: 'MSFT is within 1% of the entry on a recommended debit spread.', read: true, account: 'paper', correlationId: 'corr-fixture-5' },
+  { id: 'notif-6', time: '2026-08-07T12:15:00Z', event: 'recommendations_ready', severity: 'info', title: 'New recommendations ready', detail: '6 candidates cleared the scanner for today’s session.', read: true, account: null, correlationId: 'corr-fixture-6' },
+  { id: 'notif-7', time: '2026-08-06T20:05:00Z', event: 'strategy_promotion', severity: 'info', title: 'Strategy promotion eligible', detail: 'Momentum Call Debit Spread has 40 paper trades at a 68% win rate — eligible for promotion.', read: true, account: null, correlationId: 'corr-fixture-7' },
   // Unread, and in the *cash* book on purpose: without it the badge is
   // unreachable in one of the two accounts, and "the bell shows a count"
   // would be a state only ever seen in Paper.
-  { id: 'notif-8', time: '2026-08-06T18:40:00Z', event: 'daily_loss_halt', detail: 'Session loss reached 20% of equity — new entries halted. Managed exits still running.', read: false, account: 'cash' },
+  { id: 'notif-8', time: '2026-08-06T18:40:00Z', event: 'daily_loss_halt', severity: 'critical', title: 'Daily loss halt', detail: 'Session loss reached 20% of equity — new entries halted. Managed exits still running.', read: false, account: 'cash', correlationId: 'corr-fixture-8' },
 ]
 
 export const DATA_SOURCES: DataSourceStatus[] = [

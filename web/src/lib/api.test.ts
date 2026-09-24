@@ -31,6 +31,11 @@ import {
   fetchUnderlyings,
   fetchWorkingOrders,
   haltEngine,
+  MALFORMED_RESPONSE,
+  NOTIFICATION_NOT_FOUND,
+  dismissNotification,
+  fetchNotifications,
+  markNotificationRead,
   isAccountUnavailable,
   isApiError,
   isUnreachable,
@@ -443,6 +448,47 @@ describe('halt and resume', () => {
     expect(calledInit(fetchMock).method).toBe('POST')
     expect(calledInit(fetchMock).body).toBeUndefined()
     expect(state.halted).toBe(false)
+  })
+})
+
+describe('notifications', () => {
+  it('reads the bell for one book', async () => {
+    const fetchMock = stubFetch(jsonResponse(200, []))
+
+    await fetchNotifications('cash')
+    await fetchNotifications('paper', { limit: 20 })
+
+    expect(calledUrl(fetchMock, 0)).toBe('/api/notifications?account=cash')
+    expect(calledUrl(fetchMock, 1)).toBe('/api/notifications?account=paper&limit=20')
+  })
+
+  /** "Nothing to report" is the one claim the bell must never make about a
+   * response nobody could read. */
+  it('refuses a body that is not a list rather than calling it empty', async () => {
+    stubFetch(jsonResponse(200, { items: [] }))
+
+    const error = await fetchNotifications('paper').catch((e: unknown) => e)
+    expect(isApiError(error) && error.code).toBe(MALFORMED_RESPONSE)
+  })
+
+  it('marks read and dismisses with POSTs scoped to the book on screen', async () => {
+    const item = { id: 'n 1', read: true }
+    const fetchMock = stubFetch(jsonResponse(200, item))
+
+    await markNotificationRead('n 1', 'cash')
+    await dismissNotification('n 1', 'paper')
+
+    expect(calledUrl(fetchMock, 0)).toBe('/api/notifications/n%201/read?account=cash')
+    expect(calledInit(fetchMock, 0).method).toBe('POST')
+    expect(calledUrl(fetchMock, 1)).toBe('/api/notifications/n%201/dismiss?account=paper')
+    expect(calledInit(fetchMock, 1).method).toBe('POST')
+  })
+
+  it('carries the 404 for an id outside the book', async () => {
+    stubFetch(errorResponse(404, NOTIFICATION_NOT_FOUND, 'No such notification in this book.'))
+
+    const error = await dismissNotification('n-x', 'paper').catch((e: unknown) => e)
+    expect(isApiError(error) && error.code).toBe(NOTIFICATION_NOT_FOUND)
   })
 })
 

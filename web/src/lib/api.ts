@@ -50,6 +50,7 @@ import type {
   DataSourceStatus,
   EngineStateResponse,
   FeedKey,
+  Notification,
   NotificationEvent,
   NotificationRoute,
   OptionContract,
@@ -1080,6 +1081,81 @@ export function haltEngine(
  * position state is how a bot doubles a position it already holds. */
 export function resumeEngine(options: RequestOptions = {}): Promise<EngineStateResponse> {
   return request<EngineStateResponse>('/engine/resume', { method: 'POST', ...options })
+}
+
+/* -------------------------------------------------------------------------
+ * Notifications
+ * ---------------------------------------------------------------------- */
+
+/** The 404 a notification id outside the requested account's scope answers
+ * with — dismissed from another tab, or a paper id asked about under cash. */
+export const NOTIFICATION_NOT_FOUND = 'notification_not_found'
+
+/** A 200 whose body is not the list the endpoint promises. Distinct from
+ * {@link HTTP_ERROR} because the status was fine; what failed is the shape. */
+export const MALFORMED_RESPONSE = 'malformed_response'
+
+/** The bell feed for one book: newest first, dismissed rows excluded, scoped
+ * **server-side** to that account plus the engine events with `account:
+ * null`, which belong to no book and show in both.
+ *
+ * **Not on the socket, on purpose.** The frame contract of 2026-09-13 keeps
+ * notifications off the websocket because rule 9 halts *because* the socket
+ * died — the alert announcing that halt cannot ride the connection whose loss
+ * it reports. `useNotifications` polls this at 15s.
+ *
+ * **A body that is not an array is an error, not an empty bell.** Coercing it
+ * to `[]` would state "nothing to report" about a response nobody could read,
+ * which is the one claim a notification panel must never make falsely. */
+export async function fetchNotifications(
+  account: AccountMode,
+  params: { limit?: number } = {},
+  options: RequestOptions = {},
+): Promise<Notification[]> {
+  const path = '/notifications'
+  const body = await request<unknown>(path, {
+    params: { account, limit: params.limit },
+    ...options,
+  })
+  if (!Array.isArray(body)) {
+    throw new ApiError({
+      status: 200,
+      code: MALFORMED_RESPONSE,
+      message: 'The engine answered, but not with a list of notifications.',
+      url: apiUrl(path, { account, limit: params.limit }),
+    })
+  }
+  return body as Notification[]
+}
+
+/** Mark one notification read. Idempotent. `account` is the book the bell
+ * is showing — the server scopes the id to it and answers
+ * {@link NOTIFICATION_NOT_FOUND} for one outside that scope. */
+export function markNotificationRead(
+  id: string,
+  account: AccountMode,
+  options: RequestOptions = {},
+): Promise<Notification> {
+  return request<Notification>(`/notifications/${encodeURIComponent(id)}/read`, {
+    method: 'POST',
+    params: { account },
+    ...options,
+  })
+}
+
+/** Dismiss one notification: it leaves the bell, and the row stays on the
+ * server with `dismissed_at` set. Idempotent. Not destructive to money, so
+ * it takes no confirm. */
+export function dismissNotification(
+  id: string,
+  account: AccountMode,
+  options: RequestOptions = {},
+): Promise<Notification> {
+  return request<Notification>(`/notifications/${encodeURIComponent(id)}/dismiss`, {
+    method: 'POST',
+    params: { account },
+    ...options,
+  })
 }
 
 /* -------------------------------------------------------------------------

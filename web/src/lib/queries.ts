@@ -41,8 +41,10 @@ import {
   fetchChain,
   fetchDataFeeds,
   fetchDataSources,
+  dismissNotification,
   fetchEngineState,
   fetchNotificationRoutes,
+  fetchNotifications,
   fetchPositions,
   fetchRiskLimits,
   fetchStocks,
@@ -50,6 +52,7 @@ import {
   fetchUnderlyings,
   fetchWorkingOrders,
   haltEngine,
+  markNotificationRead,
   resumeEngine,
   updateDataFeeds,
   updateNotificationRoutes,
@@ -66,7 +69,7 @@ import type {
   SeriesWindow,
 } from './api'
 import { useUIStore } from './store'
-import type { AccountMode, StockQuote } from './types'
+import type { AccountMode, Notification, StockQuote } from './types'
 
 /* -------------------------------------------------------------------------
  * Keys
@@ -131,6 +134,8 @@ export const queryKeys = {
     ] as const,
 
   engineState: () => ['engine', 'state'] as const,
+
+  notifications: (account: AccountMode) => ['notifications', account] as const,
 
   riskLimits: () => ['settings', 'limits'] as const,
   dataFeeds: () => ['settings', 'feeds'] as const,
@@ -382,6 +387,88 @@ export function useResumeEngine() {
     mutationFn: () => resumeEngine(),
     onSuccess: (state) => {
       client.setQueryData(queryKeys.engineState(), state)
+    },
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * Notifications
+ * ---------------------------------------------------------------------- */
+
+/** How often the bell re-reads. 15s, the same cadence as engine state: the
+ * frame contract keeps notifications off the websocket (rule 9 halts
+ * *because* the socket died), so a poll is the delivery path, not a
+ * fallback. */
+export const NOTIFICATION_POLL_MS = 15_000
+
+/** The bell feed for the selected book.
+ *
+ * The server scopes it (this book plus `account: null`), and the bell still
+ * runs `visibleNotifications` over it — scoping lives in `notifications.ts`,
+ * and a cache entry that ever held the other book's rows must not show them.
+ *
+ * **No routing filter here, or anywhere on the read path.** The routing gate
+ * is applied when the engine emits; unchecking a route in Settings must not
+ * retroactively erase notifications already received.
+ *
+ * `staleTime` sits under the interval so a refocus after a background spell
+ * re-reads immediately rather than waiting out the remainder of a tick. */
+export function useNotifications(account?: AccountMode) {
+  const mode = useAccountScope(account)
+  return useQuery({
+    queryKey: queryKeys.notifications(mode),
+    queryFn: ({ signal }) => fetchNotifications(mode, {}, { signal }),
+    refetchInterval: NOTIFICATION_POLL_MS,
+    staleTime: NOTIFICATION_POLL_MS - 1_000,
+  })
+}
+
+/** Put the server's copy of one notification into the cached list — or take
+ * it out, for a dismissal. The answer is the server's row, so the badge moves
+ * on what was stored rather than on what was asked for. */
+function writeNotification(
+  client: QueryClient,
+  mode: AccountMode,
+  item: Notification,
+  remove: boolean,
+): void {
+  client.setQueryData<Notification[]>(queryKeys.notifications(mode), (list) => {
+    if (!list) return list
+    return remove
+      ? list.filter((n) => n.id !== item.id)
+      : list.map((n) => (n.id === item.id ? item : n))
+  })
+}
+
+/** Mark notifications read — one id or several, one POST each (the API has
+ * no bulk endpoint). "Mark all read" passes the unread ids **visible in this
+ * book**, so reading Paper's bell never clears a Cash notification nobody
+ * has seen. */
+export function useMarkNotificationsRead(account?: AccountMode) {
+  const mode = useAccountScope(account)
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ids: readonly string[]) =>
+      Promise.all(ids.map((id) => markNotificationRead(id, mode))),
+    onSuccess: (items) => {
+      for (const item of items) writeNotification(client, mode, item, false)
+    },
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: ['notifications'] })
+    },
+  })
+}
+
+/** Dismiss one notification from the bell. `account: null` rows are shared
+ * by both books, so the invalidation reaches both cache entries. */
+export function useDismissNotification(account?: AccountMode) {
+  const mode = useAccountScope(account)
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => dismissNotification(id, mode),
+    onSuccess: (item) => writeNotification(client, mode, item, true),
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: ['notifications'] })
     },
   })
 }

@@ -1376,11 +1376,11 @@ NotificationSeverity: TypeAlias = Literal["critical", "warning", "info"]
 
 
 class NotificationItem(ApiModel):
-    """One bell entry -- ``Notification`` in ``types.ts``, plus three fields.
+    """One bell entry -- ``Notification`` in ``types.ts``.
 
     ``detail`` is the stored ``body``, named for the TS field it fills. Three
-    additions the TS interface does not declare yet, listed in
-    ``test_schema_contract.py``'s ``DELIBERATE_ADDITIONS``:
+    fields arrived with Phase 3's notifications, beyond the Phase 1 fixture
+    shape, and ``types.ts`` declares them:
 
     * ``title`` -- the engine's own heading, which is **not** always the event
       label: a halt recorded after its fault cleared is titled so, and the

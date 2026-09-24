@@ -1,8 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import App from './App'
 import { useUIStore } from './lib/store'
+import { queryClient } from './lib/queryClient'
+import { queryKeys } from './lib/queries'
 import { unreadCount } from './lib/notifications'
+import { NOTIFICATIONS } from './lib/mockData'
 import { DESTINATIONS } from './lib/routes'
 
 const initialState = useUIStore.getState()
@@ -10,10 +13,31 @@ const initialState = useUIStore.getState()
 beforeEach(() => {
   // BrowserRouter reads window.location, and the wordmark test navigates.
   window.history.pushState({}, '', '/')
-  // The bell tests mark notifications read, which is store state that would
-  // otherwise leak into every test that runs after them.
   useUIStore.setState({ ...initialState }, true)
+  // The bell reads the notifications API now; a cached feed from one test
+  // must not badge the next.
+  queryClient.clear()
 })
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+/** Serve `GET /api/notifications` from the fixture list, scoped the way the
+ * server scopes it; everything else answers an empty 200. */
+function serveNotifications(feed = NOTIFICATIONS) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: unknown) => {
+      const url = new URL(String(input), 'http://127.0.0.1')
+      const body =
+        url.pathname === '/api/notifications'
+          ? feed.filter((n) => n.account === null || n.account === url.searchParams.get('account'))
+          : {}
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response)
+    }),
+  )
+}
 
 describe('App shell', () => {
   it('renders the wordmark and reaches all seven pages', () => {
@@ -83,23 +107,26 @@ describe('App shell', () => {
      * a feed behind it now, so a badge is a number the panel can account for
      * rather than a decoration that lies. The count is also in the accessible
      * name — a red dot says nothing to a screen reader. */
-    it('carries an unread badge that matches the feed behind it', () => {
+    it('carries an unread badge that matches the feed behind it', async () => {
+      serveNotifications()
       render(<App />)
 
-      const bell = screen.getByRole('button', { name: /^Notifications/ })
-      const unread = unreadCount(useUIStore.getState().notifications, 'paper')
-
+      const unread = unreadCount(NOTIFICATIONS, 'paper')
       expect(unread).toBeGreaterThan(0)
+      const bell = await screen.findByRole('button', { name: `Notifications — ${unread} unread` })
       expect(bell.textContent).toBe(String(unread))
-      expect(bell).toHaveAttribute('aria-label', `Notifications — ${unread} unread`)
     })
 
-    it('drops the badge once everything visible has been read', () => {
+    it('shows no badge when everything visible has been read', async () => {
+      serveNotifications(NOTIFICATIONS.map((n) => ({ ...n, read: true })))
       render(<App />)
-      act(() => useUIStore.getState().markNotificationsRead())
 
-      const bell = screen.getByRole('button', { name: 'Notifications' })
-      expect(bell.textContent).toBe('')
+      // Before the read lands the bell also has no badge, so wait for the
+      // feed itself — otherwise this passes on the loading state.
+      await waitFor(() =>
+        expect(queryClient.getQueryState(queryKeys.notifications('paper'))?.status).toBe('success'),
+      )
+      expect(screen.getByRole('button', { name: 'Notifications' }).textContent).toBe('')
     })
   })
 
