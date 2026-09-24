@@ -1238,6 +1238,11 @@ class StockQuote(ApiModel):
     #: coerced to zero it would sort SPY to the top of an ascending list and
     #: state, in a column of dollars, that a fund is worth nothing.
     market_cap: JsonMoney | None
+    #: Whether the symbol is an exchange-traded fund, from the curated
+    #: universe -- never inferred from :attr:`market_cap`, whose null also
+    #: means "vendor outage" and "not fetched yet". The table labels a fund's
+    #: empty cell "ETF" and leaves any other null an unlabelled dash.
+    is_fund: bool
 
 
 class OptionContract(ApiModel):

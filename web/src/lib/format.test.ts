@@ -4,6 +4,7 @@ import {
   formatDateOnly,
   formatExpiry,
   formatMarketCap,
+  formatMarketCapCell,
   formatSessionDateTimeET,
   formatSessionDay,
   formatSignedNumber,
@@ -138,5 +139,23 @@ describe('formatMarketCap', () => {
 
   it('renders a fund as an em dash, never $0', () => {
     expect(formatMarketCap(null)).toBe('—')
+  })
+})
+
+/** The Markets cell. "ETF" only where the server says the symbol is a fund:
+ * a company's null is a vendor outage or a symbol not fetched yet, and
+ * labelling it "ETF" would pass NVDA off as a fund. */
+describe('formatMarketCapCell', () => {
+  it('labels a fund with no market cap "ETF"', () => {
+    expect(formatMarketCapCell(null, true)).toBe('ETF')
+  })
+
+  it('leaves a company with no market cap unlabelled (null)', () => {
+    expect(formatMarketCapCell(null, false)).toBeNull()
+  })
+
+  it('prints a figure whenever there is one', () => {
+    expect(formatMarketCapCell(5_434_790_884_052, false)).toBe('$5.43T')
+    expect(formatMarketCapCell(5_434_790_884_052, true)).toBe('$5.43T')
   })
 })

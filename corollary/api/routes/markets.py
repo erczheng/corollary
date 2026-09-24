@@ -230,6 +230,11 @@ class UniverseEntry:
 
     symbol: str
     name: str
+    #: An exchange-traded fund. Curated, like :attr:`name`, because no
+    #: response can say it: a fund's null market cap looks exactly like a
+    #: vendor outage or an uncovered symbol, so "fund" is never inferred from
+    #: the missing figure.
+    fund: bool = False
 
 
 #: The screener's universe, and the only source of a company name in this
@@ -261,11 +266,11 @@ UNIVERSE: Final[tuple[UniverseEntry, ...]] = (
     UniverseEntry("XOM", "Exxon Mobil Corp."),
     UniverseEntry("COST", "Costco Wholesale Corp."),
     UniverseEntry("HD", "Home Depot Inc."),
-    UniverseEntry("SPY", "SPDR S&P 500 ETF Trust"),
-    UniverseEntry("QQQ", "Invesco QQQ Trust"),
-    UniverseEntry("IWM", "iShares Russell 2000 ETF"),
-    UniverseEntry("XLE", "Energy Select Sector SPDR Fund"),
-    UniverseEntry("ARKK", "ARK Innovation ETF"),
+    UniverseEntry("SPY", "SPDR S&P 500 ETF Trust", fund=True),
+    UniverseEntry("QQQ", "Invesco QQQ Trust", fund=True),
+    UniverseEntry("IWM", "iShares Russell 2000 ETF", fund=True),
+    UniverseEntry("XLE", "Energy Select Sector SPDR Fund", fund=True),
+    UniverseEntry("ARKK", "ARK Innovation ETF", fund=True),
     UniverseEntry("ARM", "Arm Holdings plc"),
     UniverseEntry("ALAB", "Astera Labs Inc."),
     UniverseEntry("RDDT", "Reddit Inc."),
@@ -2099,6 +2104,7 @@ async def stocks(
                 volume_date=measured.session,
                 avg_volume=measured.average,
                 market_cap=_market_cap_value(caps.get(symbol)),
+                is_fund=UNIVERSE_BY_SYMBOL[symbol].fund,
             )
         )
     _log_unpriced(unpriced, route="/api/markets/stocks")
