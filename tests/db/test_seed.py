@@ -200,9 +200,14 @@ def _row_counts(session: Session) -> tuple[int, int, int, int]:
         "stop_loss_hit",
         "daily_loss_halt",
         "engine_error",
+        "operator_halt",
+        "operator_resume",
         "price_alert",
         "recommendations_ready",
         "strategy_promotion",
+        "risk_limits_changed",
+        "data_feeds_changed",
+        "notification_routes_changed",
     ],
 )
 def test_every_prd_event_is_routed(session: Session, event: str) -> None:

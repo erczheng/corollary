@@ -485,6 +485,16 @@ working, not as a bug.
 **Q7 — No backfill.** The audit starts empty. How long that takes to become a
 figure that can act is in *Done when*.
 
+**Q8 — Operator actions notify (asked after steps 0–2 landed).** The step-1
+report noted that `POST /api/engine/halt` sent no notification. The owner's
+answer, verbatim: *"put it on the bell and discord, any action i do should be
+put into the discord."* Carried through as decision 20: the manual engine
+controls go to the bell and Discord, and every other state-changing request goes
+to Discord, with the bell off by default. The exceptions are marking a
+notification read and dismissing it, which are excluded because reading the
+bell must not page Discord. Every route is editable in the routing matrix like
+every other event.
+
 ---
 
 ## Decisions
@@ -996,6 +1006,73 @@ placeholder only when FRED is unreachable, and the chain's derived greeks
 record which one they used — the same *measured versus derived* discipline
 decision 10 of the Phase 2 spec set for IV.
 
+### 20. Every operator action notifies; the engine controls reach the bell too
+
+Owner decision Q8. Five new events, emitted through decision 14's one path
+(`_channels_for` → `FanoutNotifier`), never a second notifier:
+
+| Event | Severity | Bell | Discord | Emitted by |
+|---|---|---|---|---|
+| `operator_halt` | warning | ✓ | ✓ | `POST /api/engine/halt` |
+| `operator_resume` | info | ✓ | ✓ | `POST /api/engine/resume` |
+| `risk_limits_changed` | info | — | ✓ | `PUT /api/settings/limits` |
+| `data_feeds_changed` | info | — | ✓ | `PUT /api/settings/feeds` |
+| `notification_routes_changed` | info | — | ✓ | `PUT /api/settings/routes` |
+
+- **Severity.** A human choosing to halt is `warning`, not `error`. `error` is
+  for faults, by the same reasoning that keeps `bearish` and `error` apart.
+  Resume is `info`. It is rule 9's human recovery step, and notifying on it is a
+  record of that step, not a mechanism. `_clear_halt` keeps its one caller, and
+  nothing resumes automatically. None of the five joins PRD §10's three
+  critical events, so silencing any of them needs no confirm.
+- **Never delays, blocks or fails the action.** The notification is emitted
+  only after the action commits, as a background task that runs after the
+  response is sent. Discord delivery stays asynchronous, and no emit failure
+  can turn a successful response into an error. An action that was refused
+  (4xx) emits nothing.
+- **The notice is best-effort; the audit log and `engine_state` are the record.**
+  The notice exists only in memory between the commit and the task. A process
+  stop in that window (a shutdown, a crash, a `--reload` after a save) loses
+  it, and so does a response that fails after the commit. This is the cost of
+  never delaying the action, and it is accepted. The durable record of every
+  change is the `audit_log` row or the `engine_state` row, which is committed
+  before any notice exists. The rule-9 halt is not affected: it emits inline
+  from the runtime.
+- **Log level follows severity.** The logging sink logs each notice at its own
+  severity, so an `info` settings change is never a CRITICAL log line. A log
+  alert keyed on CRITICAL must keep meaning rule 9.
+- **The config events are built from the audit rows.** They are emitted where
+  the audit row is written and carry the same stored old → new values (rule 4),
+  so the audit log and Discord cannot disagree. Each request produces one
+  notification listing every change it made. A request that changed nothing
+  emits nothing. No key, secret or webhook URL appears in any message (rule 6).
+- **The routing change is gated by the routing it produces.** The gate is
+  applied at emission, after the change commits. Switching Discord off for
+  `notification_routes_changed` therefore means that one change is not posted.
+  The audit log still records it.
+- `account` is null on all five: engine state, limits, feeds and routes belong
+  to no book, so they show in both bells.
+- **Excluded: `POST /api/notifications/{id}/read` and `…/dismiss`.** Reading the
+  bell must not page Discord, and doing so would loop. This is a
+  coordinating-session assumption, and the owner can override it.
+- **No server route yet, so nothing to emit:** flatten (rule 7 keeps it a
+  separate control, and it arrives with Phase 6's execution path as its own
+  event with its own title, `warning`, bell and Discord); the Paper/Cash
+  switch (the book is a per-request `?account=` parameter, so the server holds
+  no mode to change); the execution-mode toggle (client state only);
+  recommendation Execute/Dismiss and the order tickets (fixture-backed). Each
+  one notifies when it gains an endpoint. None of them is faked client-side.
+
+Also fixed with this decision: `api/routes/engine.py` logged prose under
+`rule`, so grouping `engine_halted` by `rule` returned enums for automatic halts
+and sentences for manual ones. Its prose now lives under `policy`, as it does in
+`runtime.py`.
+
+Rejected: emitting from the client (the server is where the action happened, and
+the bell's routing gate is server-side); notifying on bell reads (it loops); one
+event for every config change (the owner could not route a risk-limit change
+differently from a feed change).
+
 ---
 
 ## Design
@@ -1282,6 +1359,11 @@ by this spec; these are the amendments it owes.
   - No backfill; the audit starts empty.
 - **PRD §10** — two rows: `Sentiment source demoted` (bell ✓ Discord ✓,
   warning) and `Sentiment source re-promoted` (bell ✓ Discord ✓, info).
+  Five more, from decision 20: `Engine halted by operator` (bell ✓ Discord ✓,
+  warning), `Engine resumed by operator` (bell ✓ Discord ✓, info), `Risk limits
+  changed`, `Data feeds changed` and `Notification routing changed` (each bell
+  off, Discord ✓, info). Add the note that bell reads and dismissals never
+  notify.
 - **PRD §11** — Phase 3's done-criterion (below). And under Phase 4: the LLM
   sentiment tier (decision 18), and the scanner reading the demotion flag once
   per scan (decision 13).

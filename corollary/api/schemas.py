@@ -274,9 +274,16 @@ NotificationEvent: TypeAlias = Literal[
     "stop_loss_hit",
     "daily_loss_halt",
     "engine_error",
+    # The owner's own actions (2026-09-24), emitted by the routes that
+    # perform them -- see ``corollary/api/operator.py``. None is critical.
+    "operator_halt",
+    "operator_resume",
     "price_alert",
     "recommendations_ready",
     "strategy_promotion",
+    "risk_limits_changed",
+    "data_feeds_changed",
+    "notification_routes_changed",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]

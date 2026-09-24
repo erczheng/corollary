@@ -110,12 +110,71 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0005`` is the head now: Phase 3 step 1's ``notification`` and
-    ``notification_delivery``, the tables rule 9's halt alert lands in.
-    ``0004`` before it added ``ledger_rejection``.
+    ``0006`` is the head now: the routing for the owner's own actions.
+    ``0005`` before it added ``notification`` and ``notification_delivery``,
+    the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0005"]
+    assert script.get_heads() == ["0006"]
+
+
+_OPERATOR_EVENTS = {
+    "operator_halt",
+    "operator_resume",
+    "risk_limits_changed",
+    "data_feeds_changed",
+    "notification_routes_changed",
+}
+
+
+def _route_rows(url: str) -> dict[tuple[str, str], bool]:
+    eng = create_db_engine(url)
+    try:
+        with Session(eng) as sess:
+            return {
+                (row.event, row.channel): row.enabled
+                for row in sess.query(NotificationRoute).all()
+            }
+    finally:
+        eng.dispose()
+
+
+def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
+    db_path: Path,
+) -> None:
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("operator_halt", "bell")] is True
+    assert routes[("operator_resume", "discord")] is True
+    assert routes[("risk_limits_changed", "bell")] is False
+    assert routes[("notification_routes_changed", "discord")] is True
+
+    command.downgrade(cfg, "0005")
+    routes = _route_rows(url)
+    assert not {event for event, _channel in routes} & _OPERATOR_EVENTS
+    assert len(routes) == 16  # 0001's table, untouched
+
+    command.upgrade(cfg, "head")
+    assert len(_route_rows(url)) == 26
+
+
+def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
+    """``seed.py`` runs on every startup; an edited row must survive 0006."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "0005")
+    eng = create_db_engine(url)
+    with Session(eng) as sess:
+        sess.add(NotificationRoute(event="operator_halt", channel="bell", enabled=False))
+        sess.commit()
+    eng.dispose()
+
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("operator_halt", "bell")] is False
+    assert routes[("operator_halt", "discord")] is True
 
 
 def test_upgrade_head_matches_the_models(migrated: Engine) -> None:

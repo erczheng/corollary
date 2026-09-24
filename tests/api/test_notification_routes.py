@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from corollary.api.app import create_app
 from corollary.api.deps import ServiceRegistry
+from corollary.api.operator import OperatorEvent
 from corollary.api.schemas import NotificationEvent
 from corollary.db.models import (
     NotificationDelivery,
@@ -197,7 +198,7 @@ def test_every_event_the_engine_emits_is_one_the_bell_can_render() -> None:
     Step 6's ``sentiment_demoted``/``sentiment_repromoted`` join this list
     when they start being emitted.
     """
-    emitted = {HALT_EVENT}
+    emitted = {HALT_EVENT} | {event.value for event in OperatorEvent}
     assert emitted <= set(get_args(NotificationEvent))
 
 

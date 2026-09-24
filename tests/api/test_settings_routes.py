@@ -666,9 +666,14 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "stop_loss_hit",
         "daily_loss_halt",
         "engine_error",
+        "operator_halt",
+        "operator_resume",
         "price_alert",
         "recommendations_ready",
         "strategy_promotion",
+        "risk_limits_changed",
+        "data_feeds_changed",
+        "notification_routes_changed",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
