@@ -114,6 +114,7 @@ const ROUTES: NotificationRoute[] = [
   { event: 'risk_limits_changed', bell: false, discord: true },
   { event: 'data_feeds_changed', bell: false, discord: true },
   { event: 'notification_routes_changed', bell: false, discord: true },
+  { event: 'watchlist_changed', bell: false, discord: true },
 ]
 
 const KEYS: ApiKeyPresence[] = [

@@ -64,6 +64,8 @@ describe('operator events', () => {
     ['risk_limits_changed', 'info', false, true, 'Risk limits changed'],
     ['data_feeds_changed', 'info', false, true, 'Data feeds changed'],
     ['notification_routes_changed', 'info', false, true, 'Notification routing changed'],
+    // Phase 3 decision 21 — "on the same terms as the three config events".
+    ['watchlist_changed', 'info', false, true, 'News watchlist changed'],
   ] as const
 
   it.each(OPERATOR_EVENTS)('%s is %s, bell %s, discord %s by default', (event, severity, bell, discord, label) => {
@@ -76,6 +78,20 @@ describe('operator events', () => {
   /** A human choosing to halt is not a fault — same split as bearish/error. */
   it('never dresses an operator halt as critical', () => {
     expect(severityFor('operator_halt')).not.toBe('critical')
+  })
+
+  /** A watch belongs to no book (decision 21 emits it with `account: null`),
+   * so it shows in both bells and counts toward both badges — and, being
+   * `info`, never renders in `error`. */
+  it('shows a watchlist change in both books, in the info colour', () => {
+    const n = buildNotification('watchlist_changed', 'PLTR', 'PLTR added to the news watchlist.', null, '2026-08-07T15:00:00Z')
+    expect(n.severity).toBe('info')
+    expect(n.title).toBe('News watchlist changed')
+    expect(SEVERITY_CLASS[n.severity]).not.toContain('error')
+    for (const mode of ['paper', 'cash'] as const) {
+      expect(visibleNotifications([n], mode)).toEqual([n])
+      expect(unreadCount([n], mode)).toBe(1)
+    }
   })
 
   it('routes every labelled event exactly once in the default matrix', () => {

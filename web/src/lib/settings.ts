@@ -169,6 +169,16 @@ export function auditFieldLabel(entry: AuditLogEntry, catalog: AuditCatalog = {}
     return feed?.label ?? entry.field
   }
 
+  // A watchlist row is keyed by the ticker watched or unwatched (decision 21:
+  // the unit of change is one ticker). It needs its own branch — falling
+  // through to the notification split below returned the bare ticker with
+  // nothing to say it was a watch. *Assumption*: the backend route that
+  // writes these rows was not yet on disk when this was written; if it keys
+  // them otherwise, the label still carries the raw field, never a blank.
+  if (entry.category === 'watchlist') {
+    return `News watchlist — ${entry.field}`
+  }
+
   const [event, channel] = entry.field.split('.')
   const eventLabel = NOTIFICATION_EVENT_LABEL[event as NotificationEvent]
   const channelLabel = CHANNEL_LABEL[channel as NotificationChannel]

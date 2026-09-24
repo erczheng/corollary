@@ -104,6 +104,10 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     ("data_feeds_changed", "discord", True),
     ("notification_routes_changed", "bell", False),
     ("notification_routes_changed", "discord", True),
+    # A manual watch added or removed (Phase 3 decision 20, migration 0008):
+    # ``info``, a record for Discord, not worth the bell.
+    ("watchlist_changed", "bell", False),
+    ("watchlist_changed", "discord", True),
 )
 
 

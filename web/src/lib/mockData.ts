@@ -1757,6 +1757,9 @@ export const AUDIT_LOG: AuditLogEntry[] = [
   { id: 'audit-1', time: '2026-07-15T14:00:00Z', category: 'risk', field: 'max_risk_per_trade_pct', previousValue: '5', newValue: '7' },
   { id: 'audit-2', time: '2026-06-02T09:30:00Z', category: 'risk', field: 'max_concurrent_positions', previousValue: '6', newValue: '8' },
   { id: 'audit-3', time: '2026-05-18T11:05:00Z', category: 'feed', field: 'stockHistorical', previousValue: 'iex', newValue: 'sip' },
+  // Phase 3 decision 21: a manual news watch. Present so the `watchlist`
+  // branch of `auditFieldLabel` is reachable on screen, not only in a test.
+  { id: 'audit-4', time: '2026-05-04T13:20:00Z', category: 'watchlist', field: 'PLTR', previousValue: 'not watched', newValue: 'watched' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -1777,6 +1780,7 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   { event: 'risk_limits_changed', bell: false, discord: true },
   { event: 'data_feeds_changed', bell: false, discord: true },
   { event: 'notification_routes_changed', bell: false, discord: true },
+  { event: 'watchlist_changed', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

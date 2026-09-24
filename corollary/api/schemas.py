@@ -267,8 +267,16 @@ RiskLimitKey: TypeAlias = Literal[
     "max_net_directional_pct",
 ]
 RiskLimitUnit: TypeAlias = Literal["%", "count"]
-AuditCategory: TypeAlias = Literal["risk", "feed", "notification"]
+#: ``db.models.AUDIT_CATEGORIES`` value for value -- every category
+#: ``ck_audit_log_category`` admits, or the first row of a new one fails
+#: validation and 500s every audit page holding it. ``watchlist`` is Phase 3
+#: decision 21's (migration 0008). ``test_settings_routes.py`` pins the two.
+AuditCategory: TypeAlias = Literal["risk", "feed", "notification", "watchlist"]
 
+#: Exactly the events ``db.seed.NOTIFICATION_ROUTE_DEFAULTS`` routes. An event
+#: seeded there but missing here is dropped from the Settings matrix with a
+#: warning, so the owner cannot see or toggle a route that is live;
+#: ``test_settings_routes.py`` pins the two sets equal.
 NotificationEvent: TypeAlias = Literal[
     "order_filled",
     "order_rejected",
@@ -285,6 +293,8 @@ NotificationEvent: TypeAlias = Literal[
     "risk_limits_changed",
     "data_feeds_changed",
     "notification_routes_changed",
+    # A manual watch added or removed (Phase 3 decision 20, migration 0008).
+    "watchlist_changed",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]
@@ -1375,7 +1385,8 @@ class RiskLimit(ApiModel):
 
 
 class AuditLogEntry(ApiModel):
-    """One row of PRD §8.7's single log across risk, feed and notification.
+    """One row of PRD §8.7's single log across risk, feed, notification and
+    (Phase 3) watch-list changes.
 
     One log rather than three, because on a bad day the question is whether
     *anything* changed first.

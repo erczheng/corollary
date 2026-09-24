@@ -35,7 +35,9 @@ import logging
 import re
 from collections.abc import Callable, Iterator, Mapping
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from fastapi import FastAPI
@@ -51,7 +53,9 @@ from corollary.api.routes.settings import (
     environment,
     router as settings_router,
 )
+from corollary.api.schemas import AuditCategory, NotificationEvent
 from corollary.db.models import (
+    AUDIT_CATEGORIES,
     ENGINE_STATE_ID,
     AuditLog,
     DataFeed,
@@ -59,6 +63,7 @@ from corollary.db.models import (
     NotificationRoute,
     RiskLimit,
 )
+from corollary.db.seed import NOTIFICATION_ROUTE_DEFAULTS
 
 SETTINGS_MODULE = (
     Path(__file__).resolve().parents[2]
@@ -674,6 +679,7 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "risk_limits_changed",
         "data_feeds_changed",
         "notification_routes_changed",
+        "watchlist_changed",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -682,6 +688,40 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "discord": True,
     }
     assert routed["recommendations_ready"]["discord"] is False
+    # Phase 3 decision 20: a manual watch is a record for Discord, not a bell.
+    assert routed["watchlist_changed"] == {
+        "event": "watchlist_changed",
+        "bell": False,
+        "discord": True,
+    }
+
+
+def test_every_seeded_route_event_is_one_the_contract_declares(
+    settings_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A seeded event the contract lacks is dropped from the matrix with a
+    WARNING, which leaves the owner unable to see or toggle a route that is
+    live. That shipped once, for ``watchlist_changed``."""
+    with caplog.at_level(logging.WARNING):
+        settings_client.get("/api/settings/routes")
+
+    assert not [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "settings_unknown_notification_event"
+    ]
+
+
+def test_notification_event_is_exactly_the_seeded_route_events() -> None:
+    """The contract and the shipped routing table cannot drift apart again."""
+    seeded = {event for event, _channel, _enabled in NOTIFICATION_ROUTE_DEFAULTS}
+    assert set(get_args(NotificationEvent)) == seeded
+
+
+def test_audit_category_is_exactly_the_stored_categories() -> None:
+    """Every value ``ck_audit_log_category`` admits must validate on the way
+    out, or the first row of a new category 500s every page holding it."""
+    assert set(get_args(AuditCategory)) == set(AUDIT_CATEGORIES)
 
 
 def test_a_routing_change_persists_and_is_audited_per_cell(
@@ -882,6 +922,31 @@ def test_one_log_spans_all_three_categories(
     assert body["total"] == 3
 
 
+def test_a_watchlist_audit_row_is_served(
+    settings_client: TestClient, db_engine: Engine
+) -> None:
+    """Migration 0008's category. Written directly: the watch-list route that
+    will write it is a later unit, and the page must render it before then."""
+    with Session(db_engine) as session:
+        session.add(
+            AuditLog(
+                at=datetime(2026, 9, 24, 14, 30, tzinfo=timezone.utc),
+                category="watchlist",
+                field="ACME",
+                previous_value="",
+                new_value="watched",
+            )
+        )
+        session.commit()
+
+    response = settings_client.get("/api/settings/audit")
+
+    assert response.status_code == 200
+    [row] = response.json()["items"]
+    assert row["category"] == "watchlist"
+    assert row["field"] == "ACME"
+
+
 def test_the_audit_log_is_newest_first(settings_client: TestClient) -> None:
     put_limit(settings_client, "max_daily_loss_pct", "15")
     put_limit(settings_client, "max_daily_loss_pct", "16")
@@ -958,6 +1023,41 @@ def test_a_source_nothing_reads_yet_does_not_claim_to_be_connected(
 
     assert finnhub["status"] == "disconnected"
     assert "key present" in finnhub["detail"].lower()
+
+
+def test_fred_says_the_risk_free_rate_is_live_and_the_macro_series_are_not(
+    settings_client: TestClient,
+) -> None:
+    """Step 3 landed: derived greeks read FRED's DGS3MO. The macro series are
+    still a later step, so the row must say both -- and must no longer claim
+    nothing reads the key."""
+    response = settings_client.get("/api/settings/sources")
+    body = response.json()
+    fred = next(row for row in body if row["name"].startswith("FRED"))
+    detail = fred["detail"].lower()
+
+    # Half the integration is live: `connected` would overclaim.
+    assert fred["status"] == "degraded"
+    # Rule 6: the sources row names the variable, never its value.
+    assert "not-a-real-secret-fred" not in response.text
+    assert "nothing reads it" not in detail
+    assert "risk-free rate" in detail
+    assert "dgs3mo" in detail
+    assert "macro series" in detail
+    assert "later step" in detail
+
+
+def test_fred_without_a_key_says_what_the_greeks_fall_back_to(
+    settings_app: FastAPI, settings_client: TestClient
+) -> None:
+    set_env(settings_app, FRED_API_KEY=None)
+
+    body = settings_client.get("/api/settings/sources").json()
+    fred = next(row for row in body if row["name"].startswith("FRED"))
+
+    assert fred["status"] == "disconnected"
+    assert "FRED_API_KEY not set" in fred["detail"]
+    assert "default" in fred["detail"].lower()
 
 
 def test_missing_paper_credentials_read_disconnected(

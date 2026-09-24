@@ -42,7 +42,9 @@ export type { NotificationSeverity }
  * stop new entries is not a fault. It is worth noticing — nothing will open
  * until someone resumes — which is what separates it from `info`. Resuming
  * and the three configuration changes are records of a deliberate act, so
- * `info`. */
+ * `info` — as is `watchlist_changed` (Phase 3 decision 21), a manual watch
+ * added or removed, which belongs to no book (`account: null`, so it shows
+ * in both bells). */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -57,6 +59,7 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   risk_limits_changed: 'info',
   data_feeds_changed: 'info',
   notification_routes_changed: 'info',
+  watchlist_changed: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

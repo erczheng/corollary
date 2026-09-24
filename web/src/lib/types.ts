@@ -887,8 +887,14 @@ export interface RiskLimit {
  * Feed changes belong here specifically: switching historical equity bars
  * from SIP to IEX silently reinterprets every `min_avg_volume` in every
  * strategy YAML, since IEX is ~2.5% of US volume (CLAUDE.md). Nothing about
- * that is visible in the strategy document afterwards. */
-export type AuditCategory = 'risk' | 'feed' | 'notification'
+ * that is visible in the strategy document afterwards.
+ *
+ * `watchlist` (Phase 3 decision 21) is a manual watch added or removed via
+ * `POST`/`DELETE /api/news/watch/{ticker}`. It belongs here rather than
+ * beside calendar notes because a watch changes what is polled and graded,
+ * and grading governs what the scanner may read. Mirrors `AuditCategory` in
+ * `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in `db/models.py`. */
+export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist'
 
 export interface AuditLogEntry {
   id: string
@@ -903,11 +909,13 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The routable events: PRD.md §10's eight, plus five operator events.
+/** The routable events: PRD.md §10's eight, plus six operator events.
  *
  * The owner's call: "any action i do should be put into the discord". So a
  * human halt or resume, and every change to risk limits, data feeds or the
- * routing matrix itself, is an event too. Only actions that reach the server
+ * routing matrix itself, is an event too — and so is adding or removing a
+ * manual news watch (`watchlist_changed`, Phase 3 decision 21, on the same
+ * terms as the config events). Only actions that reach the server
  * notify — client-only toggles gain an event when they gain an endpoint.
  *
  * A key, not the display string. The routing matrix, the severity map and
@@ -929,6 +937,7 @@ export type NotificationEvent =
   | 'risk_limits_changed'
   | 'data_feeds_changed'
   | 'notification_routes_changed'
+  | 'watchlist_changed'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -944,6 +953,7 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   risk_limits_changed: 'Risk limits changed',
   data_feeds_changed: 'Data feeds changed',
   notification_routes_changed: 'Notification routing changed',
+  watchlist_changed: 'News watchlist changed',
 }
 
 /** Routing per channel.

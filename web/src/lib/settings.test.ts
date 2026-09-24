@@ -179,6 +179,15 @@ describe('auditFieldLabel', () => {
     )
   })
 
+  /** Decision 21: a manual watch is keyed by its ticker. Without its own
+   * branch it fell through to the notification split and printed the bare
+   * ticker, with nothing to say the row was a watch at all. */
+  it('names a watchlist row as a watch on its ticker', () => {
+    expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'watchlist', field: 'PLTR' })).toBe(
+      'News watchlist — PLTR',
+    )
+  })
+
   it('falls back to the raw key rather than rendering nothing', () => {
     expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'risk', field: 'who_knows' })).toBe('who_knows')
   })
@@ -262,7 +271,7 @@ describe('isCriticalEvent', () => {
   it('does not treat a stop loss as critical', () => {
     expect(isCriticalEvent('stop_loss_hit')).toBe(false)
     // PRD §10's three only — a human halt or a config change is not an alarm.
-    for (const e of ['operator_halt', 'operator_resume', 'risk_limits_changed', 'data_feeds_changed', 'notification_routes_changed'] as const) {
+    for (const e of ['operator_halt', 'operator_resume', 'risk_limits_changed', 'data_feeds_changed', 'notification_routes_changed', 'watchlist_changed'] as const) {
       expect(isCriticalEvent(e)).toBe(false)
     }
   })

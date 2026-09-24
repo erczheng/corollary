@@ -127,6 +127,7 @@ from corollary.data.providers.alpaca import (
     STOCK_HISTORICAL_FEEDS,
     STOCK_REALTIME_FEEDS,
 )
+from corollary.data.providers.fred import FRED_API_KEY_ENV
 from corollary.db.models import (
     ENGINE_STATE_ID,
     RISK_LIMIT_RANGES,
@@ -138,6 +139,7 @@ from corollary.db.models import DataFeed as DataFeedRow
 from corollary.db.models import NotificationRoute as NotificationRouteRow
 from corollary.db.models import RiskLimit as RiskLimitRow
 from corollary.db.seed import NOTIFICATION_ROUTE_DEFAULTS, risk_limits
+from corollary.pricing.rates import FALLBACK_RISK_FREE_RATE
 from corollary.wire import WireFormatError, as_decimal
 
 __all__ = [
@@ -1253,8 +1255,9 @@ def read_audit(
                 id=str(row.id),
                 time=row.at,
                 # ``ck_audit_log_category`` is a CHECK constraint on the
-                # column, so the three values are enforced in the schema
-                # rather than assumed here; pydantic re-checks on the way out.
+                # column, so ``AUDIT_CATEGORIES`` is enforced in the schema
+                # rather than assumed here; pydantic re-checks on the way out,
+                # against an ``AuditCategory`` a test holds equal to it.
                 category=cast(AuditCategory, row.category),
                 field=row.field,
                 previous_value=row.previous_value,
@@ -1359,6 +1362,43 @@ def _keyed_source(
     )
 
 
+def _fred_source(env: Mapping[str, str]) -> DataSourceStatus:
+    """FRED: half wired, and the row says which half.
+
+    Phase 3 step 3 made the risk-free rate behind derived greeks live -- the
+    latest stored ``DGS3MO`` observation, refreshed by the scheduler. The macro
+    series are still a later step. So a present key is **not** "nothing reads
+    it yet" any more, and it is not the whole integration either: it reads
+    ``degraded``, the honest middle, rather than ``connected``. There is no
+    per-render probe of FRED or of the stored observation's age; the chain
+    states which rate each derived greek used (``riskFreeRateSource``), and
+    that is where a stale or defaulted rate is visible.
+    """
+    name = "FRED (macro)"
+    macro = "The macro series are a later step."
+    fallback = FALLBACK_RISK_FREE_RATE.rate
+    if not _is_set(env, FRED_API_KEY_ENV):
+        return DataSourceStatus(
+            name=name,
+            status="disconnected",
+            detail=(
+                f"{FRED_API_KEY_ENV} not set. Derived greeks use the latest "
+                f"stored DGS3MO risk-free rate if one was ever fetched, else "
+                f"the labelled {fallback} default. {macro}"
+            ),
+        )
+    return DataSourceStatus(
+        name=name,
+        status="degraded",
+        detail=(
+            "Key present. The risk-free rate behind derived greeks is live: "
+            "FRED's DGS3MO, refreshed by the scheduler, with the labelled "
+            f"{fallback} default only until a first observation is stored. "
+            f"{macro}"
+        ),
+    )
+
+
 @router.get("/sources", summary="What is live, and what is still a fixture")
 def read_sources(session: SessionDep, env: EnvDep) -> list[DataSourceStatus]:
     """Decision 8, answerable rather than asserted.
@@ -1383,15 +1423,7 @@ def read_sources(session: SessionDep, env: EnvDep) -> list[DataSourceStatus]:
                 "steps."
             ),
         ),
-        _keyed_source(
-            env,
-            name="FRED (macro)",
-            env_var="FRED_API_KEY",
-            waiting_for=(
-                "The macro series and the risk-free rate behind derived greeks "
-                "are later steps."
-            ),
-        ),
+        _fred_source(env),
         DataSourceStatus(
             name="StockTwits (social)",
             status="disconnected",

@@ -55,6 +55,19 @@ EXPECTED_TABLES = {
     "notification_delivery",
     # 0007 -- FRED observations, the risk-free rate's source (decision 19)
     "fred_observation",
+    # 0008 -- step 4: the article store, manual watches, the tradeability cache
+    "news_article",
+    "news_article_ticker",
+    "watch_symbol",
+    "ticker_tradeability",
+}
+
+#: Everything 0008 created, so a downgrade past it can say so once.
+_0008_TABLES = {
+    "news_article",
+    "news_article_ticker",
+    "watch_symbol",
+    "ticker_tradeability",
 }
 
 
@@ -94,12 +107,12 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
     eng.dispose()
     assert "notification" not in tables
     assert "notification_delivery" not in tables
-    # Everything newer than 0004 goes with it -- 0007's table included.
+    # Everything newer than 0004 goes with it -- 0007's and 0008's included.
     assert EXPECTED_TABLES - {
         "notification",
         "notification_delivery",
         "fred_observation",
-    } <= tables
+    } - _0008_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -117,13 +130,15 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0007`` is the head now: ``fred_observation``, the risk-free rate's
-    source. ``0006`` before it seeded the routing for the owner's own actions,
+    ``0008`` is the head now: step 4's article store, manual watches, the
+    tradeability cache, the ``watchlist`` audit category and the
+    ``watchlist_changed`` routes. ``0007`` before it added
+    ``fred_observation``, the risk-free rate's source. ``0006`` before it seeded the routing for the owner's own actions,
     ``0005`` added ``notification`` and ``notification_delivery``,
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0007"]
+    assert script.get_heads() == ["0008"]
 
 
 _OPERATOR_EVENTS = {
@@ -165,7 +180,8 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     assert len(routes) == 16  # 0001's table, untouched
 
     command.upgrade(cfg, "head")
-    assert len(_route_rows(url)) == 26
+    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows.
+    assert len(_route_rows(url)) == 28
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
@@ -195,7 +211,7 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "fred_observation" not in tables
-    assert EXPECTED_TABLES - {"fred_observation"} <= tables
+    assert EXPECTED_TABLES - {"fred_observation"} - _0008_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
