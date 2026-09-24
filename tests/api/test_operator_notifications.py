@@ -26,7 +26,7 @@ reading Discord, and loop.
 
 import logging
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from corollary.api.operator import OperatorEvent
+from corollary.api.operator import OperatorEvent, resume_notice
 from corollary.api.routes.engine import OperatorRule
 from corollary.api.routes.settings import environment
 from corollary.db.models import (
@@ -210,6 +210,62 @@ def test_resume_of_an_engine_that_was_not_halted_says_so(
     assert len(rows) == 2
     assert "not halted" in rows[1].body.lower()
     assert "not halted" not in rows[0].body.lower()
+
+
+_RESUMED_AT = datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc)
+_HALTED_AT = datetime(2026, 9, 24, 14, 31, 5, tzinfo=timezone.utc)  # 10:31:05 EDT
+
+
+def _resume_body(reason: str | None, halted_at: datetime | None) -> str:
+    return resume_notice(
+        was_halted=True,
+        previous_reason=reason,
+        previous_at=halted_at,
+        at=_RESUMED_AT,
+        correlation_id="c",
+    ).body
+
+
+def test_resume_body_with_time_and_reason_recorded() -> None:
+    assert _resume_body("stepping away", _HALTED_AT) == (
+        "Ended the halt that began 2026-09-24 10:31:05 EDT.\n"
+        "Halt reason: stepping away"
+    )
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+def test_resume_body_for_the_cold_start_halt_says_so(reason: str | None) -> None:
+    """The cold-start row carries neither a time nor a reason -- the notice
+    must say which halt that is, not "began an unrecorded time"."""
+    assert _resume_body(reason, None) == (
+        "Ended the cold-start halt (no time or reason is recorded for it)."
+    )
+
+
+def test_resume_body_with_a_reason_but_no_time() -> None:
+    assert _resume_body("stepping away", None) == (
+        "Ended the halt (its start time is not recorded).\n"
+        "Halt reason: stepping away"
+    )
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+def test_resume_body_with_a_time_but_no_reason(reason: str | None) -> None:
+    assert _resume_body(reason, _HALTED_AT) == (
+        "Ended the halt that began 2026-09-24 10:31:05 EDT.\n"
+        "No halt reason is recorded."
+    )
+
+
+def test_resume_of_the_cold_start_halt_through_the_route(
+    operator_client: TestClient, db_engine: Engine
+) -> None:
+    assert operator_client.post("/api/engine/resume").status_code == 200
+
+    row = only(db_engine, "operator_resume")
+    assert row.body == (
+        "Ended the cold-start halt (no time or reason is recorded for it)."
+    )
 
 
 def test_halt_and_resume_are_distinct_events_with_distinct_titles(

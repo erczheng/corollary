@@ -166,15 +166,33 @@ def resume_notice(
     at: datetime,
     correlation_id: str,
 ) -> OperatorNotice:
-    """``operator_resume``: which halt ended, or that there was none."""
-    if was_halted:
-        began = _eastern(previous_at) if previous_at else "an unrecorded time"
+    """``operator_resume``: which halt ended, or that there was none.
+
+    Four halted cases, written out rather than glued from fragments. The
+    neither-recorded case is the cold-start halt: ``engine_state`` is created
+    ``halted=True`` with no time and no reason (``db.seed``,
+    ``engine.state``). An empty reason counts as no reason.
+    """
+    has_reason = bool(previous_reason)
+    if not was_halted:
+        body = "The engine was not halted; the resume changed nothing."
+    elif previous_at is not None and has_reason:
         body = (
-            f"Ended the halt that began {began}.\n"
-            f"Halt reason: {previous_reason or 'none recorded'}"
+            f"Ended the halt that began {_eastern(previous_at)}.\n"
+            f"Halt reason: {previous_reason}"
+        )
+    elif previous_at is None and not has_reason:
+        body = "Ended the cold-start halt (no time or reason is recorded for it)."
+    elif previous_at is None:
+        body = (
+            "Ended the halt (its start time is not recorded).\n"
+            f"Halt reason: {previous_reason}"
         )
     else:
-        body = "The engine was not halted; the resume changed nothing."
+        body = (
+            f"Ended the halt that began {_eastern(previous_at)}.\n"
+            "No halt reason is recorded."
+        )
     return OperatorNotice(
         event=OperatorEvent.OPERATOR_RESUME.value,
         severity=_SEVERITY[OperatorEvent.OPERATOR_RESUME],
