@@ -14,11 +14,16 @@ from collections.abc import Awaitable, Callable
 import pytest
 
 from corollary.ratelimit import (
+    DEFAULT_PER_HOST_BUDGETS,
     FINNHUB_HOST,
     FINNHUB_REQUESTS_PER_MINUTE,
+    FRED_HOST,
+    MASSIVE_HOST,
+    STOCKTWITS_HOST,
     ALPACA_DATA_HOST,
     ALPACA_PAPER_TRADING_HOST,
     DEFAULT_REQUESTS_PER_MINUTE,
+    HostBudget,
     HostRateLimiter,
     default_limiter,
     TokenBucket,
@@ -233,3 +238,110 @@ def test_an_explicit_per_host_budget_overrides_the_default(clock: FakeClock) -> 
     assert limiter.bucket_for("EXAMPLE.TEST").capacity == 3.0
     assert limiter.bucket_for("other.test").capacity == 10_000.0
     assert limiter.bucket_for(FINNHUB_HOST).capacity == 10_000.0
+
+
+# --------------------------------------------------------------------------
+# Phase 3 decision 15: three new hosts, one of them metered per hour
+# --------------------------------------------------------------------------
+
+
+def test_the_phase_three_hosts_are_registered_at_their_documented_rates(
+    clock: FakeClock,
+) -> None:
+    """Massive 5/min, FRED 120/min, StockTwits 200/hour -- in the shared table.
+
+    In the shared limiter rather than in each client: two limiters against
+    one server-side ceiling over-spend by double and look fine locally.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    massive = limiter.bucket_for(MASSIVE_HOST)
+    fred = limiter.bucket_for(FRED_HOST)
+    stocktwits = limiter.bucket_for(STOCKTWITS_HOST)
+
+    assert (MASSIVE_HOST, FRED_HOST, STOCKTWITS_HOST) == (
+        "api.massive.com",
+        "api.stlouisfed.org",
+        "api.stocktwits.com",
+    )
+    assert (massive.capacity, massive.window_seconds) == (5.0, 60.0)
+    assert (fred.capacity, fred.window_seconds) == (120.0, 60.0)
+    assert (stocktwits.capacity, stocktwits.window_seconds) == (200.0, 3600.0)
+
+
+def test_the_default_limiter_carries_the_phase_three_hosts() -> None:
+    assert default_limiter().bucket_for(STOCKTWITS_HOST).window_seconds == 3600.0
+    assert default_limiter().bucket_for(MASSIVE_HOST).capacity == 5.0
+
+
+def test_the_existing_hosts_keep_their_per_minute_windows(clock: FakeClock) -> None:
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    for host, capacity in (
+        (ALPACA_DATA_HOST, 200.0),
+        (ALPACA_PAPER_TRADING_HOST, 200.0),
+        (FINNHUB_HOST, 60.0),
+    ):
+        assert limiter.bucket_for(host).capacity == capacity
+        assert limiter.bucket_for(host).window_seconds == 60.0
+
+
+@pytest.mark.asyncio
+async def test_an_hourly_bucket_waits_past_its_ceiling_and_refills_over_the_hour(
+    clock: FakeClock,
+) -> None:
+    """The 201st StockTwits request in an hour waits for one refill.
+
+    200 per 3600s refills a token every 18 seconds -- not every 0.3 seconds,
+    which is what the same 200 read as per-minute would do, and which is the
+    sixty-fold over-spend a per-minute-only bucket would commit against
+    StockTwits.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    for _ in range(200):
+        await limiter.acquire(STOCKTWITS_HOST)
+    assert clock.slept == []
+
+    await limiter.acquire(STOCKTWITS_HOST)
+    assert clock.slept == [pytest.approx(18.0)]
+
+    bucket = limiter.bucket_for(STOCKTWITS_HOST)
+    clock.advance(1800.0)
+    assert bucket.available == pytest.approx(100.0)
+    clock.advance(3600.0)
+    assert bucket.available == pytest.approx(200.0)
+
+
+@pytest.mark.asyncio
+async def test_a_per_minute_bucket_still_refills_at_its_old_rate(
+    clock: FakeClock,
+) -> None:
+    """The data bucket's arithmetic is unchanged: 200/min is 0.3s a token."""
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    for _ in range(200):
+        await limiter.acquire(ALPACA_DATA_HOST)
+    await limiter.acquire(ALPACA_DATA_HOST)
+    assert clock.slept == [pytest.approx(0.3)]
+
+
+def test_a_per_host_budget_may_name_its_window(clock: FakeClock) -> None:
+    """A bare int in ``per_host`` still means per minute; a budget names its own."""
+    limiter = HostRateLimiter(
+        per_host={"minute.test": 3, "hour.test": HostBudget(7, 3600.0)},
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    assert limiter.bucket_for("minute.test").window_seconds == 60.0
+    hourly = limiter.bucket_for("HOUR.test")
+    assert (hourly.capacity, hourly.window_seconds) == (7.0, 3600.0)
+
+
+@pytest.mark.parametrize(
+    ("requests", "window"), [(0, 60.0), (-1, 60.0), (5, 0.0), (5, -60.0)]
+)
+def test_a_nonsense_host_budget_is_refused(requests: int, window: float) -> None:
+    with pytest.raises(ValueError):
+        HostBudget(requests, window)
+
+
+def test_the_default_table_is_read_only() -> None:
+    with pytest.raises(TypeError):
+        DEFAULT_PER_HOST_BUDGETS[STOCKTWITS_HOST] = HostBudget(10_000)  # type: ignore[index]

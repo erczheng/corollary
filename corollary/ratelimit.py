@@ -25,21 +25,43 @@ jitter, no 429 backoff. 429 handling belongs to the caller that can see the
 ``X-RateLimit-Reset`` header; this type's job is to stay under the ceiling in
 the first place. The clock and the sleeper are injected so tests measure
 tokens rather than wall time.
+
+**Windows other than a minute** (Phase 3 decision 15). StockTwits meters per
+*hour*, 200 of them, so a bucket carries its window length rather than
+StockTwits getting a private limiter -- the per-host table is the one place a
+ceiling lives, whatever its window. Read as per-minute, StockTwits' 200 would
+refill a token every 0.3 seconds instead of every 18, a sixty-fold over-spend.
+
+**What a token bucket does and does not promise.** It holds the *steady*
+rate to ``capacity / window``, but a full bucket spent at once and then
+refilled over the next window admits up to ``2 × capacity`` in any one
+rolling window. That is true of the per-minute buckets today and is
+unchanged; for StockTwits it means a caller's own cadence -- 180/hour by the
+spec's budget, leaving 20 for retries -- is what keeps a *fixed-window*
+server counter happy after an idle spell, and this bucket is the backstop.
 """
 
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 
 __all__ = [
     "ALPACA_DATA_HOST",
-    "DEFAULT_PER_HOST_REQUESTS_PER_MINUTE",
+    "DEFAULT_PER_HOST_BUDGETS",
     "FINNHUB_HOST",
     "FINNHUB_REQUESTS_PER_MINUTE",
+    "FRED_HOST",
+    "FRED_REQUESTS_PER_MINUTE",
+    "MASSIVE_HOST",
+    "MASSIVE_REQUESTS_PER_MINUTE",
+    "STOCKTWITS_HOST",
+    "STOCKTWITS_REQUESTS_PER_HOUR",
     "ALPACA_LIVE_TRADING_HOST",
     "ALPACA_PAPER_TRADING_HOST",
     "DEFAULT_REQUESTS_PER_MINUTE",
+    "HostBudget",
     "HostRateLimiter",
     "TokenBucket",
     "default_limiter",
@@ -70,6 +92,41 @@ DEFAULT_REQUESTS_PER_MINUTE = 200
 #: applying one number everywhere.
 FINNHUB_REQUESTS_PER_MINUTE = 60
 
+#: Massive (formerly Polygon) -- vendor-scored news. The free tier's
+#: ceiling is 5/min; one untickered call every 15 minutes spends ~1% of it.
+MASSIVE_HOST = "api.massive.com"
+MASSIVE_REQUESTS_PER_MINUTE = 5
+
+#: FRED -- VIX, credit spreads, the 3-month bill, release dates.
+FRED_HOST = "api.stlouisfed.org"
+FRED_REQUESTS_PER_MINUTE = 120
+
+#: StockTwits -- keyless symbol streams, metered **per hour**, not per minute.
+STOCKTWITS_HOST = "api.stocktwits.com"
+STOCKTWITS_REQUESTS_PER_HOUR = 200
+
+
+@dataclass(frozen=True, slots=True)
+class HostBudget:
+    """A ceiling of ``requests`` per ``window_seconds`` on one host.
+
+    Every entry in the per-host table is one of these, so a ceiling and its
+    window travel together: a number without its window is exactly how a
+    per-hour vendor ends up metered per minute.
+    """
+
+    requests: int
+    window_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        if self.requests <= 0:
+            raise ValueError(f"requests must be positive, got {self.requests!r}")
+        if self.window_seconds <= 0:
+            raise ValueError(
+                f"window_seconds must be positive, got {self.window_seconds!r}"
+            )
+
+
 #: The hosts whose ceiling is not :data:`DEFAULT_REQUESTS_PER_MINUTE`.
 #:
 #: A table rather than a second limiter, and that is the load-bearing part.
@@ -85,9 +142,12 @@ FINNHUB_REQUESTS_PER_MINUTE = 60
 #: ``MappingProxyType`` makes the declared ``Mapping`` true rather than
 #: aspirational -- ``HostRateLimiter`` copies it on the way in anyway, so
 #: nothing here loses a capability.
-DEFAULT_PER_HOST_REQUESTS_PER_MINUTE: Mapping[str, int] = MappingProxyType(
+DEFAULT_PER_HOST_BUDGETS: Mapping[str, HostBudget] = MappingProxyType(
     {
-        FINNHUB_HOST: FINNHUB_REQUESTS_PER_MINUTE,
+        FINNHUB_HOST: HostBudget(FINNHUB_REQUESTS_PER_MINUTE),
+        MASSIVE_HOST: HostBudget(MASSIVE_REQUESTS_PER_MINUTE),
+        FRED_HOST: HostBudget(FRED_REQUESTS_PER_MINUTE),
+        STOCKTWITS_HOST: HostBudget(STOCKTWITS_REQUESTS_PER_HOUR, 3600.0),
     }
 )
 
@@ -131,6 +191,11 @@ class TokenBucket:
     @property
     def capacity(self) -> float:
         return self._capacity
+
+    @property
+    def window_seconds(self) -> float:
+        """The window ``capacity`` is spent over: 60 for most hosts, 3600 for StockTwits."""
+        return self._per_seconds
 
     @property
     def available(self) -> float:
@@ -189,11 +254,16 @@ class HostRateLimiter:
         self,
         requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
         *,
-        per_host: Mapping[str, int] | None = None,
+        per_host: Mapping[str, int | HostBudget] | None = None,
         clock: Clock = time.monotonic,
         sleep: Sleeper = asyncio.sleep,
     ) -> None:
         self._requests_per_minute = requests_per_minute
+        #: A bare ``int`` in ``per_host`` is requests **per minute**, which is
+        #: what every caller before Phase 3 passed; a :class:`HostBudget`
+        #: names its own window. Normalised to budgets here so ``bucket_for``
+        #: has one shape to read.
+        #:
         #: ``None`` means the documented table, **not** "no overrides": a
         #: limiter that has to be told Finnhub is 60/min is a limiter that
         #: will one day not be told. Pass ``per_host={}`` to opt out
@@ -204,10 +274,15 @@ class HostRateLimiter:
         #: lookup key and a mixed-case entry here would silently never match
         #: -- handing a 60/min vendor Alpaca's 200/min budget, which is the
         #: one failure this table exists to prevent.
-        source = (
-            DEFAULT_PER_HOST_REQUESTS_PER_MINUTE if per_host is None else per_host
+        source: Mapping[str, int | HostBudget] = (
+            DEFAULT_PER_HOST_BUDGETS if per_host is None else per_host
         )
-        self._per_host = {host.lower(): limit for host, limit in source.items()}
+        self._per_host: dict[str, HostBudget] = {
+            host.lower(): (
+                limit if isinstance(limit, HostBudget) else HostBudget(limit, 60.0)
+            )
+            for host, limit in source.items()
+        }
         self._clock = clock
         self._sleep = sleep
         self._buckets: dict[str, TokenBucket] = {}
@@ -216,9 +291,12 @@ class HostRateLimiter:
         key = host.lower()
         bucket = self._buckets.get(key)
         if bucket is None:
+            budget = self._per_host.get(key)
+            if budget is None:
+                budget = HostBudget(self._requests_per_minute, 60.0)
             bucket = TokenBucket(
-                self._per_host.get(key, self._requests_per_minute),
-                60.0,
+                budget.requests,
+                budget.window_seconds,
                 clock=self._clock,
                 sleep=self._sleep,
             )
