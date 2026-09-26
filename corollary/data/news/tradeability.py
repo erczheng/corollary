@@ -1,4 +1,11 @@
-"""Decision 21's tradeability filter -- pure.
+"""Decision 21's tradeability filter -- pure -- and the session cache around it.
+
+Everything down to :func:`assess_tradeability` is the pure filter. The
+section after it, *The session cache*, is not pure: it reads and writes
+``ticker_tradeability`` and awaits the provider, and its own docstrings carry
+its rules. Nothing in either half imports the engine runtime, its state or its
+sockets (decision 1), or the vendor file -- the provider arrives as a
+parameter satisfying :class:`TradeabilityInputs`.
 
 A discovery candidate must be a name the owner could actually trade options
 on. All of these must hold, and every threshold is a named constant because
@@ -77,26 +84,41 @@ for 20 would be judging on a partial average by another route.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
-from datetime import date, timedelta
+import asyncio
+import logging
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final
+from typing import Final, Protocol
+
+from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ, nyse_session_close
-from corollary.data.providers.interface import Bar, OptionContract
+from corollary.data.news.watchlist import MARKET_TICKER, WatchUniverse
+from corollary.data.providers.interface import AssetDirectory, Bar, OptionContract, ProviderError
 from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
+from corollary.db.models import NewsArticle, NewsArticleTicker, TickerTradeability
 from corollary.instruments import is_adjusted_root
+from corollary.wire import require_aware
 
 __all__ = [
+    "ADV_BATCH_SIZE",
     "ADV_SESSIONS",
+    "MAX_TICKERS_PER_RUN",
     "MIN_AVG_DAILY_VOLUME",
     "MIN_LAST_CLOSE",
     "MIN_SESSIONS_OF_HISTORY",
     "STANDARD_CONTRACT_SIZE",
+    "CheckStage",
     "IsSession",
+    "RefreshResult",
+    "TickerCheckError",
     "TradeabilityFailure",
+    "TradeabilityInputs",
     "TradeabilityResult",
     "adv_window",
     "adv_window_start",
@@ -104,7 +126,13 @@ __all__ = [
     "has_standard_contract",
     "is_adjusted_root_ticker",
     "nyse_is_session",
+    "recent_article_tickers",
+    "refresh_tradeability",
+    "store_tradeability",
+    "tickers_needing_check",
 ]
+
+logger = logging.getLogger(__name__)
 
 #: Average daily volume floor, in shares *(assumption)*. Inclusive: exactly
 #: 1,000,000 passes.
@@ -371,3 +399,524 @@ def assess_tradeability(
         sessions_available=sessions_available,
         failures=tuple(failures),
     )
+
+
+# ==========================================================================
+# The session cache -- ``ticker_tradeability``
+# ==========================================================================
+#
+# Decision 21: one row per ticker per session date, filled lazily and only for
+# off-watch tickers that carry a qualifying signal -- which in step 4 means any
+# off-watch ticker an article names, since labels arrive in step 5. The
+# ``has_options`` list is the asset directory, refreshed daily elsewhere
+# (``corollary.data.news.assets``); the standard-root check and the ADV run
+# once per ticker per session date, and a *failure* is cached for the session
+# like a pass, so a failing ticker is not re-checked every cycle.
+#
+# Four rules the code below implements rather than works around:
+#
+# * **Unchecked is not failed.** A provider error on a ticker's bars or its
+#   root check caches nothing: the ticker stays unchecked, is reported, and is
+#   retried next cycle. Caching it would bury a vendor outage as a day of
+#   "not tradeable".
+# * **No request whose answer cannot change the verdict.** The root check
+#   costs one request on the trading host; it is asked only when every other
+#   check already passes. A ticker failing elsewhere is cached with
+#   ``standard_root = NULL`` (not asked) and its real reasons -- see
+#   :func:`_verdict_without_root_check`.
+# * **Bars for every well-formed ticker**, in batches of at most
+#   :data:`ADV_BATCH_SIZE`, even for one without options: a batch costs one
+#   request whatever its size, and a cached failure should state the ticker's
+#   real volume and close rather than an invented "insufficient history".
+#   Always ``adv_daily_bars`` -- the historical feed -- never a snapshot.
+# * **No sleeps.** The provider's shared host limiter paces every request;
+#   the work per run is bounded by :data:`MAX_TICKERS_PER_RUN` instead.
+
+#: Most tickers one :func:`refresh_tradeability` run checks. Each can cost a
+#: standard-root request on the trading host, whose 200/min bucket is shared
+#: with every account read, so a run is bounded to half of one minute's
+#: bucket. The remainder is reported as deferred and stays unchecked, so the
+#: next cycle takes it up.
+MAX_TICKERS_PER_RUN: Final = 100
+
+#: Symbols per ADV bars request. The provider's own ceiling
+#: (``ADV_MAX_SYMBOLS``: 200 symbols x 20 sessions = 4,000 points, under the
+#: 10,000-point page), restated here because this module must not import the
+#: vendor file; a test pins the two equal.
+ADV_BATCH_SIZE: Final = 200
+
+_NO_ASSET_DIRECTORY: Final = (
+    "no asset directory has been fetched yet, so has_options is unknown; "
+    "nothing was checked or cached"
+)
+
+_NO_OPTIONABLE_NAME: Final = (
+    "the asset directory names no optionable equity, which is a vendor fault "
+    "(an empty list, or attributes dropped), not a day on which every name lost "
+    "its options; nothing was checked or cached"
+)
+
+UtcClock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class TradeabilityInputs(Protocol):
+    """The two provider requests the refresh makes. ``AlpacaProvider`` satisfies it.
+
+    Both raise ``ProviderError`` when the vendor cannot answer, and the
+    refresh reads that as *unchecked*, never as *no*.
+    """
+
+    async def has_standard_root(self, ticker: str) -> bool: ...
+
+    async def adv_daily_bars(
+        self, symbols: Sequence[str], *, session_date: date
+    ) -> Mapping[str, Sequence[Bar]]: ...
+
+
+class CheckStage(StrEnum):
+    """Which input the vendor failed to give."""
+
+    DAILY_BARS = "daily_bars"
+    STANDARD_ROOT = "standard_root"
+
+
+@dataclass(frozen=True, slots=True)
+class TickerCheckError:
+    """A ticker left unchecked this run because an input could not be had."""
+
+    ticker: str
+    stage: CheckStage
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshResult:
+    """What one :func:`refresh_tradeability` run did.
+
+    ``skipped`` is ``None`` for a run that ran, else why it did not -- a
+    skipped run checked and cached nothing. ``results`` are the verdicts
+    cached, in the order checked; ``errors`` the tickers left unchecked by a
+    provider failure; ``deferred`` the tickers beyond the per-run bound,
+    unchecked, in the order given.
+    """
+
+    session_date: date
+    skipped: str | None
+    results: tuple[TradeabilityResult, ...]
+    errors: tuple[TickerCheckError, ...]
+    deferred: tuple[str, ...]
+    bar_requests: int
+    root_requests: int
+
+    @property
+    def passed(self) -> tuple[str, ...]:
+        return tuple(result.ticker for result in self.results if result.passes)
+
+
+def _ordered_unique(tickers: Iterable[str]) -> list[str]:
+    """Normalised, blanks dropped, first occurrence kept."""
+    return list(dict.fromkeys(t for t in (normalize_symbol(raw) for raw in tickers) if t))
+
+
+def recent_article_tickers(session: Session, since: datetime) -> list[str]:
+    """Every ticker tagged on an article published at or after ``since``.
+
+    Step 4's candidate set: a tag is the only signal before step 5's labels.
+    Ordered by each ticker's latest article, newest first, ties by symbol, so
+    a run bounded by :data:`MAX_TICKERS_PER_RUN` checks the freshest news
+    first. ``MARKET`` is returned like any other tag;
+    :func:`tickers_needing_check` is what excludes it.
+    """
+    require_aware(since, "since")
+    latest = func.max(NewsArticle.published_at).label("latest")
+    statement = (
+        select(NewsArticleTicker.ticker, latest)
+        .join(NewsArticle, NewsArticle.id == NewsArticleTicker.article_id)
+        .where(NewsArticle.published_at >= since)
+        .group_by(NewsArticleTicker.ticker)
+        .order_by(latest.desc(), NewsArticleTicker.ticker)
+    )
+    return [row.ticker for row in session.execute(statement)]
+
+
+def tickers_needing_check(
+    session: Session,
+    *,
+    candidates: Iterable[str],
+    watch: WatchUniverse,
+    session_date: date,
+) -> list[str]:
+    """The candidates the cache has no ``session_date`` row for, off-watch only.
+
+    Normalised and de-duplicated, caller order kept. A watched ticker is never
+    checked -- it is already polled, and it can never be a discovery
+    candidate -- and neither is ``MARKET``, which is a tag value, not a ticker.
+    A row for any *other* session date does not count: the verdict is per
+    session.
+    """
+    off_watch = [
+        ticker
+        for ticker in _ordered_unique(candidates)
+        if ticker != MARKET_TICKER and ticker not in watch
+    ]
+    if not off_watch:
+        return []
+    cached = set(
+        session.scalars(
+            select(TickerTradeability.ticker).where(
+                TickerTradeability.session_date == session_date
+            )
+        )
+    )
+    return [ticker for ticker in off_watch if ticker not in cached]
+
+
+#: Rows per upsert statement: at 10 bound parameters a row this keeps a
+#: statement far inside SQLite's parameter limit whatever ``max_tickers`` a
+#: caller passes.
+_UPSERT_CHUNK: Final = 200
+
+_UPDATED_COLUMNS: Final = (
+    "has_options",
+    "standard_root",
+    "avg_volume_20d",
+    "last_close",
+    "sessions_available",
+    "passes",
+    "failures",
+    "checked_at",
+)
+
+
+def store_tradeability(
+    session: Session, results: Sequence[TradeabilityResult], *, checked_at: datetime
+) -> int:
+    """Upsert ``results`` into ``ticker_tradeability``. Does not commit.
+
+    ``INSERT ... ON CONFLICT DO UPDATE`` on the ``(ticker, session_date)``
+    primary key, so a second write for the same session replaces the first
+    rather than colliding. ``failures`` is the result's failures comma-joined
+    in declaration order, ``''`` exactly when it passes. Returns rows written.
+
+    Raises ``ValueError``, writing nothing, if any passing result lacks
+    ``has_options is True and standard_root is True``. A
+    :class:`TradeabilityResult` is a plain dataclass, so a hand-built pass
+    whose standard-contract check never ran is constructible; stored, it
+    would be a discovery candidate that could be an adjusted root with a
+    deliverable other than 100 shares. The whole batch is refused because
+    one such row means its caller is wrong about all of them.
+    """
+    for result in results:
+        if result.passes and not (result.has_options is True and result.standard_root is True):
+            raise ValueError(
+                f"{result.ticker} is marked passing with has_options={result.has_options!r} "
+                f"and standard_root={result.standard_root!r}; a pass needs both True, so "
+                "nothing was stored"
+            )
+    require_aware(checked_at, "checked_at")
+    stamp = checked_at.astimezone(timezone.utc)
+    rows = [
+        {
+            "ticker": result.ticker,
+            "session_date": result.session_date,
+            "has_options": result.has_options,
+            "standard_root": result.standard_root,
+            "avg_volume_20d": result.avg_volume_20d,
+            "last_close": result.last_close,
+            "sessions_available": result.sessions_available,
+            "passes": result.passes,
+            "failures": ",".join(failure.value for failure in result.failures),
+            "checked_at": stamp,
+        }
+        for result in results
+    ]
+    for start in range(0, len(rows), _UPSERT_CHUNK):
+        statement = sqlite_insert(TickerTradeability).values(rows[start : start + _UPSERT_CHUNK])
+        statement = statement.on_conflict_do_update(
+            index_elements=[TickerTradeability.ticker, TickerTradeability.session_date],
+            set_={column: statement.excluded[column] for column in _UPDATED_COLUMNS},
+        )
+        session.execute(statement)
+    return len(rows)
+
+
+def _store(
+    session_factory: Callable[[], Session],
+    results: Sequence[TradeabilityResult],
+    checked_at: datetime,
+) -> None:
+    """The blocking half of a refresh. Only ever called through ``to_thread``."""
+    with session_factory() as session:
+        store_tradeability(session, results, checked_at=checked_at)
+        session.commit()
+
+
+def _verdict_without_root_check(preliminary: TradeabilityResult) -> TradeabilityResult:
+    """The cached verdict for a ticker that fails on something other than its root.
+
+    ``preliminary`` was assessed *as if* the standard root existed, and failed
+    anyway, so no answer to the root question could make it pass: the request
+    is not spent. The row records ``standard_root = None`` -- not asked -- and
+    the failures that actually decided it. ``STANDARD_ROOT_UNCHECKED`` is not
+    added: it means *fails closed because the check could not be made*, which
+    is not what happened, and as the first failure it would displace the real
+    reason (a low close, no options) from the head of the list a caller logs.
+    """
+    if preliminary.passes:
+        raise ValueError(f"{preliminary.ticker} passes; its root check is not moot")
+    return replace(preliminary, standard_root=None)
+
+
+def _describe_error(exc: BaseException) -> str:
+    # Provider errors are scrubbed by the provider before they are raised.
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _log_unavailable(
+    tickers: Sequence[str], stage: CheckStage, error: str, session_date: date
+) -> None:
+    logger.warning(
+        "tradeability %s unavailable for %d ticker(s); left unchecked, retried next cycle",
+        stage.value,
+        len(tickers),
+        extra={
+            "event": "tradeability_check_unavailable",
+            "rule": (
+                "a provider error is not a failure: nothing is cached, so the "
+                "ticker is checked again next cycle"
+            ),
+            "stage": stage.value,
+            "tickers": list(tickers),
+            "session_date": session_date.isoformat(),
+            "error": error,
+        },
+    )
+
+
+def _log_verdicts(results: Sequence[TradeabilityResult], session_date: date) -> None:
+    for result in results:
+        logger.debug(
+            "tradeability %s for %s: %s",
+            "pass" if result.passes else "fail",
+            result.ticker,
+            ",".join(result.failures) or "every check held",
+            extra={
+                "event": "tradeability_checked",
+                "ticker": result.ticker,
+                "session_date": session_date.isoformat(),
+                "passes": result.passes,
+                "failures": [failure.value for failure in result.failures],
+                "has_options": result.has_options,
+                "standard_root": result.standard_root,
+                "avg_volume_20d": result.avg_volume_20d,
+                "last_close": None if result.last_close is None else str(result.last_close),
+            },
+        )
+
+
+def _directory_unusable(assets: AssetDirectory) -> str | None:
+    """Why ``assets`` cannot answer ``has_options`` for a run, or ``None`` if it can.
+
+    Two shapes of the same vendor fault: no optionable name at all (an empty
+    list, or every asset read as ``has_options=False``), and more than half
+    the directory arriving without ``attributes`` -- the field the answer is
+    read from. Exactly half still runs. Either way, running would cache every
+    candidate as "no options" and hide it for the session.
+    """
+    if not assets.optionable():
+        return _NO_OPTIONABLE_NAME
+    if assets.missing_attributes * 2 > len(assets):
+        return (
+            f"{assets.missing_attributes} of the asset directory's {len(assets)} rows "
+            "carried no attributes, more than half, so has_options cannot be trusted; "
+            "nothing was checked or cached"
+        )
+    return None
+
+
+def _skipped_run(
+    reason: str, assets: AssetDirectory | None, tickers: Sequence[str], session_date: date
+) -> RefreshResult:
+    """Log a run that checked nothing, and say why in its result."""
+    logger.warning(
+        "tradeability refresh skipped: %s",
+        reason,
+        extra={
+            "event": "tradeability_refresh_skipped",
+            "rule": "no trustworthy has_options answer, so no verdict is cached",
+            "session_date": session_date.isoformat(),
+            "tickers": len(tickers),
+            "asset_directory_size": None if assets is None else len(assets),
+            "optionable": None if assets is None else len(assets.optionable()),
+            "missing_attributes": None if assets is None else assets.missing_attributes,
+        },
+    )
+    return RefreshResult(
+        session_date=session_date,
+        skipped=reason,
+        results=(),
+        errors=(),
+        deferred=(),
+        bar_requests=0,
+        root_requests=0,
+    )
+
+
+async def refresh_tradeability(
+    *,
+    provider: TradeabilityInputs,
+    assets: AssetDirectory | None,
+    tickers: Sequence[str],
+    session_date: date,
+    session_factory: Callable[[], Session],
+    now: UtcClock = _utc_now,
+    max_tickers: int = MAX_TICKERS_PER_RUN,
+    is_session: IsSession = nyse_is_session,
+) -> RefreshResult:
+    """Check ``tickers`` for ``session_date`` and cache every verdict reached.
+
+    ``tickers`` should be :func:`tickers_needing_check`'s answer; this function
+    does not consult the watch universe or the cache itself, and re-checking a
+    cached ticker simply replaces its row. ``MARKET`` and blanks are dropped
+    here regardless. The first ``max_tickers`` are checked and the rest
+    returned as deferred.
+
+    ``assets=None`` -- no directory fetched yet -- skips the run: without it
+    ``has_options`` is unknown, and caching every ticker as "no options" would
+    hide them for the session. The same holds for a directory that exists but
+    cannot answer -- no optionable name at all, or more than half its rows
+    missing ``attributes`` -- and the run is skipped with the reason. A ticker
+    absent from a usable directory reads as ``has_options = False``: the
+    directory lists every active US equity, so absence is an answer.
+
+    Staleness is not checked here. The caller (the scheduler) decides whether
+    a directory older than :data:`corollary.data.news.assets.MAX_DIRECTORY_AGE`
+    may still be used,
+    and must log it when it does.
+
+    A ticker that is not a well-formed equity symbol (a crypto pair, an
+    adjusted root such as ``AIFU1``) is assessed with no bars and no root
+    check and cached as the failure it is -- no request could be made for it,
+    and one bad symbol in a bars batch would fail the other 199.
+    """
+    if max_tickers < 1:
+        raise ValueError(f"max_tickers must be at least 1, not {max_tickers}")
+    if assets is None:
+        return _skipped_run(_NO_ASSET_DIRECTORY, assets, tickers, session_date)
+    unusable = _directory_unusable(assets)
+    if unusable is not None:
+        return _skipped_run(unusable, assets, tickers, session_date)
+    # A calendar that cannot list the window raises here, once, rather than
+    # once per ticker after the bars have already been paid for.
+    adv_window(session_date, is_session=is_session)
+
+    ordered = [t for t in _ordered_unique(tickers) if t != MARKET_TICKER]
+    batch, deferred = ordered[:max_tickers], ordered[max_tickers:]
+
+    errors: list[TickerCheckError] = []
+    unavailable: set[str] = set()
+    bars: dict[str, Sequence[Bar]] = {}
+    bar_requests = 0
+    requestable = [t for t in batch if EQUITY_SYMBOL_RE.fullmatch(t)]
+    for start in range(0, len(requestable), ADV_BATCH_SIZE):
+        chunk = requestable[start : start + ADV_BATCH_SIZE]
+        bar_requests += 1
+        try:
+            answer = await provider.adv_daily_bars(chunk, session_date=session_date)
+        except ProviderError as exc:
+            error = _describe_error(exc)
+            errors.extend(TickerCheckError(t, CheckStage.DAILY_BARS, error) for t in chunk)
+            unavailable.update(chunk)
+            _log_unavailable(chunk, CheckStage.DAILY_BARS, error, session_date)
+            continue
+        for ticker in chunk:
+            # The vendor omits a symbol with no bars in the range: no bars.
+            bars[ticker] = answer.get(ticker, ())
+
+    results: list[TradeabilityResult] = []
+    root_requests = 0
+    for ticker in batch:
+        if ticker in unavailable:
+            continue
+        asset = assets.get(ticker)
+        has_options = asset is not None and asset.has_options
+        daily = bars.get(ticker, ())
+        try:
+            preliminary = assess_tradeability(
+                ticker,
+                has_options=has_options,
+                standard_root=True,
+                daily_bars=daily,
+                session_date=session_date,
+                is_session=is_session,
+            )
+        except (ValueError, TypeError) as exc:
+            # The filter refuses bars that cannot be one symbol's daily series.
+            # That is a defect in the vendor's data, not a verdict on the ticker.
+            error = _describe_error(exc)
+            errors.append(TickerCheckError(ticker, CheckStage.DAILY_BARS, error))
+            _log_unavailable([ticker], CheckStage.DAILY_BARS, error, session_date)
+            continue
+        if not preliminary.passes:
+            results.append(_verdict_without_root_check(preliminary))
+            continue
+        root_requests += 1
+        try:
+            standard_root = await provider.has_standard_root(ticker)
+        except ProviderError as exc:
+            error = _describe_error(exc)
+            errors.append(TickerCheckError(ticker, CheckStage.STANDARD_ROOT, error))
+            _log_unavailable([ticker], CheckStage.STANDARD_ROOT, error, session_date)
+            continue
+        results.append(
+            assess_tradeability(
+                ticker,
+                has_options=has_options,
+                standard_root=standard_root,
+                daily_bars=daily,
+                session_date=session_date,
+                is_session=is_session,
+            )
+        )
+
+    checked_at = now()
+    require_aware(checked_at, "now")
+    if results:
+        await asyncio.to_thread(_store, session_factory, results, checked_at)
+    _log_verdicts(results, session_date)
+
+    outcome = RefreshResult(
+        session_date=session_date,
+        skipped=None,
+        results=tuple(results),
+        errors=tuple(errors),
+        deferred=tuple(deferred),
+        bar_requests=bar_requests,
+        root_requests=root_requests,
+    )
+    logger.log(
+        logging.WARNING if errors or deferred else logging.INFO,
+        "tradeability refresh for %s: %d cached (%d pass), %d unchecked on a provider "
+        "error, %d deferred",
+        session_date.isoformat(),
+        len(results),
+        len(outcome.passed),
+        len(errors),
+        len(deferred),
+        extra={
+            "event": "tradeability_refreshed",
+            "session_date": session_date.isoformat(),
+            "cached": len(results),
+            "passed": len(outcome.passed),
+            "unchecked": len(errors),
+            "deferred": len(deferred),
+            "bar_requests": bar_requests,
+            "root_requests": root_requests,
+            "asset_directory_size": len(assets),
+        },
+    )
+    return outcome
