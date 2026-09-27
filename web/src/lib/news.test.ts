@@ -17,6 +17,7 @@ import {
   sortConsensus,
   sortNews,
   upcomingEvents,
+  orderSectors,
 } from './news'
 import {
   CALENDAR_EVENTS,
@@ -436,5 +437,27 @@ describe('the incoming reserve', () => {
     const published = new Set(NEWS_ITEMS.map((i: NewsItem) => i.id))
     expect(NEWS_INCOMING.every((i) => !published.has(i.id))).toBe(true)
     expect(NEWS_INCOMING.length).toBeGreaterThan(0)
+  })
+})
+
+describe('the live feed helpers (Phase 3 step 4)', () => {
+  /** A null publisher is "the vendor named none" — not a value to filter on,
+   * and never the string "null" in a dropdown. */
+  it('leaves a missing publisher out of the publisher options', () => {
+    const base = NEWS_ITEMS[0]
+    const items: NewsItem[] = [
+      { ...base, id: 'a', publisher: 'Reuters' },
+      { ...base, id: 'b', publisher: null },
+      { ...base, id: 'c', publisher: 'Benzinga' },
+    ]
+    expect(newsPublishers(items)).toEqual(['Benzinga', 'Reuters'])
+  })
+
+  it('orders seen sectors alphabetically with Macro last, once each', () => {
+    expect(orderSectors(['Other', MACRO_SECTOR, 'Energy', 'Other'])).toEqual([
+      'Energy',
+      'Other',
+      MACRO_SECTOR,
+    ])
   })
 })

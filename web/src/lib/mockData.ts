@@ -1011,6 +1011,11 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
       publisher: pick(rand, PUBLISHERS),
       sector: MACRO_SECTOR,
       tier: story.tier,
+      // `.example` is a reserved TLD — a fixture link that can never
+      // resolve to somebody's real article.
+      url: `https://news.example/${id}`,
+      source: null,
+      demoted: false,
     }
   }
 
@@ -1028,6 +1033,9 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
     publisher: pick(rand, PUBLISHERS),
     sector: name.sector,
     tier: story.tier,
+    url: `https://news.example/${id}`,
+    source: null,
+    demoted: false,
   }
 }
 

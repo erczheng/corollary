@@ -1,12 +1,12 @@
-import { useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { LiveStatus } from '../components/LiveStatus'
 import { Pagination } from '../components/Pagination'
 import { FixtureMarker } from '../components/FixtureMarker'
+import { RequestFailed } from '../components/RequestFailed'
 import { SentimentGauge } from '../components/SentimentGauge'
 import { TableSkeleton } from '../components/Skeleton'
-import { usePagination } from '../hooks/usePagination'
-import { useNewsPoll } from '../hooks/useNewsPoll'
 import { useUIStore } from '../lib/store'
+import { useAddWatch, useNewsFeed, useRemoveWatch, useWatchList } from '../lib/queries'
 import { CALENDAR_EVENTS, SECTOR_CONSENSUS, SOCIAL_ATTENTION, SOCIAL_AS_OF } from '../lib/mockData'
 import {
   CALENDAR_TYPE_LABEL,
@@ -18,33 +18,25 @@ import {
   type CalendarEvent,
   type CalendarEventType,
   type NewsItem,
+  type NewsScope,
   type Sentiment,
 } from '../lib/types'
 import {
   DEFAULT_NEWS_FILTER,
   LOOKBACKS,
   LOOKBACK_LABEL,
+  LOOKBACK_PHRASE,
   NEWS_SORT_LABEL,
   attentionVelocity,
-  etDate,
-  filterNews,
   labeledShare,
-  newsPublishers,
-  newsSectors,
+  orderSectors,
   sortAttention,
   sortConsensus,
-  sortNews,
   upcomingEvents,
   type NewsFilter,
   type NewsSort,
 } from '../lib/news'
-import {
-  formatCompactNumber,
-  formatDateOnly,
-  formatPct,
-  formatTimeET,
-  formatDateTimeET,
-} from '../lib/format'
+import { formatCompactNumber, formatDateOnly, formatPct, formatTimeET, formatDateTimeET } from '../lib/format'
 
 /** Deeper than the Markets tables, because the feed is now the tall column
  * of a two-column page rather than one panel among five stacked ones —
@@ -52,14 +44,21 @@ import {
  * interruption than navigation. */
 const PAGE_SIZE = 25
 
-/** How often the terminal asks for news.
- *
- * Fifteen seconds, and deliberately slower than either price feed — those
- * exist because a quote is stale the moment after it arrives, while a
- * headline published at 10:04 is the same headline at 10:05. Polling this
- * at 400ms would be asking a question whose answer changes a few times an
- * hour. */
-const POLL_MS = 15_000
+/** The page is mixed since Phase 3 step 4: the feed and the watch list are
+ * the engine's, the rest is still sample data. So the marker sits on each
+ * fixture panel rather than on the title — the Settings precedent, where a
+ * marker over the page would label real data as invented, which is worse
+ * than no marker at all. */
+const FIXTURE_DETAIL = {
+  composite:
+    'Sample data. The sentiment composite and its seven components are PRD §9 pipeline work that has not landed — nothing here was computed from a published headline.',
+  social:
+    'Sample data. Social attention is not wired to StockTwits yet — these velocities and message counts are invented.',
+  consensus:
+    'Sample data. Analyst consensus by sector is not wired to a provider yet — these ratings are invented.',
+  calendar:
+    'Sample data. The market calendar is not wired to a provider yet — these events are invented.',
+} as const
 
 /** Dense table chrome, one step tighter than Activity's ledger.
  *
@@ -104,11 +103,15 @@ function RailCard({
   id,
   title,
   meta,
+  marker,
   children,
 }: {
   id: string
   title: string
   meta: string
+  /** A `FixtureMarker` while the panel is still sample data. Beside the
+   * heading, never inside it, so the region's name stays the title. */
+  marker?: ReactNode
   children: ReactNode
 }) {
   return (
@@ -116,9 +119,12 @@ function RailCard({
       aria-labelledby={`${id}-heading`}
       className="rounded-lg border border-outline-warm bg-surface-container-lowest p-4"
     >
-      <h2 id={`${id}-heading`} className="text-title-lg text-on-surface">
-        {title}
-      </h2>
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id={`${id}-heading`} className="text-title-lg text-on-surface">
+          {title}
+        </h2>
+        {marker}
+      </div>
       <p className="mt-0.5 text-caption text-on-surface-variant">{meta}</p>
       {children}
     </section>
@@ -126,51 +132,166 @@ function RailCard({
 }
 
 // ---------------------------------------------------------------------- //
-// Live feed
+// Live feed — real since Phase 3 step 4
 // ---------------------------------------------------------------------- //
 
-/** Which tier labelled the item.
+/** Which tier labelled the item, or nothing while no tier has.
  *
  * Deliberately not a coloured mark. The sentiment beside it already owns
  * the colour in this row, and a second one would compete with the one
  * carrying the actual claim — this says *who said so*, which is supporting
- * evidence rather than the finding. */
-function TierTag({ tier }: { tier: NewsItem['tier'] }) {
+ * evidence rather than the finding. **A null tier renders nothing**: in
+ * step 4 no item is labelled, and a tag reading "undefined" (or a guessed
+ * tier) would name a source that produced nothing. */
+function TierTag({ item }: { item: NewsItem }) {
+  if (item.tier === null) return null
   return (
-    <span title={SENTIMENT_TIER_DETAIL[tier]} className="text-caption text-on-surface-variant">
-      {SENTIMENT_TIER_LABEL[tier]}
+    <span
+      title={SENTIMENT_TIER_DETAIL[item.tier]}
+      className="ml-2 text-caption text-on-surface-variant"
+    >
+      {SENTIMENT_TIER_LABEL[item.tier]}
+      {item.demoted ? ' (demoted)' : null}
     </span>
   )
 }
 
-function LiveFeed({ loading }: { loading: boolean }) {
-  const feed = useUIStore((s) => s.newsFeed)
+const SCOPE_LABEL: Record<NewsScope, string> = {
+  watch: 'Watch list',
+  all: 'Everything',
+}
+
+/** Watch list / everything. A control, so a 0.5rem rectangle rather than a
+ * pill — pills on this page are status. */
+function ScopeToggle({ scope, onChange }: { scope: NewsScope; onChange: (s: NewsScope) => void }) {
+  return (
+    <div
+      role="group"
+      aria-label="Which headlines the feed covers"
+      className="flex rounded border border-outline bg-surface-container-low p-0.5 text-label-sm"
+    >
+      {(['watch', 'all'] as NewsScope[]).map((s) => (
+        <button
+          key={s}
+          type="button"
+          aria-pressed={scope === s}
+          onClick={() => onChange(s)}
+          className={
+            scope === s
+              ? 'rounded bg-primary px-2 py-0.5 text-on-primary'
+              : 'rounded px-2 py-0.5 text-on-surface-variant hover:text-on-surface'
+          }
+        >
+          {SCOPE_LABEL[s]}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** The empty feed, worded for the question that was asked. An empty watch
+ * list today and an empty store are different findings, and "no results"
+ * says neither. */
+function EmptyFeed({
+  scope,
+  filter,
+  onWidenScope,
+}: {
+  scope: NewsScope
+  filter: NewsFilter
+  onWidenScope: () => void
+}) {
+  if (filter.sentiment !== null && filter.sentiment !== 'unclassified') {
+    return (
+      <p className="py-6 text-body-md text-on-surface-variant">
+        Nothing is labelled {SENTIMENT_LABEL[filter.sentiment]} yet. Every headline reads{' '}
+        <span className={SENTIMENT_CLASS.unclassified}>Unclassified</span> until sentiment
+        labelling lands, so this filter matches nothing — it is not that the tape is quiet.
+      </p>
+    )
+  }
+  if (filter.sector !== null || filter.publisher !== null) {
+    return (
+      <p className="py-6 text-body-md text-on-surface-variant">
+        No headlines match those filters {LOOKBACK_PHRASE[filter.lookback]}. They combine rather
+        than replacing each other — widen the lookback or clear a filter first.
+      </p>
+    )
+  }
+  if (scope === 'watch') {
+    return (
+      <p className="py-6 text-body-md text-on-surface-variant">
+        No headlines on your watch list {LOOKBACK_PHRASE[filter.lookback]}.{' '}
+        <button
+          type="button"
+          onClick={onWidenScope}
+          className="rounded text-primary underline underline-offset-2"
+        >
+          Switch to everything
+        </button>{' '}
+        to see stories about names you are not watching.
+      </p>
+    )
+  }
+  return (
+    <p className="py-6 text-body-md text-on-surface-variant">
+      {filter.lookback === 'all'
+        ? 'No headlines have been stored yet. The feed fills as the news pipeline polls its sources.'
+        : `No headlines stored ${LOOKBACK_PHRASE[filter.lookback]}, on any name. Widen the lookback.`}
+    </p>
+  )
+}
+
+function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void }) {
   const [filter, setFilter] = useState<NewsFilter>(DEFAULT_NEWS_FILTER)
+  const [scope, setScope] = useState<NewsScope>('watch')
   const [sort, setSort] = useState<NewsSort>('newest')
+  const [page, setPage] = useState(1)
 
-  // The feed's own clock, not the wall clock. MARKET_TODAY is the fixture's
-  // today and the machine's is not, so a lookback measured against
-  // `Date.now()` would return nothing at every step but "All time".
-  const now = feed[0]?.time ?? new Date().toISOString()
+  // Every filter goes to the server. It is the one filter and the one sort:
+  // nothing below narrows or re-orders `items`.
+  const feed = useNewsFeed({
+    scope,
+    lookback: filter.lookback,
+    sector: filter.sector,
+    publisher: filter.publisher,
+    sentiment: filter.sentiment,
+    sort,
+    limit: PAGE_SIZE,
+    offset: (page - 1) * PAGE_SIZE,
+  })
+  const watch = useWatchList()
+  const data = feed.data
 
-  const sectors = newsSectors(feed)
-  const publishers = newsPublishers(feed)
-  const rows = sortNews(filterNews(feed, filter, now), sort)
-  const { page, pageCount, pageItems, setPage } = usePagination(rows, PAGE_SIZE)
+  // The freshness pill reports the last successful read of *this* feed.
+  const updatedAt = feed.dataUpdatedAt > 0 ? new Date(feed.dataUpdatedAt).toISOString() : null
+  useEffect(() => onUpdatedAt(updatedAt), [updatedAt, onUpdatedAt])
+
+  // `GET /api/news` serves a page, not the set of values a filter could
+  // take, so the dropdowns offer what this session has seen — and always
+  // the current selection, so narrowing never empties its own dropdown.
+  const seen = useRef({ sectors: new Set<string>(), publishers: new Set<string>() })
+  for (const item of data?.items ?? []) {
+    seen.current.sectors.add(item.sector)
+    if (item.publisher !== null) seen.current.publishers.add(item.publisher)
+  }
+  if (filter.sector !== null) seen.current.sectors.add(filter.sector)
+  if (filter.publisher !== null) seen.current.publishers.add(filter.publisher)
+  const sectors = orderSectors(seen.current.sectors)
+  const publishers = [...seen.current.publishers].sort((a, b) => a.localeCompare(b))
 
   // Written once so every control resets the page. Narrowing while deep in
-  // the feed otherwise lands on the last page of a shorter result set,
-  // which reads as "no headlines".
+  // the feed otherwise lands past the end of a shorter result set.
   const update = (patch: Partial<NewsFilter>) => {
     setFilter({ ...filter, ...patch })
     setPage(1)
   }
+  const changeScope = (next: NewsScope) => {
+    setScope(next)
+    setPage(1)
+  }
 
-  const filtered =
-    filter.sector !== null ||
-    filter.publisher !== null ||
-    filter.sentiment !== null ||
-    filter.lookback !== 'all'
+  const pageCount = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1
 
   return (
     <section aria-labelledby="live-feed-heading">
@@ -178,6 +299,7 @@ function LiveFeed({ loading }: { loading: boolean }) {
         id="live-feed-heading"
         aside={
           <div className="flex flex-wrap items-center gap-1.5">
+            <ScopeToggle scope={scope} onChange={changeScope} />
             <select
               value={filter.sector ?? 'all'}
               onChange={(e) => update({ sector: e.target.value === 'all' ? null : e.target.value })}
@@ -256,25 +378,47 @@ function LiveFeed({ loading }: { loading: boolean }) {
         Latest intel
       </SectionLabel>
 
-      <p className="mt-2 text-caption text-on-surface-variant">
-        {filtered
-          ? `${rows.length} of ${feed.length} headlines`
-          : // The span the corpus actually covers, read off the corpus —
-            // not a hardcoded "last 2 weeks", which would slowly stop being
-            // true as the feed grows. Read off `feed`, which is always
-            // newest-first, rather than `rows`, whose ends swap over when
-            // the sort is flipped to oldest-first.
-            `${feed.length} headlines, ${formatDateOnly(etDate(feed[feed.length - 1].time))} to today`}
-      </p>
-
-      {loading ? (
-        <TableSkeleton rows={10} columns={5} label="Loading news feed" />
-      ) : rows.length === 0 ? (
-        <p className="py-6 text-body-md text-on-surface-variant">
-          No headlines match those filters. They combine rather than replacing each other, so
-          narrowing sector <em>and</em> sentiment <em>and</em> a short lookback can empty the feed
-          even when each alone would not — widen the lookback first.
+      {data ? (
+        <p className="mt-2 text-caption text-on-surface-variant">
+          <span className="font-mono tabular-nums">{data.total.toLocaleString('en-US')}</span>{' '}
+          {data.total === 1 ? 'headline' : 'headlines'}
+          {data.scope === 'watch' ? ' on your watch list' : ' across every name'}
+          {data.since !== null ? `, since ${formatDateTimeET(data.since)}` : ''}
         </p>
+      ) : null}
+
+      {data && !data.sectorsAvailable ? (
+        <p className="mt-1 text-caption text-on-surface-variant">
+          Sectors appear once the SPDR holdings seed is built — shown as Other for now, with
+          market-wide stories under Macro.
+        </p>
+      ) : null}
+      {scope === 'watch' && watch.data?.seedMissing ? (
+        <p className="mt-1 text-caption text-on-surface-variant">
+          The watch list does not yet include the sector leaders — they join once the SPDR
+          holdings seed is built, so this scope is narrower than it will be.
+        </p>
+      ) : null}
+
+      {feed.isError && data ? (
+        // A failed refresh over a page already on screen: say so, keep the
+        // page. Blanking it would read as "no news" rather than "no engine".
+        <div className="mt-2">
+          <RequestFailed error={feed.error} what="the news feed" />
+        </div>
+      ) : null}
+
+      {feed.isPending || (feed.isPlaceholderData && feed.isFetching) ? (
+        // A placeholder page belongs to the previous controls: worded from the
+        // new scope and filter, its emptiness (or its rows) would be a claim
+        // about a query that has not answered yet.
+        <TableSkeleton rows={10} columns={6} label="Loading news feed" />
+      ) : feed.isError && !data ? (
+        <div className="py-6">
+          <RequestFailed error={feed.error} what="the news feed" />
+        </div>
+      ) : !data || data.items.length === 0 ? (
+        <EmptyFeed scope={scope} filter={filter} onWidenScope={() => changeScope('all')} />
       ) : (
         <>
           <table className="mt-1 w-full border-collapse">
@@ -283,12 +427,13 @@ function LiveFeed({ loading }: { loading: boolean }) {
                 <th className={`${TH} text-left`}>Time</th>
                 <th className={`${TH} text-left`}>Ticker</th>
                 <th className={`${TH} w-full text-left`}>Headline</th>
+                <th className={`${TH} text-left`}>Sector</th>
                 <th className={`${TH} text-left`}>Sentiment</th>
                 <th className={`${TH} text-right`}>Publisher</th>
               </tr>
             </thead>
             <tbody>
-              {pageItems.map((item) => (
+              {data.items.map((item) => (
                 <tr
                   key={item.id}
                   className="h-8 border-t border-outline/10 hover:bg-surface-container-low"
@@ -305,22 +450,23 @@ function LiveFeed({ loading }: { loading: boolean }) {
                       item.ticker
                     )}
                   </td>
-                  {/* The sector rides along as the row's title rather than a
-                      second line. One line per headline is what lets a
-                      screenful be scanned, and the sector is a filter — the
-                      dropdown answers "show me Technology" better than a
-                      label repeated under every row ever could. */}
-                  <td
-                    className={`${TD} max-w-0 text-body-sm text-on-surface`}
-                    title={`${item.headline} — ${item.sector}`}
-                  >
-                    <span className="block truncate">{item.headline}</span>
+                  <td className={`${TD} max-w-0 text-body-sm text-on-surface`} title={item.headline}>
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block truncate rounded hover:underline"
+                    >
+                      {item.headline}
+                    </a>
+                  </td>
+                  <td className={`${TD} whitespace-nowrap text-caption text-on-surface-variant`}>
+                    {item.sector}
                   </td>
                   {/* Small coloured text, not a pill — the convention
-                      ExecutionsTable set for a status in a packed table. A
-                      chip per row sets the row height for a one-word label.
-                      The four-letter form keeps the column narrow, and the
-                      full word is in the title. */}
+                      ExecutionsTable set for a status in a packed table.
+                      Unclassified is `caution`, never `error`: nothing
+                      having labelled a headline is the system working. */}
                   <td className={`${TD} whitespace-nowrap`}>
                     <span
                       title={SENTIMENT_LABEL[item.sentiment]}
@@ -328,14 +474,17 @@ function LiveFeed({ loading }: { loading: boolean }) {
                     >
                       {SENTIMENT_SHORT[item.sentiment]}
                     </span>
-                    <span className="ml-2">
-                      <TierTag tier={item.tier} />
-                    </span>
+                    <TierTag item={item} />
                   </td>
                   <td
                     className={`${TD} whitespace-nowrap text-right text-caption uppercase text-on-surface-variant`}
                   >
-                    {item.publisher}
+                    {item.publisher ?? (
+                      <span title="The source named no publisher">
+                        <span aria-hidden="true">—</span>
+                        <span className="sr-only">No publisher named</span>
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -345,6 +494,125 @@ function LiveFeed({ loading }: { loading: boolean }) {
         </>
       )}
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------- //
+// Manual watches — real since Phase 3 step 4
+// ---------------------------------------------------------------------- //
+
+/** The manual watches, removable, and a field to add one.
+ *
+ * **Remove does not confirm.** It is reversible — re-adding is one entry
+ * away and removal keeps every stored headline — and it narrows what the
+ * engine watches rather than widening anything. `settings.ts` confirms only
+ * the risky direction, and nagging here is how the dialog that matters
+ * gets dismissed by reflex. The server validates every add (rule 4); a
+ * refusal renders its own sentence, in `error`, because it is a rule
+ * outcome rather than a market fact. */
+function ManualWatches() {
+  const watch = useWatchList()
+  const add = useAddWatch()
+  const remove = useRemoveWatch()
+  const [ticker, setTicker] = useState('')
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const value = ticker.trim()
+    if (value === '') return
+    add.mutate(value, { onSuccess: () => setTicker('') })
+  }
+
+  const list = watch.data
+
+  return (
+    <RailCard
+      id="manual-watches"
+      title="Watch list"
+      meta={
+        list
+          ? `${list.countBeforePositions} of ${list.cap} symbols, before position underlyings`
+          : 'Names you added by hand, on top of the Markets universe and sector leaders'
+      }
+    >
+      {watch.isPending ? (
+        <p className="mt-3 text-caption text-on-surface-variant">Loading the watch list…</p>
+      ) : watch.isError ? (
+        <div className="mt-3">
+          <RequestFailed error={watch.error} what="the watch list" />
+        </div>
+      ) : list ? (
+        <>
+          {list.seedMissing ? (
+            <p className="mt-2 text-caption text-on-surface-variant">
+              The SPDR holdings seed is not built, so sector leaders are not counted yet — this
+              count will rise when it is.
+            </p>
+          ) : null}
+          {list.manual.length === 0 ? (
+            <p className="mt-3 text-caption text-on-surface-variant">
+              No manual watches. The watch list already covers the Markets universe and your open
+              positions; add a name here to follow one outside them.
+            </p>
+          ) : (
+            <ul aria-label="Manual watches" className="mt-3 divide-y divide-outline-variant">
+              {list.manual.map((m) => (
+                <li key={m.ticker} className="flex items-center gap-2 py-1">
+                  <span className="text-label-md text-on-surface">{m.ticker}</span>
+                  <span className="ml-auto text-caption text-on-surface-variant">
+                    added {formatDateTimeET(m.addedAt)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => remove.mutate(m.ticker)}
+                    disabled={remove.isPending && remove.variables === m.ticker}
+                    aria-label={`Remove ${m.ticker} from the watch list`}
+                    className="rounded px-2 py-0.5 text-label-sm text-on-surface-variant hover:bg-surface-container hover:text-on-surface disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {remove.isError ? (
+            <div className="mt-2">
+              <RequestFailed error={remove.error} what="the watch list" />
+            </div>
+          ) : null}
+          <form onSubmit={submit} className="mt-3 flex gap-2">
+            <input
+              value={ticker}
+              onChange={(e) => {
+                setTicker(e.target.value.toUpperCase())
+                if (add.isError) add.reset()
+              }}
+              aria-label="Ticker to watch"
+              placeholder="Add ticker"
+              maxLength={32}
+              className="min-w-0 flex-1 rounded border border-outline bg-surface px-2 py-1 font-mono text-caption text-on-surface placeholder:text-on-surface-variant focus:border-primary"
+            />
+            <button
+              type="submit"
+              disabled={add.isPending || ticker.trim() === ''}
+              className="rounded bg-primary px-3 py-1 text-label-sm text-on-primary disabled:opacity-50"
+            >
+              Watch
+            </button>
+          </form>
+          {add.isError ? (
+            <div className="mt-2">
+              <RequestFailed error={add.error} what="the watch list" />
+            </div>
+          ) : !list.assetListAvailable ? (
+            <p className="mt-2 text-caption text-on-surface-variant">
+              The asset list has not been fetched yet, so an add cannot be validated and is
+              refused until the daily refresh has run.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </RailCard>
   )
 }
 
@@ -361,6 +629,7 @@ function SocialAttention() {
     <RailCard
       id="social-attention"
       title="Social Attention"
+      marker={<FixtureMarker detail={FIXTURE_DETAIL.social} />}
       meta={`StockTwits mention velocity, as of ${formatTimeET(SOCIAL_AS_OF)}`}
     >
       <table className="mt-3 w-full border-collapse">
@@ -460,6 +729,7 @@ function TopRatedBySector() {
     <RailCard
       id="sector-consensus"
       title="Top rated by sector"
+      marker={<FixtureMarker detail={FIXTURE_DETAIL.consensus} />}
       meta={`Analyst consensus, monthly — as of ${formatDateOnly(rows[0].asOf)}`}
     >
       <table className="mt-3 w-full border-collapse">
@@ -560,8 +830,11 @@ function MarketCalendar({ now }: { now: string }) {
       <SectionLabel
         id="market-calendar-heading"
         aside={
-          <span className="text-caption text-on-surface-variant">
-            Scheduled ahead, forward-looking only
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="text-caption text-on-surface-variant">
+              Scheduled ahead, forward-looking only
+            </span>
+            <FixtureMarker detail={FIXTURE_DETAIL.calendar} />
           </span>
         }
       >
@@ -615,44 +888,30 @@ function MarketCalendar({ now }: { now: string }) {
 // ---------------------------------------------------------------------- //
 
 export function News() {
-  const lastNewsAt = useUIStore((s) => s.lastNewsAt)
-  const feed = useUIStore((s) => s.newsFeed)
+  // The feed is the only live thing on this page, so the freshness pill
+  // reports the feed's last successful read and nothing else. The rail's
+  // panels refresh daily or monthly, or are still fixtures.
+  const [feedAt, setFeedAt] = useState<string | null>(null)
+  const onFeedUpdated = useCallback((at: string | null) => setFeedAt(at), [])
 
-  useNewsPoll(POLL_MS)
-
-  // Loading is a real condition, not a timer — until the first poll returns
-  // there is nothing current to show. Same rule Activity and Markets
-  // follow.
-  const loading = lastNewsAt === null
-
-  // The calendar runs off the feed's clock for the same reason the lookback
-  // does: MARKET_TODAY is the fixture's today. Measured against the wall
-  // clock, "forward-looking only" would quietly empty the panel the moment
-  // the real date passed the fixture's.
-  const now = feed[0]?.time ?? new Date().toISOString()
+  // The calendar is still a fixture and runs off the fixture's clock:
+  // MARKET_TODAY is the fixture's today, and measured against the wall
+  // clock "forward-looking only" would quietly empty the panel.
+  const fixtureFeed = useUIStore((s) => s.newsFeed)
+  const now = fixtureFeed[0]?.time ?? new Date().toISOString()
 
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-display-lg text-on-surface">News</h1>
-            {/* On the title, because the whole page is the fixture — feed,
-                composite, social attention, consensus and calendar alike.
-                The pill to the right of this one reports how recently the
-                mock feed was polled, which is exactly the combination
-                decision 8 exists for: a freshness badge over invented
-                numbers reads as a measurement. */}
-            <FixtureMarker detail="Every figure on this page is sample data. News, sentiment, the calendar, analyst consensus and social attention are PRD §9's pipeline, built in Phase 3 — nothing here was computed from a published headline." />
-          </div>
+          {/* No marker on the title: the page is mixed, so each fixture
+              panel carries its own (see FIXTURE_DETAIL). */}
+          <h1 className="text-display-lg text-on-surface">News</h1>
           <p className="mt-1 text-body-md text-on-surface-variant">
             Market intelligence, sentiment and what is scheduled ahead.
           </p>
         </div>
-        {/* Scoped to the feed, and the tooltip says so. The rail's panels
-            refresh daily or monthly, so one pill covering the page would be
-            claiming a freshness three of them do not have. */}
-        <LiveStatus at={lastNewsAt} kind="poll" />
+        <LiveStatus at={feedAt} kind="poll" />
       </div>
 
       {/* The rail comes first in the source, so a screen reader and a narrow
@@ -660,13 +919,14 @@ export function News() {
           left from `lg` up and stacks above below that. */}
       <div className="mt-8 grid items-start gap-6 lg:grid-cols-[minmax(0,19rem)_minmax(0,1fr)]">
         <aside className="grid gap-4">
-          <SentimentGauge />
+          <SentimentGauge marker={<FixtureMarker detail={FIXTURE_DETAIL.composite} />} />
+          <ManualWatches />
           <SocialAttention />
           <TopRatedBySector />
         </aside>
 
         <div>
-          <LiveFeed loading={loading} />
+          <LiveFeed onUpdatedAt={onFeedUpdated} />
           <MarketCalendar now={now} />
         </div>
       </div>

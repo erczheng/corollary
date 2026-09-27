@@ -1,15 +1,145 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, within, fireEvent, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
+import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
-import {
-  NEWS_INCOMING,
-  NEWS_ITEMS,
-  SECTOR_CONSENSUS,
-  SENTIMENT_COMPONENTS,
-  SOCIAL_ATTENTION,
-} from '../lib/mockData'
-import { compositeScore, newsSectors } from '../lib/news'
+import { SECTOR_CONSENSUS, SENTIMENT_COMPONENTS, SOCIAL_ATTENTION } from '../lib/mockData'
+import { compositeScore } from '../lib/news'
+import type { NewsFeed, NewsItem, WatchList } from '../lib/types'
+
+/** The feed and the watch list are the engine's since Phase 3 step 4, so
+ * every test here answers `GET /api/news` and `/api/news/watch` from a
+ * stub. The shapes are `corollary/api/schemas.py`'s `NewsFeed` and
+ * `WatchList`, camelCased as the API serves them. In step 4 every item is
+ * `unclassified` with no tier and no source — the stub says so too, since a
+ * labelled fixture would test a state the server cannot produce yet. */
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response
+}
+
+function refusal(status: number, code: string, message: string): Response {
+  return jsonResponse(status, { error: { code, message } })
+}
+
+function item(overrides: Partial<NewsItem> = {}): NewsItem {
+  return {
+    id: '101:AAPL',
+    time: '2026-09-25T14:32:00Z',
+    ticker: 'AAPL',
+    headline: 'Apple widens its buyback by $20B',
+    sentiment: 'unclassified',
+    publisher: 'Reuters',
+    sector: 'Other',
+    tier: null,
+    url: 'https://www.reuters.com/apple-buyback',
+    source: null,
+    demoted: false,
+    ...overrides,
+  }
+}
+
+const ITEMS: NewsItem[] = [
+  item(),
+  item({
+    id: '102:MARKET',
+    time: '2026-09-25T13:05:00Z',
+    ticker: 'MARKET',
+    headline: 'Treasury yields climb ahead of the payrolls print',
+    publisher: null,
+    sector: 'Macro',
+    url: 'https://example.com/yields',
+  }),
+]
+
+function feed(overrides: Partial<NewsFeed> = {}): NewsFeed {
+  const items = overrides.items ?? ITEMS
+  return {
+    items,
+    total: items.length,
+    limit: 25,
+    offset: 0,
+    hasMore: false,
+    lookback: 'all',
+    scope: 'watch',
+    sort: 'newest',
+    since: null,
+    sectorsAvailable: true,
+    seedAsOf: '2026-09-01',
+    ...overrides,
+  }
+}
+
+function watchList(overrides: Partial<WatchList> = {}): WatchList {
+  return {
+    manual: [
+      { ticker: 'PLTR', addedAt: '2026-09-24T15:00:00Z' },
+      { ticker: 'SOFI', addedAt: '2026-09-25T13:10:00Z' },
+    ],
+    symbols: 61,
+    countBeforePositions: 58,
+    cap: 100,
+    remaining: 42,
+    positionUnderlyings: 3,
+    positionsAsOf: '2026-09-25T14:00:00Z',
+    seedMissing: false,
+    assetListAvailable: true,
+    assetListFetchedAt: '2026-09-25T12:00:00Z',
+    ...overrides,
+  }
+}
+
+interface Stub {
+  /** Answers `GET /api/news`, given the request's query. */
+  news?: (params: URLSearchParams) => Response | Promise<Response>
+  post?: Response
+}
+
+let served: WatchList
+let calls: { method: string; path: string; params: URLSearchParams }[]
+
+function stubFetch(stub: Stub = {}) {
+  const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://127.0.0.1')
+    const method = init?.method ?? 'GET'
+    const path = url.pathname
+    calls.push({ method, path, params: url.searchParams })
+
+    if (path.endsWith('/news')) {
+      return Promise.resolve(stub.news ? stub.news(url.searchParams) : jsonResponse(200, feed()))
+    }
+    const watch = path.match(/\/news\/watch(?:\/([^/]+))?$/)
+    if (watch) {
+      const ticker = watch[1] ? decodeURIComponent(watch[1]) : null
+      if (method === 'DELETE' && ticker) {
+        served = { ...served, manual: served.manual.filter((m) => m.ticker !== ticker) }
+        return Promise.resolve(jsonResponse(200, served))
+      }
+      if (method === 'POST' && ticker) {
+        if (stub.post) return Promise.resolve(stub.post)
+        served = {
+          ...served,
+          manual: [...served.manual, { ticker, addedAt: '2026-09-25T15:00:00Z' }],
+        }
+        return Promise.resolve(jsonResponse(200, served))
+      }
+      return Promise.resolve(jsonResponse(200, served))
+    }
+    // Nothing else on this page reads the engine. A 200 with an empty body
+    // keeps an unexpected call from reading as the failure under test.
+    return Promise.resolve(jsonResponse(200, {}))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function newsRequests(): URLSearchParams[] {
+  return calls.filter((c) => c.method === 'GET' && c.path.endsWith('/news')).map((c) => c.params)
+}
 
 const initialState = useUIStore.getState()
 
@@ -19,14 +149,25 @@ beforeEach(() => {
   // wrong page.
   window.history.pushState({}, '', '/news')
   useUIStore.setState({ ...initialState }, true)
+  queryClient.clear()
+  calls = []
+  served = watchList()
+  stubFetch()
 })
 
 function section(name: string): HTMLElement {
   return screen.getByRole('region', { name })
 }
 
-function feedTable(): HTMLElement {
-  return within(section('Latest intel')).getByRole('table')
+function feedSection(): HTMLElement {
+  return section('Latest intel')
+}
+
+/** The feed's table, once it has rendered — found by its header, because
+ * the loading skeleton is a table too. */
+async function feedTable(): Promise<HTMLElement> {
+  const header = await within(feedSection()).findByRole('columnheader', { name: 'Headline' })
+  return header.closest('table')!
 }
 
 function bodyRows(table: HTMLElement): HTMLElement[] {
@@ -38,204 +179,260 @@ function column(table: HTMLElement, index: number): string[] {
 }
 
 describe('the News page', () => {
-  it('renders all five sections of PRD §8.3', () => {
+  it('renders every section, the watch list included', async () => {
     render(<App />)
 
     for (const name of [
       'Latest intel',
       'Market Sentiment',
+      'Watch list',
       'Social Attention',
       'Top rated by sector',
       'Market calendar',
     ]) {
       expect(section(name)).toBeInTheDocument()
     }
-  })
-
-  /** Loading is a real condition rather than a timer — the hook polls on
-   * mount, so by the time the feed is on screen the skeleton is gone. */
-  it('shows a skeleton until the first poll returns, then the feed', () => {
-    useUIStore.setState({ lastNewsAt: null })
-    render(<App />)
-
-    expect(feedTable()).toBeInTheDocument()
-    expect(screen.queryByText('Loading news feed')).not.toBeInTheDocument()
-  })
-
-  it('reports the feed as live once a poll has landed', () => {
-    render(<App />)
-    expect(screen.getByRole('status')).toHaveAccessibleName(/^Live/)
+    await feedTable()
   })
 })
 
 describe('the live feed', () => {
-  it('opens newest first', () => {
+  it('shows a skeleton until the first response lands', () => {
+    stubFetch({ news: () => new Promise<Response>(() => {}) })
     render(<App />)
-    const times = bodyRows(feedTable()).map((r) => within(r).getAllByRole('cell')[0].textContent)
-    expect(times).toEqual([...times])
-    expect(column(feedTable(), 2)[0]).toContain(NEWS_ITEMS[0].headline)
+
+    expect(within(feedSection()).getByText('Loading news feed')).toBeInTheDocument()
+    expect(
+      within(feedSection()).queryByRole('columnheader', { name: 'Headline' }),
+    ).not.toBeInTheDocument()
   })
 
-  it('flips to oldest first', () => {
+  it('renders the server’s rows in the server’s order, with ticker, sector and publisher', async () => {
     render(<App />)
-    const newest = column(feedTable(), 2)[0]
+    const table = await feedTable()
+
+    expect(bodyRows(table)).toHaveLength(2)
+    expect(column(table, 1)).toEqual(['AAPL', 'MARKET'])
+    expect(column(table, 2)[0]).toBe('Apple widens its buyback by $20B')
+    expect(column(table, 3)).toEqual(['Other', 'Macro'])
+    expect(column(table, 5)[0]).toBe('Reuters')
+  })
+
+  it('links each headline to its article, in a new tab with no opener', async () => {
+    render(<App />)
+    await feedTable()
+    const link = within(feedSection()).getByRole('link', { name: /Apple widens its buyback/ })
+
+    expect(link).toHaveAttribute('href', 'https://www.reuters.com/apple-buyback')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  /** The vendor is provenance, not a publisher, and the server does not
+   * substitute it — so neither does the page, and it never prints "null". */
+  it('renders a missing publisher as a dash, never "null"', async () => {
+    render(<App />)
+    const table = await feedTable()
+    const cell = within(bodyRows(table)[1]).getAllByRole('cell')[5]
+
+    expect(cell.textContent).toContain('—')
+    expect(cell.textContent).not.toMatch(/null/i)
+    expect(within(cell).getByText('No publisher named')).toHaveClass('sr-only')
+  })
+
+  /** Nothing labelled a headline in step 4, which is the system working, not
+   * failing: caution, never error. And no tier chip — no tier produced it. */
+  it('reads Unclassified in caution with no tier chip', async () => {
+    render(<App />)
+    const table = await feedTable()
+    const label = within(bodyRows(table)[0]).getByText('UNCL')
+
+    expect(label).toHaveAttribute('title', 'Unclassified')
+    expect(label).toHaveClass('text-caution')
+    expect(label).not.toHaveClass('text-error')
+    for (const tier of ['Provider', 'Rules', 'LLM', 'undefined']) {
+      expect(within(table).queryByText(tier)).not.toBeInTheDocument()
+    }
+  })
+
+  it('asks for the watch list by default, and everything on toggle', async () => {
+    render(<App />)
+    await feedTable()
+    expect(newsRequests()[0].get('scope')).toBe('watch')
+    expect(within(feedSection()).getByRole('button', { name: 'Watch list' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+
+    fireEvent.click(within(feedSection()).getByRole('button', { name: 'Everything' }))
+
+    await waitFor(() => expect(newsRequests().at(-1)?.get('scope')).toBe('all'))
+  })
+
+  it('passes the lookback, filters and sort to the server rather than filtering locally', async () => {
+    render(<App />)
+    await feedTable()
+
+    fireEvent.change(screen.getByLabelText('How far back the feed reaches'), {
+      target: { value: 'today' },
+    })
+    await waitFor(() => expect(newsRequests().at(-1)?.get('lookback')).toBe('today'))
 
     fireEvent.change(screen.getByLabelText('Sort headlines by time'), {
       target: { value: 'oldest' },
     })
+    await waitFor(() => expect(newsRequests().at(-1)?.get('sort')).toBe('oldest'))
 
-    expect(column(feedTable(), 2)[0]).not.toBe(newest)
-  })
-
-  it('narrows to one sector', () => {
-    render(<App />)
-    const sector = newsSectors(NEWS_ITEMS)[0]
-
-    fireEvent.change(screen.getByLabelText('Filter headlines by sector'), {
-      target: { value: sector },
-    })
-
-    for (const row of bodyRows(feedTable())) {
-      expect(within(row).getAllByRole('cell')[2]).toHaveAttribute(
-        'title',
-        expect.stringContaining(sector),
-      )
-    }
-  })
-
-  /** The two controls combine rather than replacing each other — the count
-   * in the panel header is what proves it. */
-  it('combines the sector and sentiment filters', () => {
-    render(<App />)
-
-    fireEvent.change(screen.getByLabelText('Filter headlines by sector'), {
-      target: { value: 'Technology' },
-    })
-    const sectorOnly = within(section('Latest intel')).getByText(/of \d+ headlines/).textContent
-
-    fireEvent.change(screen.getByLabelText('Filter headlines by sentiment'), {
-      target: { value: 'bearish' },
-    })
-    const both = within(section('Latest intel')).getByText(/of \d+ headlines/).textContent
-
-    expect(both).not.toBe(sectorOnly)
-    for (const row of bodyRows(feedTable())) {
-      const cells = within(row).getAllByRole('cell')
-      expect(cells[2]).toHaveAttribute('title', expect.stringContaining('Technology'))
-      expect(cells[3].textContent).toContain('BEAR')
-    }
-  })
-
-  it('shortens the feed as the lookback shortens', () => {
-    render(<App />)
-    const all = bodyRows(feedTable()).length
-
-    fireEvent.change(screen.getByLabelText('How far back the feed reaches'), {
-      target: { value: 'today' },
-    })
-
-    expect(bodyRows(feedTable()).length).toBeLessThanOrEqual(all)
-    expect(within(section('Latest intel')).getByText(/of \d+ headlines/)).toBeInTheDocument()
-  })
-
-  /** An empty result is a designed state that says why it is empty and
-   * what to do — not a blank panel. */
-  it('explains an empty result rather than showing a blank panel', () => {
-    render(<App />)
-
-    fireEvent.change(screen.getByLabelText('Filter headlines by sector'), {
-      target: { value: 'Energy' },
-    })
-    fireEvent.change(screen.getByLabelText('Filter headlines by sentiment'), {
-      target: { value: 'unclassified' },
-    })
-    fireEvent.change(screen.getByLabelText('How far back the feed reaches'), {
-      target: { value: 'today' },
-    })
-
-    const panel = section('Latest intel')
-    if (within(panel).queryByRole('table') === null) {
-      expect(within(panel).getByText(/No headlines match those filters/)).toBeInTheDocument()
-      expect(within(panel).getByText(/widen the lookback/)).toBeInTheDocument()
-    }
-  })
-
-  it('paginates rather than rendering the whole corpus', () => {
-    render(<App />)
-    expect(bodyRows(feedTable()).length).toBeLessThan(NEWS_ITEMS.length)
-    expect(within(section('Latest intel')).getByText(/Page 1 of/)).toBeInTheDocument()
-  })
-
-  /** A headline about no single name is not a ticker, and rendering
-   * "MARKET" in the ticker column reads like one. */
-  it('renders a macro story as Market rather than a ticker', () => {
-    render(<App />)
     fireEvent.change(screen.getByLabelText('Filter headlines by sector'), {
       target: { value: 'Macro' },
     })
-    for (const cell of column(feedTable(), 1)) {
-      expect(cell).toBe('MARKET')
-    }
+    await waitFor(() => expect(newsRequests().at(-1)?.get('sector')).toBe('Macro'))
   })
 
-  it('names the tier that produced each label', () => {
+  it('pages with offset when the server has more', async () => {
+    stubFetch({
+      news: (params) =>
+        jsonResponse(
+          200,
+          feed({ total: 60, hasMore: true, offset: Number(params.get('offset') ?? 0) }),
+        ),
+    })
     render(<App />)
-    const labels = column(feedTable(), 3)
-    expect(labels.some((l) => /Provider|Rules|LLM/.test(l))).toBe(true)
+    await feedTable()
+    expect(newsRequests()[0].get('offset')).toBe('0')
+    expect(newsRequests()[0].get('limit')).toBe('25')
+
+    fireEvent.click(within(feedSection()).getByRole('button', { name: /next/i }))
+
+    await waitFor(() => expect(newsRequests().at(-1)?.get('offset')).toBe('25'))
   })
 
-  /** The first poll is the initial fetch. Releasing an arrival on mount
-   * would put a headline that landed after you opened the page — and
-   * before you could read it — at the top of every cold open. */
-  it('releases nothing on the first poll', () => {
+  it('says the watch list is empty, and offers everything', async () => {
+    stubFetch({
+      news: (params) =>
+        jsonResponse(
+          200,
+          feed({ items: [], scope: params.get('scope') === 'all' ? 'all' : 'watch' }),
+        ),
+    })
     render(<App />)
 
-    expect(useUIStore.getState().lastNewsAt).not.toBeNull()
-    expect(useUIStore.getState().newsFeed).toHaveLength(NEWS_ITEMS.length)
-    expect(useUIStore.getState().newsReleased).toBe(0)
+    expect(
+      await within(feedSection()).findByText(/No headlines on your watch list yet/),
+    ).toBeInTheDocument()
+
+    fireEvent.click(within(feedSection()).getByRole('button', { name: 'Switch to everything' }))
+
+    expect(
+      await within(feedSection()).findByText(/No headlines have been stored yet/),
+    ).toBeInTheDocument()
+    expect(newsRequests().at(-1)?.get('scope')).toBe('all')
   })
 
-  /** A new headline arriving prepends to the feed rather than replacing
-   * it — the whole point of a live feed. */
-  it('prepends a headline when one arrives', () => {
+  it('words the empty watch list for the lookback', async () => {
+    stubFetch({ news: () => jsonResponse(200, feed({ items: [] })) })
     render(<App />)
-    const before = column(feedTable(), 2)[0]
+    await within(feedSection()).findByText(/No headlines on your watch list yet/)
 
-    act(() => {
-      useUIStore.getState().pollNews()
+    fireEvent.change(screen.getByLabelText('How far back the feed reaches'), {
+      target: { value: 'today' },
     })
 
-    expect(column(feedTable(), 2)[0]).not.toBe(before)
-    expect(useUIStore.getState().newsFeed).toHaveLength(NEWS_ITEMS.length + 1)
+    expect(
+      await within(feedSection()).findByText(/No headlines on your watch list today/),
+    ).toBeInTheDocument()
   })
 
-  /** No news is the ordinary state of a news feed, so an empty poll is a
-   * successful one and the pill has to keep saying so. */
-  it('stays live once the incoming reserve is exhausted', () => {
+  it('renders a failed request as an error, in error', async () => {
+    stubFetch({
+      news: () => refusal(503, 'news_unavailable', 'The news store could not be read.'),
+    })
     render(<App />)
 
-    act(() => {
-      for (let i = 0; i < NEWS_INCOMING.length + 3; i += 1) useUIStore.getState().pollNews()
-    })
-
-    expect(useUIStore.getState().newsFeed).toHaveLength(NEWS_ITEMS.length + NEWS_INCOMING.length)
-    expect(useUIStore.getState().lastNewsAt).not.toBeNull()
-    expect(screen.getByRole('status')).toHaveAccessibleName(/^Live/)
+    const alert = await within(feedSection()).findByRole('alert', {}, { timeout: 4000 })
+    expect(alert).toHaveTextContent('The news store could not be read.')
+    expect(alert).toHaveClass('text-error')
   })
 
-  /** MARKET_TODAY is the fixture's today and the machine's clock is not.
-   * A released item stamped `new Date()` would sort months above the
-   * corpus it belongs in. */
-  it('stamps an arriving headline on the fixture’s clock, not the wall clock', () => {
+  it('captions the Other sector while the SPDR seed is missing', async () => {
+    stubFetch({ news: () => jsonResponse(200, feed({ sectorsAvailable: false, seedAsOf: null })) })
+    render(<App />)
+    await feedTable()
+
+    expect(
+      within(feedSection()).getByText(/Sectors appear once the SPDR holdings seed is built/),
+    ).toBeInTheDocument()
+  })
+})
+
+describe('the watch list', () => {
+  it('lists the manual watches against the cap', async () => {
+    render(<App />)
+    const panel = section('Watch list')
+
+    expect(await within(panel).findByText('PLTR')).toBeInTheDocument()
+    expect(within(panel).getByText('SOFI')).toBeInTheDocument()
+    expect(within(panel).getByText(/58 of 100 symbols/)).toBeInTheDocument()
+  })
+
+  it('removes a watch with DELETE and drops the row on success, without a confirm', async () => {
+    render(<App />)
+    const panel = section('Watch list')
+    await within(panel).findByText('PLTR')
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Remove PLTR from the watch list' }))
+
+    await waitFor(() => expect(within(panel).queryByText('PLTR')).not.toBeInTheDocument())
+    expect(calls.some((c) => c.method === 'DELETE' && c.path.endsWith('/news/watch/PLTR'))).toBe(
+      true,
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(within(panel).getByText('SOFI')).toBeInTheDocument()
+  })
+
+  it('adds a watch with POST', async () => {
+    render(<App />)
+    const panel = section('Watch list')
+    await within(panel).findByText('PLTR')
+
+    fireEvent.change(within(panel).getByLabelText('Ticker to watch'), { target: { value: 'hood' } })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Watch' }))
+
+    expect(await within(panel).findByText('HOOD')).toBeInTheDocument()
+    expect(calls.some((c) => c.method === 'POST' && c.path.endsWith('/news/watch/HOOD'))).toBe(
+      true,
+    )
+  })
+
+  /** The server validates every add (rule 4) and says why it refused. The
+   * page renders that sentence rather than a generic failure. */
+  it('renders the server’s refusal inline', async () => {
+    stubFetch({
+      post: refusal(
+        422,
+        'not_an_active_us_equity',
+        'ZZZZ is not an active US equity in the asset list',
+      ),
+    })
+    render(<App />)
+    const panel = section('Watch list')
+    await within(panel).findByText('PLTR')
+
+    fireEvent.change(within(panel).getByLabelText('Ticker to watch'), { target: { value: 'ZZZZ' } })
+    fireEvent.click(within(panel).getByRole('button', { name: 'Watch' }))
+
+    const alert = await within(panel).findByRole('alert')
+    expect(alert).toHaveTextContent('ZZZZ is not an active US equity in the asset list')
+    expect(alert).toHaveClass('text-error')
+  })
+
+  it('says the count is provisional while the seed is missing', async () => {
+    served = watchList({ seedMissing: true })
     render(<App />)
 
-    act(() => {
-      useUIStore.getState().pollNews()
-    })
-
-    const newest = useUIStore.getState().newsFeed[0]
-    expect(newest.time.slice(0, 4)).toBe(NEWS_ITEMS[0].time.slice(0, 4))
-    expect(newest.time > NEWS_ITEMS[0].time).toBe(true)
+    expect(
+      await within(section('Watch list')).findByText(/SPDR holdings seed is not built/),
+    ).toBeInTheDocument()
   })
 })
 
@@ -338,48 +535,51 @@ describe('the market calendar', () => {
   })
 })
 
-/** Phase 2 decision 8. PRD §8.5's "a table of invented numbers reads as
- * invented" held while every page was a fixture; it stops holding once
- * Account, Activity, Markets and Settings' ceilings are the engine's own
- * data. The sentiment composite is the sharpest case on this page — a
- * number with a published formula behind it reads as *computed* — and the
- * poll pill beside the title is reporting a freshness for fixtures. */
-describe('the fixture marker', () => {
-  it('says at the page title that everything here is sample data', () => {
-    render(<App />)
-    const marker = screen.getByText('Sample data — Phase 1')
+/** Phase 2 decision 8, and the Settings precedent once a page is mixed. The
+ * feed and the watch list are real since Phase 3 step 4, so a marker on the
+ * title would label them invented; each panel that is still a fixture says
+ * so itself, and the real ones say nothing. */
+describe('the fixture markers', () => {
+  const MARKER = 'Sample data — Phase 1'
 
-    expect(marker).toBeInTheDocument()
-    expect(marker.getAttribute('title')).toMatch(/sample data/i)
+  it('leaves the title and the real panels unmarked', async () => {
+    render(<App />)
+    await feedTable()
+
+    const title = screen.getByRole('heading', { level: 1, name: 'News' })
+    expect(within(title.parentElement!).queryByText(MARKER)).not.toBeInTheDocument()
+    expect(within(feedSection()).queryByText(MARKER)).not.toBeInTheDocument()
+    expect(within(section('Watch list')).queryByText(MARKER)).not.toBeInTheDocument()
   })
 
-  it('marks the page once rather than each panel, since every panel is mock', () => {
+  it('marks each panel that is still sample data', () => {
     render(<App />)
 
-    expect(screen.getAllByText('Sample data — Phase 1')).toHaveLength(1)
-    for (const name of ['Latest intel', 'Market Sentiment', 'Market calendar']) {
-      expect(within(section(name)).queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
+    for (const name of [
+      'Market Sentiment',
+      'Social Attention',
+      'Top rated by sector',
+      'Market calendar',
+    ]) {
+      expect(within(section(name)).getByText(MARKER)).toBeInTheDocument()
     }
   })
 
   it('is a status label, not a control', () => {
     render(<App />)
-    expect(screen.getByText('Sample data — Phase 1').closest('button')).toBeNull()
+    for (const marker of screen.getAllByText(MARKER)) {
+      expect(marker.closest('button')).toBeNull()
+    }
   })
 
-  /** The three-word label says *whether* this page is a fixture; the detail
-   * says *what* is invented and when it becomes real. On a non-focusable span
-   * the tooltip is mouse-only, and this page has no visible restatement the
-   * way the Settings panel does — so without the screen-reader copy, the
-   * sentiment composite in particular is a published-looking formula with no
-   * reachable statement that no headline went into it. */
-  it('puts the detail in reach without a pointer, in the tooltip’s own words', () => {
+  /** On a non-focusable span the tooltip is mouse-only, so the detail rides
+   * along for a screen reader in the tooltip's own words. */
+  it('puts the composite’s detail in reach without a pointer', () => {
     render(<App />)
-    const detail = screen.getByText(/nothing here was computed from a published headline/)
+    const panel = section('Market Sentiment')
+    const detail = within(panel).getByText(/nothing here was computed from a published headline/)
 
     expect(detail).toHaveClass('sr-only')
-    expect(detail.textContent).toBe(
-      screen.getByText('Sample data — Phase 1').getAttribute('title'),
-    )
+    expect(detail.textContent).toBe(within(panel).getByText(MARKER).getAttribute('title'))
   })
 })

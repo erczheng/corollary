@@ -54,6 +54,10 @@ import {
   haltEngine,
   markNotificationRead,
   resumeEngine,
+  fetchNews,
+  fetchWatchList,
+  addWatch,
+  removeWatch,
   updateDataFeeds,
   updateNotificationRoutes,
   updateRiskLimits,
@@ -63,6 +67,7 @@ import type {
   ChainQuery,
   DataFeedUpdate,
   HistoryWindow,
+  NewsQuery,
   NotificationRouteUpdate,
   PageParams,
   RiskLimitUpdate,
@@ -144,6 +149,23 @@ export const queryKeys = {
   auditLog: (params: PageParams = {}) =>
     ['settings', 'audit', params.page ?? null, params.pageSize ?? null] as const,
   dataSources: () => ['settings', 'sources'] as const,
+
+  /** Every filter is part of the key, normalised to null — see above. */
+  news: (query: NewsQuery = {}) =>
+    [
+      'news',
+      'feed',
+      query.lookback ?? null,
+      query.scope ?? null,
+      query.ticker ?? null,
+      query.sector ?? null,
+      query.publisher ?? null,
+      query.sentiment ?? null,
+      query.sort ?? null,
+      query.limit ?? null,
+      query.offset ?? null,
+    ] as const,
+  watchList: () => ['news', 'watch'] as const,
 }
 
 /** Which book a hook is asking about: the caller's, or the selected one.
@@ -556,5 +578,65 @@ export function useDataSources() {
   return useQuery({
     queryKey: queryKeys.dataSources(),
     queryFn: ({ signal }) => fetchDataSources({ signal }),
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * News (Phase 3 step 4)
+ * ---------------------------------------------------------------------- */
+
+/** How often the feed re-reads. Fifteen seconds, the cadence the fixture
+ * poll had, and deliberately slower than either price feed: a headline
+ * published at 10:04 is the same headline at 10:05. TanStack pauses the
+ * interval while the tab is hidden, which is what `useNewsPoll` did by
+ * hand. */
+export const NEWS_POLL_MS = 15_000
+
+/** One page of the feed. The server filters and sorts; the caller renders
+ * `items` in the order given. The previous page stays on screen while the
+ * next one loads, so paging does not flash the skeleton. */
+export function useNewsFeed(query: NewsQuery = {}) {
+  return useQuery({
+    queryKey: queryKeys.news(query),
+    queryFn: ({ signal }) => fetchNews(query, { signal }),
+    refetchInterval: NEWS_POLL_MS,
+    placeholderData: keepPreviousData,
+  })
+}
+
+export function useWatchList() {
+  return useQuery({
+    queryKey: queryKeys.watchList(),
+    queryFn: ({ signal }) => fetchWatchList({ signal }),
+  })
+}
+
+/** A watch change moves the watch universe, so the feed's `watch` scope is
+ * a different answer afterwards: both the list and every cached feed page
+ * are refreshed. The change is audit-logged server-side, so the log is too. */
+function onWatchChanged(client: QueryClient) {
+  void client.invalidateQueries({ queryKey: ['news'] })
+  void client.invalidateQueries({ queryKey: ['settings', 'audit'] })
+}
+
+export function useAddWatch() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ticker: string) => addWatch(ticker),
+    onSuccess: (list) => {
+      client.setQueryData(queryKeys.watchList(), list)
+      onWatchChanged(client)
+    },
+  })
+}
+
+export function useRemoveWatch() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (ticker: string) => removeWatch(ticker),
+    onSuccess: (list) => {
+      client.setQueryData(queryKeys.watchList(), list)
+      onWatchChanged(client)
+    },
   })
 }

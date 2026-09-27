@@ -533,9 +533,9 @@ def test_no_news_route_depends_on_a_broker_or_a_provider(path: str, method: str)
 
 
 def test_the_item_serves_every_field_of_the_frontends_news_item() -> None:
-    wire = wire_fields(schemas.NewsItem)
-    assert ts_interface_fields("NewsItem") <= wire
-    assert wire - ts_interface_fields("NewsItem") == {"url", "source", "demoted"}
+    # The frontend now reads url, source and demoted too, so the two field
+    # sets are the same set: any drift either way is a contract break.
+    assert ts_interface_fields("NewsItem") == wire_fields(schemas.NewsItem)
 
 
 def test_the_sentiment_and_tier_unions_match_types_ts() -> None:

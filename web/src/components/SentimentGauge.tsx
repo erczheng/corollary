@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { SENTIMENT_COMPONENTS, SENTIMENT_PREVIOUS, SENTIMENT_AS_OF } from '../lib/mockData'
 import {
   SENTIMENT_BAND_LABEL,
@@ -83,7 +84,7 @@ function ComponentRow({
  * already makes for rejection reasons on Activity. At one line per
  * component it costs seven rows in a sidebar, which is cheaper than the
  * interaction it replaces. */
-export function SentimentGauge() {
+export function SentimentGauge({ marker }: { marker?: ReactNode } = {}) {
   const score = compositeScore(SENTIMENT_COMPONENTS)
   const band = sentimentBand(score)
   const tone = sentimentTone(score)
@@ -94,9 +95,14 @@ export function SentimentGauge() {
       aria-labelledby="market-sentiment-heading"
       className="rounded-lg border border-outline-warm bg-surface-container-lowest p-4"
     >
-      <h2 id="market-sentiment-heading" className="text-title-lg text-on-surface">
-        Market Sentiment
-      </h2>
+      {/* The marker sits beside the heading, not in it, so the region's
+          name stays "Market Sentiment". */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id="market-sentiment-heading" className="text-title-lg text-on-surface">
+          Market Sentiment
+        </h2>
+        {marker}
+      </div>
 
       <div className="mt-2 flex items-baseline justify-between gap-2">
         <p className={`text-data-xl ${TONE_TEXT[tone]}`}>{score}</p>

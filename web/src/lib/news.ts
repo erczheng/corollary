@@ -141,13 +141,35 @@ export const DEFAULT_NEWS_FILTER: NewsFilter = {
  * and alphabetising it between Health Care and Technology implies a
  * peerage it does not have. */
 export function newsSectors(items: NewsItem[]): string[] {
-  const seen = [...new Set(items.map((i) => i.sector))]
+  return orderSectors(items.map((i) => i.sector))
+}
+
+/** Sector names for a dropdown: distinct, alphabetical, Macro last — the
+ * ordering `newsSectors` documents, over bare names. The live feed needs it
+ * over names it has *seen* across pages, because `GET /api/news` serves a
+ * page, not the list of sectors a filter could take. */
+export function orderSectors(names: Iterable<string>): string[] {
+  const seen = [...new Set(names)]
   const sectors = seen.filter((s) => s !== MACRO_SECTOR).sort((a, b) => a.localeCompare(b))
   return seen.includes(MACRO_SECTOR) ? [...sectors, MACRO_SECTOR] : sectors
 }
 
+/** The lookback as it reads inside a sentence — "No headlines on your watch
+ * list {phrase}". `all` reads "yet": with no bound, empty means nothing has
+ * been ingested, not that the window was quiet. */
+export const LOOKBACK_PHRASE: Record<Lookback, string> = {
+  today: 'today',
+  '3d': 'in the last 3 days',
+  '1w': 'in the last week',
+  '2w': 'in the last 2 weeks',
+  all: 'yet',
+}
+
 export function newsPublishers(items: NewsItem[]): string[] {
-  return [...new Set(items.map((i) => i.publisher))].sort((a, b) => a.localeCompare(b))
+  // A null publisher is "the vendor named none" — not a publisher, so not an
+  // option to filter by.
+  const named = items.map((i) => i.publisher).filter((p): p is string => p !== null)
+  return [...new Set(named)].sort((a, b) => a.localeCompare(b))
 }
 
 /** Every filter narrows the same set — they **combine** rather than
