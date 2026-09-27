@@ -12,12 +12,14 @@ import pytest
 
 from corollary.calendars import NYSE_TZ, nyse_session_close
 from corollary.data.news.tradeability import (
+    ADV_LOOKBACK_SESSIONS,
     ADV_SESSIONS,
     MIN_AVG_DAILY_VOLUME,
+    MIN_COMPLETED_SESSIONS,
     MIN_LAST_CLOSE,
-    MIN_SESSIONS_OF_HISTORY,
     STANDARD_CONTRACT_SIZE,
     TradeabilityFailure,
+    adv_request_start,
     adv_window,
     adv_window_start,
     assess_tradeability,
@@ -32,6 +34,31 @@ SESSION = date(2026, 9, 24)
 #: Aug 26, skipping weekends and Labor Day (Sep 7). An independent check on
 #: the calendar walk, not derived from it.
 WINDOW_START = date(2026, 8, 26)
+
+#: The 272nd NYSE session before SESSION -- the window plus the 252-session
+#: listing lookback. Too many to count by hand in a comment, so it is counted
+#: independently of ``corollary.calendars`` instead: weekdays, minus the NYSE
+#: full-day closures listed in :data:`HAND_LISTED_CLOSURES` (see
+#: ``test_the_request_start_matches_a_hand_listed_holiday_count``).
+REQUEST_START = date(2025, 8, 25)
+
+#: NYSE full-day closures between REQUEST_START and SESSION, typed from the
+#: published holiday schedule rather than read from the calendar under test.
+HAND_LISTED_CLOSURES = frozenset(
+    {
+        date(2025, 9, 1),  # Labor Day
+        date(2025, 11, 27),  # Thanksgiving
+        date(2025, 12, 25),  # Christmas
+        date(2026, 1, 1),  # New Year's Day
+        date(2026, 1, 19),  # Martin Luther King Jr. Day
+        date(2026, 2, 16),  # Washington's Birthday
+        date(2026, 4, 3),  # Good Friday
+        date(2026, 5, 25),  # Memorial Day
+        date(2026, 6, 19),  # Juneteenth
+        date(2026, 7, 3),  # Independence Day, observed
+        date(2026, 9, 7),  # Labor Day
+    }
+)
 
 
 def sessions_before(day: date, count: int) -> list[date]:
@@ -95,8 +122,12 @@ def test_the_thresholds_are_the_spec_values() -> None:
     assert MIN_AVG_DAILY_VOLUME == 1_000_000
     assert MIN_LAST_CLOSE == Decimal("5")
     assert isinstance(MIN_LAST_CLOSE, Decimal)
-    assert MIN_SESSIONS_OF_HISTORY == 20
+    # Q10: a recent IPO is judged on the sessions it has, down to one.
+    assert MIN_COMPLETED_SESSIONS == 1
     assert ADV_SESSIONS == 20
+    # Q10 fix round: one year of sessions, so only a name silent for longer
+    # than a year reads as a recent listing.
+    assert ADV_LOOKBACK_SESSIONS == 252
     assert STANDARD_CONTRACT_SIZE == Decimal(100)
 
 
@@ -112,7 +143,8 @@ def test_a_liquid_optionable_standard_name_passes_and_carries_every_cache_field(
     assert result.avg_volume_20d == 2_000_000
     assert result.last_close == Decimal("50")
     assert isinstance(result.last_close, Decimal)
-    # Window coverage, not history length: 25 bars, 20 of them in the window.
+    # The divisor the average was taken over: 25 bars, an established name,
+    # so all 20 window sessions.
     assert result.sessions_available == 20
 
 
@@ -167,22 +199,175 @@ def test_a_close_at_4_99_fails() -> None:
     assert result.failures == (TradeabilityFailure.LOW_CLOSE,)
 
 
-def test_19_sessions_of_history_fails_without_a_partial_average() -> None:
-    result = assess(daily_bars=history(19, volume=5_000_000))
-    assert result.sessions_available == 19
-    assert result.failures == (TradeabilityFailure.INSUFFICIENT_HISTORY,)
-    # A recent IPO is not judged on a partial average, and none is recorded.
-    assert result.avg_volume_20d is None
-    # The close is a fact about the last bar and is still reported.
-    assert result.last_close == Decimal("50")
-
-
-def test_no_history_at_all_fails_with_nothing_to_report() -> None:
+def test_no_completed_session_fails_with_a_named_reason_and_nothing_to_report() -> None:
+    """Zero completed sessions: no close, no volume, no divide-by-zero, no pass."""
     result = assess(daily_bars=[])
     assert result.sessions_available == 0
     assert result.avg_volume_20d is None
     assert result.last_close is None
-    assert result.failures == (TradeabilityFailure.INSUFFICIENT_HISTORY,)
+    assert result.failures == (TradeabilityFailure.NO_COMPLETED_SESSION,)
+
+
+def test_only_a_bar_for_session_date_itself_is_no_completed_session() -> None:
+    """Listing day, mid-session: the one bar there is still forming."""
+    result = assess(daily_bars=[bar(SESSION, volume=40_000_000)])
+    assert result.sessions_available == 0
+    assert result.avg_volume_20d is None
+    assert result.failures == (TradeabilityFailure.NO_COMPLETED_SESSION,)
+
+
+# --- recent listings (Q10) ------------------------------------------------------
+
+
+def test_a_single_completed_session_passes_when_every_other_check_holds() -> None:
+    """Listed yesterday: one real close and one real volume are enough (Q10)."""
+    result = assess(daily_bars=history(1, volume=1_500_000, last_close="31.25"))
+    assert result.passes is True, result.failures
+    assert result.sessions_available == 1
+    assert result.avg_volume_20d == 1_500_000
+    assert result.last_close == Decimal("31.25")
+
+
+def test_a_single_completed_session_still_meets_every_threshold() -> None:
+    thin = assess(daily_bars=history(1, volume=999_999))
+    assert thin.failures == (TradeabilityFailure.LOW_VOLUME,)
+    cheap = assess(daily_bars=history(1, last_close="4.99"))
+    assert cheap.failures == (TradeabilityFailure.LOW_CLOSE,)
+    unlisted = assess(daily_bars=history(1), has_options=False)
+    assert unlisted.failures == (TradeabilityFailure.NO_OPTIONS,)
+
+
+def test_19_sessions_the_old_boundary_passes_on_a_19_session_average() -> None:
+    result = assess(daily_bars=history(19, volume=1_200_000))
+    assert result.passes is True, result.failures
+    assert result.sessions_available == 19
+    assert result.avg_volume_20d == 1_200_000
+    assert result.last_close == Decimal("50")
+
+
+def test_a_partial_average_is_floored_over_its_own_session_count() -> None:
+    """2,999,999 over 3 sessions is 999,999.67: floored, it fails."""
+    result = assess(daily_bars=history(3, volumes=[1_000_000, 1_000_000, 999_999]))
+    assert result.sessions_available == 3
+    assert result.avg_volume_20d == 999_999
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+
+def test_a_recent_listing_counts_a_gap_after_its_first_bar_as_zero_volume() -> None:
+    """Ten sessions since the first bar, one without a bar: 9 x 1,100,000 / 10.
+
+    Averaged over the bars it traded on it would be 1,100,000 and pass.
+    """
+    bars = history(10, volume=1_100_000)
+    gap = sessions_before(SESSION, 5)[0]
+    bars = [item for item in bars if item.at.astimezone(NYSE_TZ).date() != gap]
+    result = assess(daily_bars=bars)
+    assert result.sessions_available == 10
+    assert result.avg_volume_20d == 990_000
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+
+def test_a_recent_listing_with_a_stale_tape_still_fails() -> None:
+    """Listed five sessions ago, no bar for the previous session: stale, as ever."""
+    bars = history(5, volume=9_000_000)[:-1]
+    result = assess(daily_bars=bars)
+    assert result.sessions_available == 5
+    assert result.avg_volume_20d == 7_200_000
+    assert result.failures == (TradeabilityFailure.STALE_BARS,)
+
+
+def test_a_listing_on_the_first_window_session_reads_like_an_established_name() -> None:
+    """The two rules meet at 20: first bar on the window's first session."""
+    listed = assess(daily_bars=history(20, volume=1_000_000))
+    established = assess(daily_bars=history(21, volume=1_000_000))
+    assert listed.sessions_available == established.sessions_available == 20
+    assert listed.avg_volume_20d == established.avg_volume_20d == 1_000_000
+    assert listed.passes and established.passes
+
+
+# --- a partial window is not missing bars ---------------------------------------
+
+
+def test_an_established_ticker_with_missing_recent_bars_still_fails() -> None:
+    """Long-listed, last three sessions absent: stale, judged over all 20."""
+    bars = history(60, volume=5_000_000)[:-3]
+    result = assess(daily_bars=bars)
+    assert result.sessions_available == 20
+    assert result.avg_volume_20d == 4_250_000
+    assert result.failures == (TradeabilityFailure.STALE_BARS,)
+
+
+def test_an_established_name_missing_the_front_of_its_window_is_not_a_recent_listing() -> None:
+    """Bars only on the last 10 window sessions -- but one in the lookback too.
+
+    That lookback bar proves the name was listed before the window, so the
+    ten missing sessions are zero-volume sessions of an established name:
+    15,000,000 / 20 = 750,000, which fails. Without it the same ten bars are
+    a ten-session listing averaging 1,500,000, which passes -- the difference
+    the lookback exists to see.
+    """
+    recent = history(10, volume=1_500_000)
+    lookback_bar = bar(sessions_before(WINDOW_START, 1)[0], volume=1_500_000)
+
+    established = assess(daily_bars=[lookback_bar, *recent])
+    assert established.sessions_available == 20
+    assert established.avg_volume_20d == 750_000
+    assert established.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+    listing = assess(daily_bars=recent)
+    assert listing.sessions_available == 10
+    assert listing.avg_volume_20d == 1_500_000
+    assert listing.passes is True
+
+
+def test_any_older_bar_marks_a_name_established_however_far_back() -> None:
+    """The caller may pass more than the lookback; an older bar still counts."""
+    recent = history(5, volume=3_000_000)
+    ancient = bar(date(2025, 1, 2), volume=3_000_000)
+    result = assess(daily_bars=[ancient, *recent])
+    assert result.sessions_available == 20
+    assert result.avg_volume_20d == 750_000
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+
+def test_a_name_silent_for_longer_than_the_lookback_reads_as_a_recent_listing() -> None:
+    """The residual ambiguity, pinned rather than hidden (Q10).
+
+    A long-listed name with no bar anywhere in the 252-session lookback --
+    suspended for more than a year, then resumed five sessions ago -- is
+    indistinguishable by bars from a five-session IPO, and the provider's
+    asset record carries no listing date to tell them apart. Given only the
+    bars ``adv_daily_bars`` fetches, it is judged as a recent listing on the
+    sessions since it resumed.
+    """
+    resumed = history(5, volume=2_000_000)
+    assert min(item.at.astimezone(NYSE_TZ).date() for item in resumed) > REQUEST_START
+    result = assess(daily_bars=resumed)
+    assert result.sessions_available == 5
+    assert result.avg_volume_20d == 2_000_000
+    assert result.passes is True
+
+
+def test_a_name_suspended_for_months_then_resumed_is_judged_as_established() -> None:
+    """The audit's case: a long-listed name halted for well over 40 sessions.
+
+    Its last pre-suspension bar is 120 sessions back -- outside the old
+    40-session lookback, inside the 252-session one. It resumed five sessions
+    ago at 2,000,000 shares a day. Under the old lookback it read as a
+    five-session listing and passed on a 2,000,000 average; now the pre-window
+    bar marks it established, the average runs over all 20 window sessions
+    with the silent ones as zeros, and it fails on volume.
+    """
+    halted_at = sessions_before(SESSION, 120)[0]
+    # The fix is in what gets fetched: the request must reach the halted bar,
+    # or the filter never sees it and the name reads as a listing again.
+    assert adv_request_start(SESSION) <= halted_at < WINDOW_START
+    before_halt = bar(halted_at, volume=2_000_000)
+    resumed = history(5, volume=2_000_000, last_close="8")
+    result = assess(daily_bars=[before_halt, *resumed])
+    assert result.sessions_available == 20
+    assert result.avg_volume_20d == 500_000
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
 
 
 # --- the boundaries pass ------------------------------------------------------
@@ -312,6 +497,42 @@ def test_the_window_is_the_20_nyse_sessions_before_session_date() -> None:
     assert adv_window_start(SESSION) == WINDOW_START
 
 
+def test_the_bar_request_reaches_back_252_sessions_before_the_window() -> None:
+    assert adv_request_start(SESSION) == REQUEST_START
+    assert sessions_before(SESSION, ADV_LOOKBACK_SESSIONS + ADV_SESSIONS)[0] == REQUEST_START
+    assert sessions_before(WINDOW_START, ADV_LOOKBACK_SESSIONS)[0] == REQUEST_START
+
+
+def test_the_request_start_matches_a_hand_listed_holiday_count() -> None:
+    """An independent check on the 272-session walk: weekdays minus closures."""
+    counted = 0
+    cursor = SESSION
+    while counted < ADV_LOOKBACK_SESSIONS + ADV_SESSIONS:
+        cursor -= timedelta(days=1)
+        if cursor.weekday() < 5 and cursor not in HAND_LISTED_CLOSURES:
+            counted += 1
+    assert cursor == REQUEST_START
+
+
+def test_the_lookback_walk_reaches_a_full_year_but_the_window_walk_stays_short() -> None:
+    """Two bounds, not one: the 272-session walk needs ~395 calendar days, and
+    widening the 20-session window's bound to match would let a date far
+    outside the published schedule find a window instead of raising."""
+    weekdays = lambda day: day.weekday() < 5  # noqa: E731
+    # 272 weekday sessions span ~380 days: inside the lookback bound.
+    assert adv_request_start(SESSION, is_session=weekdays) < WINDOW_START
+    # A calendar with no sessions in the last 200 days: the window walk (bound
+    # 180) must raise; it would not with the lookback's bound.
+    gap_start = SESSION - timedelta(days=200)
+    with pytest.raises(ValueError, match="sessions"):
+        adv_window(SESSION, is_session=lambda day: weekdays(day) and day < gap_start)
+
+
+def test_a_calendar_that_cannot_reach_the_lookback_raises() -> None:
+    with pytest.raises(ValueError, match="sessions"):
+        adv_request_start(SESSION, is_session=lambda day: False)
+
+
 def test_a_half_day_is_a_session_and_a_holiday_is_not() -> None:
     """Friday 28 Nov 2025 closed at 13:00 and is a session; Thanksgiving is not.
 
@@ -335,7 +556,8 @@ def test_a_halted_name_is_not_judged_on_its_pre_halt_tape() -> None:
     halted_from = sessions_before(SESSION, 30)[0]
     bars = history(40, volume=5_000_000, last_close="42", before=halted_from)
     result = assess(daily_bars=bars)
-    assert result.sessions_available == 0
+    # Established (its bars predate the window), so the divisor is all 20.
+    assert result.sessions_available == 20
     # Every window session is a no-trade session: zero volume, not the old average.
     assert result.avg_volume_20d == 0
     # The close is still the newest bar's, so the row shows what it was judged on.
@@ -346,7 +568,7 @@ def test_a_halted_name_is_not_judged_on_its_pre_halt_tape() -> None:
 def test_missing_only_the_previous_session_is_stale() -> None:
     bars = history(25)[:-1]
     result = assess(daily_bars=bars)
-    assert result.sessions_available == 19
+    assert result.sessions_available == 20
     assert result.failures == (TradeabilityFailure.STALE_BARS,)
 
 
@@ -369,16 +591,16 @@ def test_a_session_with_no_bar_counts_as_zero_volume() -> None:
     gap = sessions_before(SESSION, 10)[0]
     bars = [item for item in bars if item.at.astimezone(NYSE_TZ).date() != gap]
     result = assess(daily_bars=bars)
-    assert result.sessions_available == 19
+    assert result.sessions_available == 20
     assert result.avg_volume_20d == 997_500
     assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
 
 
-def test_no_bar_on_the_first_window_session_but_an_older_one_still_has_history() -> None:
+def test_no_bar_on_the_first_window_session_but_an_older_one_is_established() -> None:
     bars = history(25, volume=2_000_000)
     bars = [item for item in bars if item.at.astimezone(NYSE_TZ).date() != WINDOW_START]
     result = assess(daily_bars=bars)
-    assert result.sessions_available == 19
+    assert result.sessions_available == 20
     assert result.avg_volume_20d == 1_900_000
     assert result.passes is True
 
@@ -390,7 +612,7 @@ def test_the_calendar_is_a_parameter() -> None:
         2026, 8, 27
     )
     # Labor Day has no bar, so under the fake it is a zero-volume window session.
-    assert result.sessions_available == 19
+    assert result.sessions_available == 20
     assert result.avg_volume_20d == 1_900_000
 
 

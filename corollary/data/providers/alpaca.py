@@ -86,7 +86,7 @@ from corollary.data.news.article import (
     NewsFeed,
     NewsProviderError,
 )
-from corollary.data.news.tradeability import adv_window, has_standard_contract
+from corollary.data.news.tradeability import adv_request_start, has_standard_contract
 from corollary.data.providers.interface import (
     AnalyticsSource,
     AssetDirectory,
@@ -270,8 +270,12 @@ ALPACA_NEWS_MAX_PAGES: Final = 10
 #: shared 200/min data bucket the Markets snapshots also draw on.
 ALPACA_NEWS_OVERRUN_FACTOR: Final = 3
 
-#: Symbols per ADV bars request. Decision 21's budget row: 200 symbols x ~21
-#: daily bars is ~4,200 points, under the 10,000-bar page.
+#: Symbols per ADV bars request. Decision 21's budget row was 200 symbols x
+#: ~21 daily bars, one page; since Q10 a request spans 272 sessions (the
+#: window plus the one-year listing lookback), so a full 200-symbol batch is
+#: ~54,400 points, six 10,000-bar pages -- :meth:`AlpacaProvider.stock_bars`
+#: follows the page token. The tradeability refresh sends at most 100 symbols
+#: (27,200 points, three pages).
 ADV_MAX_SYMBOLS: Final = 200
 
 #: How far out the standard-root check looks for a contract. The contracts
@@ -1736,13 +1740,20 @@ class AlpacaProvider(MarketDataProvider):
     ) -> dict[str, list[Bar]]:
         """Daily bars covering the ADV window before ``session_date``, on the historical feed.
 
-        Decision 21's volume and close inputs. The window is
-        :func:`~corollary.data.news.tradeability.adv_window` -- the 20 exchange
-        sessions strictly before ``session_date`` from the market calendar --
-        so the request runs from midnight New York on its first session to
-        one second before midnight New York on ``session_date``. Alpaca stamps
-        a daily bar at midnight New York, so the ``session_date`` bar (still
-        forming during the day) is excluded by the request itself.
+        Decision 21's volume and close inputs. The ADV window is the 20
+        exchange sessions strictly before ``session_date`` from the market
+        calendar, and since Q10 the request also covers the 252 sessions (one
+        year) before that --
+        :func:`~corollary.data.news.tradeability.adv_request_start` -- so the
+        filter can tell a recent listing (first bar inside the window) from an
+        established name with missing bars, including one suspended for
+        anything up to a year. That is the
+        :class:`~corollary.data.news.tradeability.TradeabilityInputs` contract:
+        a request starting later would make such names read as listings. It runs from midnight New
+        York on that first session to one second before midnight New York on
+        ``session_date``. Alpaca stamps a daily bar at midnight New York, so
+        the ``session_date`` bar (still forming during the day) is excluded by
+        the request itself.
 
         **Always** :attr:`FeedConfig.stock_historical` (``sip`` on this plan),
         through :meth:`stock_bars`, never the realtime feed and never
@@ -1764,8 +1775,7 @@ class AlpacaProvider(MarketDataProvider):
             raise ValueError(f"not equity symbols: {bad!r}")
         if not normalised:
             return {}
-        window = adv_window(session_date)
-        start = datetime.combine(window[0], time(0), tzinfo=NYSE_TZ)
+        start = datetime.combine(adv_request_start(session_date), time(0), tzinfo=NYSE_TZ)
         end = datetime.combine(session_date, time(0), tzinfo=NYSE_TZ) - timedelta(seconds=1)
         return await self.stock_bars(
             list(dict.fromkeys(normalised)),

@@ -17,6 +17,9 @@ nothing here loads ``.env`` (rule 6; pinned by
   is the provider's own ``standard_root_params``; the committed
   ``p4_contracts_root_*`` files were captured with this script's older
   params, as ``record_roots`` explains.
+* ``bars`` writes only ``p4_stock_bars_adv_lookback.json``: AAPL, SPY and
+  XRX daily bars on the historical feed from ``adv_request_start`` (the ADV
+  window plus the one-year listing lookback) to the last completed session.
 * ``measure`` writes nothing. It paginates the last complete UTC day of the
   untickered feed and prints counts only: articles, distinct tags, how many
   are crypto-shaped, how many articles carry no symbol, and which timestamp
@@ -61,7 +64,7 @@ REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from corollary.data.news.tradeability import adv_window_start  # noqa: E402
+from corollary.data.news.tradeability import adv_request_start  # noqa: E402
 from corollary.calendars import NYSE_TZ  # noqa: E402
 from corollary.wire import vendor_detail  # noqa: E402
 from corollary.data.providers.alpaca import (  # noqa: E402
@@ -289,11 +292,20 @@ async def record_roots(rec: Recorder, trading: str) -> None:
         save(name, _envelope(f"/v2/options/contracts?{_qs(root_params)}", got), rec.secrets)
 
 
-async def record_bars(rec: Recorder, feeds: FeedConfig) -> None:
+async def record_bars(
+    rec: Recorder, feeds: FeedConfig, name: str = "p4_stock_bars_adv_lookback"
+) -> None:
+    """One multi-symbol daily-bars page from ``adv_request_start`` -- the window
+    plus Q10's one-year lookback -- to the last completed session.
+
+    Writes ``p4_stock_bars_adv_lookback``. The older ``p4_stock_bars_adv``
+    (window only, recorded before the lookback existed) is kept as it is:
+    ``save`` refuses to overwrite, and tests still read it.
+    """
     print("\ndaily bars for ADV, historical feed:")
     today = datetime.now(timezone.utc).date()
     last = _last_session_before(today)
-    start = adv_window_start(today)
+    start = adv_request_start(today)  # the window plus Q10's lookback
     bar_params = {
         "symbols": "AAPL,SPY,XRX",
         "timeframe": "1Day",
@@ -305,7 +317,7 @@ async def record_bars(rec: Recorder, feeds: FeedConfig) -> None:
         "sort": "asc",
     }
     got = await rec.get(DATA_BASE_URL, "/v2/stocks/bars", bar_params)
-    save("p4_stock_bars_adv", _envelope(f"/v2/stocks/bars?{_qs(bar_params)}", got), rec.secrets)
+    save(name, _envelope(f"/v2/stocks/bars?{_qs(bar_params)}", got), rec.secrets)
 
 
 # ----------------------------------------------------------------- measure
@@ -438,7 +450,7 @@ async def hunt(rec: Recorder, trading: str) -> None:
     print("  no has_options underlying with only adjusted contracts was found")
 
 
-MODES: Final = ("record", "roots", "measure", "hunt")
+MODES: Final = ("record", "roots", "bars", "measure", "hunt")
 
 
 async def main() -> None:
@@ -457,6 +469,8 @@ async def main() -> None:
             await record(rec, feeds, credentials.trading_base_url)
         elif mode == "roots":
             await record_roots(rec, credentials.trading_base_url)
+        elif mode == "bars":
+            await record_bars(rec, feeds)
         elif mode == "measure":
             await measure(rec)
         else:

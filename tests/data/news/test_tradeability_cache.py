@@ -254,6 +254,39 @@ async def test_a_passing_ticker_is_cached_with_every_field(sessions):
 
 
 @pytest.mark.asyncio
+async def test_a_recent_listing_is_cached_with_its_partial_average_and_divisor(sessions):
+    """Q10: three sessions since listing pass, and the row says "over 3 sessions"."""
+
+    def bars(symbol: str, session_date: date) -> list[Bar]:
+        return history(
+            3, before=session_date, symbol=symbol, volumes=[4_000_000, 2_000_000, 1_500_001]
+        )
+
+    provider = FakeInputs(bars=bars)
+    result = await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"))
+
+    assert result.passed == ("NEWCO",)
+    assert provider.root_calls == ["NEWCO"]
+    row = rows(sessions)[("NEWCO", SESSION)]
+    assert row.sessions_available == 3
+    assert row.avg_volume_20d == 2_500_000  # 7,500,001 // 3
+    assert row.passes is True
+
+
+@pytest.mark.asyncio
+async def test_no_completed_session_is_cached_under_its_own_name(sessions):
+    provider = FakeInputs(bars=lambda symbol, session_date: [])
+    await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"))
+
+    row = rows(sessions)[("NEWCO", SESSION)]
+    assert row.failures == "no_completed_session"
+    assert row.sessions_available == 0
+    assert row.avg_volume_20d is None
+    assert row.last_close is None
+    assert provider.root_calls == []
+
+
+@pytest.mark.asyncio
 async def test_the_failures_column_is_the_results_failures_in_declaration_order(sessions):
     def bars(symbol: str, session_date: date) -> list[Bar]:
         return history(25, before=session_date, symbol=symbol, volume=10, last_close="1.10")

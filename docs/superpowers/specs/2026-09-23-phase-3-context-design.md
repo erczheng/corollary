@@ -573,6 +573,83 @@ the owner can override**, and each is labelled where it appears in decision 21:
 the tradeability thresholds, the manual-watch cap, the retention window, the
 audit's discovery cap, and the panel's ranking.
 
+**Q10 — Recent IPOs reach discovery (2026-09-26, asked during step 4).** The
+owner wants recent IPOs to reach the discovery panel, *"because of the upcoming
+big ones."* Decision 21's *"at least 20 sessions of history"* check is dropped.
+The owner also gave one rule for the specifics, verbatim: *"Distinguish
+'listed recently' (first bar inside the window) from 'bars missing'. If the
+provider cannot tell them apart, fail closed and report it to me."* That
+fail-closed sentence is **the owner's**. The owner stated the goal and that
+rule; the specifics below were chosen by the parent session and are
+**parent-session assumptions the owner can override**:
+
+- A ticker needs **at least one completed session** — a real close and a real
+  volume. Zero completed sessions still fails, under its own name
+  (`no_completed_session`), with no average and never a division by zero.
+- **ADV is the mean over the completed sessions that exist in the 20-session
+  window**, 1 to 20 of them. A name with a bar *before* the window is
+  **established** and is averaged over all 20, exactly as before. A name whose
+  first bar is *inside* the window is a **recent listing** and is averaged over
+  the window sessions from that first bar on. Either way a session with no bar
+  counts as zero volume, and the average is floored.
+- The ≥1,000,000 ADV, ≥$5 close, `has_options` and standard-root checks are
+  unchanged. `has_options` is what gates a fresh IPO until its options list.
+- **A partial window is not stale bars.** The staleness check (newest bar must
+  be the previous session) holds for both kinds, and an established name with
+  missing bars fails exactly as it did. To see which kind a name is, the bars
+  request reaches back **252 sessions — one year — before the window** (272 in
+  all): a bar in that lookback proves the name was listed before the window,
+  so its missing window sessions are zeros in a 20-session average rather than
+  a short, kinder one. (The first cut used 40 sessions; an audit showed a
+  long-listed name suspended for more than 40 sessions and resumed five
+  sessions before the check passing as a five-session listing, so the
+  lookback was raised to a year.) The cost: at the refresh's 100-ticker bound
+  a 272-session batch is **27,200 points, three 10,000-point pages** — two
+  more requests per refresh run than the 20-session design; the provider's
+  200-symbol ceiling would be 54,400 points, six pages.
+- `ticker_tradeability.sessions_available` is kept and now means **the divisor
+  the average was taken over**: 20 for an established name, 1–20 for a recent
+  listing, 0 when nothing could be averaged. `/api/news/movers` (step 5) carries
+  it, so the panel can say "ADV over N sessions" for a partial window. The
+  `insufficient_history` failure token is retired rather than redefined, so a
+  stored row never reads under the wrong meaning; rows are per session date,
+  and old ones age out.
+
+**Open owner question — the residual case departs from the fail-closed
+rule.** The owner's rule was *"If the provider cannot tell them apart, fail
+closed and report it to me."* This is that report. Bars alone **cannot**
+distinguish a long-listed name that has been silent for longer than the
+lookback — no bar anywhere in the 252 sessions before the window, then resumed
+inside it — from an IPO whose first bar is inside the window. Nothing else
+Alpaca serves separates the two: the asset record carries no listing or
+first-trade date among its fields, and its `ipo` attribute marks a name that
+is accepting limit orders *before* secondary trading begins, not one that has
+since listed. **As built, that residual case is treated as a recent listing**
+and judged on the sessions since it resumed, **so it can pass** — which
+departs from the literal fail-closed rule. Staleness, `has_options` and the
+standard-root check still apply to it, and a test pins the behaviour. The
+one-year lookback shrinks the case to a silence of more than a year: any
+shorter suspension leaves a bar in the lookback and is judged as established.
+**Put to the owner**, with the alternatives:
+
+- **(a) Keep as built.** The residual is a name silent for more than a year
+  and then resumed — rarer than any IPO — and it still has to clear
+  `has_options`, the standard root, the $5 close, the 1,000,000 ADV over its
+  resumed sessions and the staleness check.
+- **(b) Fail closed on first-bar-in-window** unless the symbol was first seen
+  in a stored asset-list snapshot dated inside the window. That needs
+  asset-list history — a migration and a daily snapshot — and **no IPO passes
+  until that history spans the window**.
+- **(c) Drop IPOs again**: restore decision 21's 20-sessions-of-history check.
+
+**Q11 — Class shares stay excluded (2026-09-26, asked during step 4).** The
+owner's answer, verbatim: *"Class shares stay excluded, as built."* OCC writes
+a class-share root without the dot — `BRKB` for `BRK.B` — so no contract's
+`root_symbol` ever equals the ticker and the standard-root check fails closed.
+That exclusion is now a **decided behaviour, not an open carry**. Treating
+`BRKB` as `BRK.B`'s standard root remains a mapping to add explicitly, with a
+test, if the owner ever reverses this.
+
 ---
 
 ## Decisions
@@ -1299,13 +1376,23 @@ candidate, over the page's lookback, when all three hold:
      alone is not enough here: an underlying whose only listed chains are
      adjusted after a reverse split is exactly the kind of name
      secondary-offering headlines produce, and CLAUDE.md's `AAPL1` warning
-     applies.
+     applies. **Class shares fail this check by decision (Q11):** OCC writes
+     `BRKB` for `BRK.B`, so the root never equals the ticker, and class shares
+     stay out of discovery.
    - **Average daily volume ≥ 1,000,000 shares** over the trailing 20
-     completed sessions *(assumption)*.
+     completed sessions *(assumption)* — or, for a recent listing, over the
+     completed sessions it has in that window, 1 to 20 *(Q10;
+     parent-session assumption)*. A name with a bar in the 252 sessions before
+     the window is established and is averaged over all 20; a window session
+     with no bar counts as zero volume in either case.
    - **Last close ≥ $5** *(assumption: it keeps the panel from filling with
      sub-dollar offering news; drop it and only the ADV gate remains)*.
-   - **At least 20 sessions of history** *(assumption: a recent IPO fails
-     rather than being judged on a partial average)*.
+   - **At least one completed session** — a real close and a real volume
+     *(Q10, 2026-09-26: this replaced "at least 20 sessions of history" so
+     recent IPOs reach discovery; the floor of one is a parent-session
+     assumption)*. `has_options` gates a fresh IPO until its options list.
+     The newest bar must still be the previous session's, for a recent
+     listing as for any other name.
 
    Volume and close come from **daily bars on the historical feed**
    (`ALPACA_STOCK_FEED_HISTORICAL`, `sip` on this plan), never the realtime
@@ -1331,7 +1418,9 @@ panel at once, and there is no candidate table to drift from its inputs.
 - each reason as a named rule family or a Massive direction with its
   `sentiment_reasoning`, and each reason's direction. **Conflicting directions
   are shown side by side, never netted.**
-- the article count, the latest article's time, the ADV
+- the article count, the latest article's time, the ADV and the number of
+  sessions it was taken over (`sessions_available`, so a recent listing reads
+  "ADV over N sessions" — Q10)
 - links to the articles
 - a **Watch** button
 
@@ -1528,7 +1617,7 @@ the protocol stays where it is so the halt path's imports do not move. No
 | Vendor-scored news — **discovery tier** | Massive `/v2/reference/news`, untickered, `limit=1000`, from the last `published_utc` seen | 15 min | `api.massive.com` 5/min | 4/hr = 0.07/min (1.3% of the bucket) |
 | Tradeability: optionable list (decision 21) | Alpaca `GET /v2/assets?status=active&attributes=has_options` | daily 07:30 ET | `paper-api.alpaca.markets` 200/min | 1/day |
 | Tradeability: standard root | Alpaca `/v2/options/contracts`, `underlying_symbols` = `root_symbol` = ticker, `limit=1` | once per newly signalled off-watch ticker per session | `paper-api.alpaca.markets` | est. ≤100/day, paced by the limiter |
-| Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 20 sessions, multi-symbol, ≤200 symbols a request (4,000 points, under the 10,000-point page) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.07/min |
+| Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 272 sessions — the 20-session window plus Q10's 252-session (one-year) listing lookback — multi-symbol, ≤200 symbols a request (≤100 per refresh run: 27,200 points, three 10,000-point pages; 54,400 and six pages at the 200 ceiling) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.2/min (3 pages per 15-min run) |
 | Social | StockTwits symbol streams — social watch set only (decision 10) | budgeted round-robin | `api.stocktwits.com` 200/hr | 180/hr |
 | Earnings | Finnhub `/calendar/earnings`, 3-week window | daily 07:00 ET | `finnhub.io` | 1/day |
 | Consensus | Finnhub `/stock/recommendation` — sector leaders only (decision 11) | weekly, off-hours, spread across the minute | `finnhub.io` | 55/week |
@@ -1548,7 +1637,7 @@ publishers write about watch-universe tickers, which step 0 measures.
 
 **The data bucket is the one that matters.** Decision 18 of the Phase 2 spec
 spends 150/min of it on the Markets poll at 400ms, leaving ~49/min. Phase 3
-adds ≤~1.1/min in session: news plus the ADV batch. The EOD composite pages and
+adds ≤~1.2/min in session: news plus the ADV batch. The EOD composite pages and
 the Saturday audit run outside the session, when the Markets poll is
 backgrounded or stopped, and wait on the bucket rather than refusing, which is
 how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
@@ -1564,7 +1653,7 @@ how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
   drops to 1.1–1.8/min. The 30-per-second ceiling is met by spreading
   requests, not by the limiter (*Not verified*).
 - **`data.alpaca.markets`, 200/min (~49 left after the Markets poll).**
-  In session: untickered news ≤1/min + ADV ≤0.07/min. Saturday: the audit's
+  In session: untickered news ≤1/min + ADV ≤0.2/min. Saturday: the audit's
   ~0.6 pages per symbol-week of 1Min bars (Phase 2's ~40 pages ÷ 66 symbols)
   × (66 watch + ≤250 discovery) ≈ **≤190 pages**. That is ~4 minutes against
   the 49/min remainder, or ~1 minute against the whole bucket with the market
@@ -1749,9 +1838,18 @@ and the audit's transitions — get the careful coverage.
     - a ticker whose only signal is a Massive `neutral` or `mixed`
     - a ticker failing any one tradeability check: no `has_options`, an
       adjusted root, no standard-root contract, ADV at 999,999, a close at
-      $4.99, or 19 sessions of history
+      $4.99, or **zero completed sessions** (Q10)
+    - an established ticker with missing bars: stale bars still fail, and
+      missing window sessions count as zeros over 20 — a lookback bar keeps
+      it from being read as a recent listing
   - **The boundaries pass:** ADV at exactly 1,000,000, a close at exactly $5,
-    and 20 sessions.
+    and **one completed session** when every other check holds. **19
+    sessions — the old boundary — passes** on a 19-session average (Q10).
+  - **The residual ambiguity is pinned:** a name with no bar in the 252-session
+    lookback and bars inside the window is judged as a recent listing (an open
+    owner question — Q10). A name suspended 120 sessions and resumed five
+    sessions before the check is established and fails on volume.
+  - **Class shares:** `BRK.B` has no standard-root contract (Q11).
   - **Ranking:** a rules event outranks a Massive-only row regardless of
     recency; within a group, newest first. The same inputs give the same order.
   - **Attribution:** a single-tag Alpaca or Massive article attributes to its

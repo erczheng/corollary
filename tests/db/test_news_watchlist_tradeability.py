@@ -430,7 +430,7 @@ def test_every_result_the_filter_can_produce_fits_a_row(any_engine: Engine) -> N
             last_close=None,
             sessions_available=0,
             passes=False,
-            failures="standard_root_unchecked,insufficient_history",
+            failures="standard_root_unchecked,no_completed_session",
         ))
         sess.commit()
         sess.expire_all()
@@ -438,7 +438,7 @@ def test_every_result_the_filter_can_produce_fits_a_row(any_engine: Engine) -> N
         assert row.standard_root is None
         assert row.avg_volume_20d is None
         assert row.last_close is None
-        assert row.failures == "standard_root_unchecked,insufficient_history"
+        assert row.failures == "standard_root_unchecked,no_completed_session"
 
 
 def test_one_row_per_ticker_per_session(any_engine: Engine) -> None:

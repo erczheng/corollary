@@ -1402,8 +1402,9 @@ class TickerTradeability(Base):
     the filter can produce, so three columns are nullable:
 
     * ``standard_root`` -- ``None``: the standard-contract check was not run.
-    * ``avg_volume_20d`` -- ``None``: under 20 sessions of history, so no
-      average is computed at all. An integer share count otherwise.
+    * ``avg_volume_20d`` -- ``None``: no completed session to average over
+      (Q10: a recent listing averages over the 1-20 sessions it has). An
+      integer share count otherwise.
     * ``last_close`` -- ``None``: no completed bar. ``Money``; SQL comparison
       of it is refused, so a "close >= $5" filter reads rows into Python.
 
@@ -1449,7 +1450,8 @@ class TickerTradeability(Base):
     standard_root: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     avg_volume_20d: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_close: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
-    #: How many of the 20 window sessions carry a bar -- not history length.
+    #: The ADV divisor: 20 for an established name, 1-20 for a recent listing
+    #: (Q10), 0 when nothing could be averaged -- "ADV over N sessions".
     sessions_available: Mapped[int] = mapped_column(Integer, nullable=False)
     passes: Mapped[bool] = mapped_column(Boolean, nullable=False)
     failures: Mapped[str] = mapped_column(String(256), nullable=False)

@@ -16,6 +16,9 @@ import pytest
 from corollary.calendars import NYSE_TZ
 from corollary.data.news.tradeability import (
     TradeabilityFailure,
+    ADV_LOOKBACK_SESSIONS,
+    ADV_SESSIONS,
+    adv_request_start,
     adv_window,
     adv_window_start,
     assess_tradeability,
@@ -349,12 +352,17 @@ async def test_adv_bars_carry_the_historical_feed_never_the_realtime_one(make_pr
     assert params["feed"] != feeds.stock_realtime
 
 
-async def test_adv_bars_request_exactly_the_window_before_the_session(make_provider):
+async def test_adv_bars_request_the_window_and_its_listing_lookback(make_provider):
+    """Q10: the request reaches 252 sessions past the window's start, so the
+    filter can tell a recent listing from an established name with gaps --
+    including one suspended for anything up to a year."""
     provider, transport = make_provider(single("p4_stock_bars_adv"), now=RECORDED_P4)
     await provider.adv_daily_bars(["aapl", "SPY", "XRX", "AAPL"], session_date=SESSION)
     params = transport.params_for("/v2/stocks/bars")
 
-    first = adv_window_start(SESSION)
+    first = adv_request_start(SESSION)
+    assert first < adv_window_start(SESSION)
+    assert ADV_LOOKBACK_SESSIONS + ADV_SESSIONS == 272
     assert params["symbols"] == "AAPL,SPY,XRX"
     assert params["timeframe"] == "1Day"
     assert params["adjustment"] == "split"
@@ -367,24 +375,74 @@ async def test_adv_bars_request_exactly_the_window_before_the_session(make_provi
     assert end.astimezone(NYSE_TZ).date() == date(2026, 9, 23)
 
 
+#: ``p4_stock_bars_adv_lookback.json`` was recorded on Saturday 2026-09-26
+#: (23:49 UTC) by ``record_alpaca_news.py bars``, requesting from
+#: ``adv_request_start(2026-09-26)`` -- the window plus the one-year lookback.
+RECORDED_LOOKBACK = datetime(2026, 9, 26, 23, 49, 15, tzinfo=timezone.utc)
+LOOKBACK_SESSION = date(2026, 9, 26)
+
+
 async def test_recorded_adv_bars_feed_the_tradeability_filter(make_provider):
-    provider, _ = make_provider(single("p4_stock_bars_adv"), now=RECORDED_P4)
-    bars = await provider.adv_daily_bars(["AAPL", "SPY", "XRX"], session_date=SESSION)
+    """Real SIP bars, requested from ``adv_request_start``, drive the
+    established branch: every name has bars before its window."""
+    provider, transport = make_provider(
+        single("p4_stock_bars_adv_lookback"), now=RECORDED_LOOKBACK
+    )
+    bars = await provider.adv_daily_bars(
+        ["AAPL", "SPY", "XRX"], session_date=LOOKBACK_SESSION
+    )
+    params = transport.params_for("/v2/stocks/bars")
+    first = adv_request_start(LOOKBACK_SESSION)
+    assert datetime.fromisoformat(params["start"].replace("Z", "+00:00")) == datetime.combine(
+        first, time(0), tzinfo=NYSE_TZ
+    )
 
     assert set(bars) == {"AAPL", "SPY", "XRX"}
-    window = adv_window(SESSION)
+    window = adv_window(LOOKBACK_SESSION)
+    for symbol, series in bars.items():
+        days = sorted(item.at.astimezone(NYSE_TZ).date() for item in series)
+        # The recording starts on the request's first session, well before the
+        # window -- so these names are judged as established, not as listings.
+        assert days[0] == first, symbol
+        assert days[0] < window[0], symbol
+        assert days[-1] == window[-1], symbol
+
     aapl = assess_tradeability(
-        "AAPL", has_options=True, standard_root=True, daily_bars=bars["AAPL"], session_date=SESSION
+        "AAPL",
+        has_options=True,
+        standard_root=True,
+        daily_bars=bars["AAPL"],
+        session_date=LOOKBACK_SESSION,
     )
     assert aapl.sessions_available == len(window) == 20
     assert aapl.passes, aapl.failures
+
+    # The branch, proven on real data: drop AAPL's bar on the window's first
+    # session. Its lookback bars still mark it established, so it is judged
+    # over all 20 sessions with the gap as zero volume -- not re-read as a
+    # 19-session listing.
+    gapped = [b for b in bars["AAPL"] if b.at.astimezone(NYSE_TZ).date() != window[0]]
+    gapped_result = assess_tradeability(
+        "AAPL", has_options=True, standard_root=True, daily_bars=gapped,
+        session_date=LOOKBACK_SESSION,
+    )
+    assert gapped_result.sessions_available == 20
+    kept = [b.volume for b in gapped if b.at.astimezone(NYSE_TZ).date() in set(window)]
+    assert len(kept) == 19
+    assert gapped_result.avg_volume_20d == sum(kept) // 20
+
     xrx = assess_tradeability(
-        "XRX", has_options=True, standard_root=True, daily_bars=bars["XRX"], session_date=SESSION
+        "XRX",
+        has_options=True,
+        standard_root=True,
+        daily_bars=bars["XRX"],
+        session_date=LOOKBACK_SESSION,
     )
     # Recorded, not asserted as a fact about Xerox: whatever XRX printed, the
-    # filter ran on 20 complete SIP sessions.
+    # filter ran on 20 complete SIP sessions as an established name.
     assert xrx.sessions_available == 20
-    assert TradeabilityFailure.INSUFFICIENT_HISTORY not in xrx.failures
+    assert TradeabilityFailure.NO_COMPLETED_SESSION not in xrx.failures
+    assert TradeabilityFailure.STALE_BARS not in xrx.failures
 
 
 async def test_more_than_the_symbol_ceiling_is_refused_not_split(make_provider):
