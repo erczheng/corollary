@@ -32,7 +32,8 @@ credentials surface where they are used, as a stated condition.
 """
 
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Annotated, Any, Final
 
 from fastapi import Depends, Query, Request
@@ -55,28 +56,39 @@ from corollary.data.providers.fundamentals import (
     UnavailableFundamentals,
 )
 from corollary.data.providers.fred import FRED_API_KEY_ENV, FredCredentialsError, FredProvider
+from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import MarketDataProvider
+from corollary.data.seeds import SeedError, SpdrSeed, load_spdr_seed
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 from corollary.pricing.rates import RiskFreeRateSource
+from corollary.wire import require_aware
 
 __all__ = [
     "AccountMode",
     "AccountModeDep",
     "ApiError",
+    "AssetDirectoryDep",
     "BrokerDep",
     "FundamentalsDep",
     "LIVE_CREDENTIAL_ENV_VARS",
+    "PositionUnderlyings",
+    "PositionUnderlyingsDep",
     "ProviderDep",
     "ServiceRegistry",
+    "SeedLoader",
     "SessionDep",
+    "SpdrSeedDep",
     "account_mode",
+    "asset_directory",
     "broker_for_account",
     "db_session",
     "fundamentals_data",
     "market_data",
     "missing_live_credentials",
+    "position_underlyings",
     "service_registry",
+    "spdr_seed",
 ]
 
 logger = logging.getLogger(__name__)
@@ -439,6 +451,48 @@ class ServiceRegistry:
 
 
 # --------------------------------------------------------------------------
+# News state the routes read and never fetch (Phase 3 step 4)
+# --------------------------------------------------------------------------
+
+#: How the SPDR seed is loaded. A callable on ``app.state`` so a test can hand
+#: in a seed without writing the package's seed file.
+SeedLoader = Callable[[], SpdrSeed | None]
+
+
+class PositionUnderlyings:
+    """The last-known open-position underlyings, for the watch universe.
+
+    **The watch routes never call the broker** (spec *API*: they depend on no
+    broker), so the position members of the universe come from here: a set
+    the scheduler's news cycle replaces after it reads positions, and that
+    the routes only read. Empty, with :attr:`as_of` ``None``, until the first
+    :meth:`replace` -- stated in ``GET /api/news/watch`` rather than hidden.
+
+    The symbols are kept exactly as they arrived: ``watch_universe`` is the
+    one place that normalises them and skips a non-equity deliverable
+    (``GME.WS``) with its reason. Single event loop, one assignment per
+    replace, so a reader sees the old set or the new one, never half of each.
+    """
+
+    def __init__(self) -> None:
+        self._symbols: frozenset[str] = frozenset()
+        self._as_of: datetime | None = None
+
+    def current(self) -> frozenset[str]:
+        return self._symbols
+
+    @property
+    def as_of(self) -> datetime | None:
+        """When :meth:`replace` last ran (UTC), or ``None`` if it never has."""
+        return self._as_of
+
+    def replace(self, symbols: Iterable[str], *, at: datetime) -> None:
+        require_aware(at, "at")
+        self._symbols = frozenset(symbols)
+        self._as_of = at.astimezone(timezone.utc)
+
+
+# --------------------------------------------------------------------------
 # Dependencies
 # --------------------------------------------------------------------------
 
@@ -529,8 +583,52 @@ def db_session(request: Request) -> Iterator[Session]:
         yield session
 
 
+def asset_directory(request: Request) -> AssetDirectoryHolder:
+    """The cached daily asset list. Read-only here: the scheduler refreshes it."""
+    holder = request.app.state.asset_directory
+    assert isinstance(holder, AssetDirectoryHolder)
+    return holder
+
+
+def position_underlyings(request: Request) -> PositionUnderlyings:
+    """The last-known position underlyings (see :class:`PositionUnderlyings`)."""
+    holder = request.app.state.position_underlyings
+    assert isinstance(holder, PositionUnderlyings)
+    return holder
+
+
+def spdr_seed(request: Request) -> SpdrSeed | None:
+    """The SPDR seed, ``None`` when it has not been built, 503 when it is malformed.
+
+    Absent is an ordinary, stated state (``load_spdr_seed`` logs it once).
+    Malformed is refused rather than degraded: a half-read seed would misfile
+    sectors and shrink the watch universe's count under the cap in silence.
+    """
+    loader: SeedLoader = getattr(request.app.state, "spdr_seed_loader", load_spdr_seed)
+    try:
+        return loader()
+    except SeedError as exc:
+        logger.error(
+            "the SPDR seed is malformed; refusing rather than reading half of it",
+            extra={
+                "event": "spdr_seed_invalid",
+                "rule": "a malformed seed raises; a half-read seed is worse than none",
+                "error": str(exc),
+            },
+        )
+        raise ApiError(
+            status_code=503,
+            code="spdr_seed_invalid",
+            message=f"The SPDR holdings seed cannot be read: {exc}",
+        ) from exc
+
+
+
 AccountModeDep = Annotated[AccountMode, Depends(account_mode)]
 BrokerDep = Annotated[BrokerAccount, Depends(broker_for_account)]
 ProviderDep = Annotated[MarketDataProvider, Depends(market_data)]
 FundamentalsDep = Annotated[FundamentalsProvider, Depends(fundamentals_data)]
 SessionDep = Annotated[Session, Depends(db_session)]
+AssetDirectoryDep = Annotated[AssetDirectoryHolder, Depends(asset_directory)]
+PositionUnderlyingsDep = Annotated[PositionUnderlyings, Depends(position_underlyings)]
+SpdrSeedDep = Annotated[SpdrSeed | None, Depends(spdr_seed)]

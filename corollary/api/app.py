@@ -75,19 +75,22 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from corollary.api.deps import AccountMode, ApiError, ServiceRegistry
+from corollary.api.deps import AccountMode, ApiError, PositionUnderlyings, ServiceRegistry
 from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
 from corollary.api.routes import (
     account_router,
     activity_router,
     engine_router,
     markets_router,
+    news_router,
     notifications_router,
     positions_router,
     settings_router,
     ws_router,
 )
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
+from corollary.data.news.assets import AssetDirectoryHolder
+from corollary.data.seeds import load_spdr_seed
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
     ALPACA_LIVE_SECRET_ENV,
@@ -726,6 +729,16 @@ def create_app(
     app.state.secret_values = (
         _environment_secrets if secrets is None else (lambda: tuple(secrets))
     )
+    # Phase 3 step 4's news state. The news routes *read* these and never
+    # fetch: the asset list is refreshed daily by the scheduler (and is
+    # ``None`` until its first success, which the watch routes refuse on
+    # with a 503 rather than accept an unvalidated ticker), and the position
+    # underlyings are replaced by the news cycle after it reads positions --
+    # so no news route depends on a broker. The seed loader is a callable so
+    # a test can supply a seed without writing the package's seed file.
+    app.state.asset_directory = AssetDirectoryHolder()
+    app.state.position_underlyings = PositionUnderlyings()
+    app.state.spdr_seed_loader = load_spdr_seed
 
     for exception, status_code, code in _VENDOR_FAILURES:
         app.add_exception_handler(exception, _vendor_handler(status_code, code))
@@ -750,6 +763,7 @@ def create_app(
     app.include_router(activity_router)
     app.include_router(engine_router)
     app.include_router(markets_router)
+    app.include_router(news_router)
     app.include_router(notifications_router)
     app.include_router(positions_router)
     app.include_router(settings_router)

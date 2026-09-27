@@ -84,8 +84,16 @@ __all__ = [
     "LedgerRefusalGroup",
     "LedgerRefusals",
     "ManagedExit",
+    "ManualWatch",
     "MarginClassName",
     "MarginSummary",
+    "NewsFeed",
+    "NewsItem",
+    "NewsLookback",
+    "NewsScope",
+    "NewsSentiment",
+    "NewsSentimentTier",
+    "NewsSort",
     "NotificationEvent",
     "NotificationItem",
     "NotificationRoute",
@@ -106,6 +114,7 @@ __all__ = [
     "TimeInForce",
     "Trend",
     "UnderlyingQuote",
+    "WatchList",
     "WorkingOrder",
     "WorkingOrderType",
     "WsClientFrame",
@@ -1479,6 +1488,122 @@ class ApiKeyPresence(ApiModel):
     #: The live keys are *meant* to be absent until Phase 7, so their absence
     #: renders as a fact rather than a warning.
     optional: bool
+
+
+# --------------------------------------------------------------------------
+# News (Phase 3 step 4)
+# --------------------------------------------------------------------------
+
+#: ``Sentiment`` in ``types.ts``, value for value -- lower case on the wire;
+#: ``SENTIMENT_LABEL`` is where the client capitalises it.
+NewsSentiment: TypeAlias = Literal["bullish", "bearish", "neutral", "unclassified"]
+#: ``SentimentTier`` in ``types.ts``.
+NewsSentimentTier: TypeAlias = Literal["provider", "rules", "llm"]
+#: ``Lookback`` in ``web/src/lib/news.ts`` (``LOOKBACKS``).
+NewsLookback: TypeAlias = Literal["today", "3d", "1w", "2w", "all"]
+#: ``watch`` (the default): watch-universe tickers plus ``MARKET``. ``all``:
+#: everything retained (decision 21's narrowed default scope).
+NewsScope: TypeAlias = Literal["watch", "all"]
+#: ``NewsSort`` in ``web/src/lib/news.ts`` (``NEWS_SORT_LABEL``'s keys).
+NewsSort: TypeAlias = Literal["newest", "oldest"]
+
+
+class NewsItem(ApiModel):
+    """One (canonical article, ticker) row -- ``NewsItem`` in ``types.ts``.
+
+    The canonical row of a cross-vendor duplicate group is served once per
+    ticker the group is tagged to, naming the canonical row's publisher
+    (decision 3). Three fields beyond the TS shape, per the spec's *API*
+    section -- *"the tier and source that produced it, and whether that
+    source is demoted"* -- plus ``url``.
+
+    **Step 4 labels nothing.** ``sentiment`` is ``unclassified``, ``tier`` and
+    ``source`` are ``None`` and ``demoted`` is ``False`` on every item until
+    step 5's labelling lands. That is the honest answer, not a placeholder:
+    no source has produced a label, so none is named.
+    """
+
+    #: ``"{canonical article id}:{ticker}"`` -- unique per row served.
+    id: str
+    #: The canonical row's publication time, aware UTC.
+    time: datetime
+    #: A ticker, or ``MARKET`` for a story tagged to no single name.
+    ticker: str
+    headline: str
+    sentiment: NewsSentiment
+    #: The canonical row's publisher. ``None`` when the vendor named none:
+    #: the vendor is provenance, not a publisher, and is not substituted.
+    publisher: str | None
+    #: From the SPDR seed; ``Other`` outside it or with no seed; ``MARKET``
+    #: files under ``Macro``.
+    sector: str
+    tier: NewsSentimentTier | None
+    url: str
+    #: The labelling source that produced ``sentiment``; ``None`` in step 4.
+    source: str | None
+    #: Whether that source is demoted (decision 4/9). ``False`` with no source.
+    demoted: bool
+
+
+class NewsFeed(ApiModel):
+    """One page of ``GET /api/news``. Offset pagination.
+
+    Offset rather than a cursor: the feed is newest-first and grows at the
+    top, so a row arriving between two page requests shifts the second page
+    by one -- a repeated row, never a lost one, and never a wrong one. That is
+    cosmetic on a news feed, and the ``Page`` convention the activity table
+    already uses is offset-shaped too.
+    """
+
+    items: list[NewsItem]
+    #: Rows matching the query, not rows on this page.
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+    lookback: NewsLookback
+    scope: NewsScope
+    sort: NewsSort
+    #: The lookback's lower bound -- the start of an ET calendar date, as an
+    #: aware UTC instant -- or ``None`` for ``all``.
+    since: datetime | None
+    #: ``False`` when the SPDR seed has not been built: every ticker files
+    #: under ``Other`` (``MARKET`` still under ``Macro``), and the UI says why.
+    sectors_available: bool
+    seed_as_of: date | None
+
+
+class ManualWatch(ApiModel):
+    """One active manual watch (``watch_symbol`` with no ``removed_at``)."""
+
+    ticker: str
+    added_at: datetime
+
+
+class WatchList(ApiModel):
+    """``GET /api/news/watch``: the manual watches and the universe they sit in."""
+
+    #: Sorted by ticker.
+    manual: list[ManualWatch]
+    #: Every symbol the watch tier polls -- the universe less ``MARKET``.
+    symbols: int
+    #: What the cap counts: members with a reason other than a position.
+    count_before_positions: int
+    #: Inclusive: the ``cap``-th symbol is permitted, one more is a 409.
+    cap: int
+    #: ``cap - countBeforePositions``, floored at zero.
+    remaining: int
+    #: The last-known open-position underlyings, as the scheduler last set
+    #: them; zero (and ``positionsAsOf`` null) before it ever has.
+    position_underlyings: int
+    positions_as_of: datetime | None
+    #: True when the SPDR seed has not been built: no sector leaders are in
+    #: the universe, so it (and the cap's count) is smaller than it will be.
+    seed_missing: bool
+    #: False until the daily asset list has been fetched once; until then an
+    #: add is refused with a 503 rather than accepted unvalidated.
+    asset_list_available: bool
+    asset_list_fetched_at: datetime | None
 
 
 # --------------------------------------------------------------------------

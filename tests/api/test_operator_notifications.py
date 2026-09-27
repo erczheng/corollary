@@ -127,6 +127,9 @@ def test_the_five_events_are_the_contract_the_web_codes_against() -> None:
         "risk_limits_changed",
         "data_feeds_changed",
         "notification_routes_changed",
+        # Phase 3 decision 21, emitted by the watch routes; its own suite is
+        # ``tests/api/test_watch_routes.py``.
+        "watchlist_changed",
     }
 
 
@@ -601,8 +604,11 @@ def test_no_runtime_means_the_action_succeeds_and_the_log_says_so(
         for r in caplog.records
         if r.__dict__.get("event") == "operator_notice_not_emitted"
     ]
+    # ``_each_action`` drives the five engine and settings actions; the sixth
+    # event, ``watchlist_changed``, is the watch routes' and is exercised in
+    # ``tests/api/test_watch_routes.py``.
     assert sorted(r.__dict__["notification_event"] for r in skipped) == sorted(
-        event.value for event in OperatorEvent
+        event.value for event in OperatorEvent if event is not OperatorEvent.WATCHLIST_CHANGED
     )
     assert all(r.__dict__["correlation_id"] for r in skipped)
 
