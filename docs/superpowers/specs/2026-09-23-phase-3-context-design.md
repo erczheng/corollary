@@ -590,7 +590,8 @@ rule; the specifics below were chosen by the parent session and are
   window**, 1 to 20 of them. A name with a bar *before* the window is
   **established** and is averaged over all 20, exactly as before. A name whose
   first bar is *inside* the window is a **recent listing** and is averaged over
-  the window sessions from that first bar on. Either way a session with no bar
+  the window sessions from that first bar on — **since Q12, only when its real
+  IPO date says so**. Either way a session with no bar
   counts as zero volume, and the average is floored.
 - The ≥1,000,000 ADV, ≥$5 close, `has_options` and standard-root checks are
   unchanged. `has_options` is what gates a fresh IPO until its options list.
@@ -615,8 +616,12 @@ rule; the specifics below were chosen by the parent session and are
   stored row never reads under the wrong meaning; rows are per session date,
   and old ones age out.
 
-**Open owner question — the residual case departs from the fail-closed
-rule.** The owner's rule was *"If the provider cannot tell them apart, fail
+**Resolved by Q12 (2026-09-26).** What follows was the open owner question
+as it was put; the owner answered it with Q12 below — check the real IPO date —
+rather than any of (a)–(c). Kept as the record of what was asked.
+
+**Formerly open owner question — the residual case departed from the
+fail-closed rule.** The owner's rule was *"If the provider cannot tell them apart, fail
 closed and report it to me."* This is that report. Bars alone **cannot**
 distinguish a long-listed name that has been silent for longer than the
 lookback — no bar anywhere in the 252 sessions before the window, then resumed
@@ -649,6 +654,58 @@ a class-share root without the dot — `BRKB` for `BRK.B` — so no contract's
 That exclusion is now a **decided behaviour, not an open carry**. Treating
 `BRKB` as `BRK.B`'s standard root remains a mapping to add explicitly, with a
 test, if the owner ever reverses this.
+
+**Q12 — The real IPO date settles a partial window (2026-09-26, the answer to
+Q10's open question).** The owner's decision: a partial history window — fewer
+than 20 completed sessions in the ADV window — **no longer counts as a recent
+listing by itself**. For those tickers only, fetch Finnhub `/stock/profile2`'s
+`ipo` field, through `data/providers/finnhub.py` on the shared `finnhub.io`
+bucket (the endpoint is already used for market cap, and the swagger shows it
+free: `premium` null). Missing, empty, malformed or unfetchable `ipo` — a 403,
+a timeout — **fails closed with a stated reason, `ipo_date_unavailable`**;
+never assume an IPO, and log each case with its rule. The looked-up date is
+cached per ticker, since it does not change, so each partial-window ticker
+costs at most one Finnhub call ever. Those rules are **the owner's**. The
+specifics below were chosen by the parent session and are **parent-session
+assumptions the owner can override**:
+
+- **"Recent" means the ADV window.** A ticker is a recent listing, averaged
+  over the sessions it has, only if its `ipo` date falls **on or after the
+  window's first session** *(assumption)*. An older date means the gap is
+  missing bars: the ticker is judged as an **established** name — 20-session
+  divisor, missing sessions zero volume — and fails as it did before Q10
+  (low volume, and stale bars where the tape stops early).
+- **Which tickers are asked.** Only a partial window: first completed bar
+  *after* the window's first session, and no bar in the 252-session lookback.
+  The lookback stays — it keeps the question rare, since any name with a bar in
+  the past year is established without a Finnhub call. A first bar *on* the
+  window's first session is a full window and is not asked about. Nor is a
+  ticker that would fail anyway: it is first judged on the kindest reading
+  (listed at its first bar), and only one passing that is asked. The IPO date
+  is settled before the standard-root check, so a ticker failing on it spends
+  no trading-host request.
+- **The divisor for a recent listing** runs from the earlier of the IPO date
+  and the first bar: a listed session with no bar is zero volume, as it is for
+  any listed name. An IPO date **later than the ticker's own first bar** is one
+  the tape contradicts, and fails closed as `ipo_date_unavailable`.
+- **What is cached.** A new table `ticker_ipo_date(ticker, ipo_date,
+  fetched_at)` (migration **0009**) holds **only successfully parsed dates**,
+  for good. A profile with no usable `ipo` is never stored there: the ticker's
+  `ticker_tradeability` row for that session records `ipo_date_unavailable`,
+  and it is asked again the next session. A transport failure, a 403 or a
+  timeout stores nothing anywhere — the ticker stays unchecked and is retried
+  next cycle, the same rule as any other vendor outage. `ipo_date_unavailable`
+  rows carry no average and a divisor of 0.
+- **The bound.** At most **20** IPO lookups per refresh run (a third of one
+  minute's `finnhub.io` bucket); the rest are deferred, unchecked, to a later
+  cycle.
+- **The wiring.** `refresh_tradeability` and the poller's
+  `refresh_tradeability_cache` take `ipo_dates: IpoDateSource | None = None`;
+  `None` fails every partial window closed. The scheduler passes the Finnhub
+  provider (the next unit).
+- **The fixture.** `tests/fixtures/finnhub/profile2_aapl.json`, recorded live
+  in Phase 2, already carries `"ipo":"1980-12-12"`, so no new recording was
+  needed; the tests replay it through the real provider.
 
 ---
 
@@ -1384,7 +1441,11 @@ candidate, over the page's lookback, when all three hold:
      completed sessions it has in that window, 1 to 20 *(Q10;
      parent-session assumption)*. A name with a bar in the 252 sessions before
      the window is established and is averaged over all 20; a window session
-     with no bar counts as zero volume in either case.
+     with no bar counts as zero volume in either case. **A partial window is a
+     recent listing only on a real IPO date (Q12):** Finnhub's
+     `/stock/profile2` `ipo` on or after the window's first session; an older
+     date is missing bars, judged over all 20; no usable date fails closed as
+     `ipo_date_unavailable`.
    - **Last close ≥ $5** *(assumption: it keeps the panel from filling with
      sub-dollar offering news; drop it and only the ADV gate remains)*.
    - **At least one completed session** — a real close and a real volume
@@ -1411,6 +1472,9 @@ panel at once, and there is no candidate table to drift from its inputs.
 - The standard-root check and the ADV run once per ticker per session date.
 - A failure is cached for the session too, so a failing ticker is not
   re-checked every cycle.
+- A partial window's IPO date (Q12) is cached **per ticker, for good**, in
+  `ticker_ipo_date` — only a parsed date is stored, so an empty answer is
+  re-asked next session and a failed request next cycle.
 
 **The panel: "Movers in the news"** on the News page. Each row carries:
 
@@ -1618,6 +1682,7 @@ the protocol stays where it is so the halt path's imports do not move. No
 | Tradeability: optionable list (decision 21) | Alpaca `GET /v2/assets?status=active&attributes=has_options` | daily 07:30 ET | `paper-api.alpaca.markets` 200/min | 1/day |
 | Tradeability: standard root | Alpaca `/v2/options/contracts`, `underlying_symbols` = `root_symbol` = ticker, `limit=1` | once per newly signalled off-watch ticker per session | `paper-api.alpaca.markets` | est. ≤100/day, paced by the limiter |
 | Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 272 sessions — the 20-session window plus Q10's 252-session (one-year) listing lookback — multi-symbol, ≤200 symbols a request (≤100 per refresh run: 27,200 points, three 10,000-point pages; 54,400 and six pages at the 200 ceiling) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.2/min (3 pages per 15-min run) |
+| Tradeability: IPO date (Q12) | Finnhub `/stock/profile2`, the `ipo` field — only for a partial ADV window that would otherwise pass, and only when no date is cached | with the tradeability refresh, ≤20 a run | `finnhub.io` | **≤ once per partial-window ticker, ever**, once a date comes back; an empty answer re-asks once a session, a failure once a cycle |
 | Social | StockTwits symbol streams — social watch set only (decision 10) | budgeted round-robin | `api.stocktwits.com` 200/hr | 180/hr |
 | Earnings | Finnhub `/calendar/earnings`, 3-week window | daily 07:00 ET | `finnhub.io` | 1/day |
 | Consensus | Finnhub `/stock/recommendation` — sector leaders only (decision 11) | weekly, off-hours, spread across the minute | `finnhub.io` | 55/week |
@@ -1648,7 +1713,9 @@ how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
   at the ceiling of 100 watch symbols plus ≤8 position underlyings) + market
   news 0.2/min = **4.6/min sustained in the window, ≤7.4/min at the ceiling
   (8–12% of the bucket)**. On top of that sit profile2's 26 a day (Phase 2's
-  daily cache, a sub-30 burst on the first Markets load), earnings at 1 a day,
+  daily cache, a sub-30 burst on the first Markets load), Q12's IPO lookups —
+  at most 20 a refresh run, at most once per partial-window ticker ever once a
+  date is cached, so near zero in steady state — earnings at 1 a day,
   and consensus at 55 a week, spread and off-hours. Overnight the watch tier
   drops to 1.1–1.8/min. The 30-per-second ceiling is met by spreading
   requests, not by the limiter (*Not verified*).
@@ -1695,6 +1762,9 @@ comparison refused); every timestamp is `UtcDateTime`.
   avg_volume_20d, last_close, sessions_available, passes, checked_at)`,
   UNIQUE `(ticker, session_date)`. `last_close` is `Money`. `avg_volume_20d`
   is an integer share count.
+- `ticker_ipo_date(ticker, ipo_date, fetched_at)`, `ticker` the primary key,
+  `ipo_date` `NOT NULL` — migration **0009** (Q12). The vendor's IPO date for a
+  partial-window ticker, cached for good; only a parsed date is ever written.
 - `sentiment_label(id, article_id, ticker, source, tier, direction, reasoning,
   rule_id, labeled_at)`, UNIQUE `(article_id, ticker, source)`. `direction` ∈
   `bullish | bearish | neutral`; `tier` ∈ `rules | vendor`, CHECK-constrained.
@@ -1845,10 +1915,19 @@ and the audit's transitions — get the careful coverage.
   - **The boundaries pass:** ADV at exactly 1,000,000, a close at exactly $5,
     and **one completed session** when every other check holds. **19
     sessions — the old boundary — passes** on a 19-session average (Q10).
-  - **The residual ambiguity is pinned:** a name with no bar in the 252-session
-    lookback and bars inside the window is judged as a recent listing (an open
-    owner question — Q10). A name suspended 120 sessions and resumed five
-    sessions before the check is established and fails on volume.
+  - **The residual ambiguity is settled by the IPO date (Q12):** a name with
+    no bar in the 252-session lookback and bars inside the window fails closed
+    with no IPO date, fails on volume with an old one, and is a recent listing
+    only with one inside the window. A name suspended 120 sessions and resumed
+    five sessions before the check is established and fails on volume, with no
+    IPO lookup.
+  - **Q12's five, the owner's:** a recent `ipo` passes with one session; an old
+    `ipo` plus a partial window fails as missing bars; a missing or malformed
+    `ipo` fails closed (`ipo_date_unavailable`, for the session only); a
+    Finnhub failure (403, timeout) fails closed and is **not** cached as a
+    permanent answer; the cache prevents a second call. Plus the boundaries —
+    an `ipo` on the window's first session permits, one the session before
+    rejects — and a ticker failing on anything else is never asked.
   - **Class shares:** `BRK.B` has no standard-root contract (Q11).
   - **Ranking:** a rules event outranks a Massive-only row regardless of
     recency; within a group, newest first. The same inputs give the same order.

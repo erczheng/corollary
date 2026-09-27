@@ -20,7 +20,8 @@ three of them are *(assumption)*s the owner can override:
   used here as decision 21 states it, as a *filter*, never as a multiplier.)
 * average daily volume >= 1,000,000 shares over the trailing 20 completed
   sessions, or over every completed session a recent listing has
-  *(assumption)*;
+  *(assumption)* -- and since owner decision Q12 (2026-09-26) a ticker is a
+  recent listing only on a real IPO date (below);
 * last close >= $5 *(assumption)*;
 * at least **one** completed session -- a real close and a real volume.
   Owner decision Q10 (2026-09-26): recent IPOs reach discovery, so decision
@@ -52,10 +53,22 @@ averaged over only the days it traded. So:
   pre-Q10 rule unchanged, and it is what keeps a partial window from being
   confused with missing bars: a long-listed name with no bar on ten window
   sessions is ten zero-volume sessions, never a ten-session listing;
-* a **recent listing** -- first completed bar inside the window -- is
-  averaged over the window sessions from that bar's date on, gaps after it
-  counting zero: ``floor(sum / N)``, N from 1 to 20. When the first bar is on
-  the window's first session the two rules give the same answer;
+* a first completed bar **on** the window's first session is a full window
+  -- 20 sessions either way -- and needs nothing more;
+* a **partial window** -- first completed bar *after* the window's first
+  session, none before it -- is settled by the ticker's **IPO date** (owner
+  decision Q12), passed in as ``ipo_date``:
+
+  - on or after the window's first session, and not after the first bar: a
+    **recent listing**, averaged over the window sessions from the earlier
+    of the IPO date and the first bar, gaps counting zero:
+    ``floor(sum / N)``, N from 1 to 20;
+  - before the window's first session: an established name **missing
+    bars**, averaged over all 20 as above -- it fails as it did before Q10;
+  - none (not looked up, not on file, missing/empty/malformed in the
+    vendor's answer), or one *later* than the first bar, which the tape
+    contradicts: :attr:`TradeabilityFailure.IPO_DATE_UNAVAILABLE`, with no
+    average at all. An IPO is never assumed;
 * **no completed session** -- no bar before ``session_date``, or none on or
   before the window's last session -- fails
   :attr:`TradeabilityFailure.NO_COMPLETED_SESSION` with no average at all;
@@ -76,22 +89,17 @@ a request starting at the window would make every name that skipped the
 window's first session look like a listing, and judge it on a shorter,
 kinder average. Any older bar the caller has is welcome and counts.
 
-**The residual ambiguity, stated -- and put to the owner.** The owner's
-instruction (Q10) was: "Distinguish 'listed recently' (first bar inside the
-window) from 'bars missing'. If the provider cannot tell them apart, fail
-closed and report it to me." Bars alone cannot, in one case: a long-listed
-name with no bar anywhere in the lookback -- silent for more than 252
-sessions (a year), then resumed inside the window -- looks exactly like a
-recent IPO. Nothing else the provider serves separates them: Alpaca's asset
-record carries no listing or first-trade date, and its ``ipo`` attribute
-marks a name *before* secondary trading begins, not after. **As built, that
-residual case is judged as a recent listing on the sessions since it resumed,
-so it can pass** -- a departure from the literal fail-closed rule, recorded in
-the spec's Q10 as an open owner question. The one-year lookback is what keeps
-the case small: a suspension of anything up to a year leaves a bar in the
-lookback and is judged as established. STALE_BARS still applies, and
-``has_options`` and the standard-root check still gate. A test pins this
-behaviour.
+**The residual ambiguity, and how Q12 closed it.** Bars alone cannot tell
+a recent IPO from a long-listed name with no bar anywhere in the lookback --
+silent for more than 252 sessions (a year), then resumed inside the window.
+Alpaca's asset record carries no listing date, so Q10 left that case judged
+as a recent listing, an open owner question. Owner decision Q12 answered it:
+a partial window is a recent listing only when Finnhub's ``/stock/profile2``
+``ipo`` date falls on or after the window's first session. The one-year
+lookback stays, because it keeps the question rare -- any name with a bar in
+the past year is established without asking. The refresh below asks only
+for a partial window that would otherwise pass, caches each date for good in
+``ticker_ipo_date``, and fails closed when no date can be had.
 
 **The calendar is a parameter.** ``is_session`` answers "is this date an
 exchange session" and defaults to :func:`nyse_is_session`, which reads
@@ -109,8 +117,10 @@ opening timestamp read in ``America/New_York`` -- Alpaca stamps a daily bar at
 midnight New York, which is 04:00 or 05:00 UTC.
 
 **Nothing is guessed.** ``standard_root=None`` means "not checked" and fails
-closed. With no completed session no average is computed at all
-(``avg_volume_20d`` is ``None``). A recent listing's partial average *is*
+closed; ``ipo_date=None`` on a partial window means "no usable date" and
+fails closed. With no completed session, or a partial window without a
+usable IPO date, no average is computed at all (``avg_volume_20d`` is
+``None``). A recent listing's partial average *is*
 recorded in ``avg_volume_20d`` -- the field keeps its name -- and
 ``sessions_available`` carries the divisor, so a reader never mistakes a
 5-session mean for a 20-session one.
@@ -133,9 +143,10 @@ from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ, nyse_session_close
 from corollary.data.news.watchlist import MARKET_TICKER, WatchUniverse
+from corollary.data.providers.fundamentals import FundamentalsError
 from corollary.data.providers.interface import AssetDirectory, Bar, OptionContract, ProviderError
 from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
-from corollary.db.models import NewsArticle, NewsArticleTicker, TickerTradeability
+from corollary.db.models import NewsArticle, NewsArticleTicker, TickerIpoDate, TickerTradeability
 from corollary.instruments import is_adjusted_root
 from corollary.wire import require_aware
 
@@ -143,12 +154,14 @@ __all__ = [
     "ADV_BATCH_SIZE",
     "ADV_LOOKBACK_SESSIONS",
     "ADV_SESSIONS",
+    "MAX_IPO_LOOKUPS_PER_RUN",
     "MAX_TICKERS_PER_RUN",
     "MIN_AVG_DAILY_VOLUME",
     "MIN_LAST_CLOSE",
     "MIN_COMPLETED_SESSIONS",
     "STANDARD_CONTRACT_SIZE",
     "CheckStage",
+    "IpoDateSource",
     "IsSession",
     "RefreshResult",
     "TickerCheckError",
@@ -162,6 +175,7 @@ __all__ = [
     "has_standard_contract",
     "is_adjusted_root_ticker",
     "nyse_is_session",
+    "partial_window_first_session",
     "recent_article_tickers",
     "refresh_tradeability",
     "store_tradeability",
@@ -248,6 +262,11 @@ class TradeabilityFailure(StrEnum):
     #: a new token for a new meaning, so a stored row never reads under the
     #: wrong one.
     NO_COMPLETED_SESSION = "no_completed_session"
+    #: A partial ADV window with no usable IPO date (owner decision Q12,
+    #: 2026-09-26): none was looked up or on file, the vendor's answer had
+    #: none (missing, empty, malformed), or it is later than the ticker's own
+    #: first bar. Nothing is averaged -- neither divisor can be defended.
+    IPO_DATE_UNAVAILABLE = "ipo_date_unavailable"
     STALE_BARS = "stale_bars"
     LOW_VOLUME = "low_volume"
     LOW_CLOSE = "low_close"
@@ -269,7 +288,9 @@ class TradeabilityResult:
     established name, whatever its bar count: one that did not trade on two
     window sessions still reads 20, because those sessions are in the average
     as zeros. 1 to 20 for a recent listing: the window sessions from its first
-    bar's date on, gaps included. 0 exactly when nothing could be averaged.
+    bar's date on (or from its IPO date, if earlier -- Q12), gaps included.
+    0 exactly when nothing could be averaged: no completed session, or a
+    partial window with no usable IPO date.
     (Before Q10, 2026-09-26, it counted the window sessions carrying a bar;
     rows are per session date, so rows under that meaning age out.)
     """
@@ -425,6 +446,32 @@ def _completed_bars(
     return {day: item for day, item in by_session.items() if day < session_date}
 
 
+def partial_window_first_session(
+    ticker: str,
+    daily_bars: Sequence[Bar],
+    session_date: date,
+    *,
+    is_session: IsSession = nyse_is_session,
+) -> date | None:
+    """The first completed session, when it falls *after* the window's first session.
+
+    That is a **partial window** -- fewer than :data:`ADV_SESSIONS` window
+    sessions from the first bar on, and no bar before the window -- and it is
+    the one case an IPO date settles (Q12). ``None`` for everything else: an
+    established name (a bar before the window), a first bar on the window's
+    first session (a full window), or no completed session at all. Raises as
+    :func:`assess_tradeability` does on bars that cannot be one symbol's
+    daily series.
+    """
+    symbol = normalize_symbol(ticker)
+    window = adv_window(session_date, is_session=is_session)
+    completed = _completed_bars(symbol, daily_bars, session_date)
+    if not completed:
+        return None
+    oldest = min(completed)
+    return oldest if window[0] < oldest <= window[-1] else None
+
+
 def assess_tradeability(
     ticker: str,
     *,
@@ -433,6 +480,7 @@ def assess_tradeability(
     daily_bars: Sequence[Bar],
     session_date: date,
     is_session: IsSession = nyse_is_session,
+    ipo_date: date | None = None,
 ) -> TradeabilityResult:
     """Run every tradeability check on one ticker for one session date.
 
@@ -442,8 +490,11 @@ def assess_tradeability(
     historical feed, in any order, starting no later than
     :func:`adv_request_start`; only sessions before ``session_date`` count.
     Bars starting later are not refused, but a name whose pre-window bars
-    were left out is judged as a recent listing (see the module docstring).
+    were left out reads as a partial window (see the module docstring).
     ``is_session`` is the market calendar (see the module docstring).
+    ``ipo_date`` is the ticker's IPO date, consulted only for a partial
+    window -- first completed bar after the window's first session -- and
+    ignored otherwise; ``None`` there fails closed (Q12).
 
     Every check runs, so the result names every reason, and the first is
     what a caller logs. A malformed ticker fails rather than raising: tickers
@@ -464,22 +515,35 @@ def assess_tradeability(
     last_close = completed[newest].close if newest is not None else None
     stale = newest is not None and newest != window[-1]
 
-    # The sessions the average is taken over (Q10). Established -- a bar
-    # before the window -- is all 20, exactly the pre-Q10 rule. Otherwise the
-    # name first traded inside the window (or not at all): the sessions from
-    # its first bar's date on. The two agree when the first bar is on the
-    # window's first session, so the boundary needs no rule of its own.
-    if oldest is None:
+    # The sessions the average is taken over (Q10, Q12). Established -- a bar
+    # before the window -- or a first bar on the window's first session is
+    # all 20, exactly the pre-Q10 rule. A first bar *after* the window's first
+    # session is a partial window, and only the IPO date settles it: none
+    # usable, nothing is averaged and the ticker fails closed; one before the
+    # window, it is an established name missing bars, judged over all 20; one
+    # inside the window and not after the first bar, a recent listing,
+    # averaged from the earlier of the two -- a listed session with no bar
+    # counts zero, as it does for any listed name.
+    ipo_unavailable = False
+    if oldest is None or oldest > window[-1]:
         adv_sessions: tuple[date, ...] = ()
-    elif oldest < window[0]:
+    elif oldest <= window[0]:
+        adv_sessions = window
+    elif ipo_date is None or ipo_date > oldest:
+        # No usable date: none looked up, none on file, or one later than the
+        # ticker's own first bar -- a date the tape contradicts is not
+        # evidence of a listing. Never assume an IPO.
+        adv_sessions = ()
+        ipo_unavailable = True
+    elif ipo_date < window[0]:
         adv_sessions = window
     else:
-        adv_sessions = tuple(day for day in window if day >= oldest)
+        adv_sessions = tuple(day for day in window if day >= ipo_date)
     sessions_available = len(adv_sessions)
-    has_completed_session = sessions_available >= MIN_COMPLETED_SESSIONS
+    has_completed_session = oldest is not None and oldest <= window[-1]
 
     avg_volume: int | None = None
-    if has_completed_session:
+    if sessions_available >= MIN_COMPLETED_SESSIONS:
         # A session with no bar is a session with no trades: it adds zero to
         # the sum and still counts in the divisor. Floor, in integers: a mean
         # of 999,999.95 is 999,999 and fails. The divisor is never zero here.
@@ -496,6 +560,8 @@ def assess_tradeability(
         failures.append(TradeabilityFailure.STANDARD_ROOT_UNCHECKED)
     if not has_completed_session:
         failures.append(TradeabilityFailure.NO_COMPLETED_SESSION)
+    if ipo_unavailable:
+        failures.append(TradeabilityFailure.IPO_DATE_UNAVAILABLE)
     if stale:
         failures.append(TradeabilityFailure.STALE_BARS)
     if avg_volume is not None and avg_volume < MIN_AVG_DAILY_VOLUME:
@@ -527,7 +593,8 @@ def assess_tradeability(
 # once per ticker per session date, and a *failure* is cached for the session
 # like a pass, so a failing ticker is not re-checked every cycle.
 #
-# Four rules the code below implements rather than works around:
+# Five rules the code below implements rather than works around (the fifth
+# is owner decision Q12's):
 #
 # * **Unchecked is not failed.** A provider error on a ticker's bars or its
 #   root check caches nothing: the ticker stays unchecked, is reported, and is
@@ -546,6 +613,12 @@ def assess_tradeability(
 #   Always ``adv_daily_bars`` -- the historical feed -- never a snapshot.
 # * **No sleeps.** The provider's shared host limiter paces every request;
 #   the work per run is bounded by :data:`MAX_TICKERS_PER_RUN` instead.
+# * **An IPO date is asked for at most once per ticker, ever.** Only for a
+#   partial window that passes on its kindest reading; a parsed date is
+#   stored in ``ticker_ipo_date`` for good; "no date" fails the ticker closed
+#   for the session and is asked again next session; a failed request stores
+#   nothing and is retried next cycle; :data:`MAX_IPO_LOOKUPS_PER_RUN` bounds
+#   the requests per run.
 
 #: Most tickers one :func:`refresh_tradeability` run checks. Each can cost a
 #: standard-root request on the trading host, whose 200/min bucket is shared
@@ -553,6 +626,14 @@ def assess_tradeability(
 #: bucket. The remainder is reported as deferred and stays unchecked, so the
 #: next cycle takes it up.
 MAX_TICKERS_PER_RUN: Final = 100
+
+#: Most IPO-date lookups one :func:`refresh_tradeability` run makes (owner
+#: decision Q12). Each is one ``/stock/profile2`` request on the ``finnhub.io``
+#: bucket -- 60/min, shared with market cap and the news polls -- so a run
+#: takes at most a third of one minute's bucket. A ticker past the bound is
+#: deferred, unchecked, and asked on a later cycle. A date that comes back is
+#: cached for good, so steady state is close to zero requests.
+MAX_IPO_LOOKUPS_PER_RUN: Final = 20
 
 #: Symbols per ADV bars request. The provider's own ceiling
 #: (``ADV_MAX_SYMBOLS``), restated here because this module must not import the
@@ -600,14 +681,32 @@ class TradeabilityInputs(Protocol):
         :data:`ADV_LOOKBACK_SESSIONS` sessions before it. Nothing here can
         check that a name's older bars were merely not asked for, so a short
         request is not refused: it is silently wrong. A name whose pre-window
-        bars were left out has its first bar inside the window, so
-        :func:`assess_tradeability` judges it as a recent listing -- averaged
-        over the sessions since that bar, a smaller divisor that can lift an
-        established name with gaps over the volume floor. Any older bar is
+        bars were left out has its first bar inside the window, so it reads as
+        a partial window: an IPO lookup is spent on it (Q12), and only its
+        IPO date then keeps it from being averaged over the sessions since
+        that bar -- a smaller divisor that can lift an established name with
+        gaps over the volume floor. Any older bar is
         welcome and counts. Bars for ``session_date`` or later may be
         included; they are dropped.
         """
         ...
+
+
+class IpoDateSource(Protocol):
+    """Where a partial window's IPO date comes from (owner decision Q12).
+
+    ``FinnhubProvider`` satisfies it, reading ``/stock/profile2``'s ``ipo``.
+    Two outcomes, never confused:
+
+    * a ``date``, or ``None`` -- **the vendor answered**. ``None`` means the
+      answer had no usable date (missing, empty, malformed), and the ticker
+      fails closed with ``ipo_date_unavailable`` for this session;
+    * a raised :class:`FundamentalsError` or ``ProviderError`` -- **the vendor
+      could not be asked** (a 403, a timeout). The ticker stays unchecked,
+      nothing is cached, and the next cycle asks again.
+    """
+
+    async def ipo_date(self, symbol: str) -> date | None: ...
 
 
 class CheckStage(StrEnum):
@@ -615,6 +714,7 @@ class CheckStage(StrEnum):
 
     DAILY_BARS = "daily_bars"
     STANDARD_ROOT = "standard_root"
+    IPO_DATE = "ipo_date"
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,7 +734,8 @@ class RefreshResult:
     skipped run checked and cached nothing. ``results`` are the verdicts
     cached, in the order checked; ``errors`` the tickers left unchecked by a
     provider failure; ``deferred`` the tickers beyond the per-run bound,
-    unchecked, in the order given.
+    unchecked, in the order given -- a ticker deferred for want of an IPO
+    lookup this run (:data:`MAX_IPO_LOOKUPS_PER_RUN`) among them.
     """
 
     session_date: date
@@ -644,6 +745,9 @@ class RefreshResult:
     deferred: tuple[str, ...]
     bar_requests: int
     root_requests: int
+    #: ``/stock/profile2`` requests made for an IPO date (Q12); a date on file
+    #: costs none.
+    ipo_requests: int = 0
 
     @property
     def passed(self) -> tuple[str, ...]:
@@ -780,12 +884,50 @@ def store_tradeability(
 def _store(
     session_factory: Callable[[], Session],
     results: Sequence[TradeabilityResult],
+    ipo_dates: Mapping[str, date],
     checked_at: datetime,
 ) -> None:
     """The blocking half of a refresh. Only ever called through ``to_thread``."""
     with session_factory() as session:
-        store_tradeability(session, results, checked_at=checked_at)
+        if results:
+            store_tradeability(session, results, checked_at=checked_at)
+        if ipo_dates:
+            _store_ipo_dates(session, ipo_dates, fetched_at=checked_at)
         session.commit()
+
+
+def _store_ipo_dates(
+    session: Session, ipo_dates: Mapping[str, date], *, fetched_at: datetime
+) -> None:
+    """Insert newly fetched IPO dates into ``ticker_ipo_date``. Does not commit.
+
+    Only parsed dates reach here -- ``None`` and failures are never stored as
+    a permanent answer (Q12). ``ON CONFLICT DO NOTHING``: the date does not
+    change, and a row already there was fetched first.
+    """
+    require_aware(fetched_at, "fetched_at")
+    stamp = fetched_at.astimezone(timezone.utc)
+    rows = [
+        {"ticker": ticker, "ipo_date": ipo, "fetched_at": stamp}
+        for ticker, ipo in ipo_dates.items()
+    ]
+    statement = sqlite_insert(TickerIpoDate).values(rows).on_conflict_do_nothing(
+        index_elements=[TickerIpoDate.ticker]
+    )
+    session.execute(statement)
+
+
+def _load_ipo_dates(
+    session_factory: Callable[[], Session], tickers: Sequence[str]
+) -> dict[str, date]:
+    """The IPO dates already on file for ``tickers``. Only called through ``to_thread``."""
+    with session_factory() as session:
+        found = session.execute(
+            select(TickerIpoDate.ticker, TickerIpoDate.ipo_date).where(
+                TickerIpoDate.ticker.in_(tickers)
+            )
+        )
+        return {row.ticker: row.ipo_date for row in found}
 
 
 def _verdict_without_root_check(preliminary: TradeabilityResult) -> TradeabilityResult:
@@ -826,6 +968,30 @@ def _log_unavailable(
             "tickers": list(tickers),
             "session_date": session_date.isoformat(),
             "error": error,
+        },
+    )
+
+
+def _log_ipo_date_unavailable(
+    ticker: str, cause: str, session_date: date, first_session: date, ipo: date | None
+) -> None:
+    """Rule 8 for Q12: a partial window failed closed for want of a usable IPO date."""
+    logger.warning(
+        "tradeability: %s has a partial ADV window and no usable IPO date (%s); failed closed",
+        ticker,
+        cause,
+        extra={
+            "event": "tradeability_ipo_date_unavailable",
+            "rule": (
+                "owner decision Q12: a partial ADV window is a recent listing only "
+                "on an IPO date on or after the window's start; an IPO is never "
+                "assumed, so the ticker fails ipo_date_unavailable for this session"
+            ),
+            "ticker": ticker,
+            "session_date": session_date.isoformat(),
+            "first_completed_session": first_session.isoformat(),
+            "ipo_date": None if ipo is None else ipo.isoformat(),
+            "cause": cause,
         },
     )
 
@@ -909,6 +1075,8 @@ async def refresh_tradeability(
     now: UtcClock = _utc_now,
     max_tickers: int = MAX_TICKERS_PER_RUN,
     is_session: IsSession = nyse_is_session,
+    ipo_dates: IpoDateSource | None = None,
+    max_ipo_lookups: int = MAX_IPO_LOOKUPS_PER_RUN,
 ) -> RefreshResult:
     """Check ``tickers`` for ``session_date`` and cache every verdict reached.
 
@@ -935,9 +1103,24 @@ async def refresh_tradeability(
     adjusted root such as ``AIFU1``) is assessed with no bars and no root
     check and cached as the failure it is -- no request could be made for it,
     and one bad symbol in a bars batch would fail the other 199.
+
+    **A partial ADV window needs an IPO date (owner decision Q12).** A ticker
+    whose first completed bar falls after the window's first session is
+    first judged on the kindest reading -- listed at its first bar. Failing
+    even that, it is cached with no IPO question asked, since no answer could
+    make it pass. Otherwise its date is read from ``ticker_ipo_date``, else
+    asked of ``ipo_dates`` -- at most ``max_ipo_lookups`` requests a run, the
+    rest deferred -- and the ticker re-judged on it, before any root check. A
+    date that comes back is stored for good; ``None`` fails the ticker closed
+    (``ipo_date_unavailable``) for this session only, and is asked again next
+    session; a raised error caches nothing and is retried next cycle.
+    ``ipo_dates=None`` fails every such ticker closed: nothing to ask, and an
+    IPO is never assumed.
     """
     if max_tickers < 1:
         raise ValueError(f"max_tickers must be at least 1, not {max_tickers}")
+    if max_ipo_lookups < 0:
+        raise ValueError(f"max_ipo_lookups must not be negative, not {max_ipo_lookups}")
     if assets is None:
         return _skipped_run(_NO_ASSET_DIRECTORY, assets, tickers, session_date)
     unusable = _directory_unusable(assets)
@@ -970,8 +1153,11 @@ async def refresh_tradeability(
             # The vendor omits a symbol with no bars in the range: no bars.
             bars[ticker] = answer.get(ticker, ())
 
+    # Pass 1: every ticker judged on the kindest reading of its history -- a
+    # partial window taken as listed at its first bar. A failure here cannot
+    # be rescued by an IPO date or a root check, so neither is asked for.
     results: list[TradeabilityResult] = []
-    root_requests = 0
+    pending: list[tuple[str, bool, Sequence[Bar], date | None]] = []
     for ticker in batch:
         if ticker in unavailable:
             continue
@@ -979,6 +1165,9 @@ async def refresh_tradeability(
         has_options = asset is not None and asset.has_options
         daily = bars.get(ticker, ())
         try:
+            first = partial_window_first_session(
+                ticker, daily, session_date, is_session=is_session
+            )
             preliminary = assess_tradeability(
                 ticker,
                 has_options=has_options,
@@ -986,6 +1175,7 @@ async def refresh_tradeability(
                 daily_bars=daily,
                 session_date=session_date,
                 is_session=is_session,
+                ipo_date=first,
             )
         except (ValueError, TypeError) as exc:
             # The filter refuses bars that cannot be one symbol's daily series.
@@ -997,6 +1187,66 @@ async def refresh_tradeability(
         if not preliminary.passes:
             results.append(_verdict_without_root_check(preliminary))
             continue
+        pending.append((ticker, has_options, daily, first))
+
+    # The IPO dates already on file, read only when some ticker needs one.
+    needing = [ticker for ticker, _, _, first in pending if first is not None]
+    known: dict[str, date] = (
+        await asyncio.to_thread(_load_ipo_dates, session_factory, needing) if needing else {}
+    )
+
+    # Pass 2: settle each partial window on its IPO date (Q12), then the root.
+    fetched: dict[str, date] = {}
+    ipo_deferred: list[str] = []
+    ipo_requests = 0
+    root_requests = 0
+    for ticker, has_options, daily, first in pending:
+        ipo: date | None = None
+        if first is not None:
+            cause = ""
+            if ticker in known:
+                ipo = known[ticker]
+            elif ipo_dates is None:
+                cause = "no IPO-date source was given to this refresh"
+            elif ipo_requests >= max_ipo_lookups:
+                ipo_deferred.append(ticker)
+                continue
+            else:
+                ipo_requests += 1
+                try:
+                    ipo = await ipo_dates.ipo_date(ticker)
+                except (FundamentalsError, ProviderError) as exc:
+                    error = _describe_error(exc)
+                    errors.append(TickerCheckError(ticker, CheckStage.IPO_DATE, error))
+                    _log_unavailable([ticker], CheckStage.IPO_DATE, error, session_date)
+                    continue
+                if ipo is None:
+                    cause = "the vendor answered with no usable ipo date"
+                elif ipo <= first:
+                    # Stored for good only when the tape agrees with it: a date
+                    # after the first completed bar is a bad vendor answer, and
+                    # caching it would refuse the ticker until the window moves
+                    # past it instead of re-asking next session.
+                    fetched[ticker] = ipo
+            if ipo is not None and ipo > first:
+                cause = (
+                    f"the IPO date {ipo.isoformat()} is later than the ticker's first "
+                    f"completed session {first.isoformat()}, which the tape contradicts"
+                )
+            settled = assess_tradeability(
+                ticker,
+                has_options=has_options,
+                standard_root=True,
+                daily_bars=daily,
+                session_date=session_date,
+                is_session=is_session,
+                ipo_date=ipo,
+            )
+            if TradeabilityFailure.IPO_DATE_UNAVAILABLE in settled.failures:
+                _log_ipo_date_unavailable(ticker, cause, session_date, first, ipo)
+            if not settled.passes:
+                results.append(_verdict_without_root_check(settled))
+                continue
         root_requests += 1
         try:
             standard_root = await provider.has_standard_root(ticker)
@@ -1013,13 +1263,19 @@ async def refresh_tradeability(
                 daily_bars=daily,
                 session_date=session_date,
                 is_session=is_session,
+                ipo_date=ipo,
             )
         )
 
+    # Verdicts in the order the tickers were given, whichever pass reached them.
+    position = {ticker: index for index, ticker in enumerate(batch)}
+    results.sort(key=lambda result: position[result.ticker])
+    deferred = ipo_deferred + deferred
+
     checked_at = now()
     require_aware(checked_at, "now")
-    if results:
-        await asyncio.to_thread(_store, session_factory, results, checked_at)
+    if results or fetched:
+        await asyncio.to_thread(_store, session_factory, results, fetched, checked_at)
     _log_verdicts(results, session_date)
 
     outcome = RefreshResult(
@@ -1030,6 +1286,7 @@ async def refresh_tradeability(
         deferred=tuple(deferred),
         bar_requests=bar_requests,
         root_requests=root_requests,
+        ipo_requests=ipo_requests,
     )
     logger.log(
         logging.WARNING if errors or deferred else logging.INFO,
@@ -1049,6 +1306,8 @@ async def refresh_tradeability(
             "deferred": len(deferred),
             "bar_requests": bar_requests,
             "root_requests": root_requests,
+            "ipo_requests": ipo_requests,
+            "ipo_deferred": len(ipo_deferred),
             "asset_directory_size": len(assets),
         },
     )

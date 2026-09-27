@@ -129,6 +129,7 @@ Measured against this project's key on 2026-09-24 and recorded under
 import asyncio
 import logging
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -172,6 +173,7 @@ __all__ = [
     "MARKET_NEWS_PAGE_SIZE",
     "MILLION",
     "MarketNews",
+    "ipo_date_from_profile",
 ]
 
 logger = logging.getLogger(__name__)
@@ -521,6 +523,41 @@ class FinnhubProvider(FundamentalsProvider):
             return _log_unavailable(symbol, str(exc))
         except Exception as exc:  # noqa: BLE001 - see _log_internal_fault
             return self._fault(symbol, exc)
+
+    # ------------------------------------------------------------ IPO date
+
+    async def ipo_date(self, symbol: str) -> date | None:
+        """The ``ipo`` field of ``/stock/profile2`` -- owner decision Q12.
+
+        Asked only by the tradeability refresh, for a ticker whose history
+        starts inside the ADV window, and at most once per ticker ever once
+        a date comes back (the caller caches it). The same endpoint and the
+        same shared ``finnhub.io`` bucket as :meth:`market_caps`; one request.
+
+        Two outcomes that must never be confused:
+
+        * ``None`` -- **the vendor answered, with no usable date**: no
+          ``ipo`` field (a fund, an unknown symbol -- both recorded as
+          ``{}``), an empty string, or anything that is not an ISO
+          ``YYYY-MM-DD`` calendar date. Logged at WARNING with its rule.
+        * :class:`FundamentalsError` -- **the vendor could not be asked**: a
+          transport failure or timeout, any non-2xx (a 403 included), a body
+          that does not decode, or one that is not a JSON object. Scrubbed
+          like every other message from this module.
+
+        Neither is ever read as an IPO. Raises ``ValueError`` for a blank
+        symbol, before any request.
+        """
+        wanted = symbol.strip().upper()
+        if not wanted:
+            raise ValueError("an IPO date needs a symbol; got a blank one")
+        payload = await self._get("/stock/profile2", {"symbol": wanted})
+        if not isinstance(payload, Mapping):
+            raise FundamentalsError(
+                f"/stock/profile2 for {wanted} answered with a "
+                f"{type(payload).__name__}, not an object"
+            )
+        return ipo_date_from_profile(wanted, payload)
 
 
     # ----------------------------------------------------------------- news
@@ -964,6 +1001,73 @@ def _vendor_number(field: str, raw: object) -> Any:
     raise FundamentalsError(
         f"{field} is a {type(raw).__name__}, not a number. The vendor changed "
         "a field's type, or something in front of it rewrote the body."
+    )
+
+
+#: The one shape an ``ipo`` value is read in: ``YYYY-MM-DD``, as recorded
+#: (``"1980-12-12"`` for AAPL). Checked before ``date.fromisoformat``, which
+#: since Python 3.11 also accepts ``19801212`` and ISO week dates -- shapes the
+#: vendor has never been seen to send, so one arriving is a change to report,
+#: not a date to trust.
+_IPO_DATE_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # ASCII only: \d matches any Unicode digit
+
+
+def ipo_date_from_profile(symbol: str, payload: Mapping[str, Any]) -> date | None:
+    """Read one ``/stock/profile2`` body's ``ipo`` field -- or ``None``, logged.
+
+    ``None`` for a missing field, a non-string, an empty string, or text that
+    is not a real ``YYYY-MM-DD`` calendar date (``2026-02-30`` is refused).
+    Each is logged at WARNING with the rule, because the refresh fails that
+    ticker closed on it. Never raises for a body that merely lacks a date:
+    that is the vendor's answer, not a fault.
+    """
+    cause = _ipo_problem(payload)
+    if cause is not None:
+        _log_no_ipo_date(symbol, cause)
+        return None
+    return date.fromisoformat(str(payload["ipo"]).strip())
+
+
+def _ipo_problem(payload: Mapping[str, Any]) -> str | None:
+    """Why ``payload`` has no usable ``ipo`` date, or ``None`` when it has one."""
+    if "ipo" not in payload:
+        return "/stock/profile2 carries no ipo field"
+    raw = payload["ipo"]
+    if not isinstance(raw, str):
+        return f"/stock/profile2's ipo is a {type(raw).__name__}, not a date string"
+    text = raw.strip()
+    if not text:
+        return "/stock/profile2's ipo is empty"
+    if not _IPO_DATE_RE.fullmatch(text):
+        # Not quoted: it is vendor text that failed the only shape this module
+        # trusts, so it is described rather than echoed into a log.
+        return f"/stock/profile2's ipo is not YYYY-MM-DD ({len(text)} characters)"
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        # ASCII digits and dashes only (the regex above), so quoting it cannot
+        # carry anything else.
+        return f"/stock/profile2's ipo {text!r} is not a calendar date"
+    return None
+
+
+def _log_no_ipo_date(symbol: str, cause: str) -> None:
+    """Rule 8 for Q12: the vendor answered without a usable IPO date."""
+    logger.warning(
+        "no usable IPO date for %s: %s",
+        symbol,
+        cause,
+        extra={
+            "event": "ipo_date_unavailable",
+            "rule": (
+                "owner decision Q12: a partial ADV window is a recent listing "
+                "only on a real IPO date; an IPO is never assumed, so this "
+                "ticker fails closed this session and is asked again next session"
+            ),
+            "symbol": symbol,
+            "cause": cause,
+            "vendor": FINNHUB_HOST,
+        },
     )
 
 

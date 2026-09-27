@@ -10,6 +10,7 @@ underlying whose only live contracts are adjusted.
 """
 
 import json
+import logging
 from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from corollary.data.news.tradeability import (
     ADV_BATCH_SIZE,
+    MAX_IPO_LOOKUPS_PER_RUN,
     MAX_TICKERS_PER_RUN,
     RefreshResult,
     TradeabilityFailure,
@@ -34,16 +36,31 @@ from corollary.data.news.tradeability import (
 )
 from corollary.data.news.watchlist import watch_universe
 from corollary.data.providers.alpaca import ADV_MAX_SYMBOLS
+from corollary.data.providers.finnhub import FinnhubProvider
+from corollary.data.providers.fundamentals import FundamentalsError
 from corollary.data.providers.interface import (
     AssetDirectory,
     Bar,
     EquityAsset,
     ProviderError,
 )
-from corollary.db.models import Base, NewsArticle, NewsArticleTicker, TickerTradeability
+from corollary.db.models import (
+    Base,
+    NewsArticle,
+    NewsArticleTicker,
+    TickerIpoDate,
+    TickerTradeability,
+)
+from corollary.ratelimit import HostRateLimiter
 from corollary.db.session import create_db_engine, sqlite_url
-from tests.data.news.test_tradeability import history
+from tests.data.news.test_tradeability import history, sessions_before
 from tests.data.providers.conftest import fixture_text, limiter, make_provider  # noqa: F401
+from tests.data.providers.test_finnhub_provider import (
+    TEST_CREDENTIALS,
+    RecordingTransport,
+    _never_sleep,
+    by_symbol,
+)
 
 SESSION = date(2026, 9, 24)
 NEXT_SESSION = date(2026, 9, 25)
@@ -255,7 +272,8 @@ async def test_a_passing_ticker_is_cached_with_every_field(sessions):
 
 @pytest.mark.asyncio
 async def test_a_recent_listing_is_cached_with_its_partial_average_and_divisor(sessions):
-    """Q10: three sessions since listing pass, and the row says "over 3 sessions"."""
+    """Q10/Q12: listed three sessions ago -- the IPO date says so -- and the row
+    says "over 3 sessions"."""
 
     def bars(symbol: str, session_date: date) -> list[Bar]:
         return history(
@@ -263,7 +281,10 @@ async def test_a_recent_listing_is_cached_with_its_partial_average_and_divisor(s
         )
 
     provider = FakeInputs(bars=bars)
-    result = await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"))
+    ipos = FakeIpoDates({"NEWCO": sessions_before(SESSION, 3)[0]})
+    result = await refresh(
+        sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos
+    )
 
     assert result.passed == ("NEWCO",)
     assert provider.root_calls == ["NEWCO"]
@@ -663,6 +684,303 @@ async def test_the_same_inputs_give_the_same_rows(tmp_path):
         )
         engine.dispose()
     assert snapshots[0] == snapshots[1]
+
+
+
+# --------------------------------- Q12: the real IPO date settles a partial window
+
+
+class FakeIpoDates:
+    """``IpoDateSource``: answers from a table, recorded, failing on request.
+
+    ``answers[ticker]`` is a date, or ``None`` for a profile with no usable
+    ``ipo``. A ticker in ``errors`` raises what Finnhub's provider raises
+    when it could not be asked at all.
+    """
+
+    def __init__(
+        self,
+        answers: dict[str, date | None] | None = None,
+        *,
+        errors: Sequence[str] = (),
+        provider_errors: Sequence[str] = (),
+    ) -> None:
+        self._answers = answers or {}
+        self._errors = set(errors)
+        self._provider_errors = set(provider_errors)
+        self.calls: list[str] = []
+
+    async def ipo_date(self, symbol: str) -> date | None:
+        self.calls.append(symbol)
+        if symbol in self._errors:
+            raise FundamentalsError("GET /stock/profile2 returned 403: no access")
+        if symbol in self._provider_errors:
+            raise ProviderError("GET /stock/profile2 failed: timed out")
+        return self._answers.get(symbol)
+
+
+def listed_sessions_ago(count: int, session_date: date = SESSION) -> date:
+    """The session ``count`` sessions before ``session_date`` -- a first bar's date."""
+    return sessions_before(session_date, count)[0]
+
+
+def partial(count: int, *, volume: int = 2_000_000) -> Callable[[str, date], list[Bar]]:
+    """Bars on only the last ``count`` sessions: a partial window, no lookback bar."""
+
+    def bars(symbol: str, session_date: date) -> list[Bar]:
+        return history(count, before=session_date, symbol=symbol, volume=volume)
+
+    return bars
+
+
+def ipo_rows(sessions: Callable[[], Session]) -> dict[str, TickerIpoDate]:
+    with sessions() as session:
+        found = session.scalars(select(TickerIpoDate)).all()
+        session.expunge_all()
+    return {row.ticker: row for row in found}
+
+
+@pytest.mark.asyncio
+async def test_a_recent_ipo_passes_with_one_session_and_the_date_is_cached(sessions):
+    """Owner test 1: listed yesterday, and the IPO date says so."""
+    ipo = listed_sessions_ago(1)
+    provider = FakeInputs(bars=partial(1, volume=1_500_000))
+    ipos = FakeIpoDates({"NEWCO": ipo})
+    result = await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos)
+
+    assert result.passed == ("NEWCO",)
+    assert ipos.calls == ["NEWCO"]
+    assert result.ipo_requests == 1
+    assert provider.root_calls == ["NEWCO"]
+    row = rows(sessions)[("NEWCO", SESSION)]
+    assert (row.sessions_available, row.avg_volume_20d, row.passes) == (1, 1_500_000, True)
+    stored = ipo_rows(sessions)["NEWCO"]
+    assert stored.ipo_date == ipo
+    assert stored.fetched_at == NOW
+
+
+@pytest.mark.asyncio
+async def test_an_old_ipo_with_a_partial_window_fails_as_missing_bars(sessions):
+    """Owner test 2: listed in 1999, bars on five sessions -- zeros for the rest."""
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates({"OLDCO": date(1999, 3, 10)})
+    result = await refresh(sessions, provider, ["OLDCO"], assets=directory("OLDCO"), ipo_dates=ipos)
+
+    assert result.passed == ()
+    row = rows(sessions)[("OLDCO", SESSION)]
+    assert row.failures == "low_volume"
+    assert row.sessions_available == 20
+    assert row.avg_volume_20d == 500_000
+    assert row.standard_root is None
+    assert provider.root_calls == []  # the verdict is settled; no root request
+    # The date itself is a real answer, and it does not change: kept.
+    assert ipo_rows(sessions)["OLDCO"].ipo_date == date(1999, 3, 10)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_or_malformed_ipo_fails_closed_for_the_session_only(sessions, caplog):
+    """Owner test 3: no usable date -- ``ipo_date_unavailable``, re-asked next session."""
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates({"NEWCO": None})
+    with caplog.at_level(logging.WARNING, logger="corollary.data.news.tradeability"):
+        await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos)
+
+    row = rows(sessions)[("NEWCO", SESSION)]
+    assert row.failures == "ipo_date_unavailable"
+    assert row.passes is False
+    assert row.avg_volume_20d is None
+    assert row.sessions_available == 0
+    assert row.standard_root is None
+    assert provider.root_calls == []
+    assert ipo_rows(sessions) == {}  # never stored as a permanent answer
+    [record] = [r for r in caplog.records if getattr(r, "event", None) == "tradeability_ipo_date_unavailable"]
+    assert record.ticker == "NEWCO"
+    assert "never assumed" in record.rule
+
+    # Cached for this session like any failure, so not asked again today...
+    with sessions() as session:
+        assert tickers_needing_check(
+            session, candidates=["NEWCO"], watch=UNIVERSE, session_date=SESSION
+        ) == []
+    # ...and asked again next session, where a real answer can still arrive.
+    ipos_next = FakeIpoDates({"NEWCO": listed_sessions_ago(6, NEXT_SESSION)})
+    result = await refresh(
+        sessions, provider, ["NEWCO"], assets=directory("NEWCO"),
+        session_date=NEXT_SESSION, ipo_dates=ipos_next,
+    )
+    assert ipos_next.calls == ["NEWCO"]
+    assert result.passed == ("NEWCO",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["errors", "provider_errors"])
+async def test_a_finnhub_failure_fails_closed_and_caches_nothing(sessions, failure):
+    """Owner test 4: a 403 or a timeout is "could not ask" -- unchecked, retried."""
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates(**{failure: ["NEWCO"]})
+    result = await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos)
+
+    assert result.passed == ()
+    assert rows(sessions) == {}
+    assert ipo_rows(sessions) == {}
+    (error,) = result.errors
+    assert (error.ticker, error.stage) == ("NEWCO", "ipo_date")
+    assert provider.root_calls == []
+
+    # Unchecked, so the same session asks again -- and a later answer counts.
+    with sessions() as session:
+        again = tickers_needing_check(
+            session, candidates=["NEWCO"], watch=UNIVERSE, session_date=SESSION
+        )
+    assert again == ["NEWCO"]
+    recovered = FakeIpoDates({"NEWCO": listed_sessions_ago(5)})
+    second = await refresh(sessions, provider, again, assets=directory("NEWCO"), ipo_dates=recovered)
+    assert second.passed == ("NEWCO",)
+    assert recovered.calls == ["NEWCO"]
+
+
+@pytest.mark.asyncio
+async def test_the_cache_prevents_a_second_call(sessions):
+    """Owner test 5: a partial-window ticker costs one Finnhub call, ever."""
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates({"NEWCO": listed_sessions_ago(5)})
+    await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos)
+    assert ipos.calls == ["NEWCO"]
+
+    later = await refresh(
+        sessions, provider, ["NEWCO"], assets=directory("NEWCO"),
+        session_date=NEXT_SESSION, ipo_dates=ipos,
+    )
+    assert ipos.calls == ["NEWCO"]  # still one
+    assert later.ipo_requests == 0
+    assert later.passed == ("NEWCO",)
+    assert rows(sessions)[("NEWCO", NEXT_SESSION)].sessions_available == 6
+
+
+@pytest.mark.asyncio
+async def test_a_date_already_on_file_is_used_without_asking(sessions):
+    with sessions() as session:
+        session.add(TickerIpoDate(ticker="OLDCO", ipo_date=date(2004, 8, 19), fetched_at=NOW))
+        session.commit()
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates()
+    await refresh(sessions, provider, ["OLDCO"], assets=directory("OLDCO"), ipo_dates=ipos)
+
+    assert ipos.calls == []
+    assert rows(sessions)[("OLDCO", SESSION)].failures == "low_volume"
+
+
+@pytest.mark.asyncio
+async def test_an_ipo_date_the_tape_contradicts_fails_closed_and_is_not_stored(sessions):
+    """SYNTHETIC: the vendor's date is after the first completed bar. The
+    ticker fails closed, and the date is not cached for good -- a later,
+    corrected answer must still be asked for next session."""
+    provider = FakeInputs(bars=partial(5, volume=1_500_000))
+    ipos = FakeIpoDates({"NEWCO": listed_sessions_ago(2)})
+    await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"), ipo_dates=ipos)
+
+    row = rows(sessions)[("NEWCO", SESSION)]
+    assert row.failures == "ipo_date_unavailable"
+    assert row.passes is False
+    assert ipo_rows(sessions) == {}
+
+
+@pytest.mark.asyncio
+async def test_no_ipo_source_fails_every_partial_window_closed(sessions):
+    """``ipo_dates=None`` (the default): nobody to ask, so never assume an IPO."""
+    provider = FakeInputs(bars=partial(5))
+    result = await refresh(sessions, provider, ["NEWCO"], assets=directory("NEWCO"))
+
+    assert result.passed == ()
+    assert result.ipo_requests == 0
+    assert rows(sessions)[("NEWCO", SESSION)].failures == "ipo_date_unavailable"
+    assert ipo_rows(sessions) == {}
+
+
+@pytest.mark.asyncio
+async def test_the_ipo_date_is_asked_only_when_it_could_change_the_verdict(sessions):
+    """Established names, and partial windows failing on anything else, cost nothing."""
+
+    def bars(symbol: str, session_date: date) -> list[Bar]:
+        if symbol == "OLDCO":  # established: 25 sessions, a bar before the window
+            return history(25, before=session_date, symbol=symbol)
+        if symbol == "CHEAP":
+            return history(5, before=session_date, symbol=symbol, last_close="3")
+        if symbol == "STALE":
+            return history(5, before=session_date, symbol=symbol)[:-1]
+        if symbol == "THIN":  # fails even over its own five sessions
+            return history(5, before=session_date, symbol=symbol, volume=999_999)
+        return history(5, before=session_date, symbol=symbol)
+
+    provider = FakeInputs(bars=bars)
+    ipos = FakeIpoDates()
+    tickers = ["OLDCO", "CHEAP", "STALE", "THIN", "NOOPT"]
+    await refresh(
+        sessions, provider, tickers,
+        assets=directory("OLDCO", "CHEAP", "STALE", "THIN", without_options=["NOOPT"]),
+        ipo_dates=ipos,
+    )
+
+    assert ipos.calls == []
+    cached = rows(sessions)
+    assert cached[("OLDCO", SESSION)].passes is True
+    assert cached[("CHEAP", SESSION)].failures == "low_close"
+    assert cached[("STALE", SESSION)].failures == "stale_bars"
+    assert cached[("THIN", SESSION)].failures == "low_volume"
+    assert cached[("NOOPT", SESSION)].failures == "no_options"
+    # Judged on the kindest reading (listed at its first bar) and failed
+    # anyway: the recorded divisor is the one that average was taken over.
+    assert cached[("THIN", SESSION)].sessions_available == 5
+
+
+@pytest.mark.asyncio
+async def test_ipo_lookups_are_bounded_per_run_and_the_rest_deferred(sessions):
+    tickers = ["AAAA", "BBBB", "CCCC", "DDDD"]
+    provider = FakeInputs(bars=partial(5))
+    ipos = FakeIpoDates({t: listed_sessions_ago(5) for t in tickers})
+    result = await refresh(
+        sessions, provider, tickers, assets=directory(*tickers),
+        ipo_dates=ipos, max_ipo_lookups=2,
+    )
+
+    assert ipos.calls == ["AAAA", "BBBB"]
+    assert result.ipo_requests == 2
+    assert result.passed == ("AAAA", "BBBB")
+    assert result.deferred == ("CCCC", "DDDD")
+    assert set(rows(sessions)) == {("AAAA", SESSION), ("BBBB", SESSION)}
+
+
+def test_the_ipo_lookup_bound_is_twenty():
+    assert MAX_IPO_LOOKUPS_PER_RUN == 20
+
+
+@pytest.mark.asyncio
+async def test_a_bad_ipo_lookup_bound_is_refused(sessions):
+    with pytest.raises(ValueError):
+        await refresh(sessions, FakeInputs(), ["ACME"], assets=directory("ACME"), max_ipo_lookups=-1)
+
+
+@pytest.mark.asyncio
+async def test_the_real_finnhub_provider_answers_the_ipo_question(sessions):
+    """The recorded AAPL profile (``ipo`` 1980-12-12) through the real provider.
+
+    SYNTHETIC: the bars -- five sessions of AAPL, a partial window no real
+    AAPL tape has -- so the IPO question is asked at all. The recorded date
+    is 45 years before the window, so the gap is missing bars and it fails.
+    """
+    transport = RecordingTransport(by_symbol({"AAPL": "profile2_aapl"}))
+    finnhub = FinnhubProvider(
+        credentials=TEST_CREDENTIALS,
+        client=httpx.AsyncClient(transport=transport),
+        limiter=HostRateLimiter(clock=lambda: 0.0, sleep=_never_sleep),
+    )
+    provider = FakeInputs(bars=partial(5))
+    result = await refresh(sessions, provider, ["AAPL"], assets=directory("AAPL"), ipo_dates=finnhub)
+
+    assert transport.symbols_requested() == ["AAPL"]
+    assert result.passed == ()
+    assert rows(sessions)[("AAPL", SESSION)].failures == "low_volume"
+    assert ipo_rows(sessions)["AAPL"].ipo_date == date(1980, 12, 12)
 
 
 # ------------------------------------------- recorded fixtures, real provider

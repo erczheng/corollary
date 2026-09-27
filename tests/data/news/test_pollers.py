@@ -1164,6 +1164,7 @@ class TradeabilityCall:
     tickers: Sequence[str]
     session_date: date
     assets: AssetDirectory | None
+    ipo_dates: object = None
 
 
 @pytest.fixture
@@ -1178,8 +1179,9 @@ def fake_refresh(monkeypatch: pytest.MonkeyPatch) -> list[TradeabilityCall]:
         session_date: date,
         session_factory: object,
         now: object,
+        ipo_dates: object,
     ) -> RefreshResult:
-        calls.append(TradeabilityCall(list(tickers), session_date, assets))
+        calls.append(TradeabilityCall(list(tickers), session_date, assets, ipo_dates))
         return RefreshResult(
             session_date=session_date, skipped=None, results=(), errors=(), deferred=(),
             bar_requests=1, root_requests=0,
@@ -1217,6 +1219,32 @@ async def test_tradeability_candidates_are_todays_et_tags_minus_the_watch(
     )
     assert isinstance(result, RefreshResult)
     assert fake_refresh == [TradeabilityCall(["ORCL"], date(2026, 9, 24), DIRECTORY)]
+
+
+class Ipos:
+    async def ipo_date(self, symbol: str) -> date | None:
+        raise AssertionError("not called")
+
+
+@pytest.mark.asyncio
+async def test_tradeability_passes_the_ipo_date_source_through_and_defaults_to_none(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    """Q12: the scheduler hands the Finnhub provider in; absent, partial windows fail closed."""
+    await holder.refresh(DirectorySource())
+    now = et(2026, 9, 24, 21, 30)
+    seed_rows(
+        sessions,
+        article(NewsFeed.ALPACA_NEWS, "today", published_at=et(2026, 9, 24, 0, 0), tickers=("ORCL",)),
+    )
+    common: dict[str, Any] = dict(
+        holder=holder, provider=NoInputs(), universe=UniverseBox("NVDA"),
+        session_factory=sessions, now=now,
+    )
+    source = Ipos()
+    await refresh_tradeability_cache(**common, ipo_dates=source)
+    await refresh_tradeability_cache(**common)
+    assert [call.ipo_dates for call in fake_refresh] == [source, None]
 
 
 @pytest.mark.asyncio

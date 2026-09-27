@@ -91,6 +91,7 @@ __all__ = [
     "RiskLimit",
     "RISK_LIMIT_ABSOLUTE_MAX",
     "RISK_LIMIT_RANGES",
+    "TickerIpoDate",
     "TickerTradeability",
     "WatchSymbol",
     "validate_risk_limit",
@@ -1402,9 +1403,10 @@ class TickerTradeability(Base):
     the filter can produce, so three columns are nullable:
 
     * ``standard_root`` -- ``None``: the standard-contract check was not run.
-    * ``avg_volume_20d`` -- ``None``: no completed session to average over
-      (Q10: a recent listing averages over the 1-20 sessions it has). An
-      integer share count otherwise.
+    * ``avg_volume_20d`` -- ``None``: no completed session to average over,
+      or a partial window with no usable IPO date (Q12). An integer share
+      count otherwise (Q10: a recent listing averages over the 1-20 sessions
+      it has).
     * ``last_close`` -- ``None``: no completed bar. ``Money``; SQL comparison
       of it is refused, so a "close >= $5" filter reads rows into Python.
 
@@ -1451,8 +1453,46 @@ class TickerTradeability(Base):
     avg_volume_20d: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_close: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
     #: The ADV divisor: 20 for an established name, 1-20 for a recent listing
-    #: (Q10), 0 when nothing could be averaged -- "ADV over N sessions".
+    #: (Q10, on a real IPO date since Q12), 0 when nothing could be averaged
+    #: (no completed session, or ``ipo_date_unavailable``) -- "ADV over N
+    #: sessions".
     sessions_available: Mapped[int] = mapped_column(Integer, nullable=False)
     passes: Mapped[bool] = mapped_column(Boolean, nullable=False)
     failures: Mapped[str] = mapped_column(String(256), nullable=False)
     checked_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class TickerIpoDate(Base):
+    """One ticker's IPO date, as the vendor states it -- owner decision Q12 (migration 0009).
+
+    The tradeability filter asks for an IPO date only for a **partial ADV
+    window** -- a ticker whose first completed bar falls after the window's
+    first session, with none in the one-year lookback -- and a date does not
+    change, so each ticker costs at most one Finnhub ``/stock/profile2`` call
+    ever. Cached across sessions, unlike ``ticker_tradeability``'s per-session
+    verdicts.
+
+    **Only a successfully parsed date is ever stored**, which is why
+    ``ipo_date`` is ``NOT NULL``. A body with no usable ``ipo`` fails the ticker
+    closed for that session (its ``ticker_tradeability`` row says
+    ``ipo_date_unavailable``) and is asked again next session; a transport
+    failure, a 403 or a timeout stores nothing anywhere and is retried next
+    cycle. Storing either as a permanent answer would turn a vendor outage
+    into a ticker that can never be judged again.
+
+    ``fetched_at`` is when the date was fetched, UTC. ``ticker`` carries
+    ``watch_symbol``'s non-blank uppercase CHECK so a lookup cannot miss on
+    case.
+    """
+
+    __tablename__ = "ticker_ipo_date"
+    __table_args__ = (
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)",
+            name="ck_ticker_ipo_date_ticker",
+        ),
+    )
+
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ipo_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

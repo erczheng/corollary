@@ -25,6 +25,7 @@ from corollary.data.news.tradeability import (
     assess_tradeability,
     has_standard_contract,
     is_adjusted_root_ticker,
+    partial_window_first_session,
 )
 from corollary.data.providers.interface import Bar, OptionContract, OptionType
 
@@ -216,12 +217,22 @@ def test_only_a_bar_for_session_date_itself_is_no_completed_session() -> None:
     assert result.failures == (TradeabilityFailure.NO_COMPLETED_SESSION,)
 
 
-# --- recent listings (Q10) ------------------------------------------------------
+# --- recent listings (Q10, settled by the IPO date since Q12) -------------------
 
 
-def test_a_single_completed_session_passes_when_every_other_check_holds() -> None:
-    """Listed yesterday: one real close and one real volume are enough (Q10)."""
-    result = assess(daily_bars=history(1, volume=1_500_000, last_close="31.25"))
+def first_session(bars: list[Bar]) -> date:
+    """The NY session of the oldest bar -- what a true IPO date would match."""
+    return min(item.at.astimezone(NYSE_TZ).date() for item in bars)
+
+
+def assess_listing(bars: list[Bar], **overrides: Any) -> Any:
+    """A partial window whose IPO date is its first bar's session (Q12)."""
+    return assess(daily_bars=bars, ipo_date=first_session(bars), **overrides)
+
+
+def test_a_single_completed_session_passes_when_its_ipo_date_is_recent() -> None:
+    """Listed yesterday, and the IPO date says so: one session is enough (Q10, Q12)."""
+    result = assess_listing(history(1, volume=1_500_000, last_close="31.25"))
     assert result.passes is True, result.failures
     assert result.sessions_available == 1
     assert result.avg_volume_20d == 1_500_000
@@ -229,16 +240,16 @@ def test_a_single_completed_session_passes_when_every_other_check_holds() -> Non
 
 
 def test_a_single_completed_session_still_meets_every_threshold() -> None:
-    thin = assess(daily_bars=history(1, volume=999_999))
+    thin = assess_listing(history(1, volume=999_999))
     assert thin.failures == (TradeabilityFailure.LOW_VOLUME,)
-    cheap = assess(daily_bars=history(1, last_close="4.99"))
+    cheap = assess_listing(history(1, last_close="4.99"))
     assert cheap.failures == (TradeabilityFailure.LOW_CLOSE,)
-    unlisted = assess(daily_bars=history(1), has_options=False)
+    unlisted = assess_listing(history(1), has_options=False)
     assert unlisted.failures == (TradeabilityFailure.NO_OPTIONS,)
 
 
 def test_19_sessions_the_old_boundary_passes_on_a_19_session_average() -> None:
-    result = assess(daily_bars=history(19, volume=1_200_000))
+    result = assess_listing(history(19, volume=1_200_000))
     assert result.passes is True, result.failures
     assert result.sessions_available == 19
     assert result.avg_volume_20d == 1_200_000
@@ -247,7 +258,7 @@ def test_19_sessions_the_old_boundary_passes_on_a_19_session_average() -> None:
 
 def test_a_partial_average_is_floored_over_its_own_session_count() -> None:
     """2,999,999 over 3 sessions is 999,999.67: floored, it fails."""
-    result = assess(daily_bars=history(3, volumes=[1_000_000, 1_000_000, 999_999]))
+    result = assess_listing(history(3, volumes=[1_000_000, 1_000_000, 999_999]))
     assert result.sessions_available == 3
     assert result.avg_volume_20d == 999_999
     assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
@@ -261,7 +272,7 @@ def test_a_recent_listing_counts_a_gap_after_its_first_bar_as_zero_volume() -> N
     bars = history(10, volume=1_100_000)
     gap = sessions_before(SESSION, 5)[0]
     bars = [item for item in bars if item.at.astimezone(NYSE_TZ).date() != gap]
-    result = assess(daily_bars=bars)
+    result = assess_listing(bars)
     assert result.sessions_available == 10
     assert result.avg_volume_20d == 990_000
     assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
@@ -270,19 +281,138 @@ def test_a_recent_listing_counts_a_gap_after_its_first_bar_as_zero_volume() -> N
 def test_a_recent_listing_with_a_stale_tape_still_fails() -> None:
     """Listed five sessions ago, no bar for the previous session: stale, as ever."""
     bars = history(5, volume=9_000_000)[:-1]
-    result = assess(daily_bars=bars)
+    result = assess_listing(bars)
     assert result.sessions_available == 5
     assert result.avg_volume_20d == 7_200_000
     assert result.failures == (TradeabilityFailure.STALE_BARS,)
 
 
 def test_a_listing_on_the_first_window_session_reads_like_an_established_name() -> None:
-    """The two rules meet at 20: first bar on the window's first session."""
+    """The two rules meet at 20: first bar on the window's first session.
+
+    That is a full window, not a partial one, so no IPO date is needed.
+    """
     listed = assess(daily_bars=history(20, volume=1_000_000))
     established = assess(daily_bars=history(21, volume=1_000_000))
     assert listed.sessions_available == established.sessions_available == 20
     assert listed.avg_volume_20d == established.avg_volume_20d == 1_000_000
     assert listed.passes and established.passes
+
+
+# --- Q12: the real IPO date settles a partial window -----------------------------
+
+
+def test_a_partial_window_without_an_ipo_date_fails_closed() -> None:
+    """Q12: a partial window is no longer a recent listing by itself.
+
+    With no IPO date nothing is averaged -- neither divisor can be defended --
+    so the average is ``None`` and the divisor 0, and the other checks still
+    report.
+    """
+    result = assess(daily_bars=history(5, volume=2_000_000, last_close="4"))
+    assert result.avg_volume_20d is None
+    assert result.sessions_available == 0
+    assert result.last_close == Decimal("4")
+    assert result.failures == (
+        TradeabilityFailure.IPO_DATE_UNAVAILABLE,
+        TradeabilityFailure.LOW_CLOSE,
+    )
+
+
+def test_an_old_ipo_date_with_a_partial_window_fails_as_missing_bars() -> None:
+    """Q12: listed long ago, bars only on five window sessions -- missing bars.
+
+    Judged as the established name it is: 20 sessions, the fifteen with no bar
+    counting zero -- 10,000,000 / 20 = 500,000, which fails. This is the case
+    Q10 left open: a name silent for more than the 252-session lookback, then
+    resumed, which bars alone read as a five-session IPO.
+    """
+    resumed = history(5, volume=2_000_000)
+    assert first_session(resumed) > REQUEST_START
+    result = assess(daily_bars=resumed, ipo_date=date(1999, 3, 10))
+    assert result.sessions_available == 20
+    assert result.avg_volume_20d == 500_000
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+
+def test_an_old_ipo_date_with_a_stale_partial_window_fails_stale_and_on_volume() -> None:
+    resumed = history(5, volume=2_000_000)[:-1]
+    result = assess(daily_bars=resumed, ipo_date=date(2010, 6, 29))
+    assert result.sessions_available == 20
+    assert result.failures == (
+        TradeabilityFailure.STALE_BARS,
+        TradeabilityFailure.LOW_VOLUME,
+    )
+
+
+def test_an_ipo_the_session_before_the_window_is_established() -> None:
+    """The boundary that rejects: listed one session before the window starts."""
+    day_before = sessions_before(WINDOW_START, 1)[0]
+    result = assess(daily_bars=history(10, volume=1_500_000), ipo_date=day_before)
+    assert result.sessions_available == 20
+    assert result.avg_volume_20d == 750_000
+    assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+
+def test_an_ipo_on_the_window_start_is_a_recent_listing() -> None:
+    """The boundary that permits: "on or after the start of the ADV window"."""
+    bars = history(20, volume=1_000_000)[1:]  # first bar on the second window session
+    second = sessions_before(SESSION, 19)[0]
+    assert first_session(bars) == second
+    on_start = assess(daily_bars=bars, ipo_date=WINDOW_START)
+    # Listed on the window's first session with no trade that day: that
+    # session counts zero, exactly as it would for any listed name.
+    assert on_start.sessions_available == 20
+    assert on_start.avg_volume_20d == 950_000
+    assert on_start.failures == (TradeabilityFailure.LOW_VOLUME,)
+
+    on_first_bar = assess(daily_bars=bars, ipo_date=second)
+    assert on_first_bar.sessions_available == 19
+    assert on_first_bar.avg_volume_20d == 1_000_000
+    assert on_first_bar.passes is True
+
+
+def test_sessions_between_the_ipo_and_the_first_bar_count_zero() -> None:
+    """Listed eight sessions ago, first traded five sessions ago: divisor 8."""
+    listed = sessions_before(SESSION, 8)[0]
+    result = assess(daily_bars=history(5, volume=1_600_000), ipo_date=listed)
+    assert result.sessions_available == 8
+    assert result.avg_volume_20d == 1_000_000
+    assert result.passes is True
+
+
+def test_an_ipo_date_after_the_first_bar_contradicts_the_tape_and_fails_closed() -> None:
+    """Bars before the listing date: the vendor's date is not evidence here."""
+    bars = history(5, volume=2_000_000)
+    result = assess(daily_bars=bars, ipo_date=first_session(bars) + timedelta(days=1))
+    assert result.avg_volume_20d is None
+    assert result.sessions_available == 0
+    assert result.failures == (TradeabilityFailure.IPO_DATE_UNAVAILABLE,)
+
+
+def test_an_ipo_date_is_never_consulted_for_a_full_window() -> None:
+    """An established name, or one first trading on the window start, ignores it."""
+    for bars in (history(25), history(20)):
+        without = assess(daily_bars=bars)
+        with_nonsense = assess(daily_bars=bars, ipo_date=date(2030, 1, 1))
+        assert without == with_nonsense
+        assert without.passes is True
+
+
+def test_no_completed_session_needs_no_ipo_date() -> None:
+    result = assess(daily_bars=[], ipo_date=date(2026, 9, 1))
+    assert result.failures == (TradeabilityFailure.NO_COMPLETED_SESSION,)
+
+
+def test_partial_window_first_session_names_only_the_case_an_ipo_date_settles() -> None:
+    assert partial_window_first_session("ACME", history(25), SESSION) is None
+    assert partial_window_first_session("ACME", history(20), SESSION) is None
+    assert partial_window_first_session("ACME", [], SESSION) is None
+    assert partial_window_first_session("ACME", [bar(SESSION)], SESSION) is None
+    five = history(5)
+    assert partial_window_first_session("acme", five, SESSION) == first_session(five)
+    with pytest.raises(ValueError):
+        partial_window_first_session("ACME", history(5, symbol="OTHER"), SESSION)
 
 
 # --- a partial window is not missing bars ---------------------------------------
@@ -302,9 +432,10 @@ def test_an_established_name_missing_the_front_of_its_window_is_not_a_recent_lis
 
     That lookback bar proves the name was listed before the window, so the
     ten missing sessions are zero-volume sessions of an established name:
-    15,000,000 / 20 = 750,000, which fails. Without it the same ten bars are
-    a ten-session listing averaging 1,500,000, which passes -- the difference
-    the lookback exists to see.
+    15,000,000 / 20 = 750,000, which fails -- and no IPO date is asked for.
+    Without it the same ten bars are a partial window: failing closed with no
+    IPO date, and a ten-session listing averaging 1,500,000 only when the IPO
+    date says it listed then.
     """
     recent = history(10, volume=1_500_000)
     lookback_bar = bar(sessions_before(WINDOW_START, 1)[0], volume=1_500_000)
@@ -314,7 +445,10 @@ def test_an_established_name_missing_the_front_of_its_window_is_not_a_recent_lis
     assert established.avg_volume_20d == 750_000
     assert established.failures == (TradeabilityFailure.LOW_VOLUME,)
 
-    listing = assess(daily_bars=recent)
+    unknown = assess(daily_bars=recent)
+    assert unknown.failures == (TradeabilityFailure.IPO_DATE_UNAVAILABLE,)
+
+    listing = assess_listing(recent)
     assert listing.sessions_available == 10
     assert listing.avg_volume_20d == 1_500_000
     assert listing.passes is True
@@ -330,22 +464,23 @@ def test_any_older_bar_marks_a_name_established_however_far_back() -> None:
     assert result.failures == (TradeabilityFailure.LOW_VOLUME,)
 
 
-def test_a_name_silent_for_longer_than_the_lookback_reads_as_a_recent_listing() -> None:
-    """The residual ambiguity, pinned rather than hidden (Q10).
+def test_a_name_silent_for_longer_than_the_lookback_is_settled_by_its_ipo_date() -> None:
+    """The residual ambiguity Q10 left open, closed by Q12.
 
     A long-listed name with no bar anywhere in the 252-session lookback --
     suspended for more than a year, then resumed five sessions ago -- is
-    indistinguishable by bars from a five-session IPO, and the provider's
-    asset record carries no listing date to tell them apart. Given only the
-    bars ``adv_daily_bars`` fetches, it is judged as a recent listing on the
-    sessions since it resumed.
+    indistinguishable by bars from a five-session IPO. Before Q12 it was
+    judged as a recent listing and passed. Now its IPO date decides: none at
+    all fails closed, an old one fails as missing bars, and only a date inside
+    the window makes it the recent listing the bars suggest.
     """
     resumed = history(5, volume=2_000_000)
-    assert min(item.at.astimezone(NYSE_TZ).date() for item in resumed) > REQUEST_START
-    result = assess(daily_bars=resumed)
-    assert result.sessions_available == 5
-    assert result.avg_volume_20d == 2_000_000
-    assert result.passes is True
+    assert first_session(resumed) > REQUEST_START
+    assert assess(daily_bars=resumed).failures == (TradeabilityFailure.IPO_DATE_UNAVAILABLE,)
+    assert assess(daily_bars=resumed, ipo_date=date(2004, 8, 19)).failures == (
+        TradeabilityFailure.LOW_VOLUME,
+    )
+    assert assess_listing(resumed).passes is True
 
 
 def test_a_name_suspended_for_months_then_resumed_is_judged_as_established() -> None:

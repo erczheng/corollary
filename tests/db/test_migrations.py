@@ -60,6 +60,8 @@ EXPECTED_TABLES = {
     "news_article_ticker",
     "watch_symbol",
     "ticker_tradeability",
+    # 0009 -- owner decision Q12: the vendor's IPO date, cached per ticker
+    "ticker_ipo_date",
 }
 
 #: Everything 0008 created, so a downgrade past it can say so once.
@@ -112,6 +114,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification",
         "notification_delivery",
         "fred_observation",
+        "ticker_ipo_date",
     } - _0008_TABLES <= tables
 
     command.upgrade(cfg, "head")
@@ -130,7 +133,8 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     schema is one revision written ahead of both, and why this test exists
     rather than the convention being left to memory.
 
-    ``0008`` is the head now: step 4's article store, manual watches, the
+    ``0009`` is the head now: owner decision Q12's ``ticker_ipo_date``, the
+    vendor's IPO date cached per ticker. ``0008`` before it: step 4's article store, manual watches, the
     tradeability cache, the ``watchlist`` audit category and the
     ``watchlist_changed`` routes. ``0007`` before it added
     ``fred_observation``, the risk-free rate's source. ``0006`` before it seeded the routing for the owner's own actions,
@@ -138,7 +142,26 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0008"]
+    assert script.get_heads() == ["0009"]
+
+
+def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
+    """``ticker_ipo_date`` comes and goes alone; 0008's tables are untouched."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0008")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert "ticker_ipo_date" not in tables
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
 
 
 _OPERATOR_EVENTS = {
@@ -211,7 +234,7 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "fred_observation" not in tables
-    assert EXPECTED_TABLES - {"fred_observation"} - _0008_TABLES <= tables
+    assert EXPECTED_TABLES - {"fred_observation", "ticker_ipo_date"} - _0008_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)

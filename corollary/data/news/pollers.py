@@ -100,6 +100,7 @@ from corollary.data.news.assets import AssetDirectoryHolder, AssetSource
 from corollary.data.news.ingest import IngestResult, store_articles
 from corollary.data.news.retention import PruneResult, no_labels, prune
 from corollary.data.news.tradeability import (
+    IpoDateSource,
     RefreshResult,
     TradeabilityInputs,
     recent_article_tickers,
@@ -976,8 +977,14 @@ async def refresh_tradeability_cache(
     universe: UniverseSource,
     session_factory: SessionFactory,
     now: datetime,
+    ipo_dates: IpoDateSource | None = None,
 ) -> RefreshResult | PollSkipped:
     """Check the off-watch tickers tagged since midnight ET today, for today's ET date.
+
+    ``ipo_dates`` settles a partial ADV window (owner decision Q12) and is
+    passed straight through; ``None`` fails every such ticker closed with
+    ``ipo_date_unavailable``. The scheduler wiring (the next unit) will pass
+    the Finnhub provider; until then every partial window fails closed.
 
     Skips with a reason when there is no provider, no asset directory, or no
     ticker needing a check. A directory older than ``MAX_DIRECTORY_AGE`` is
@@ -1023,6 +1030,7 @@ async def refresh_tradeability_cache(
         session_date=session_date,
         session_factory=session_factory,
         now=lambda: now,
+        ipo_dates=ipo_dates,
     )
     if result.skipped is not None:
         return PollSkipped(result.skipped)
