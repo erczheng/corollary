@@ -69,7 +69,9 @@ accident, in the direction nobody chose. The environment is the input;
 appears in this module.
 """
 
+import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -801,12 +803,28 @@ class AlpacaProvider(MarketDataProvider):
         )
 
     async def _get(
-        self, base_url: str, path: str, params: Mapping[str, Any] | None = None
+        self,
+        base_url: str,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        not_found_ok: bool = False,
     ) -> Any:
         """One GET, metered against the bucket for that host.
 
         The host is derived from ``base_url`` rather than passed in, so a new
         endpoint cannot accidentally be billed to the wrong budget.
+
+        ``not_found_ok`` makes a 404 return :data:`_NOT_FOUND` instead of
+        raising -- a sentinel, not ``None``, because a 200 whose body is JSON
+        ``null`` also decodes to ``None`` and must not read as "not found".
+        **Only a 404 whose body is Alpaca's own asset-not-found envelope**
+        (:func:`_is_asset_not_found`) counts: a gateway, a moved route or a
+        wrong URL prefix answering 404 to everything -- HTML, empty, or any
+        other JSON -- falls through and raises like every other status, so
+        it can never record every CUSIP as unresolvable. Only
+        :meth:`asset_by_cusip` passes it; every other status still raises
+        exactly as before.
         """
         url = f"{base_url}{path}"
         host = httpx.URL(base_url).host
@@ -819,6 +837,12 @@ class AlpacaProvider(MarketDataProvider):
         except httpx.HTTPError as exc:
             raise ProviderError(f"GET {path} failed: {exc}") from exc
 
+        if (
+            not_found_ok
+            and response.status_code == 404
+            and _is_asset_not_found(response.text)
+        ):
+            return _NOT_FOUND
         if response.status_code == 403:
             raise FeedAccessError(
                 f"GET {path} returned 403: {self._detail(response)}. This is an "
@@ -1671,6 +1695,69 @@ class AlpacaProvider(MarketDataProvider):
             missing_attributes=len(no_attributes),
         )
 
+    async def asset_by_cusip(self, cusip: str) -> EquityAsset | None:
+        """The active US equity a CUSIP names, or ``None`` if Alpaca knows none.
+
+        ``GET /v2/assets/{cusip}`` on the **trading** host, one request per
+        CUSIP -- the bulk list carries no ``cusip`` field, so there is no
+        batch form. Phase 3 step 4 uses it to put tickers on SEC N-PORT
+        holdings, which identify a security by CUSIP only.
+
+        **Only a 404 carrying Alpaca's asset-not-found body answers
+        ``None``** for "unknown CUSIP" (:func:`_is_asset_not_found`); a 404
+        with any other body raises :class:`ProviderError`. Every other
+        failure status raises (403 :class:`FeedAccessError`, 429
+        :class:`RateLimitedError`, anything else :class:`ProviderError`), so
+        an outage or a refused key is never recorded as "unresolvable".
+
+        A 200 naming an asset that is not an active US equity (delisted, or
+        another class) also answers ``None``, logged by the row reader with
+        the reason. A 200 whose body is not a readable asset row -- missing
+        ``class``/``status``, a non-boolean ``tradable`` -- raises instead:
+        a vendor shape change is not an answer.
+
+        The CUSIP is trimmed and upper-cased, then must be eight letters or
+        digits followed by a digit (the check character is always one), and
+        not all zeros (N-PORT's "none"), or ``ValueError`` before any
+        request; the shape check is also what keeps a ``/`` or ``?`` out of
+        the path. The check digit's value is not verified.
+        """
+        key = cusip.strip().upper()
+        if not _CUSIP_RE.fullmatch(key) or set(key) == {"0"}:
+            raise ValueError(
+                f"{cusip!r} is not a CUSIP (eight letters or digits, then a check digit)"
+            )
+        path = f"/v2/assets/{key}"
+        payload = await self._get(
+            self._credentials.trading_base_url, path, not_found_ok=True
+        )
+        if payload is _NOT_FOUND:
+            return None
+        if not isinstance(payload, Mapping):
+            raise ProviderError(
+                f"GET {path} answered without an asset object: "
+                f"{self._scrub(repr(payload))}"
+            )
+        asset = _equity_asset(payload, self._scrub)
+        if asset is not None:
+            return asset
+        asset_class, status = payload.get("class"), payload.get("status")
+        if (
+            isinstance(asset_class, str)
+            and isinstance(status, str)
+            and (asset_class != "us_equity" or status != "active")
+        ):
+            # A readable answer: the CUSIP names something, just not an
+            # active US equity. _equity_asset logged which.
+            return None
+        raise ProviderError(
+            f"GET {path} answered with an asset row that cannot be read "
+            f"(class {self._scrub(repr(asset_class))}, status "
+            f"{self._scrub(repr(status))}, tradable "
+            f"{self._scrub(repr(payload.get('tradable')))}); see the "
+            "alpaca_asset_row_skipped log line for the field"
+        )
+
     async def has_standard_root(self, ticker: str) -> bool:
         """Whether a live standard contract exists on ``ticker``: root and underlying both ``ticker``.
 
@@ -2004,6 +2091,48 @@ def _news_row(row: Any, scrub: _Scrub) -> tuple[NewsArticle, datetime] | None:
             },
         )
         return None
+
+
+#: A CUSIP as ``asset_by_cusip`` accepts it, after trimming and upper-casing:
+#: eight letters or digits, then the check character, which is always a digit.
+_CUSIP_RE: Final = re.compile(r"[A-Z0-9]{8}[0-9]")
+
+#: What ``_get(..., not_found_ok=True)`` returns for a 404. Compared by identity.
+_NOT_FOUND: Final = object()
+
+#: Alpaca's error codes are eight digits, the HTTP status then a five-digit
+#: sub-code (``40410000``). The asset endpoint's reference page documents its
+#: 404 only as "Not Found" with no body schema, so what is pinned here is the
+#: envelope every Alpaca error uses plus the wording of its asset miss.
+_ALPACA_NOT_FOUND_CODES: Final = range(40400000, 40500000)
+_ASSET_NOT_FOUND_RE: Final = re.compile(r"\basset\b.*\bnot found\b", re.IGNORECASE)
+
+
+def _is_asset_not_found(body: str) -> bool:
+    """Whether a 404 body is Alpaca saying "no such asset", not some other 404.
+
+    Pinned: a JSON object whose ``code`` is an integer (not a bool) in the
+    ``404xxxxx`` family and whose ``message`` is a string saying the *asset*
+    was *not found* -- ``{"code": 40410000, "message": "asset not found for
+    X"}``. Anything else -- an HTML page, an empty body, a proxy's JSON, an
+    Alpaca 404 about something other than an asset -- is ``False``, and the
+    caller raises. Nothing here is returned or logged, so the body needs no
+    scrubbing.
+    """
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    code, message = payload.get("code"), payload.get("message")
+    return (
+        isinstance(code, int)
+        and not isinstance(code, bool)
+        and code in _ALPACA_NOT_FOUND_CODES
+        and isinstance(message, str)
+        and _ASSET_NOT_FOUND_RE.search(message) is not None
+    )
 
 
 def _equity_asset(row: Any, scrub: _Scrub) -> EquityAsset | None:

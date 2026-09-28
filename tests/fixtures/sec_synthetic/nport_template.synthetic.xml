@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC template: @@SERIES_ID@@, @@SERIES_NAME@@ and @@REP_PD_DATE@@ are replaced by
+     tests/data/providers/test_sec_provider.py for each of a quarter's other filings. Not a recording. -->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport" xmlns:com="http://www.sec.gov/edgar/common">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>The Select Sector SPDR Trust</regName>
+      <regCik>0001064641</regCik>
+      <seriesName>@@SERIES_NAME@@</seriesName>
+      <seriesId>@@SERIES_ID@@</seriesId>
+      <repPdEnd>2026-09-30</repPdEnd>
+      <repPdDate>@@REP_PD_DATE@@</repPdDate>
+    </genInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>Synthetic Common Stock</name>
+        <cusip>594918104</cusip>
+        <identifiers>
+          <isin value="US5949181045"/>
+        </identifiers>
+        <pctVal>5.5</pctVal>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+    </invstOrSecs>
+  </formData>
+</edgarSubmission>

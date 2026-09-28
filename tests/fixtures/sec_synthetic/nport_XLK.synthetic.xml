@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC: hand-built for tests/data/providers/test_sec_provider.py; not a recording.
+     Element names follow tests/fixtures/record_sec.py's assumptions about NPORT-P primary_doc.xml;
+     the live recording must confirm them. Values are invented. -->
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport" xmlns:com="http://www.sec.gov/edgar/common" xmlns:ncom="http://www.sec.gov/edgar/nportcommon" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <isConfidential>false</isConfidential>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>The Select Sector SPDR Trust</regName>
+      <regCik>0001064641</regCik>
+      <seriesName>The Technology Select Sector SPDR Fund</seriesName>
+      <seriesId>S000006415</seriesId>
+      <repPdEnd>2026-09-30</repPdEnd>
+      <repPdDate>2026-06-30</repPdDate>
+      <isFinalFiling>N</isFinalFiling>
+    </genInfo>
+    <fundInfo>
+      <totAssets>1000000.00</totAssets>
+      <netAssets>999000.00</netAssets>
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>NVIDIA Corp</name>
+        <lei>SYNTHETICLEI00000001</lei>
+        <title>NVIDIA Corp</title>
+        <cusip>67066G104</cusip>
+        <identifiers>
+          <isin value="US67066G1040"/>
+        </identifiers>
+        <balance>1000.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>150000.00000000</valUSD>
+        <pctVal>15.01234567890123456789</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Apple Inc</name>
+        <lei>SYNTHETICLEI00000002</lei>
+        <title>Apple Inc</title>
+        <cusip>037833100</cusip>
+        <identifiers>
+          <isin value="US0378331005"/>
+        </identifiers>
+        <balance>900.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>140000.00000000</valUSD>
+        <pctVal>14.1</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>AT&amp;T Inc</name>
+        <lei>SYNTHETICLEI00000003</lei>
+        <title>AT&amp;T Inc</title>
+        <cusip>00206R102</cusip>
+        <identifiers>
+          <isin value="US00206R1023"/>
+        </identifiers>
+        <balance>100.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>2000.00000000</valUSD>
+        <pctVal>0.200200200200</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Holding With No CUSIP</name>
+        <lei>N/A</lei>
+        <title>Synthetic Holding With No CUSIP</title>
+        <cusip>N/A</cusip>
+        <identifiers>
+          <isin value="US9999999992"/>
+        </identifiers>
+        <balance>10.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>100.00000000</valUSD>
+        <pctVal>0.01</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Holding With Zero CUSIP</name>
+        <lei>N/A</lei>
+        <title>Synthetic Holding With Zero CUSIP</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <other otherDesc="none" value="N/A"/>
+        </identifiers>
+        <balance>10.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>100.00000000</valUSD>
+        <pctVal>0.01</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Government Money Market Fund</name>
+        <lei>SYNTHETICLEI00000004</lei>
+        <title>Synthetic Government Money Market Fund</title>
+        <cusip>857492706</cusip>
+        <identifiers>
+          <isin value="US8574927061"/>
+        </identifiers>
+        <balance>5000.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>5000.00000000</valUSD>
+        <pctVal>0.500500500500</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>STIV</assetCat>
+        <issuerCat>RF</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Cash Collateral</name>
+        <lei>N/A</lei>
+        <title>Synthetic Cash Collateral</title>
+        <cusip>N/A</cusip>
+        <identifiers>
+          <other otherDesc="none" value="N/A"/>
+        </identifiers>
+        <balance>1.00000000</balance>
+        <units>OU</units>
+        <curCd>USD</curCd>
+        <valUSD>1.00000000</valUSD>
+        <pctVal>0.0001</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetConditional assetCat="OTHER" desc="cash collateral"/>
+        <issuerCat>OTHER</issuerCat>
+        <invCountry>US</invCountry>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Row With Unreadable pctVal</name>
+        <cusip>594918104</cusip>
+        <pctVal>n/a</pctVal>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Row With No pctVal</name>
+        <cusip>594918104</cusip>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Row With NaN pctVal</name>
+        <cusip>594918104</cusip>
+        <pctVal>NaN</pctVal>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synthetic Row With No Category</name>
+        <cusip>594918104</cusip>
+        <pctVal>1.0</pctVal>
+      </invstOrSec>
+    </invstOrSecs>
+  </formData>
+</edgarSubmission>
