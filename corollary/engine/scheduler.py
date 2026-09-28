@@ -135,11 +135,13 @@ arrives with its own, explicit handle on the runtime when Phase 4 lands.
 import asyncio
 import functools
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Protocol
+from typing import Final, Protocol
 
+from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
@@ -149,23 +151,68 @@ from corollary.data.macro.risk_free import (
     catch_up_dgs3mo,
     refresh_dgs3mo,
 )
+from corollary.data.news.assets import AssetDirectoryHolder, AssetSource
+from corollary.data.news.pollers import (
+    AlpacaNewsPoller,
+    AlpacaNewsSource,
+    CompanyNewsSource,
+    FinnhubMarketNewsPoller,
+    MarketNewsSource,
+    MassiveNewsPoller,
+    MassiveNewsSource,
+    NewsStore,
+    PollSkipped,
+    UniverseSource,
+    WatchTierPoller,
+    build_watch_universe,
+    prune_news,
+    refresh_assets,
+    refresh_tradeability_cache,
+    watch_interval,
+)
+from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
+from corollary.data.seeds import SpdrSeed, load_spdr_seed
 from corollary.pricing.rates import DGS3MO_SERIES, RiskFreeRateSource
-from corollary.ratelimit import FRED_HOST
+from corollary.ratelimit import (
+    ALPACA_DATA_HOST,
+    ALPACA_PAPER_TRADING_HOST,
+    FINNHUB_HOST,
+    FRED_HOST,
+    MASSIVE_HOST,
+)
 from corollary.wire import vendor_detail
 
 __all__ = [
+    "ALPACA_NEWS_IN_SESSION",
+    "ALPACA_NEWS_OTHERWISE",
+    "ASSET_DIRECTORY_AT",
+    "FINNHUB_MARKET_NEWS_EVERY",
+    "MASSIVE_NEWS_EVERY",
+    "NEWS_PRUNE_AT",
+    "TRADEABILITY_EVERY",
+    "AlpacaContextSource",
     "AtTime",
+    "CONTEXT_SESSIONS_DRAIN_TIMEOUT",
     "ContextServices",
+    "ContextSessions",
     "DayRule",
+    "EveryInterval",
     "EveryWhileOpen",
+    "FinnhubNewsSource",
     "JobSkipped",
     "JobStatus",
+    "HeldPositionUnderlyings",
+    "PositionUnderlyings",
+    "PositionUnderlyingsSource",
     "Schedule",
     "ScheduledJob",
     "Scheduler",
     "SchedulerFactory",
+    "TwoRate",
+    "WatchTierCadence",
     "build_context_scheduler",
     "context_jobs",
+    "every_day",
     "no_scheduler",
     "on_weekdays",
     "trading_days",
@@ -256,6 +303,16 @@ DayRule = Callable[[date], bool]
 def trading_days(day: date) -> bool:
     """NYSE holds a session on ``day``, per the calendar. Half-days count."""
     return nyse_session_open(day) is not None
+
+
+def every_day(day: date) -> bool:
+    """Every calendar day, whatever the market does -- weekends and holidays included.
+
+    For jobs whose clock is the day rather than the session: the retention
+    prune, and the asset directory (whose 26-hour staleness bound would lapse
+    over every weekend if it refreshed on trading days only).
+    """
+    return True
 
 
 def on_weekdays(*weekdays: int) -> DayRule:
@@ -351,6 +408,137 @@ class AtTime:
         return f"at {self.at.isoformat(timespec='minutes')} ET on {name}"
 
 
+#: Where :class:`EveryInterval`'s grid is anchored. Any fixed UTC instant on a
+#: whole hour would do; what matters is that it never moves, so a restarted
+#: process lands on the same slots. On a whole hour, a five- or fifteen-minute
+#: grid is on the five- or fifteen-minute marks in ET as well as UTC.
+_GRID_EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+def _in_regular_session(moment: datetime) -> bool:
+    """``moment`` is inside the calendar's ``[open, close)`` for its ET date.
+
+    A session never spans midnight ET, so the ET date names the only session
+    ``moment`` could be in. A day the calendar has no session for -- weekend,
+    holiday, or past the published schedule -- is never in session.
+    """
+    day = moment.astimezone(NYSE_TZ).date()
+    opens = nyse_session_open(day)
+    closes = nyse_session_close(day)
+    return opens is not None and closes is not None and opens <= moment < closes
+
+
+@dataclass(frozen=True, slots=True)
+class EveryInterval:
+    """Every ``interval``, day and night, whatever the calendar says.
+
+    For a feed whose news does not stop when the market does (Finnhub market
+    news, Massive). The slots are ``epoch + k * interval`` on a fixed UTC grid,
+    so -- like :class:`EveryWhileOpen` -- the answer does not depend on when the
+    question was asked, and a restart lands back on the same grid.
+    """
+
+    interval: timedelta
+
+    def __post_init__(self) -> None:
+        if self.interval <= timedelta(0):
+            raise ValueError(f"interval must be positive, got {self.interval!r}")
+
+    def next_run(self, after: datetime) -> datetime | None:
+        moment = _require_utc(after)
+        steps = (moment - _GRID_EPOCH) // self.interval + 1
+        return _GRID_EPOCH + self.interval * steps
+
+    def at_or_after(self, moment: datetime) -> datetime:
+        """The first slot at or after ``moment`` (``next_run`` is strictly after)."""
+        moment = _require_utc(moment)
+        # ceil(x) = -floor(-x), in whole intervals: no float anywhere.
+        steps = -((_GRID_EPOCH - moment) // self.interval)
+        return _GRID_EPOCH + self.interval * steps
+
+    def describe(self) -> str:
+        return f"every {self.interval}, day and night"
+
+
+@dataclass(frozen=True, slots=True)
+class TwoRate:
+    """Every ``in_session`` while the NYSE session is open, every ``otherwise`` outside it.
+
+    The job's slots are the union of two grids: :class:`EveryWhileOpen`'s
+    ``in_session`` grid (anchored at each open, inside ``[open, close)``), and
+    :class:`EveryInterval`'s ``otherwise`` grid with every slot that falls
+    inside a session removed. So a half-day goes slow at its 13:00 close, not
+    at a hardcoded 16:00, and a holiday is slow all day. Past the published
+    calendar there is no session to be in, and the slow grid carries on.
+    """
+
+    in_session: timedelta
+    otherwise: timedelta
+
+    def __post_init__(self) -> None:
+        for name, value in (("in_session", self.in_session), ("otherwise", self.otherwise)):
+            if value <= timedelta(0):
+                raise ValueError(f"{name} must be positive, got {value!r}")
+
+    def _next_out_of_session(self, moment: datetime) -> datetime | None:
+        grid = EveryInterval(self.otherwise)
+        candidate = grid.next_run(moment)
+        # Each pass either answers or jumps past one session's close, and the
+        # next slow slot after a close is outside that session; bounded anyway.
+        for _ in range(_HORIZON_DAYS * 2):
+            if candidate is None or not _in_regular_session(candidate):
+                return candidate
+            day = candidate.astimezone(NYSE_TZ).date()
+            closes = nyse_session_close(day)
+            if closes is None:  # pragma: no cover - _in_regular_session saw one
+                return candidate
+            candidate = grid.at_or_after(closes)
+        return None
+
+    def next_run(self, after: datetime) -> datetime | None:
+        moment = _require_utc(after)
+        fast = EveryWhileOpen(self.in_session).next_run(moment)
+        slow = self._next_out_of_session(moment)
+        candidates = [slot for slot in (fast, slow) if slot is not None]
+        return min(candidates) if candidates else None
+
+    def describe(self) -> str:
+        return (
+            f"every {self.in_session} while the NYSE session is open, "
+            f"every {self.otherwise} otherwise"
+        )
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class WatchTierCadence:
+    """Decision 21's watch tier: one request every ``watch_interval(W, after)``.
+
+    ``universe_size`` is read on every question, because W changes whenever
+    the universe does -- a manual add, a position opened. It is the size the
+    poller saw on its latest call; ``0`` (nothing polled yet, or an empty
+    universe) is taken as 1, so the job is asked again after a whole cycle
+    rather than never. The window and its two rates are
+    :func:`~corollary.data.news.pollers.watch_interval`'s, which reads the
+    calendar's close -- never hardcoded hours.
+
+    Not a grid: each slot is the previous one plus the interval at that
+    instant, so a cycle's pace follows W as it changes.
+    """
+
+    universe_size: Callable[[], int]
+
+    def next_run(self, after: datetime) -> datetime | None:
+        moment = _require_utc(after)
+        size = max(self.universe_size(), 1)
+        return moment + watch_interval(size, moment)
+
+    def describe(self) -> str:
+        return (
+            "one watch-tier symbol every 15 min / W in the watch window "
+            "(06:00 ET to the calendar's close + 1h), every 1 h / W otherwise"
+        )
+
+
 # --------------------------------------------------------------------------
 # Jobs and their status
 # --------------------------------------------------------------------------
@@ -390,7 +578,9 @@ class ScheduledJob:
     #: Run once when the scheduler starts, before the first slot, with the
     #: same failure handling as :attr:`run`. It must decide from the rows it
     #: finds whether anything is missing, and do nothing when not -- see the
-    #: module docstring's *Clocks*.
+    #: module docstring's *Clocks*. The one exception is the watch tier's,
+    #: which always makes one request: its cadence cannot be known until it
+    #: has (see ``_news_watch_tier_catch_up``).
     catch_up: JobBody | None = None
 
 
@@ -849,15 +1039,201 @@ class Scheduler:
 # --------------------------------------------------------------------------
 
 
+class AlpacaContextSource(AlpacaNewsSource, AssetSource, TradeabilityInputs, Protocol):
+    """Alpaca as the context jobs use it. ``AlpacaProvider`` satisfies it.
+
+    Benzinga news (``data.``), the day's optionable asset list (``paper-api.``)
+    and the tradeability inputs (daily bars, the standard-root lookup). Market
+    and reference data only -- **not** the broker: nothing here reads an
+    account, and nothing here can place an order.
+    """
+
+
+class FinnhubNewsSource(CompanyNewsSource, MarketNewsSource, IpoDateSource, Protocol):
+    """Finnhub as the context jobs use it. ``FinnhubProvider`` satisfies it.
+
+    Company news (the watch tier), market news (discovery) and ``ipo_date``
+    (owner decision Q12, for a partial ADV window) -- one instance, the same
+    one the market-cap column reads, so Finnhub's 60/min is counted once.
+    """
+
+
+#: The open-position underlyings, as the watch universe's position members.
+#: A narrow async callable rather than a broker: the API builds it over the
+#: paper account's read-only positions and hands only the callable here. A
+#: raise is logged by the universe build and leaves positions out of one cycle.
+PositionUnderlyingsSource = Callable[[], Awaitable[Iterable[str]]]
+
+
+async def _no_position_underlyings() -> frozenset[str]:
+    """No positions: what :class:`ContextServices` built without a source reads."""
+    return frozenset()
+
+
+class PositionUnderlyings:
+    """The last-known open-position underlyings, for the watch universe.
+
+    **In memory, and nothing else.** The holder has a frozen set and the
+    instant it was last replaced; it holds no broker, no registry, no
+    callable. It lives here rather than in ``corollary.api`` so that the
+    object the context jobs are handed a view of is one whose module the
+    jobs' import scan may walk (unit 4B2 audit: the jobs used to hold a
+    callable that closed over the whole service registry).
+
+    Two readers, one writer. ``GET /api/news/watch`` reads it; the jobs read
+    it through :class:`HeldPositionUnderlyings`; the lifespan's
+    ``PaperPositionsRefresher`` (``corollary.api.deps``) is the one thing that
+    calls :meth:`replace`, from the **paper** account's positions. Empty, with
+    :attr:`as_of` ``None``, until the first replace -- stated by the route as
+    "never read", not "none held".
+
+    The symbols are kept exactly as they arrived: ``watch_universe`` is the
+    one place that normalises them and skips a non-equity deliverable
+    (``GME.WS``) with its reason. Single event loop, one assignment per
+    replace, so a reader sees the old set or the new one, never half of each.
+    """
+
+    def __init__(self) -> None:
+        self._symbols: frozenset[str] = frozenset()
+        self._as_of: datetime | None = None
+
+    def current(self) -> frozenset[str]:
+        return self._symbols
+
+    @property
+    def as_of(self) -> datetime | None:
+        """When :meth:`replace` last ran (UTC), or ``None`` if it never has."""
+        return self._as_of
+
+    def replace(self, symbols: Iterable[str], *, at: datetime) -> None:
+        self._symbols = frozenset(symbols)
+        self._as_of = _require_utc(at)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class HeldPositionUnderlyings:
+    """What :attr:`ContextServices.position_underlyings` is in production.
+
+    An async read of a :class:`PositionUnderlyings` holder and **nothing
+    more**: it never fetches, so it can never be the thing that reaches an
+    account. The broker read that fills the holder is the lifespan's, outside
+    everything a context job is built from -- ``tests/engine/test_scheduler.py``
+    walks the object graph of the services the real lifespan builds and
+    fails if a broker, the registry or the runtime is reachable from it.
+    """
+
+    holder: PositionUnderlyings
+
+    async def __call__(self) -> frozenset[str]:
+        return self.holder.current()
+
+
+#: How long shutdown waits for a context job's in-flight database work. A job
+#: task cancelled while awaiting ``asyncio.to_thread`` stops waiting; the
+#: thread does not stop, and its commit would otherwise land after the
+#: lifespan returned.
+CONTEXT_SESSIONS_DRAIN_TIMEOUT: Final = 10.0
+
+
+class _CountedSession(Session):
+    """A :class:`Session` that tells its factory when it closes -- once."""
+
+    def __init__(self, bind: Engine, *, on_close: Callable[[], None]) -> None:
+        super().__init__(bind)
+        self._corollary_on_close: Callable[[], None] | None = on_close
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            on_close, self._corollary_on_close = self._corollary_on_close, None
+            if on_close is not None:
+                on_close()
+
+
+class ContextSessions:
+    """The context jobs' session factory, which shutdown can drain.
+
+    ``aclose`` on the scheduler cancels job *tasks*; a task awaiting
+    ``asyncio.to_thread`` is cancelled while the worker thread runs on and
+    commits. So every session this factory opens is counted until it closes,
+    and :meth:`drain` -- called by the lifespan straight after the
+    scheduler's ``aclose`` -- first refuses any new session (a thread that
+    had not yet opened one fails rather than writing after shutdown) and then
+    waits, bounded, for the open ones to close. Every job opens its session
+    with ``with``, so closing is not optional.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        self._condition = threading.Condition()
+        self._open = 0
+        self._closed = False
+
+    def __call__(self) -> Session:
+        with self._condition:
+            if self._closed:
+                raise RuntimeError(
+                    "the context scheduler has shut down; no new database session"
+                )
+            self._open += 1
+        return _CountedSession(self._engine, on_close=self._closed_one)
+
+    def _closed_one(self) -> None:
+        with self._condition:
+            self._open -= 1
+            self._condition.notify_all()
+
+    @property
+    def open_sessions(self) -> int:
+        with self._condition:
+            return self._open
+
+    def _wait_closed(self, timeout: float) -> bool:
+        with self._condition:
+            self._closed = True
+            return self._condition.wait_for(lambda: self._open == 0, timeout=timeout)
+
+    async def drain(self, timeout: float = CONTEXT_SESSIONS_DRAIN_TIMEOUT) -> bool:
+        """Refuse new sessions, then wait up to ``timeout`` s for open ones. Never raises.
+
+        ``True`` when every session closed in time. ``False`` is logged --
+        the count only, since a session carries no secret but its work
+        might -- and shutdown continues: a stuck write is not a reason to
+        leave the rule 9 alerts behind it undelivered.
+        """
+        drained = await asyncio.to_thread(self._wait_closed, timeout)
+        if not drained:
+            logger.error(
+                "context job database work was still running at shutdown",
+                extra={
+                    "event": "context_sessions_not_drained",
+                    "open_sessions": self.open_sessions,
+                    "timeout_seconds": timeout,
+                },
+            )
+        return drained
+
+
 @dataclass(frozen=True, slots=True)
 class ContextServices:
     """Everything a context job may be built from -- and, by omission, what it may not.
 
     **No engine runtime, no watchdog, no socket supervisor, no broker.** Rule
     9's switch is fed by the three vendor sockets and nothing else, and a job
-    cannot call what it was never given. Later steps add the providers their
-    jobs need (FRED, news, StockTwits); adding the runtime here is the change
-    the isolation test exists to refuse.
+    cannot call what it was never given. Adding the runtime here is the change
+    the isolation test exists to refuse. The positions the watch universe
+    needs arrive as :data:`PositionUnderlyingsSource` -- in production a
+    :class:`HeldPositionUnderlyings`, an in-memory read of a holder -- never as
+    a broker object, and never as a callable that *could* reach one: the
+    lifespan's refresher reads the paper account and writes the holder, and
+    is not in here. ``tests/engine/test_scheduler.py`` walks every object
+    reachable from the services the real lifespan builds (fields, partials,
+    bound methods, closure cells, instance attributes) and fails on a broker,
+    the service registry, the runtime or a socket supervisor.
+
+    Every vendor is ``None`` when it is not configured; its jobs then return
+    :class:`JobSkipped` with the reason, and the app boots regardless.
     """
 
     session_factory: Callable[[], Session]
@@ -867,6 +1243,36 @@ class ContextServices:
     #: The process's risk-free rate, which the FRED job updates and the
     #: market-data provider reads. A private default is a rate nobody reads.
     rates: RiskFreeRateSource = field(default_factory=RiskFreeRateSource)
+    #: The day's asset directory. The lifespan passes ``app.state.asset_directory``
+    #: -- **the same object** -- so the news routes read what the
+    #: ``asset_directory`` job refreshed. A private default is a directory no
+    #: route ever sees.
+    assets: AssetDirectoryHolder = field(default_factory=AssetDirectoryHolder)
+    #: The one write path into the news tables: its lock is what serialises
+    #: every ingest and the prune. ``None`` (a test's services) and
+    #: :func:`context_jobs` builds exactly one for its job set. It must hold
+    #: :attr:`assets`, or ingest would filter tags against a directory nobody
+    #: refreshes -- refused in ``__post_init__``.
+    news_store: NewsStore | None = None
+    alpaca: AlpacaContextSource | None = None
+    finnhub: FinnhubNewsSource | None = None
+    #: Massive, or ``None`` when ``MASSIVE_API_KEY`` is unset.
+    massive: MassiveNewsSource | None = None
+    #: The Markets page's universe -- the watch universe's ``markets`` members.
+    #: Passed in, because this module may not import ``corollary.api``.
+    markets: tuple[str, ...] = ()
+    position_underlyings: PositionUnderlyingsSource = _no_position_underlyings
+    #: The SPDR seed, for the sector leaders. The lifespan passes
+    #: ``app.state.spdr_seed_loader`` so the jobs and the watch routes agree.
+    seed_loader: Callable[[], SpdrSeed | None] = load_spdr_seed
+
+    def __post_init__(self) -> None:
+        if self.news_store is not None and self.news_store.assets is not self.assets:
+            raise ValueError(
+                "the news store holds a different asset directory from the one "
+                "these services refresh; ingest would filter tags against a "
+                "directory nobody refreshes"
+            )
 
 
 async def _calendar_probe() -> None:
@@ -881,8 +1287,13 @@ FRED_DAILY_AT = time(10, 0)
 
 
 def _skipped(outcome: object) -> JobSkipped | None:
-    """A risk-free refresh's outcome as a job outcome: ``NotRefreshed`` skips."""
-    if isinstance(outcome, NotRefreshed):
+    """A refresh or poll's outcome as a job outcome.
+
+    ``NotRefreshed`` (FRED) and ``PollSkipped`` (news) skip, with their
+    reason; anything else returned is work done. A failure is a raise, and
+    never reaches here.
+    """
+    if isinstance(outcome, (NotRefreshed, PollSkipped)):
         return JobSkipped(outcome.reason)
     return None
 
@@ -910,6 +1321,219 @@ async def _fred_dgs3mo_catch_up(
             now=clock,
         )
     )
+
+
+# -- the news jobs (Phase 3 step 4, decision 21) ----------------------------
+
+#: *Feeds and budgets*: Benzinga via Alpaca, 60 s in session, 5 min otherwise.
+ALPACA_NEWS_IN_SESSION = timedelta(seconds=60)
+ALPACA_NEWS_OTHERWISE = timedelta(minutes=5)
+#: Finnhub ``/news?category=general``: 5 min, day and night.
+FINNHUB_MARKET_NEWS_EVERY = timedelta(minutes=5)
+#: Massive ``/v2/reference/news``: 15 min, day and night (a 5/min bucket).
+MASSIVE_NEWS_EVERY = timedelta(minutes=15)
+#: The optionable asset list: daily at 07:30 ET -- every day, not trading
+#: days only, because ``MAX_DIRECTORY_AGE`` is 26 h and a weekend would lapse
+#: it, and the tradeability job warns on a stale directory every run.
+ASSET_DIRECTORY_AT = time(7, 30)
+#: ADV / tradeability for off-watch tickers tagged today: every 15 min.
+TRADEABILITY_EVERY = timedelta(minutes=15)
+#: Retention: nightly at 03:00 ET. 03:00 exists exactly once on both DST
+#: change days -- spring forward skips 02:00-03:00 and lands *on* 03:00 EDT,
+#: fall back repeats 01:00-02:00 -- so the prune neither doubles nor vanishes.
+NEWS_PRUNE_AT = time(3, 0)
+
+
+class _DiscoveryPoller(Protocol):
+    async def poll(self, now: datetime) -> object: ...
+
+
+async def _news_watch_tier(poller: WatchTierPoller, clock: UtcClock) -> JobSkipped | None:
+    """One watch-tier request: the next symbol in the round robin."""
+    return _skipped(await poller.poll_next(clock()))
+
+
+async def _news_discovery(poller: _DiscoveryPoller, clock: UtcClock) -> JobSkipped | None:
+    """One discovery-feed call (Alpaca, Finnhub market, Massive) from its cursor."""
+    return _skipped(await poller.poll(clock()))
+
+
+async def _news_watch_tier_catch_up(
+    poller: WatchTierPoller, clock: UtcClock
+) -> JobSkipped | None:
+    """One watch-tier request at start, so W is known before the first slot.
+
+    Until the poller has built the universe once, W is unknown and taken as
+    1 -- which would put the first request a whole window interval (up to an
+    hour overnight) after a restart. This asks once, straight away: one
+    Finnhub request per process start, against 60/min. The rotation is in
+    memory, so after a restart it resumes at the first symbol.
+    """
+    return await _news_watch_tier(poller, clock)
+
+
+async def _asset_directory_refresh(services: ContextServices) -> JobSkipped | None:
+    """Fetch and hold the day's asset directory, in the holder the routes read."""
+    return _skipped(await refresh_assets(services.assets, services.alpaca))
+
+
+async def _asset_directory_catch_up(services: ContextServices) -> JobSkipped | None:
+    """At start, only while nothing is held: the watch routes 503 until then.
+
+    A process starts with an empty holder, so in practice this fetches once
+    per start -- one ``paper-api.`` request against 200/min, which a
+    ``--reload`` loop can afford -- and never while a directory is held.
+    """
+    if services.assets.current() is not None:
+        return JobSkipped(
+            "an asset directory is already held; the start-up catch-up had nothing to fill"
+        )
+    return await _asset_directory_refresh(services)
+
+
+async def _tradeability(
+    services: ContextServices, universe: UniverseSource, clock: UtcClock
+) -> JobSkipped | None:
+    """Check today's off-watch tickers. Finnhub settles a partial ADV window (Q12)."""
+    return _skipped(
+        await refresh_tradeability_cache(
+            holder=services.assets,
+            provider=services.alpaca,
+            universe=universe,
+            session_factory=services.session_factory,
+            now=clock(),
+            ipo_dates=services.finnhub,
+        )
+    )
+
+
+async def _news_prune(store: NewsStore, clock: UtcClock) -> JobSkipped | None:
+    """Decision 21's retention, under the store's lock so it never races an ingest."""
+    await prune_news(store, clock())
+    return None
+
+
+def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]:
+    """The step 4 news jobs, over one store and one poller per feed.
+
+    Called once per job set, so a process holds exactly one
+    :class:`NewsStore` (unless the services brought theirs) and one poller
+    per feed. The cursors live in the pollers, in memory, recovered from the
+    stored rows on each first run.
+    """
+    store = (
+        services.news_store
+        if services.news_store is not None
+        else NewsStore(session_factory=services.session_factory, assets=services.assets)
+    )
+    universe: UniverseSource = functools.partial(
+        build_watch_universe,
+        markets=services.markets,
+        position_underlyings=services.position_underlyings,
+        session_factory=services.session_factory,
+        seed_loader=services.seed_loader,
+    )
+    watch = WatchTierPoller(provider=services.finnhub, universe=universe, store=store)
+    alpaca_news = AlpacaNewsPoller(provider=services.alpaca, store=store)
+    finnhub_market = FinnhubMarketNewsPoller(provider=services.finnhub, store=store)
+    massive = MassiveNewsPoller(provider=services.massive, store=store)
+    return [
+        ScheduledJob(
+            name="news_watch_tier",
+            schedule=WatchTierCadence(universe_size=lambda: watch.last_universe_size),
+            run=functools.partial(_news_watch_tier, watch, clock),
+            catch_up=functools.partial(_news_watch_tier_catch_up, watch, clock),
+            rule=(
+                "decision 21's watch tier: company news for the watch universe "
+                "(Markets, sector leaders, positions, manual), one symbol per "
+                "request; when this fails that symbol waits for its next turn "
+                "and its news goes stale"
+            ),
+            inputs={"host": FINNHUB_HOST, "endpoint": "/company-news"},
+        ),
+        ScheduledJob(
+            name="news_alpaca",
+            schedule=TwoRate(
+                in_session=ALPACA_NEWS_IN_SESSION, otherwise=ALPACA_NEWS_OTHERWISE
+            ),
+            run=functools.partial(_news_discovery, alpaca_news, clock),
+            rule=(
+                "decision 21's discovery tier: every Benzinga headline, "
+                "untickered; when this fails the cursor stays put and the next "
+                "run re-reads. Never a rule 9 input: REST news, not the Alpaca "
+                "socket the watchdog judges"
+            ),
+            inputs={"host": ALPACA_DATA_HOST, "endpoint": "/v1beta1/news"},
+        ),
+        ScheduledJob(
+            name="news_finnhub_market",
+            schedule=EveryInterval(FINNHUB_MARKET_NEWS_EVERY),
+            run=functools.partial(_news_discovery, finnhub_market, clock),
+            rule=(
+                "decision 21's discovery tier: Finnhub general market news from "
+                "the minId cursor; when this fails the cursor stays put"
+            ),
+            inputs={"host": FINNHUB_HOST, "endpoint": "/news", "category": "general"},
+        ),
+        ScheduledJob(
+            name="news_massive",
+            schedule=EveryInterval(MASSIVE_NEWS_EVERY),
+            run=functools.partial(_news_discovery, massive, clock),
+            rule=(
+                "decision 21's discovery tier: Massive's vendor-scored news, "
+                "untickered, from the last published_utc seen; when this fails "
+                "the cursor stays put"
+            ),
+            inputs={"host": MASSIVE_HOST, "endpoint": "/v2/reference/news"},
+        ),
+        ScheduledJob(
+            name="asset_directory",
+            schedule=AtTime(ASSET_DIRECTORY_AT, every_day),
+            run=functools.partial(_asset_directory_refresh, services),
+            catch_up=functools.partial(_asset_directory_catch_up, services),
+            rule=(
+                "decision 21's optionable list: ingest's tag filter, has_options "
+                "for tradeability, and the watch routes' ticker check, which "
+                "answer 503 until one is held; when this fails the last "
+                "directory stays in use, with its age"
+            ),
+            inputs={
+                "host": ALPACA_PAPER_TRADING_HOST,
+                "endpoint": "/v2/assets",
+                "attributes": "has_options",
+            },
+        ),
+        ScheduledJob(
+            name="tradeability_cache",
+            schedule=EveryInterval(TRADEABILITY_EVERY),
+            run=functools.partial(_tradeability, services, universe, clock),
+            rule=(
+                "decision 21's tradeability cache for off-watch tickers tagged "
+                "today (ADV, last close, has_options, standard root, IPO date); "
+                "when this fails those tickers stay unchecked and are asked "
+                "again next run"
+            ),
+            inputs={
+                "host": ALPACA_DATA_HOST,
+                "endpoint": "/v2/stocks/bars",
+                "also": (
+                    f"{ALPACA_PAPER_TRADING_HOST} /v2/options/contracts, "
+                    f"{FINNHUB_HOST} /stock/profile2"
+                ),
+            },
+        ),
+        ScheduledJob(
+            name="news_prune",
+            schedule=AtTime(NEWS_PRUNE_AT, every_day),
+            run=functools.partial(_news_prune, store, clock),
+            rule=(
+                "decision 21's retention: null old summaries and delete old "
+                "unlabelled groups; when this fails the tables grow a night "
+                "longer and nothing else is affected"
+            ),
+            inputs={"host": "local"},
+        ),
+    ]
 
 
 def context_jobs(
@@ -948,6 +1572,7 @@ def context_jobs(
                 "series_id": DGS3MO_SERIES,
             },
         ),
+        *_news_jobs(services, clock),
     ]
 
 

@@ -65,7 +65,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Final
+from typing import Final, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -75,7 +75,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from corollary.api.deps import AccountMode, ApiError, PositionUnderlyings, ServiceRegistry
+from corollary.api.deps import (
+    AccountMode,
+    ApiError,
+    PaperPositionsRefresher,
+    PositionUnderlyings,
+    ServiceRegistry,
+)
 from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
 from corollary.api.routes import (
     account_router,
@@ -89,7 +95,9 @@ from corollary.api.routes import (
     ws_router,
 )
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
+from corollary.api.routes.markets import UNIVERSE_SYMBOLS
 from corollary.data.news.assets import AssetDirectoryHolder
+from corollary.data.news.pollers import NewsStore
 from corollary.data.seeds import load_spdr_seed
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
@@ -114,7 +122,11 @@ from corollary.engine.execution.interface import (
 from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
 from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
 from corollary.engine.scheduler import (
+    AlpacaContextSource,
     ContextServices,
+    ContextSessions,
+    HeldPositionUnderlyings,
+    FinnhubNewsSource,
     Scheduler,
     SchedulerFactory,
     build_context_scheduler,
@@ -448,6 +460,138 @@ def no_socket_supervisor(
     return None
 
 
+
+# --------------------------------------------------------------------------
+# The context jobs' services (Phase 3 step 4 wiring)
+# --------------------------------------------------------------------------
+
+#: What the context jobs call on Alpaca and on Finnhub. Checked by name at
+#: boot, because the registry's provider is typed as ``MarketDataProvider``
+#: (which declares none of them) and a test registry's double may offer none.
+_ALPACA_CONTEXT_METHODS: Final = ("news", "active_equities", "has_standard_root", "adv_daily_bars")
+_FINNHUB_NEWS_METHODS: Final = ("company_news", "market_news", "ipo_date")
+
+
+def _offers(service: object, methods: Sequence[str]) -> bool:
+    return all(callable(getattr(service, name, None)) for name in methods)
+
+
+def _alpaca_context_source(registry: ServiceRegistry) -> AlpacaContextSource | None:
+    """The registry's one market-data provider, as the context jobs use it -- or ``None``.
+
+    The same instance the routes use, so the ``data.alpaca.markets`` budget is
+    counted once. **Never raises**: missing paper keys make the Alpaca news,
+    asset-directory and tradeability jobs skip, never stop the app. Logged by
+    class name only (rule 6).
+    """
+    try:
+        provider = registry.provider
+    except Exception as exc:
+        logger.warning(
+            "Alpaca market data is unavailable to the context jobs; the Alpaca "
+            "news, asset-directory and tradeability jobs will skip",
+            extra={
+                "event": "context_alpaca_unavailable",
+                "error_type": type(exc).__name__,
+                "variables": [ALPACA_PAPER_KEY_ENV, ALPACA_PAPER_SECRET_ENV],
+            },
+        )
+        return None
+    if not _offers(provider, _ALPACA_CONTEXT_METHODS):
+        logger.info(
+            "the market-data provider offers no news or asset list; the Alpaca "
+            "news, asset-directory and tradeability jobs will skip",
+            extra={
+                "event": "context_alpaca_unavailable",
+                "provider": type(provider).__name__,
+            },
+        )
+        return None
+    return cast(AlpacaContextSource, provider)
+
+
+def _finnhub_news_source(registry: ServiceRegistry) -> FinnhubNewsSource | None:
+    """The registry's one Finnhub client, as the news jobs use it -- or ``None``.
+
+    The same instance the market-cap column reads, so the Finnhub budget is
+    counted once. Without ``FINNHUB_API_KEY`` the registry holds an
+    ``UnavailableFundamentals`` instead, which offers no news: the watch tier
+    and market-news jobs skip, and tradeability fails a partial ADV window
+    closed (no IPO date source, owner decision Q12). Never raises.
+    """
+    try:
+        fundamentals = registry.fundamentals
+    except Exception as exc:
+        logger.warning(
+            "Finnhub is unavailable to the news jobs",
+            extra={"event": "context_finnhub_unavailable", "error_type": type(exc).__name__},
+        )
+        return None
+    if not _offers(fundamentals, _FINNHUB_NEWS_METHODS):
+        logger.warning(
+            "Finnhub is unavailable to the news jobs (is FINNHUB_API_KEY set?): "
+            "the watch tier and market news will skip, and a partial ADV "
+            "window fails closed with no IPO date",
+            extra={
+                "event": "context_finnhub_unavailable",
+                "provider": type(fundamentals).__name__,
+                "variable": "FINNHUB_API_KEY",
+            },
+        )
+        return None
+    return cast(FinnhubNewsSource, fundamentals)
+
+
+def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextServices:
+    """Everything the context jobs are built from, out of this app's own state.
+
+    **Shared, never copied:** the asset directory is ``app.state.asset_directory``
+    and the position underlyings are read from ``app.state.position_underlyings``,
+    so what a news route reports is what the jobs used. One ``NewsStore`` per
+    app -- its lock is what serialises every news write. ``sessions`` is the
+    lifespan's :class:`ContextSessions`, which shutdown drains.
+
+    **Nothing here can reach a broker or the registry** (rule 1 stays
+    structural, unit 4B2 audit): the watch universe's positions arrive as
+    :class:`HeldPositionUnderlyings`, an in-memory read of the holder. The
+    paper-account read that fills the holder is :func:`_position_refresher`'s,
+    which the lifespan owns and no job holds. The vendors handed over are the
+    registry's *providers*, never the registry. Every vendor that is not
+    configured is ``None``, and its jobs skip.
+    """
+    registry: ServiceRegistry = app.state.registry
+    holder: AssetDirectoryHolder = app.state.asset_directory
+    return ContextServices(
+        session_factory=sessions,
+        # ``None`` when FRED_API_KEY is unset -- said once, inside.
+        fred=registry.fred_provider(),
+        rates=registry.rates,
+        assets=holder,
+        news_store=NewsStore(session_factory=sessions, assets=holder),
+        alpaca=_alpaca_context_source(registry),
+        finnhub=_finnhub_news_source(registry),
+        # ``None`` when MASSIVE_API_KEY is unset -- said once, inside.
+        massive=registry.massive_provider(),
+        markets=UNIVERSE_SYMBOLS,
+        position_underlyings=HeldPositionUnderlyings(app.state.position_underlyings),
+        seed_loader=app.state.spdr_seed_loader,
+    )
+
+
+def _position_refresher(app: FastAPI) -> PaperPositionsRefresher:
+    """The one reader of the paper positions, into ``app.state.position_underlyings``.
+
+    The lambda closes over the registry -- which is why this object is the
+    lifespan's and is never put in :class:`ContextServices`. ``PAPER`` is a
+    literal here on purpose: rule 5, and a news cycle never reads Cash.
+    """
+    registry: ServiceRegistry = app.state.registry
+    return PaperPositionsRefresher(
+        broker=lambda: registry.broker(AccountMode.PAPER),
+        holder=app.state.position_underlyings,
+    )
+
+
 def create_app(
     *,
     registry: ServiceRegistry | None = None,
@@ -635,18 +779,27 @@ def create_app(
         # handed. Stated-never-fatal like the sockets above -- and never a
         # halt either, since a feed that cannot be scheduled is a stale page,
         # not a lost connection.
+        #
+        # ``no_scheduler`` -- every route test's app -- needs no services, and
+        # building them would construct vendor clients for an app that runs
+        # no jobs, so it is handed none.
+        #
+        # The paper-positions refresher runs beside it, only when it does
+        # (nothing else reads the holder's positions but the watch route,
+        # which says "never read"): owned here, never handed to a job, and
+        # handed no runtime either -- it calls ``positions()`` and
+        # ``holder.replace`` and nothing else, and catches its own failures.
         context_scheduler: Scheduler | None = None
+        context_sessions = ContextSessions(db_engine)
+        refresher: PaperPositionsRefresher | None = None
         try:
-            context_scheduler = scheduler(
-                ContextServices(
-                    session_factory=lambda: Session(db_engine),
-                    # ``None`` when FRED_API_KEY is unset -- said once, inside.
-                    fred=app.state.registry.fred_provider(),
-                    rates=app.state.registry.rates,
-                ),
-                app.state.secret_values,
-            )
+            if scheduler is not no_scheduler:
+                context_scheduler = scheduler(
+                    _context_services(app, context_sessions), app.state.secret_values
+                )
             if context_scheduler is not None:
+                refresher = _position_refresher(app)
+                refresher.start()
                 context_scheduler.start()
         except Exception as exc:
             logger.error(
@@ -663,6 +816,7 @@ def create_app(
             )
             context_scheduler = None
         app.state.scheduler = context_scheduler
+        app.state.position_refresher = refresher
         try:
             yield
         finally:
@@ -671,8 +825,15 @@ def create_app(
             # ``aclose`` never raises -- a job task that died was logged when
             # it died -- so it cannot skip the steps after it, and the rule 9
             # alerts still queued in the Discord sink keep their grace period.
+            if refresher is not None:
+                await refresher.aclose()
             if context_scheduler is not None:
                 await context_scheduler.aclose()
+                # A job task cancelled mid-``to_thread`` leaves its worker
+                # thread running; wait (bounded) for its session to close, so
+                # no commit lands after this lifespan has returned. Never
+                # raises, so the rule 9 alerts below keep their grace.
+                await context_sessions.drain()
             # Then the sockets, ahead of the runtime: they report into the
             # watchdog, and a socket
             # still reading while the supervisor it reports to is gone is a

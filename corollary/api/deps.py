@@ -31,9 +31,10 @@ needs a broker -- for a condition that affects four endpoints. Missing
 credentials surface where they are used, as a stated condition.
 """
 
+import asyncio
 import logging
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Final
 
 from fastapi import Depends, Query, Request
@@ -56,11 +57,17 @@ from corollary.data.providers.fundamentals import (
     UnavailableFundamentals,
 )
 from corollary.data.providers.fred import FRED_API_KEY_ENV, FredCredentialsError, FredProvider
+from corollary.data.providers.massive import MASSIVE_API_KEY_ENV, MassiveProvider
+from corollary.data.news.pollers import MassiveNewsSource
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import MarketDataProvider
 from corollary.data.seeds import SeedError, SpdrSeed, load_spdr_seed
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
+# Re-exported: the holder lives beside the jobs that read it, so the object a
+# job holds a view of is one the jobs' import scan may walk.
+from corollary.engine.scheduler import PositionUnderlyings
+from corollary.instruments import parse_occ_symbol
 from corollary.pricing.rates import RiskFreeRateSource
 from corollary.wire import require_aware
 
@@ -72,6 +79,8 @@ __all__ = [
     "BrokerDep",
     "FundamentalsDep",
     "LIVE_CREDENTIAL_ENV_VARS",
+    "POSITION_UNDERLYINGS_TTL",
+    "PaperPositionsRefresher",
     "PositionUnderlyings",
     "PositionUnderlyingsDep",
     "ProviderDep",
@@ -86,6 +95,7 @@ __all__ = [
     "fundamentals_data",
     "market_data",
     "missing_live_credentials",
+    "position_underlying",
     "position_underlyings",
     "service_registry",
     "spdr_seed",
@@ -152,6 +162,9 @@ BrokerFactory = Callable[[], BrokerAccount]
 ProviderFactory = Callable[[], MarketDataProvider]
 FundamentalsFactory = Callable[[], FundamentalsProvider]
 FredFactory = Callable[[], FredProvider]
+#: ``None`` is a stated absence: ``MassiveProvider.available_from_env``
+#: answers it, logged, when ``MASSIVE_API_KEY`` is unset.
+MassiveFactory = Callable[[], MassiveNewsSource | None]
 
 
 def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
@@ -204,6 +217,7 @@ class ServiceRegistry:
         fred: FredFactory | None = None,
         rates: RiskFreeRateSource | None = None,
         missing_live_credentials: Sequence[str] = (),
+        massive: MassiveFactory | None = None,
     ) -> None:
         self._factories: dict[AccountMode, BrokerFactory] = dict(brokers)
         #: The process's one risk-free rate (Phase 3 decision 19): the
@@ -221,6 +235,11 @@ class ServiceRegistry:
         self._fred_factory: FredFactory | None = fred
         self._fred: FredProvider | None = None
         self._fred_resolved = False
+        #: Optional, like FRED: the news jobs' Massive feed (step 4). One
+        #: client per process, so Massive's 5/min is counted once.
+        self._massive_factory: MassiveFactory | None = massive
+        self._massive: MassiveNewsSource | None = None
+        self._massive_resolved = False
         self._provider_factory = provider
         #: Optional because it is the one service whose absence is a designed
         #: state rather than a failure -- see :func:`_fundamentals_from_env`.
@@ -272,6 +291,7 @@ class ServiceRegistry:
             fred=lambda: FredProvider.from_env(source),
             rates=rates,
             missing_live_credentials=missing,
+            massive=lambda: MassiveProvider.available_from_env(source),
         )
 
     def broker(self, mode: AccountMode) -> BrokerAccount:
@@ -419,6 +439,33 @@ class ServiceRegistry:
             )
         return self._fred
 
+    def massive_provider(self) -> MassiveNewsSource | None:
+        """The one Massive client, built on first call -- or ``None``, said once.
+
+        **Never raises**, for :meth:`fred_provider`'s reason: the lifespan
+        that calls this carries rule 9. An unset ``MASSIVE_API_KEY`` is
+        logged inside ``MassiveProvider.available_from_env``; anything else a
+        factory raises is logged here by class name only, since its message
+        could quote the key.
+        """
+        if self._massive_resolved:
+            return self._massive
+        self._massive_resolved = True
+        if self._massive_factory is None:
+            return None
+        try:
+            self._massive = self._massive_factory()
+        except Exception as exc:
+            logger.error(
+                "the Massive provider could not be built; Massive news is unavailable",
+                extra={
+                    "event": "massive_unavailable",
+                    "variable": MASSIVE_API_KEY_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return self._massive
+
     async def aclose(self) -> None:
         """Close whatever was actually built. Called from the lifespan.
 
@@ -433,11 +480,15 @@ class ServiceRegistry:
             built.append(self._fundamentals)
         if self._fred is not None:
             built.append(self._fred)
+        if self._massive is not None:
+            built.append(self._massive)
         self._brokers.clear()
         self._provider = None
         self._fundamentals = None
         self._fred = None
         self._fred_resolved = False
+        self._massive = None
+        self._massive_resolved = False
         for service in built:
             close = getattr(service, "aclose", None)
             if close is None:
@@ -459,37 +510,173 @@ class ServiceRegistry:
 SeedLoader = Callable[[], SpdrSeed | None]
 
 
-class PositionUnderlyings:
-    """The last-known open-position underlyings, for the watch universe.
+#: How long one read of the paper positions serves the watch universe. The
+#: watch tier asks on every request (every ~14 s at W = 66); positions change
+#: when an order fills, and Phase 3 places none. Five minutes keeps the
+#: ``paper-api.`` cost at 12/hour against 200/min.
+POSITION_UNDERLYINGS_TTL: Final = timedelta(minutes=5)
 
-    **The watch routes never call the broker** (spec *API*: they depend on no
-    broker), so the position members of the universe come from here: a set
-    the scheduler's news cycle replaces after it reads positions, and that
-    the routes only read. Empty, with :attr:`as_of` ``None``, until the first
-    :meth:`replace` -- stated in ``GET /api/news/watch`` rather than hidden.
 
-    The symbols are kept exactly as they arrived: ``watch_universe`` is the
-    one place that normalises them and skips a non-equity deliverable
-    (``GME.WS``) with its reason. Single event loop, one assignment per
-    replace, so a reader sees the old set or the new one, never half of each.
+def position_underlying(symbol: str) -> str:
+    """The symbol whose news a held position is about.
+
+    An OCC contract maps to its root, with an adjusted root's numeric suffix
+    stripped (``AAPL1`` is an AAPL deliverable after a corporate action, and
+    the news is about Apple). **This is watch-universe membership only** --
+    nothing sizes or prices from it; the multiplier stays per contract.
+    Anything else -- an equity, or a symbol that is neither -- passes through
+    unchanged, and :func:`~corollary.data.news.watchlist.watch_universe` skips
+    what cannot be a member, with its reason.
+    """
+    try:
+        root = parse_occ_symbol(symbol).root
+    except ValueError:
+        return symbol
+    return root.rstrip("0123456789") or root
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PaperPositionsRefresher:
+    """Reads the **paper** account's positions into the watch universe's holder.
+
+    Owned by the lifespan, and **outside everything a context job is built
+    from** (unit 4B2 audit): the jobs are handed
+    :class:`~corollary.engine.scheduler.HeldPositionUnderlyings`, which only
+    reads the holder, so no object a job holds can reach this refresher, its
+    broker callable, or the registry that callable closes over.
+
+    ``broker`` is ``registry.broker(PAPER)`` -- rule 5: Paper is the default,
+    and a news cycle has no business reading Cash. The refresher calls exactly
+    two things: ``positions()`` on that broker, which is read-only REST, and
+    ``holder.replace``. It is handed no runtime, watchdog or socket
+    supervisor, and every failure is caught here, so it can neither halt nor
+    resume the engine (rule 9) -- a failed read is a stale watch list, never a
+    lost connection.
+
+    One read at start, then one per ``interval``. A failure (including a
+    registry with no paper keys) is logged by class name only -- its message
+    could carry a credential, rule 6 -- and leaves the holder as it was, whose
+    ``as_of`` then says how stale it is. Before the first successful read the
+    holder is empty with ``as_of`` ``None``: "never read", not "none held".
     """
 
-    def __init__(self) -> None:
-        self._symbols: frozenset[str] = frozenset()
-        self._as_of: datetime | None = None
-
-    def current(self) -> frozenset[str]:
-        return self._symbols
+    def __init__(
+        self,
+        *,
+        broker: Callable[[], BrokerAccount],
+        holder: PositionUnderlyings,
+        clock: Callable[[], datetime] = _utc_now,
+        interval: timedelta = POSITION_UNDERLYINGS_TTL,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._broker = broker
+        self._holder = holder
+        self._clock = clock
+        self._interval = interval
+        self._sleep = sleep
+        self._task: asyncio.Task[None] | None = None
 
     @property
-    def as_of(self) -> datetime | None:
-        """When :meth:`replace` last ran (UTC), or ``None`` if it never has."""
-        return self._as_of
+    def holder(self) -> PositionUnderlyings:
+        return self._holder
 
-    def replace(self, symbols: Iterable[str], *, at: datetime) -> None:
-        require_aware(at, "at")
-        self._symbols = frozenset(symbols)
-        self._as_of = at.astimezone(timezone.utc)
+    async def refresh(self) -> bool:
+        """One read. ``True`` if the holder was replaced. Never raises an ``Exception``.
+
+        The whole body is guarded, not only the broker read: a naive clock
+        (``require_aware``), a row the mapping cannot take, or the holder's
+        ``replace`` refusing its input would otherwise escape into the read
+        loop and end it with nothing logged (unit 4B2 re-audit). Anything the
+        broker read itself raises is the expected, specific warning below;
+        anything else is logged here, by class name only (rule 6), and the
+        holder is left as it was.
+        """
+        try:
+            return await self._refresh_once()
+        except Exception as exc:
+            logger.error(
+                "the paper positions refresh failed outside the broker read; "
+                "the watch universe keeps the last position underlyings",
+                extra={
+                    "event": "position_underlyings_refresh_failed",
+                    "account": AccountMode.PAPER.value,
+                    "error_type": type(exc).__name__,
+                    "retry_after_seconds": int(self._interval.total_seconds()),
+                    "rule": (
+                        "a failed position refresh keeps the last value and "
+                        "is never a rule 9 input"
+                    ),
+                },
+            )
+            return False
+
+    async def _refresh_once(self) -> bool:
+        now = self._clock()
+        require_aware(now, "now")
+        try:
+            held = await self._broker().positions()
+        except Exception as exc:
+            as_of = self._holder.as_of
+            logger.warning(
+                "the paper positions could not be read; the watch universe "
+                "keeps the last position underlyings",
+                extra={
+                    "event": "position_underlyings_unavailable",
+                    "account": AccountMode.PAPER.value,
+                    "error_type": type(exc).__name__,
+                    "kept": len(self._holder.current()),
+                    "kept_as_of": None if as_of is None else as_of.isoformat(),
+                    "retry_after_seconds": int(self._interval.total_seconds()),
+                    "rule": (
+                        "a failed position read keeps the last value and "
+                        "is never a rule 9 input"
+                    ),
+                },
+            )
+            return False
+        self._holder.replace(
+            (position_underlying(row.symbol) for row in held), at=now
+        )
+        return True
+
+    async def _run(self) -> None:
+        while True:
+            # ``refresh`` never raises an ``Exception``; this guard is the
+            # loop's own, so that a regression there degrades to a logged,
+            # stale watch list rather than a silently dead refresh task.
+            try:
+                await self.refresh()
+            except Exception as exc:
+                logger.error(
+                    "the paper positions refresh raised; the read loop "
+                    "continues on its interval",
+                    extra={
+                        "event": "position_underlyings_loop_error",
+                        "account": AccountMode.PAPER.value,
+                        "error_type": type(exc).__name__,
+                        "retry_after_seconds": int(self._interval.total_seconds()),
+                    },
+                )
+            await self._sleep(self._interval.total_seconds())
+
+    def start(self) -> None:
+        """Start the read loop. Call once, from the running event loop."""
+        if self._task is not None:
+            raise RuntimeError("the paper positions refresher is already running")
+        self._task = asyncio.get_running_loop().create_task(
+            self._run(), name="position-underlyings-refresh"
+        )
+
+    async def aclose(self) -> None:
+        """Stop the loop and wait for it. Safe to call more than once. Never raises."""
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------
