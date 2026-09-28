@@ -486,15 +486,18 @@ export interface WatchList {
   manual: ManualWatch[]
   /** Every symbol the watch tier polls. */
   symbols: number
-  /** What the cap counts: members for any reason other than a position. */
-  countBeforePositions: number
-  /** Inclusive — the cap-th symbol is permitted, one more is a 409. */
+  /** What the cap counts (Q13): active manual watches, and nothing else —
+   * never the sector leaders, the Markets list or positions. */
+  manualCount: number
+  /** The manual-watch cap. Inclusive — the cap-th manual watch is
+   * permitted, one more is a 409. */
   cap: number
+  /** Manual watches still addable: `cap - manualCount`, floored at zero. */
   remaining: number
   positionUnderlyings: number
   positionsAsOf: string | null
-  /** True until the SPDR seed is built: no sector leaders are counted yet,
-   * so the universe and the cap's count are provisional. */
+  /** True until the SPDR seed is built: no sector leaders are in the
+   * universe yet, so `symbols` is provisional. The cap is unaffected. */
   seedMissing: boolean
   /** False until the daily asset list has been fetched; until then an add
    * is refused with a 503 rather than accepted unvalidated. */

@@ -81,9 +81,9 @@ function watchList(overrides: Partial<WatchList> = {}): WatchList {
       { ticker: 'SOFI', addedAt: '2026-09-25T13:10:00Z' },
     ],
     symbols: 61,
-    countBeforePositions: 58,
-    cap: 100,
-    remaining: 42,
+    manualCount: 2,
+    cap: 34,
+    remaining: 32,
     positionUnderlyings: 3,
     positionsAsOf: '2026-09-25T14:00:00Z',
     seedMissing: false,
@@ -372,7 +372,8 @@ describe('the watch list', () => {
 
     expect(await within(panel).findByText('PLTR')).toBeInTheDocument()
     expect(within(panel).getByText('SOFI')).toBeInTheDocument()
-    expect(within(panel).getByText(/58 of 100 symbols/)).toBeInTheDocument()
+    expect(within(panel).getByText(/2 of 34 manual watches/)).toBeInTheDocument()
+    expect(within(panel).queryByText(/of 100/)).not.toBeInTheDocument()
   })
 
   it('removes a watch with DELETE and drops the row on success, without a confirm', async () => {
@@ -430,9 +431,12 @@ describe('the watch list', () => {
     served = watchList({ seedMissing: true })
     render(<App />)
 
-    expect(
-      await within(section('Watch list')).findByText(/SPDR holdings seed is not built/),
-    ).toBeInTheDocument()
+    const note = await within(section('Watch list')).findByText(
+      /SPDR holdings seed is not built/,
+    )
+    expect(note).toBeInTheDocument()
+    // Q13: the seed moves the universe, never the manual cap.
+    expect(note.textContent).toMatch(/cap is unaffected/)
   })
 })
 

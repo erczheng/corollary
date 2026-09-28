@@ -707,6 +707,37 @@ assumptions the owner can override**:
   in Phase 2, already carries `"ipo":"1980-12-12"`, so no new recording was
   needed; the tests replay it through the real provider.
 
+**Q13 — Manual watches are capped at 34, independent of the seed (2026-09-28,
+resolving the 4EG audit's question).** The audit's finding: decision 21's cap
+counted the watch universe *before position underlyings*, so with the SPDR seed
+not yet built the leaders were absent from that count, and manual watches added
+against the smaller universe could push it past 100 once the leaders arrived.
+The owner's decision: **replace that ceiling with a fixed cap on manual watches
+only**, independent of the seed, the Markets list and open positions.
+
+- **The cap is 34 active manual watches**, `MANUAL_WATCH_CAP` in
+  `data/news/watchlist.py` — the 100 − 66 that this spec's own arithmetic gave.
+  The owner set the rule; **the number 34 is a parent-session assumption the
+  owner can override**, and changing it is a one-constant change.
+- **The 34th add is permitted; the 35th is refused** with a 409,
+  `watch_cap_reached`, whose message names the ticker and the cap. The refusal
+  writes no `watch_symbol` row and no audit row, emits nothing, and is logged
+  with the rule, the inputs and the time (rule 8, decision 20).
+- **Removing a manual watch frees a slot. Nothing is ever removed
+  automatically** — not when the seed arrives, not when it grows.
+- **What counts:** active manual watches, whatever else they are. A ticker that
+  is only a position underlying and is then added as a manual watch counts (it
+  is a manual watch). Position underlyings on their own never count, and never
+  block or free a slot. The other add refusals are unchanged and come first: a
+  Markets or leader member, an existing manual watch, `MARKET` and a malformed
+  symbol are refused as before, whatever the count.
+- **`GET /api/news/watch`** reports `manualCount`, `cap` and `remaining`
+  (`cap − manualCount`). The old `countBeforePositions` is gone, since nothing
+  is capped on it any more; `seedMissing` now qualifies `symbols` only.
+- **The watch tier's W is no longer capped as a whole.** It floats with the
+  seed's leader count; *Feeds and budgets* carries the arithmetic at the
+  ceiling.
+
 ---
 
 ## Decisions
@@ -1515,10 +1546,14 @@ market-wide stream the discovery panel already summarises.
   `DELETE` removes one. Only manual watches are removable: seed, Markets and
   position members are not. The ticker must be an active US equity in the
   asset list.
-- **The cap.** Manual watches may bring the watch universe to **at most 100
-  symbols before position underlyings** *(assumption)*. That is 34 manual
-  watches at the measured 66. One past the ceiling is refused with a 409 that
-  names it.
+- **The cap.** *(Amended by Q13, 2026-09-28.)* At most **34 active manual
+  watches** (`MANUAL_WATCH_CAP`; the number is a parent-session assumption the
+  owner can override), counted on manual watches alone — independent of the
+  seed, the Markets list and positions. One past the cap is refused with a 409
+  that names the ticker and the cap. Removing a watch frees a slot; nothing is
+  ever auto-removed. This replaced the draft's "at most 100 symbols before
+  position underlyings", which a missing seed could let manual watches
+  overrun once the leaders arrived.
 - **Audit-logged**, under a new `watchlist` category in the configuration
   audit log. Decision 9 kept calendar notes out of that log because they govern
   nothing. A watch is different: it changes what is polled and graded, grading
@@ -1675,7 +1710,7 @@ the protocol stays where it is so the halt path's imports do not move. No
 
 | Feed | Source | Cadence | Host bucket | Spend |
 |---|---|---|---|---|
-| Company news — **watch tier** (Q9) | Finnhub `/company-news`, per symbol, previous day → today | every symbol every 15 min, 06:00 ET → close + 1h on trading days; hourly otherwise; round-robin, one request every 900/W s | `finnhub.io` 60/min (and 30/s, unenforced) | **4.4/min** at W = 66; **≤7.2/min** at the W = 108 ceiling; 1.1–1.8/min overnight |
+| Company news — **watch tier** (Q9) | Finnhub `/company-news`, per symbol, previous day → today | every symbol every 15 min, 06:00 ET → close + 1h on trading days; hourly otherwise; round-robin, one request every 900/W s | `finnhub.io` 60/min (and 30/s, unenforced) | **4.4/min** at W = 66; **7.2/min** at W = 108 (66 + 34 manual + 8 positions); **≤8.2/min** at the W = 123 ceiling (Q13); 1.1–1.8/min overnight |
 | Benzinga headlines — **discovery tier** | Alpaca `/v1beta1/news`, untickered | 60s in session, 5 min otherwise | `data.alpaca.markets` 200/min | ≤1/min, a few pages after a burst |
 | Market news — **discovery tier** | Finnhub `/news?category=general`, `minId` cursor | 5 min | `finnhub.io` | 0.2/min |
 | Vendor-scored news — **discovery tier** | Massive `/v2/reference/news`, untickered, `limit=1000`, from the last `published_utc` seen | 15 min | `api.massive.com` 5/min | 4/hr = 0.07/min (1.3% of the bucket) |
@@ -1709,10 +1744,18 @@ how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
 
 **Q9's arithmetic, one line per bucket** (decision 21):
 
-- **`finnhub.io`, 60/min.** Watch tier 66/15 = **4.4/min** (≤108/15 = 7.2/min
-  at the ceiling of 100 watch symbols plus ≤8 position underlyings) + market
-  news 0.2/min = **4.6/min sustained in the window, ≤7.4/min at the ceiling
-  (8–12% of the bucket)**. On top of that sit profile2's 26 a day (Phase 2's
+- **`finnhub.io`, 60/min.** Watch tier 66/15 = **4.4/min** + market news
+  0.2/min = **4.6/min sustained in the window** (8% of the bucket). Since Q13
+  the manual watches are capped at 34 on their own, so W = |Markets ∪
+  leaders| + ≤34 manual + ≤8 position underlyings, and **W floats with the
+  seed's leader count** rather than being held to a total. At the measured 66
+  that is W ≤ 108: 108/15 = 7.2/min, **7.4/min with market news (12%)**, one
+  request every 8.3 s — the same figure the old 100-before-positions ceiling
+  gave. The seed can hold at most 11 funds × 5 = 55 leaders, so |Markets ∪
+  leaders| ≤ 26 + 55 = 81 even if none overlapped, and the ceiling is W ≤ 81
+  + 34 + 8 = **123: 8.2/min, 8.4/min with market news (14% of the bucket)**,
+  one request every 7.3 s — still far under both the 60/min bucket and the
+  30-per-second ceiling. On top of that sit profile2's 26 a day (Phase 2's
   daily cache, a sub-30 burst on the first Markets load), Q12's IPO lookups —
   at most 20 a refresh run, at most once per partial-window ticker ever once a
   date is cached, so near zero in steady state — earnings at 1 a day,
@@ -1937,8 +1980,12 @@ and the audit's transitions — get the careful coverage.
   `ALPACA_STOCK_FEED_HISTORICAL`'s value, and fails if it ever carries the
   realtime feed's.
 - **Watch routes:**
-  - add, remove, the 409 one past the 100-symbol ceiling, and refusal to
-    remove a non-manual member
+  - add, remove, and refusal to remove a non-manual member
+  - the manual-watch cap (Q13): the 34th add succeeds and the 35th is a 409
+    naming the cap; a refused add writes no `watch_symbol` row and no audit
+    row, and emits nothing; removing a watch frees a slot (the next add
+    succeeds); the cap is the same with and without the seed, and position
+    underlyings neither block nor free a slot
   - exactly one `audit_log` row and one `watchlist_changed` emit per change
   - nothing emitted on a refused request
 - **Retention:**
@@ -2434,8 +2481,7 @@ From Q9 (decision 21):
   firehoses, and a missing source is a vendor decision. No Benzinga Pro or
   Marketaux purchase.
 - **No automatic promotion to the watch list.** Watching is one manual,
-  audit-logged click, capped at a 100-symbol watch universe before position
-  underlyings.
+  audit-logged click, capped at 34 manual watches (Q13).
 - **No discovery candidate is a trade trigger or a scanner input** in Phase 3,
   and none becomes one in Phase 4 without Phase 4 deciding it.
 - **Nothing extra for candidates:** no price-move column on the movers panel,

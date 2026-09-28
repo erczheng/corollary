@@ -10,8 +10,8 @@ from decimal import Decimal
 import pytest
 
 from corollary.data.news.watchlist import (
+    MANUAL_WATCH_CAP,
     MARKET_TICKER,
-    WATCH_UNIVERSE_CAP,
     Membership,
     SkippedSymbol,
     WatchRefusal,
@@ -172,58 +172,118 @@ def test_the_universe_is_frozen() -> None:
         universe.members["NEW"] = frozenset({Membership.MANUAL})  # type: ignore[index]
 
 
-# --- the cap counts the universe before position underlyings ------------------
+# --- the cap counts active manual watches only (Q13) ---------------------------
 
 
-def test_the_cap_is_100() -> None:
-    assert WATCH_UNIVERSE_CAP == 100
+def test_the_cap_is_34_manual_watches() -> None:
+    assert MANUAL_WATCH_CAP == 34
 
 
-def test_the_count_before_positions_excludes_position_only_members_and_market() -> None:
+def test_the_manual_count_counts_manual_watches_and_nothing_else() -> None:
     universe = watch_universe(
-        markets=MARKETS, leaders=["XOM"], positions=["TSLA", "AAPL"], manual=["PLTR"]
+        markets=MARKETS, leaders=["XOM"], positions=["TSLA", "AAPL"], manual=["PLTR", "SOFI"]
     )
-    # AAPL MSFT NVDA SPY XOM PLTR -- TSLA is position-only, MARKET is not a symbol.
-    assert universe.count_before_positions == 6
+    # AAPL MSFT NVDA SPY XOM TSLA MARKET are members for other reasons.
+    assert universe.manual_count == 2
 
 
-def test_adding_the_hundredth_symbol_is_permitted() -> None:
-    universe = watch_universe(markets=synthetic_symbols(99), leaders=[], positions=[], manual=[])
-    assert universe.count_before_positions == 99
+@pytest.mark.risk
+def test_the_thirty_fourth_manual_watch_is_permitted() -> None:
+    universe = watch_universe(
+        markets=MARKETS, leaders=[], positions=[], manual=synthetic_symbols(33, "R")
+    )
+    assert universe.manual_count == 33
     check = can_add_manual(universe, "PLTR")
     assert check.allowed is True
     assert check.refusal is None
     assert check.ticker == "PLTR"
 
 
-def test_one_past_the_ceiling_is_refused_and_the_refusal_names_it() -> None:
+@pytest.mark.risk
+def test_the_thirty_fifth_manual_watch_is_refused_and_the_refusal_names_the_cap() -> None:
     universe = watch_universe(
-        markets=synthetic_symbols(90), leaders=[], positions=[], manual=synthetic_symbols(10, "R")
+        markets=MARKETS, leaders=[], positions=[], manual=synthetic_symbols(34, "R")
     )
-    assert universe.count_before_positions == 100
+    assert universe.manual_count == 34
     check = can_add_manual(universe, "PLTR")
     assert check.allowed is False
     assert check.refusal is WatchRefusal.CAP_REACHED
-    assert "100" in check.detail
+    assert "34" in check.detail
     assert "PLTR" in check.detail
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize("markets", [0, 26, 200])
+@pytest.mark.parametrize("leaders", [0, 40, 300])
+def test_the_cap_ignores_the_size_of_the_markets_list_and_the_seed(
+    markets: int, leaders: int
+) -> None:
+    """Q13: the seed, the Markets list and positions do not move the cap."""
+    manual = synthetic_symbols(33, "R")
+    below = watch_universe(
+        markets=synthetic_symbols(markets, "M"),
+        leaders=synthetic_symbols(leaders, "L"),
+        positions=[],
+        manual=manual,
+    )
+    assert can_add_manual(below, "PLTR").allowed is True
+    full = watch_universe(
+        markets=synthetic_symbols(markets, "M"),
+        leaders=synthetic_symbols(leaders, "L"),
+        positions=[],
+        manual=[*manual, "SOFI"],
+    )
+    assert can_add_manual(full, "PLTR").refusal is WatchRefusal.CAP_REACHED
+
+
+def test_a_missing_seed_leaves_the_cap_where_it_is() -> None:
+    manual = synthetic_symbols(34, "R")
+    for leaders in (leaders_from_seed(None), leaders_from_seed(seed())):
+        universe = watch_universe(
+            markets=MARKETS, leaders=leaders.symbols, positions=[], manual=manual
+        )
+        assert universe.manual_count == 34
+        assert can_add_manual(universe, "PLTR").refusal is WatchRefusal.CAP_REACHED
 
 
 def test_position_underlyings_do_not_count_toward_the_cap() -> None:
     universe = watch_universe(
-        markets=synthetic_symbols(99), leaders=[], positions=synthetic_symbols(10, "P"), manual=[]
+        markets=MARKETS,
+        leaders=[],
+        positions=synthetic_symbols(10, "P"),
+        manual=synthetic_symbols(33, "R"),
     )
-    assert len(universe.polled_symbols) == 109
+    assert universe.manual_count == 33
     assert can_add_manual(universe, "PLTR").allowed is True
 
 
 def test_a_position_only_ticker_may_be_watched_and_counts_toward_the_cap() -> None:
-    """Watching it keeps it after the position closes, so it is a pre-position member."""
-    below = watch_universe(markets=synthetic_symbols(99), leaders=[], positions=["TSLA"], manual=[])
+    """Watching it keeps it after the position closes, so it is a manual watch."""
+    below = watch_universe(
+        markets=MARKETS, leaders=[], positions=["TSLA"], manual=synthetic_symbols(33, "R")
+    )
     assert can_add_manual(below, "TSLA").allowed is True
 
-    at_cap = watch_universe(markets=synthetic_symbols(100), leaders=[], positions=["TSLA"], manual=[])
-    check = can_add_manual(at_cap, "TSLA")
-    assert check.refusal is WatchRefusal.CAP_REACHED
+    at_cap = watch_universe(
+        markets=MARKETS, leaders=[], positions=["TSLA"], manual=synthetic_symbols(34, "R")
+    )
+    assert can_add_manual(at_cap, "TSLA").refusal is WatchRefusal.CAP_REACHED
+
+    watched = watch_universe(
+        markets=MARKETS, leaders=[], positions=["TSLA"], manual=["TSLA"]
+    )
+    assert watched.manual_count == 1
+
+
+def test_the_other_refusals_come_before_the_cap() -> None:
+    """At the cap, a no-op add is still told it is a no-op, not that the list is full."""
+    universe = watch_universe(
+        markets=MARKETS, leaders=["XOM"], positions=[], manual=synthetic_symbols(34, "R")
+    )
+    assert can_add_manual(universe, "AAPL").refusal is WatchRefusal.ALREADY_MEMBER
+    assert can_add_manual(universe, "RAAA").refusal is WatchRefusal.ALREADY_MANUAL
+    assert can_add_manual(universe, "MARKET").refusal is WatchRefusal.RESERVED
+    assert can_add_manual(universe, "AAPL1").refusal is WatchRefusal.INVALID_SYMBOL
 
 
 # --- other add refusals -------------------------------------------------------

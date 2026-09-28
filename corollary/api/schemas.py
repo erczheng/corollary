@@ -1587,18 +1587,21 @@ class WatchList(ApiModel):
     manual: list[ManualWatch]
     #: Every symbol the watch tier polls -- the universe less ``MARKET``.
     symbols: int
-    #: What the cap counts: members with a reason other than a position.
-    count_before_positions: int
-    #: Inclusive: the ``cap``-th symbol is permitted, one more is a 409.
+    #: What the cap counts (Q13): active manual watches, and nothing else --
+    #: never the seed's leaders, the Markets list or positions.
+    manual_count: int
+    #: The manual-watch cap. Inclusive: the ``cap``-th manual watch is
+    #: permitted, one more is a 409.
     cap: int
-    #: ``cap - countBeforePositions``, floored at zero.
+    #: Manual watches still addable: ``cap - manualCount``, floored at zero.
     remaining: int
     #: The last-known open-position underlyings, as the scheduler last set
     #: them; zero (and ``positionsAsOf`` null) before it ever has.
     position_underlyings: int
     positions_as_of: datetime | None
     #: True when the SPDR seed has not been built: no sector leaders are in
-    #: the universe, so it (and the cap's count) is smaller than it will be.
+    #: the universe, so ``symbols`` is smaller than it will be. The cap and
+    #: ``remaining`` are unaffected (Q13).
     seed_missing: bool
     #: False until the daily asset list has been fetched once; until then an
     #: add is refused with a 503 rather than accepted unvalidated.

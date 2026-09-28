@@ -531,7 +531,7 @@ function ManualWatches() {
       title="Watch list"
       meta={
         list
-          ? `${list.countBeforePositions} of ${list.cap} symbols, before position underlyings`
+          ? `${list.manualCount} of ${list.cap} manual watches`
           : 'Names you added by hand, on top of the Markets universe and sector leaders'
       }
     >
@@ -545,8 +545,8 @@ function ManualWatches() {
         <>
           {list.seedMissing ? (
             <p className="mt-2 text-caption text-on-surface-variant">
-              The SPDR holdings seed is not built, so sector leaders are not counted yet — this
-              count will rise when it is.
+              The SPDR holdings seed is not built, so sector leaders are not watched yet — they
+              join when it is. The manual-watch cap is unaffected.
             </p>
           ) : null}
           {list.manual.length === 0 ? (

@@ -18,15 +18,18 @@ tagged to nothing is stored under, so it belongs to the graded set; nobody
 polls it, so :attr:`WatchUniverse.polled_symbols` leaves it out. It is also
 refused as an input symbol and as a manual watch: it is always present already.
 
-**The cap counts the universe before position underlyings** *(assumption:
-100)*. That is every symbol with a membership other than
-:attr:`Membership.POSITION`, and not ``MARKET``: at launch 26 Markets names ∪
-the leaders measured 66 symbols, leaving 34 manual watches. Position
-underlyings come and go with trades and must never be what blocks a watch.
+**The cap counts active manual watches, and nothing else** (owner decision
+Q13, 2026-09-28): at most :data:`MANUAL_WATCH_CAP` = 34 *(parent-session
+assumption the owner can override: the 100 - 66 the spec's own arithmetic
+gave)*. It is independent of the seed, the Markets list and positions, so a
+missing seed does not make room that the sector leaders later take back, and
+a larger seed never blocks a watch already permitted. Position underlyings
+come and go with trades and are never what blocks or frees a slot. Removing a
+manual watch frees one; nothing is ever removed automatically.
 
 **A position-only ticker may be added as a manual watch, and then it counts.**
 The manual membership is what keeps it watched after the position closes, so
-it is a pre-position member like any other manual watch.
+it is a manual watch like any other.
 
 **A Markets or leader member may not be added as a manual watch.** It would
 change nothing that is polled or graded, and an audit-log row and a Discord
@@ -65,8 +68,8 @@ from corollary.data.seeds import (
 )
 
 __all__ = [
+    "MANUAL_WATCH_CAP",
     "MARKET_TICKER",
-    "WATCH_UNIVERSE_CAP",
     "Membership",
     "SectorLeaders",
     "WatchChangeCheck",
@@ -82,9 +85,11 @@ __all__ = [
 #: The ticker value for an article tagged to no ticker (``types.ts``).
 MARKET_TICKER: Final = "MARKET"
 
-#: The most symbols manual watches may bring the universe to, counted before
-#: position underlyings *(assumption)*. Inclusive: the 100th is permitted.
-WATCH_UNIVERSE_CAP: Final = 100
+#: The most active manual watches there may be (Q13). Counts manual watches
+#: only -- never the seed, the Markets list or positions. Inclusive: the 34th
+#: is permitted, the 35th is refused. *(Parent-session assumption the owner
+#: can override: 100 - the 66 names measured at launch.)*
+MANUAL_WATCH_CAP: Final = 34
 
 
 class Membership(StrEnum):
@@ -183,13 +188,9 @@ class WatchUniverse:
         )
 
     @property
-    def count_before_positions(self) -> int:
-        """What the cap counts: members with a reason other than position, less ``MARKET``."""
-        return sum(
-            1
-            for symbol, reasons in self.members.items()
-            if symbol != MARKET_TICKER and reasons - {Membership.POSITION}
-        )
+    def manual_count(self) -> int:
+        """What the cap counts: active manual watches, whatever else they are."""
+        return len(self.manual)
 
     def reasons(self, ticker: str) -> frozenset[Membership]:
         """Why ``ticker`` is a member; empty when it is not one."""
@@ -286,13 +287,13 @@ def can_add_manual(universe: WatchUniverse, ticker: str) -> WatchChangeCheck:
             WatchRefusal.ALREADY_MEMBER,
             f"{symbol} is already watched ({_reason_list(reasons)}); a manual watch would change nothing",
         )
-    count = universe.count_before_positions
-    if count + 1 > WATCH_UNIVERSE_CAP:
+    count = universe.manual_count
+    if count >= MANUAL_WATCH_CAP:
         return WatchChangeCheck(
             symbol,
             WatchRefusal.CAP_REACHED,
-            f"adding {symbol} would bring the watch universe to {count + 1} symbols before "
-            f"position underlyings; the ceiling is {WATCH_UNIVERSE_CAP}",
+            f"{symbol} cannot be added: there are already {count} manual watches and the "
+            f"cap is {MANUAL_WATCH_CAP}; remove one to make room",
         )
     return WatchChangeCheck(symbol, None, f"{symbol} may be added as a manual watch")
 

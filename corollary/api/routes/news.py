@@ -49,8 +49,8 @@ The watch routes
 
 Decision 21, verbatim: *"Only manual watches are removable: seed, Markets and
 position members are not. The ticker must be an active US equity in the asset
-list. ... at most 100 symbols before position underlyings. One past the
-ceiling is refused with a 409 that names it. Audit-logged, under a new
+list. ... One past the ceiling is refused with a 409 that names it.
+Audit-logged, under a new
 ``watchlist`` category ... It notifies ``watchlist_changed`` ... Removal keeps
 everything already stored."*
 
@@ -60,7 +60,12 @@ everything already stored."*
   the cached asset list. **No asset list yet is a 503**, not an accepted
   ticker: an unvalidated watch is a symbol the watch tier would poll and the
   self-audit would grade on nobody's say-so.
-* **Status codes.** Ceiling: 409 naming the ticker and the 100. Not an active
+* **The cap is on manual watches only** (owner decision Q13, which replaced
+  decision 21's "at most 100 symbols before position underlyings"): at most
+  ``MANUAL_WATCH_CAP`` = 34 active manual watches *(parent-session
+  assumption)*, independent of the seed, the Markets list and positions.
+  Removing a watch frees a slot; nothing is ever removed automatically.
+* **Status codes.** Cap: 409 naming the ticker and the 34. Not an active
   US equity: 422. Malformed symbol: 422. Already watched (manually, or by
   another membership, or ``MARKET``): 409. Removing a non-manual member: 409
   naming its memberships. Removing a non-member: 404.
@@ -73,16 +78,14 @@ everything already stored."*
   ``removed_at`` and is never deleted, and no article is touched. A re-add is
   a new row.
 * **Check and write under one lock.** The routes are synchronous and run in
-  the threadpool, so two adds racing could both pass the ceiling check; the
-  partial unique index stops a duplicate *ticker*, not a 101st symbol. One
+  the threadpool, so two adds racing could both pass the cap check; the
+  partial unique index stops a duplicate *ticker*, not a 35th watch. One
   process, one writer (the design spec), so an in-process lock is sufficient.
 
-Seed missing: the leaders are absent from the universe, so the cap counts
-fewer symbols than it will once the seed is built. Adds are still permitted --
-refusing would block every manual watch until the owner runs a quarterly
-script -- and ``seedMissing`` says the count is provisional. Watches already
-held when the seed arrives are kept; only further adds are refused if the
-count then exceeds the ceiling.
+Seed missing: the leaders are absent from the universe, so ``symbols`` is
+smaller than it will be once the seed is built, and ``seedMissing`` says so.
+The cap does not move with it: it counts manual watches only, so the seed's
+arrival can never push the count past the cap or take a slot back.
 """
 
 import logging
@@ -124,8 +127,8 @@ from corollary.api.schemas import (
 )
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.news.watchlist import (
+    MANUAL_WATCH_CAP,
     MARKET_TICKER,
-    WATCH_UNIVERSE_CAP,
     WatchChangeCheck,
     WatchRefusal,
     WatchUniverse,
@@ -271,16 +274,16 @@ def _watch_list(
     correlation_id: str,
 ) -> WatchList:
     universe, seed_missing = _universe(session, seed, positions, correlation_id)
-    counted = universe.count_before_positions
+    counted = universe.manual_count
     return WatchList(
         manual=[
             ManualWatch(ticker=row.ticker, added_at=row.added_at)
             for row in _active_manual(session)
         ],
         symbols=len(universe.polled_symbols),
-        count_before_positions=counted,
-        cap=WATCH_UNIVERSE_CAP,
-        remaining=max(WATCH_UNIVERSE_CAP - counted, 0),
+        manual_count=counted,
+        cap=MANUAL_WATCH_CAP,
+        remaining=max(MANUAL_WATCH_CAP - counted, 0),
         position_underlyings=len(positions.current()),
         positions_as_of=positions.as_of,
         seed_missing=seed_missing,
@@ -462,8 +465,8 @@ _REFUSAL_STATUS: Final[dict[WatchRefusal, int]] = {
 
 _RULE: Final = (
     "decision 21: only manual watches are added or removed; an added ticker is "
-    "an active US equity in the cached asset list; at most "
-    f"{WATCH_UNIVERSE_CAP} symbols before position underlyings"
+    "an active US equity in the cached asset list; Q13: at most "
+    f"{MANUAL_WATCH_CAP} active manual watches"
 )
 
 
@@ -591,7 +594,7 @@ def add_watch(
             raise _refuse_check(
                 check, action="add", raw=ticker, at=now, correlation_id=correlation_id
             )
-        # A real equity before a full ceiling: a garbage ticker is told it is
+        # A real equity before a full cap: a garbage ticker is told it is
         # garbage, not that there is no room for it.
         assets = directory.current()
         if assets is None:

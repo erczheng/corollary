@@ -1,9 +1,11 @@
 """``GET /api/news/watch`` and ``POST``/``DELETE /api/news/watch/{ticker}``.
 
 The spec's *Testing* section, verbatim: *"add, remove, the 409 one past the
-100-symbol ceiling, and refusal to remove a non-manual member; exactly one
-``audit_log`` row and one ``watchlist_changed`` emit per change; nothing
-emitted on a refused request"*. Beyond that: a 503 with no asset list (never
+34-manual-watch cap (Q13), and refusal to remove a non-manual member; exactly
+one ``audit_log`` row and one ``watchlist_changed`` emit per change; nothing
+emitted on a refused request"*. For the cap, also: the 34th add succeeds, a
+removal frees a slot, and the cap is the same with and without the seed and
+with and without positions. Beyond that: a 503 with no asset list (never
 an unvalidated ticker), a 422 for a ticker that is not an active US equity,
 re-adding after a removal, and the audit row rendering through the existing
 ``/api/settings/audit`` route in the words ``web/src/lib/settings.ts`` and
@@ -27,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from corollary.api.routes.markets import UNIVERSE_SYMBOLS
 from corollary.api.routes.news import request_now
-from corollary.data.news.watchlist import WATCH_UNIVERSE_CAP
+from corollary.data.news.watchlist import MANUAL_WATCH_CAP
 from corollary.db.models import (
     AuditLog,
     NotificationDelivery,
@@ -50,7 +52,7 @@ FAKE_WEBHOOK = "https://discord.com/api/webhooks/1234/not-a-real-webhook-token"
 
 #: The universe before positions with the test seed and no manual watches.
 BASE = frozenset(UNIVERSE_SYMBOLS) | SEED_LEADERS
-FILLER = filler_symbols(WATCH_UNIVERSE_CAP, exclude=BASE)
+FILLER = filler_symbols(MANUAL_WATCH_CAP + 2, exclude=BASE)
 #: Everything the test asset list names: the base, the filler, and two
 #: ordinary names to watch. ``QZNOTLISTED`` shaped names are absent on purpose.
 LISTED = BASE | set(FILLER) | {"PLTR", "BRK.B"}
@@ -126,9 +128,9 @@ def test_the_watch_list_states_the_universe_it_sits_in(watch: TestClient) -> Non
     assert body == {
         "manual": [],
         "symbols": len(BASE),
-        "countBeforePositions": len(BASE),
-        "cap": 100,
-        "remaining": 100 - len(BASE),
+        "manualCount": 0,
+        "cap": 34,
+        "remaining": 34,
         "positionUnderlyings": 0,
         "positionsAsOf": None,
         "seedMissing": False,
@@ -138,7 +140,7 @@ def test_the_watch_list_states_the_universe_it_sits_in(watch: TestClient) -> Non
     assert body["assetListFetchedAt"] is not None
 
 
-def test_position_underlyings_widen_the_universe_but_not_the_capped_count(
+def test_position_underlyings_widen_the_universe_but_not_the_manual_count(
     watch: TestClient,
 ) -> None:
     app: Any = watch.app
@@ -147,7 +149,8 @@ def test_position_underlyings_widen_the_universe_but_not_the_capped_count(
     body = watch.get("/api/news/watch").json()
 
     assert body["symbols"] == len(BASE) + 1
-    assert body["countBeforePositions"] == len(BASE)
+    assert body["manualCount"] == 0
+    assert body["remaining"] == MANUAL_WATCH_CAP
     assert body["positionUnderlyings"] == 2
     assert body["positionsAsOf"] is not None
 
@@ -159,7 +162,9 @@ def test_a_missing_seed_is_stated_and_shrinks_the_universe(
         body = client.get("/api/news/watch").json()
 
     assert body["seedMissing"] is True
-    assert body["countBeforePositions"] == len(set(UNIVERSE_SYMBOLS))
+    assert body["symbols"] == len(set(UNIVERSE_SYMBOLS))
+    assert body["cap"] == MANUAL_WATCH_CAP
+    assert body["remaining"] == MANUAL_WATCH_CAP
 
 
 def test_no_asset_list_is_stated(app: FastAPI) -> None:
@@ -277,43 +282,78 @@ def test_the_audit_row_renders_through_the_settings_audit_route(
 
 
 # --------------------------------------------------------------------------
-# The ceiling: 100 before position underlyings, inclusive
+# The cap: 34 active manual watches, inclusive (Q13)
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.risk
-def test_the_hundredth_symbol_is_permitted_and_the_hundred_and_first_is_a_409(
+def test_the_thirty_fourth_watch_is_permitted_and_the_thirty_fifth_is_a_409(
     watch: TestClient, db_engine: Engine
 ) -> None:
-    room = WATCH_UNIVERSE_CAP - len(BASE)
-    add_manual_watches(db_engine, FILLER[: room - 1], at=NOW - timedelta(days=1))
-    assert watch.get("/api/news/watch").json()["countBeforePositions"] == 99
+    add_manual_watches(db_engine, FILLER[: MANUAL_WATCH_CAP - 1], at=NOW - timedelta(days=1))
+    assert watch.get("/api/news/watch").json()["manualCount"] == 33
 
     at_boundary = watch.post("/api/news/watch/PLTR")
     assert at_boundary.status_code == 200, at_boundary.text
-    assert at_boundary.json()["countBeforePositions"] == 100
+    assert at_boundary.json()["manualCount"] == 34
     assert at_boundary.json()["remaining"] == 0
 
     before = _state(db_engine)
-    refused = watch.post(f"/api/news/watch/{FILLER[room]}")
+    refused = watch.post(f"/api/news/watch/{FILLER[MANUAL_WATCH_CAP]}")
 
     assert refused.status_code == 409
     error = _error(refused)
     assert error["code"] == "watch_cap_reached"
-    assert FILLER[room] in error["message"]
-    assert "100" in error["message"]
+    assert FILLER[MANUAL_WATCH_CAP] in error["message"]
+    assert "34" in error["message"]
+    # No watch_symbol row, no audit row, no watchlist_changed notice.
     assert _state(db_engine) == before
 
 
-def test_position_underlyings_never_block_a_watch_at_the_ceiling(
+@pytest.mark.risk
+def test_removing_a_watch_frees_a_slot(watch: TestClient, db_engine: Engine) -> None:
+    add_manual_watches(db_engine, FILLER[:MANUAL_WATCH_CAP], at=NOW - timedelta(days=1))
+    assert watch.post("/api/news/watch/PLTR").status_code == 409
+
+    removed = watch.delete(f"/api/news/watch/{FILLER[0]}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["remaining"] == 1
+
+    added = watch.post("/api/news/watch/PLTR")
+    assert added.status_code == 200, added.text
+    assert added.json()["manualCount"] == MANUAL_WATCH_CAP
+    assert added.json()["remaining"] == 0
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize("seed", ["default", None], ids=["seed", "no-seed"])
+def test_the_cap_is_the_same_with_and_without_the_seed(
+    app: FastAPI, db_engine: Engine, seed: Any
+) -> None:
+    add_manual_watches(db_engine, FILLER[: MANUAL_WATCH_CAP - 1], at=NOW - timedelta(days=1))
+    with _start(app, seed=seed) as client:
+        body = client.get("/api/news/watch").json()
+        assert body["seedMissing"] is (seed is None)
+        assert body["cap"] == MANUAL_WATCH_CAP
+        assert body["remaining"] == 1
+
+        assert client.post("/api/news/watch/PLTR").status_code == 200
+        refused = client.post(f"/api/news/watch/{FILLER[MANUAL_WATCH_CAP]}")
+        assert refused.status_code == 409
+        assert _error(refused)["code"] == "watch_cap_reached"
+
+
+def test_position_underlyings_neither_block_nor_free_a_slot(
     watch: TestClient, db_engine: Engine
 ) -> None:
-    room = WATCH_UNIVERSE_CAP - len(BASE)
-    add_manual_watches(db_engine, FILLER[: room - 1], at=NOW - timedelta(days=1))
+    add_manual_watches(db_engine, FILLER[: MANUAL_WATCH_CAP - 1], at=NOW - timedelta(days=1))
     app: Any = watch.app
     app.state.position_underlyings.replace(["QZPO", "QZPP", "QZPQ"], at=NOW)
 
     assert watch.post("/api/news/watch/PLTR").status_code == 200
+    refused = watch.post(f"/api/news/watch/{FILLER[MANUAL_WATCH_CAP]}")
+    assert refused.status_code == 409
+    assert _error(refused)["code"] == "watch_cap_reached"
 
 
 # --------------------------------------------------------------------------
