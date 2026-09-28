@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/595112103",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Micron Technology Inc",
+  "status_code": 200,
+  "body": {"id":"1ef18995-5094-4f62-a5c5-e00168611152","class":"us_equity","exchange":"NASDAQ","symbol":"MU","name":"Micron Technology, Inc. Common Stock","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

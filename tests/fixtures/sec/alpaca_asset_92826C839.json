@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/92826C839",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Visa Inc",
+  "status_code": 200,
+  "body": {"id":"4f5baf1e-0e9b-4d85-b88a-d874dc4a3c42","class":"us_equity","exchange":"NYSE","symbol":"V","name":"VISA Inc.","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

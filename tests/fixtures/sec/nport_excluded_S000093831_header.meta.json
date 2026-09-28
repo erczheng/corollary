@@ -1,0 +1,11 @@
+{
+  "series_id": "S000093831",
+  "series_name": "State Street(R) Communication Services Select Sector SPDR(R) Premium Income ETF",
+  "accession": "0001410368-26-089584",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089584/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "trimmed": "the <invstOrSecs> section is removed; header, genInfo and fundInfo are as served. Recorded to prove a same-trust, same-quarter filing outside the eleven is excluded by seriesId",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

@@ -1,0 +1,21 @@
+{
+  "ticker": "XLU",
+  "series_id": "S000006416",
+  "series_name": "State Street(R) Utilities Select Sector SPDR(R) ETF",
+  "class_id": "C000017602",
+  "accession": "0001410368-26-089590",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "rep_pd_end": "2026-09-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089590/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "complete": true,
+  "trimmed": "none: byte-for-byte as served",
+  "holdings_total": 36,
+  "equity_lines": 31,
+  "non_equity_removed": 0,
+  "equity_pct_val_sum": "99.665187195657",
+  "equity_lines_without_cusip": 0,
+  "bytes_original": 40859,
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

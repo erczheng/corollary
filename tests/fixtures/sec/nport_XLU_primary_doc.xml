@@ -1,0 +1,1091 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/nport" xmlns:com="http://www.sec.gov/edgar/common" xmlns:ncom="http://www.sec.gov/edgar/nportcommon" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sec.gov/edgar/nport eis_NPORT_Filer.xsd">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <isConfidential>false</isConfidential>
+    <filerInfo>
+
+      <filer>
+        <issuerCredentials>
+          <cik>0001064641</cik>
+          <ccc>XXXXXXXX</ccc>
+        </issuerCredentials>
+      </filer>
+
+
+      <seriesClassInfo>
+        <seriesId>S000006416</seriesId>
+        <classId>C000017602</classId>
+      </seriesClassInfo>
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>SELECT SECTOR SPDR TRUST</regName>
+      <regFileNumber>811-08837</regFileNumber>
+      <regCik>0001064641</regCik>
+      <regLei>5493008JJKIPMEX3CO91</regLei>
+      <regStreet1>One Congress Street</regStreet1>
+      <regCity>Boston</regCity>
+      <regStateConditional regCountry="US" regState="US-MA"/>
+      <regZipOrPostalCode>02114</regZipOrPostalCode>
+      <regPhone>1-866-787-2257</regPhone>
+      <seriesName>State Street(R) Utilities Select Sector SPDR(R) ETF</seriesName>
+      <seriesId>S000006416</seriesId>
+      <seriesLei>549300ERQDM80PRYUH21</seriesLei>
+      <repPdEnd>2026-09-30</repPdEnd>
+      <repPdDate>2026-06-30</repPdDate>
+      <isFinalFiling>N</isFinalFiling>
+    </genInfo>
+    <fundInfo>
+      <totAssets>23170805749.31</totAssets>
+      <totLiabs>59388646.46</totLiabs>
+      <netAssets>23111417102.85</netAssets>
+      <assetsAttrMiscSec>0.00000000</assetsAttrMiscSec>
+      <assetsInvested>0.00000000</assetsInvested>
+      <amtPayOneYrBanksBorr>0.00000000</amtPayOneYrBanksBorr>
+      <amtPayOneYrCtrldComp>0.00000000</amtPayOneYrCtrldComp>
+      <amtPayOneYrOthAffil>0.00000000</amtPayOneYrOthAffil>
+      <amtPayOneYrOther>0.00000000</amtPayOneYrOther>
+      <amtPayAftOneYrBanksBorr>0.00000000</amtPayAftOneYrBanksBorr>
+      <amtPayAftOneYrCtrldComp>0.00000000</amtPayAftOneYrCtrldComp>
+      <amtPayAftOneYrOthAffil>0.00000000</amtPayAftOneYrOthAffil>
+      <amtPayAftOneYrOther>0.00000000</amtPayAftOneYrOther>
+      <delayDeliv>0.00000000</delayDeliv>
+      <standByCommit>0.00000000</standByCommit>
+      <liquidPref>0.00000000</liquidPref>
+      <cshNotRptdInCorD>2442876.71000000</cshNotRptdInCorD>
+      <borrowers>
+        <borrower aggrVal="1419964.00000000" lei="RUC0QBLBRPRCU4W1NE59" name="BMO Capital Markets Corp."/>
+        <borrower aggrVal="186832.00000000" lei="RCNB6OTYUAMMP879YW96" name="BNP Paribas Securities Corp."/>
+        <borrower aggrVal="26893790.00000000" lei="G5GSEF7VJP5I7OUK5573" name="Barclays Bank PLC"/>
+        <borrower aggrVal="1517670.00000000" lei="AC28XWWI3WIBK2824319" name="Barclays Capital Inc."/>
+        <borrower aggrVal="10229133.32000000" lei="549300HN4UKV1E2R3U73" name="BofA Securities, Inc."/>
+        <borrower aggrVal="26937372.18000000" lei="MBNUM2BPBDO7JBLYG310" name="Citigroup Global Markets Inc."/>
+        <borrower aggrVal="2030366.20000000" lei="FOR8UP27PHTHYVLBNG30" name="Goldman Sachs &amp; Co. LLC"/>
+        <borrower aggrVal="313850.00000000" lei="W22LROWP2IHZNBB6K528" name="Goldman Sachs International"/>
+        <borrower aggrVal="788913.90000000" lei="MP6I5ZYZBEU3UXPYFY54" name="HSBC Bank PLC"/>
+        <borrower aggrVal="5886909.00000000" lei="ZBUT11V806EZRVTWT807" name="J.P. Morgan Securities LLC"/>
+        <borrower aggrVal="1044996.00000000" lei="58PU97L1C0WSRCWADL48" name="Jefferies LLC"/>
+        <borrower aggrVal="495414.00000000" lei="9R7GPTSO7KV3UQJZQ078" name="Morgan Stanley &amp; Co. LLC"/>
+        <borrower aggrVal="316143.00000000" lei="549300L8G1E7ZHVEOG75" name="Natixis Securities Americas LLC"/>
+        <borrower aggrVal="739608.00000000" lei="OXTKY6Q8X53C9ILVV871" name="Nomura Securities International, Inc."/>
+        <borrower aggrVal="64987.00000000" lei="549300F35UE0BOM1WJ55" name="SG Americas Securities, LLC"/>
+        <borrower aggrVal="4569070.00000000" lei="549300BLWPABP1VNME36" name="Scotia Capital (USA) Inc."/>
+        <borrower aggrVal="1517169.27000000" lei="SUVUFHICNZMP2WKHG940" name="TD Securities (USA) LLC"/>
+        <borrower aggrVal="4754.00000000" lei="BFM8T61CT2L1QCEMIK50" name="UBS AG"/>
+        <borrower aggrVal="497978.00000000" lei="KB1H1DSPRFMYMCUFXT09" name="Wells Fargo Bank, National Association"/>
+      </borrowers>
+      <aggregateCondition isNonCashCollateral="Y">
+        <aggregateInfos>
+          <aggregateInfo amt="226444.65000000" collatrl="229097.55000000">
+            <invstCat>ACMBS</invstCat>
+          </aggregateInfo>
+          <aggregateInfo amt="32344371.31000000" collatrl="30628925.18000000">
+            <invstCat>UST</invstCat>
+          </aggregateInfo>
+          <aggregateInfo amt="1220399.58000000" collatrl="1212918.30000000">
+            <invstCatConditional invstCat="other instrument" otherDesc="non-U.S. sovereign"/>
+          </aggregateInfo>
+        </aggregateInfos>
+      </aggregateCondition>
+      <returnInfo>
+        <monthlyTotReturns>
+          <monthlyTotReturn classId="C000017602" rtn1="2.08000000" rtn2="-5.14000000" rtn3="2.69000000"/>
+        </monthlyTotReturns>
+        <monthlyReturnCats>
+          <equityContracts>
+            <mon1 netRealizedGain="0.00000000" netUnrealizedAppr="1037660.00000000"/>
+            <mon2 netRealizedGain="0.00000000" netUnrealizedAppr="-3223500.00000000"/>
+            <mon3 netRealizedGain="-1910995.60000000" netUnrealizedAppr="4144332.60000000"/>
+            <futureCategory>
+              <instrMon1 netRealizedGain="0.00000000" netUnrealizedAppr="1037660.00000000"/>
+              <instrMon2 netRealizedGain="0.00000000" netUnrealizedAppr="-3223500.00000000"/>
+              <instrMon3 netRealizedGain="-1910995.60000000" netUnrealizedAppr="4144332.60000000"/>
+            </futureCategory>
+          </equityContracts>
+        </monthlyReturnCats>
+        <othMon1 netRealizedGain="289048247.73000000" netUnrealizedAppr="184157544.99000000"/>
+        <othMon2 netRealizedGain="202225090.12000000" netUnrealizedAppr="-1513883431.00000000"/>
+        <othMon3 netRealizedGain="121552223.88000000" netUnrealizedAppr="431930736.27000000"/>
+      </returnInfo>
+      <mon1Flow redemption="1749975009.95000000" reinvestment="0.00000000" sales="899472853.85000000"/>
+      <mon2Flow redemption="1592515266.50000000" reinvestment="0.00000000" sales="1121815326.75000000"/>
+      <mon3Flow redemption="1364735576.45000000" reinvestment="0.00000000" sales="1650331739.75000000"/>
+
+
+
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>AES Corp/The</name>
+        <lei>2NUNNB7D43COUIRE5295</lei>
+        <title>AES Corp</title>
+        <cusip>00130H105</cusip>
+        <identifiers>
+          <isin value="US00130H1059"/>
+        </identifiers>
+        <balance>11604644.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>170124081.04000000</valUSD>
+        <pctVal>0.736104066154</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Alliant Energy Corp</name>
+        <lei>5493009ML300G373MZ12</lei>
+        <title>Alliant Energy Corp</title>
+        <cusip>018802108</cusip>
+        <identifiers>
+          <isin value="US0188021085"/>
+        </identifiers>
+        <balance>4202674.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>320621999.46000000</valUSD>
+        <pctVal>1.387288360697</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="6972906.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>State Street Global Advisors</name>
+        <lei>5493008BJIBKQ5KTIF74</lei>
+        <title>State Street Navigator Securities Lending Portfolio II</title>
+        <cusip>857492706</cusip>
+        <identifiers>
+          <isin value="US8574927062"/>
+        </identifiers>
+        <balance>56168989.75000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>56168989.75000000</valUSD>
+        <pctVal>0.243035680157</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>STIV</assetCat>
+        <issuerCat>RF</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <cashCollateralCondition cashCollateralVal="56168989.75000000" isCashCollateral="Y"/>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Ameren Corp</name>
+        <lei>XRZQ5S7HYJFPHJ78L959</lei>
+        <title>Ameren Corp</title>
+        <cusip>023608102</cusip>
+        <identifiers>
+          <isin value="US0236081024"/>
+        </identifiers>
+        <balance>4503378.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>509061849.12000000</valUSD>
+        <pctVal>2.202642299494</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="135648.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>American Electric Power Co Inc</name>
+        <lei>1B4S6S7G0TW5EE83BO58</lei>
+        <title>American Electric Power Co Inc</title>
+        <cusip>025537101</cusip>
+        <identifiers>
+          <isin value="US0255371017"/>
+        </identifiers>
+        <balance>8853702.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1211274970.62000000</valUSD>
+        <pctVal>5.241024231571</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="2023456.57000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>American Water Works Co Inc</name>
+        <lei>549300DXHIJQMD5WFW18</lei>
+        <title>American Water Works Co Inc</title>
+        <cusip>030420103</cusip>
+        <identifiers>
+          <isin value="US0304201033"/>
+        </identifiers>
+        <balance>3177689.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>418120318.62000000</valUSD>
+        <pctVal>1.809150502365</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="4919805.42000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Atmos Energy Corp</name>
+        <lei>QVLWEGTD2S8GJMO8D383</lei>
+        <title>Atmos Energy Corp</title>
+        <cusip>049560105</cusip>
+        <identifiers>
+          <isin value="US0495601058"/>
+        </identifiers>
+        <balance>2716108.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>467903925.16000000</valUSD>
+        <pctVal>2.024557486361</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>CMS Energy Corp</name>
+        <lei>549300IA9XFBAGNIBW29</lei>
+        <title>CMS Energy Corp</title>
+        <cusip>125896100</cusip>
+        <identifiers>
+          <isin value="US1258961002"/>
+        </identifiers>
+        <balance>5026781.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>384548746.50000000</valUSD>
+        <pctVal>1.663890815473</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="1993004.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>CenterPoint Energy Inc</name>
+        <lei>21TPXMRRHFKOBHDC8J74</lei>
+        <title>CenterPoint Energy Inc</title>
+        <cusip>15189T107</cusip>
+        <identifiers>
+          <isin value="US15189T1079"/>
+        </identifiers>
+        <balance>10644626.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>468789329.04000000</valUSD>
+        <pctVal>2.028388510119</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="2358807.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Consolidated Edison Inc</name>
+        <lei>54930033SBW53OO8T749</lei>
+        <title>Consolidated Edison Inc</title>
+        <cusip>209115104</cusip>
+        <identifiers>
+          <isin value="US2091151041"/>
+        </identifiers>
+        <balance>5996727.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>663417908.01000000</valUSD>
+        <pctVal>2.870520250046</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="553150.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Constellation Energy Corp</name>
+        <lei>549300F8Y20RYGNGV346</lei>
+        <title>Constellation Energy Corp</title>
+        <cusip>21037T109</cusip>
+        <identifiers>
+          <isin value="US21037T1097"/>
+        </identifiers>
+        <balance>5201845.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1291982242.65000000</valUSD>
+        <pctVal>5.590233765850</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="2942013.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>DTE Energy Co</name>
+        <lei>549300IX8SD6XXD71I78</lei>
+        <title>DTE Energy Co</title>
+        <cusip>233331107</cusip>
+        <identifiers>
+          <isin value="US2333311072"/>
+        </identifiers>
+        <balance>3385008.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>515773668.96000000</valUSD>
+        <pctVal>2.231683443142</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Dominion Energy Inc</name>
+        <lei>ILUL7B6Z54MRYCF6H308</lei>
+        <title>Dominion Energy Inc</title>
+        <cusip>25746U109</cusip>
+        <identifiers>
+          <isin value="US25746U1097"/>
+        </identifiers>
+        <balance>14310634.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>977273195.86000000</valUSD>
+        <pctVal>4.228529957773</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Duke Energy Corp</name>
+        <lei>I1BZKREC126H0VB1BL91</lei>
+        <title>Duke Energy Corp</title>
+        <cusip>26441C204</cusip>
+        <identifiers>
+          <isin value="US26441C2044"/>
+        </identifiers>
+        <balance>12685588.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1605741729.04000000</valUSD>
+        <pctVal>6.947828953517</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Edison International</name>
+        <lei>549300I7ROF15MAEVP56</lei>
+        <title>Edison International</title>
+        <cusip>281020107</cusip>
+        <identifiers>
+          <isin value="US2810201077"/>
+        </identifiers>
+        <balance>6261450.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>466164952.50000000</valUSD>
+        <pctVal>2.017033185050</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Entergy Corp</name>
+        <lei>4XM3TW50JULSLG8BNC79</lei>
+        <title>Entergy Corp</title>
+        <cusip>29364G103</cusip>
+        <identifiers>
+          <isin value="US29364G1031"/>
+        </identifiers>
+        <balance>7450780.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>855796590.80000000</valUSD>
+        <pctVal>3.702916991163</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="392582.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Evergy Inc</name>
+        <lei>549300PGTHDQY6PSUI61</lei>
+        <title>Evergy Inc</title>
+        <cusip>30034W106</cusip>
+        <identifiers>
+          <isin value="US30034W1062"/>
+        </identifiers>
+        <balance>3750926.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>324192534.18000000</valUSD>
+        <pctVal>1.402737585225</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="1468359.27000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Eversource Energy</name>
+        <lei>SJ7XXD41SQU3ZNWUJ746</lei>
+        <title>Eversource Energy</title>
+        <cusip>30040W108</cusip>
+        <identifiers>
+          <isin value="US30040W1080"/>
+        </identifiers>
+        <balance>6119645.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>442266744.15000000</valUSD>
+        <pctVal>1.913628844920</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Exelon Corp</name>
+        <lei>3SOUA6IRML7435B56G12</lei>
+        <title>Exelon Corp</title>
+        <cusip>30161N101</cusip>
+        <identifiers>
+          <isin value="US30161N1019"/>
+        </identifiers>
+        <balance>16649684.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>776208268.08000000</valUSD>
+        <pctVal>3.358549000373</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="343123.20000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>FirstEnergy Corp</name>
+        <lei>549300SVYJS666PQJH88</lei>
+        <title>FirstEnergy Corp</title>
+        <cusip>337932107</cusip>
+        <identifiers>
+          <isin value="US3379321074"/>
+        </identifiers>
+        <balance>8471016.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>402712100.64000000</valUSD>
+        <pctVal>1.742481211116</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="38032.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>NRG Energy Inc</name>
+        <lei>5E2UPK5SW04M13XY7I38</lei>
+        <title>NRG Energy Inc</title>
+        <cusip>629377508</cusip>
+        <identifiers>
+          <isin value="US6293775085"/>
+        </identifiers>
+        <balance>3433201.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>501453338.06000000</valUSD>
+        <pctVal>2.169721293283</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>NextEra Energy Inc</name>
+        <lei>254900RHL9MEUS5NKX63</lei>
+        <title>NextEra Energy Inc</title>
+        <cusip>65339F101</cusip>
+        <identifiers>
+          <isin value="US65339F1012"/>
+        </identifiers>
+        <balance>33932813.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>2978282997.01000000</valUSD>
+        <pctVal>12.88663081002</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="51317650.61000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>NiSource Inc</name>
+        <lei>549300D8GOWWH0SJB189</lei>
+        <title>NiSource Inc</title>
+        <cusip>65473P105</cusip>
+        <identifiers>
+          <isin value="US65473P1057"/>
+        </identifiers>
+        <balance>7801484.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>370960564.20000000</valUSD>
+        <pctVal>1.605096574343</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>PG&amp;E Corp</name>
+        <lei>8YQ2GSDWYZXO2EDN3511</lei>
+        <title>PG&amp;E Corp</title>
+        <cusip>69331C108</cusip>
+        <identifiers>
+          <isin value="US69331C1080"/>
+        </identifiers>
+        <balance>35834677.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>602739267.14000000</valUSD>
+        <pctVal>2.607971914736</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>PPL Corp</name>
+        <lei>9N3UAJSNOUXFKQLF3V18</lei>
+        <title>PPL Corp</title>
+        <cusip>69351T106</cusip>
+        <identifiers>
+          <isin value="US69351T1060"/>
+        </identifiers>
+        <balance>12242333.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>445008804.55000000</valUSD>
+        <pctVal>1.925493372256</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Pinnacle West Capital Corp</name>
+        <lei>TWSEY0NEDUDCKS27AH81</lei>
+        <title>Pinnacle West Capital Corp</title>
+        <cusip>723484101</cusip>
+        <identifiers>
+          <isin value="US7234841010"/>
+        </identifiers>
+        <balance>1971925.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>210995975.00000000</valUSD>
+        <pctVal>0.912951265865</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Public Service Enterprise Group Inc</name>
+        <lei>PUSS41EMO3E6XXNV3U28</lei>
+        <title>Public Service Enterprise Group Inc</title>
+        <cusip>744573106</cusip>
+        <identifiers>
+          <isin value="US7445731067"/>
+        </identifiers>
+        <balance>8108784.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>658108909.44000000</valUSD>
+        <pctVal>2.847548925759</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="2140757.32000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Sempra</name>
+        <lei>PBBKGKLRK5S5C0Y4T545</lei>
+        <title>Sempra</title>
+        <cusip>816851109</cusip>
+        <identifiers>
+          <isin value="US8168511090"/>
+        </identifiers>
+        <balance>10636844.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>986141807.24000000</valUSD>
+        <pctVal>4.266903248950</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="1511591.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Southern Co/The</name>
+        <lei>549300FC3G3YU2FBZD92</lei>
+        <title>Southern Co/The</title>
+        <cusip>842587107</cusip>
+        <identifiers>
+          <isin value="US8425871071"/>
+        </identifiers>
+        <balance>18343529.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1755659160.59000000</valUSD>
+        <pctVal>7.596501559281</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="754960.48000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>State Street Global Advisors</name>
+        <lei>549300BZ5TGIFZUZDZ37</lei>
+        <title>State Street Institutional US Government Money Market Fund</title>
+        <cusip>857492706</cusip>
+        <identifiers>
+          <isin value="US8574927062"/>
+        </identifiers>
+        <balance>13474602.56000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>13474602.56000000</valUSD>
+        <pctVal>0.058302796838</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>STIV</assetCat>
+        <issuerCat>RF</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>State Street Global Advisors</name>
+        <lei>549300BZ5TGIFZUZDZ37</lei>
+        <title>State Street Institutional US Government Money Market Fund</title>
+        <cusip>857492706</cusip>
+        <identifiers>
+          <isin value="US8574927062"/>
+        </identifiers>
+        <balance>683392.87000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>683392.87000000</valUSD>
+        <pctVal>0.002956949229</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>STIV</assetCat>
+        <issuerCat>RF</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>State Street Global Advisors</name>
+        <lei>549300BZ5TGIFZUZDZ37</lei>
+        <title>State Street Institutional US Government Money Market Fund</title>
+        <cusip>857492706</cusip>
+        <identifiers>
+          <isin value="US8574927062"/>
+        </identifiers>
+        <balance>39801209.24000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>39801209.24000000</valUSD>
+        <pctVal>0.172214490625</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>STIV</assetCat>
+        <issuerCat>RF</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Vistra Corp</name>
+        <lei>549300KP43CPCUJOOG15</lei>
+        <title>Vistra Corp</title>
+        <cusip>92840M102</cusip>
+        <identifiers>
+          <isin value="US92840M1027"/>
+        </identifiers>
+        <balance>5157418.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>818121217.34000000</valUSD>
+        <pctVal>3.539900706647</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>WEC Energy Group Inc</name>
+        <lei>549300IGLYTZUK3PVP70</lei>
+        <title>WEC Energy Group Inc</title>
+        <cusip>92939U106</cusip>
+        <identifiers>
+          <isin value="US92939U1060"/>
+        </identifiers>
+        <balance>5300119.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>618894895.63000000</valUSD>
+        <pctVal>2.677875150951</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="186832.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Xcel Energy Inc</name>
+        <lei>LGJNMI9GH8XIDG5RCM61</lei>
+        <title>Xcel Energy Inc</title>
+        <cusip>98389B100</cusip>
+        <identifiers>
+          <isin value="US98389B1008"/>
+        </identifiers>
+        <balance>10158095.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>815695028.50000000</valUSD>
+        <pctVal>3.529402913157</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="5402242.00000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Chicago Mercantile Exchange</name>
+        <lei>SNZ2OJLFK8MNNCLQOF39</lei>
+        <title>XAU UTILITIES SEP26</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <other otherDesc="Bloomberg Identifier" value="BBG01VKPJ9J2"/>
+        </identifiers>
+        <balance>692.00000000</balance>
+        <units>NC</units>
+        <curCd>USD</curCd>
+        <valUSD>897316.40000000</valUSD>
+        <pctVal>0.003882567633</pctVal>
+        <payoffProfile>N/A</payoffProfile>
+        <assetCat>DE</assetCat>
+        <issuerConditional desc="derivative" issuerCat="OTHER"/>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <derivativeInfo>
+          <futrDeriv derivCat="FUT">
+            <counterparties>
+              <counterpartyName>Chicago Mercantile Exchange</counterpartyName>
+              <counterpartyLei>SNZ2OJLFK8MNNCLQOF39</counterpartyLei>
+            </counterparties>
+            <payOffProf>Long</payOffProf>
+            <descRefInstrmnt>
+              <indexBasketInfo>
+                <indexName>CME E-mini Utilities Select Sector Futures</indexName>
+                <indexIdentifier>IXSU6 Index</indexIdentifier>
+              </indexBasketInfo>
+            </descRefInstrmnt>
+            <expDate>2026-09-18</expDate>
+            <notionalAmt>62891243.60000000</notionalAmt>
+            <curCd>USD</curCd>
+            <unrealizedAppr>897316.40000000</unrealizedAppr>
+          </futrDeriv>
+        </derivativeInfo>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+    </invstOrSecs>
+    <explntrNotes>
+
+
+
+    </explntrNotes>
+    <signature>
+      <ncom:dateSigned>2026-07-30</ncom:dateSigned>
+      <ncom:nameOfApplicant>SELECT SECTOR SPDR TRUST</ncom:nameOfApplicant>
+      <ncom:signature>Arthur Jensen</ncom:signature>
+      <ncom:signerName>Arthur Jensen</ncom:signerName>
+      <ncom:title>Deputy Treasurer</ncom:title>
+    </signature>
+  </formData>
+  <documents>XXXX</documents>
+</edgarSubmission>

@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/084670702",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Berkshire Hathaway Inc",
+  "status_code": 200,
+  "body": {"id":"71bb19d0-6c5f-4881-9552-33224badd810","class":"us_equity","exchange":"NYSE","symbol":"BRK.B","name":"BERKSHIRE HATHAWAY Class B","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

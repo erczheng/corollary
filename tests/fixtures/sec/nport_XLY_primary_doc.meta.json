@@ -1,0 +1,21 @@
+{
+  "ticker": "XLY",
+  "series_id": "S000006408",
+  "series_name": "State Street(R) Consumer Discretionary Select Sector SPDR(R) ETF",
+  "class_id": "C000017594",
+  "accession": "0001410368-26-089594",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "rep_pd_end": "2026-09-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089594/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "complete": false,
+  "trimmed": "every <invstOrSec> whose assetCat is not EC is removed; all else as served",
+  "holdings_total": 51,
+  "equity_lines": 47,
+  "non_equity_removed": 4,
+  "equity_pct_val_sum": "99.898096362399",
+  "equity_lines_without_cusip": 5,
+  "bytes_original": 51656,
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

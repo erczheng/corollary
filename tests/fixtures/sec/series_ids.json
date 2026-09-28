@@ -1,0 +1,152 @@
+{
+  "trust_cik": "0001064641",
+  "report_date": "2026-06-30",
+  "source": "tickers -> seriesId from SEC company_tickers_mf.json; each confirmed against genInfo/seriesId in that fund's primary_doc.xml",
+  "funds": {
+    "XLB": {
+      "series_id": "S000006414",
+      "series_name": "State Street(R) Materials Select Sector SPDR(R) ETF",
+      "class_id": "C000017600",
+      "accession": "0001410368-26-089261",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLC": {
+      "series_id": "S000062095",
+      "series_name": "State Street(R) Communication Services Select Sector SPDR(R) ETF",
+      "class_id": "C000201048",
+      "accession": "0001410368-26-089424",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLE": {
+      "series_id": "S000006410",
+      "series_name": "State Street(R) Energy Select Sector SPDR(R) ETF",
+      "class_id": "C000017596",
+      "accession": "0001410368-26-089509",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLF": {
+      "series_id": "S000006411",
+      "series_name": "State Street(R) Financial Select Sector SPDR(R) ETF",
+      "class_id": "C000017597",
+      "accession": "0001410368-26-089671",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLI": {
+      "series_id": "S000006413",
+      "series_name": "State Street(R) Industrial Select Sector SPDR(R) ETF",
+      "class_id": "C000017599",
+      "accession": "0001410368-26-089138",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLK": {
+      "series_id": "S000006415",
+      "series_name": "State Street(R) Technology Select Sector SPDR(R) ETF",
+      "class_id": "C000017601",
+      "accession": "0001410368-26-089672",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLP": {
+      "series_id": "S000006409",
+      "series_name": "State Street(R) Consumer Staples Select Sector SPDR(R) ETF",
+      "class_id": "C000017595",
+      "accession": "0001410368-26-089214",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLRE": {
+      "series_id": "S000051152",
+      "series_name": "State Street(R) Real Estate Select Sector SPDR(R) ETF",
+      "class_id": "C000161049",
+      "accession": "0001410368-26-089191",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLU": {
+      "series_id": "S000006416",
+      "series_name": "State Street(R) Utilities Select Sector SPDR(R) ETF",
+      "class_id": "C000017602",
+      "accession": "0001410368-26-089590",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLV": {
+      "series_id": "S000006412",
+      "series_name": "State Street(R) Health Care Select Sector SPDR(R) ETF",
+      "class_id": "C000017598",
+      "accession": "0001410368-26-089348",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    },
+    "XLY": {
+      "series_id": "S000006408",
+      "series_name": "State Street(R) Consumer Discretionary Select Sector SPDR(R) ETF",
+      "class_id": "C000017594",
+      "accession": "0001410368-26-089594",
+      "filing_date": "2026-08-28",
+      "report_date": "2026-06-30"
+    }
+  },
+  "excluded_same_quarter": [
+    {
+      "series_id": "S000093831",
+      "series_name": "State Street(R) Communication Services Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089584"
+    },
+    {
+      "series_id": "S000093832",
+      "series_name": "State Street(R) Technology Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089476"
+    },
+    {
+      "series_id": "S000093833",
+      "series_name": "State Street(R) Utilities Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089280"
+    },
+    {
+      "series_id": "S000093834",
+      "series_name": "State Street(R) Consumer Discretionary Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089318"
+    },
+    {
+      "series_id": "S000093835",
+      "series_name": "State Street(R) Consumer Staples Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089413"
+    },
+    {
+      "series_id": "S000093836",
+      "series_name": "State Street(R) Energy Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089438"
+    },
+    {
+      "series_id": "S000093837",
+      "series_name": "State Street(R) Financial Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089505"
+    },
+    {
+      "series_id": "S000093838",
+      "series_name": "State Street(R) Health Care Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089360"
+    },
+    {
+      "series_id": "S000093839",
+      "series_name": "State Street(R) Industrial Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089414"
+    },
+    {
+      "series_id": "S000093840",
+      "series_name": "State Street(R) Materials Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089434"
+    },
+    {
+      "series_id": "S000093841",
+      "series_name": "State Street(R) Real Estate Select Sector SPDR(R) Premium Income ETF",
+      "accession": "0001410368-26-089377"
+    }
+  ]
+}
