@@ -1,7 +1,8 @@
 """``fred_observation`` storage and the ``DGS3MO`` refresh behind the risk-free rate.
 
 Decision 19: the rate in use is the latest non-missing stored ``DGS3MO``
-observation; the 0.0425 default only when none was ever obtained. Real SQLite
+observation, converted to continuous compounding (Q16); the 4.25% default only
+when none was ever obtained. Real SQLite
 file, no vendor: the FRED side is a fake returning parsed recorded fixtures.
 """
 
@@ -103,7 +104,29 @@ def test_stored_observations_yield_the_latest_as_a_fred_rate(
     with sessions() as session:
         rate = latest_dgs3mo_rate(session)
     assert rate == rate_from_dgs3mo(Decimal("4.16"), date(2026, 9, 22))
-    assert rate is not None and rate.rate == Decimal("0.0416")
+    # Q16: the pricing rate is continuous -- ln(1 + 0.0416*91/365) / (91/365),
+    # worked by hand in tests/pricing/test_rates.py -- not the quoted 0.0416.
+    assert rate is not None and rate.rate == Decimal("0.0413857528")
+
+
+def test_the_table_keeps_freds_quoted_percent_and_only_the_rate_is_converted(
+    sessions: Callable[[], Session],
+) -> None:
+    """``fred_observation`` is the raw input: 4.16, as FRED quoted it.
+
+    The conversion to continuous compounding happens where the rate source
+    produces the pricing rate, never on the way into storage -- so a stored
+    row can always be checked against FRED's own page.
+    """
+    with sessions() as session:
+        store_observations(session, recorded(), fetched_at=FETCHED)
+        session.commit()
+    assert _rows(sessions)[date(2026, 9, 22)] == Decimal("4.16")
+    with sessions() as session:
+        rate = latest_dgs3mo_rate(session)
+    assert rate is not None
+    assert rate.rate != Decimal("0.0416")
+    assert rate.rate == rate_from_dgs3mo(Decimal("4.16"), date(2026, 9, 22)).rate
 
 
 def test_an_empty_table_has_no_rate(sessions: Callable[[], Session]) -> None:

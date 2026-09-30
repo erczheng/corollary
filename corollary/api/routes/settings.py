@@ -139,7 +139,7 @@ from corollary.db.models import DataFeed as DataFeedRow
 from corollary.db.models import NotificationRoute as NotificationRouteRow
 from corollary.db.models import RiskLimit as RiskLimitRow
 from corollary.db.seed import NOTIFICATION_ROUTE_DEFAULTS, risk_limits
-from corollary.pricing.rates import FALLBACK_RISK_FREE_RATE
+from corollary.pricing.rates import FALLBACK_DGS3MO_PERCENT, FALLBACK_RISK_FREE_RATE
 from corollary.wire import WireFormatError, as_decimal
 
 __all__ = [
@@ -1376,7 +1376,12 @@ def _fred_source(env: Mapping[str, str]) -> DataSourceStatus:
     """
     name = "FRED (macro)"
     macro = "The macro series are a later step."
-    fallback = FALLBACK_RISK_FREE_RATE.rate
+    # The quoted yield and the continuous rate pricing uses, both stated:
+    # a bare 10-digit figure with no convention reads as a different default.
+    fallback = (
+        f"quoted {FALLBACK_DGS3MO_PERCENT}% "
+        f"({FALLBACK_RISK_FREE_RATE.rate} continuous)"
+    )
     if not _is_set(env, FRED_API_KEY_ENV):
         return DataSourceStatus(
             name=name,

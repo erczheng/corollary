@@ -15,6 +15,7 @@ from corollary.data.providers.interface import AnalyticsSource, OptionSnapshot
 from corollary.pricing.rates import (
     FALLBACK_RISK_FREE_RATE,
     RateProvenance,
+    RiskFreeRate,
     RiskFreeRateSource,
     rate_from_dgs3mo,
 )
@@ -77,15 +78,65 @@ async def test_without_fred_derived_greeks_use_the_default_and_say_so(
     for snapshot in derived.values():
         assert snapshot.analytics_rate is not None
         assert snapshot.analytics_rate.provenance is RateProvenance.DEFAULT
-        assert snapshot.analytics_rate.rate == Decimal("0.0425")
+        # 4.25% read as a quoted yield and converted like an observation (Q16).
+        assert snapshot.analytics_rate.rate == Decimal("0.0422764153")
+
+
+async def test_derived_greeks_are_priced_at_the_converted_rate(
+    make_provider: Any,
+) -> None:
+    """Q16: a quoted 4.16% prices at the continuous 0.0413857528, not at 0.0416.
+
+    Three providers over one recorded chain: the FRED observation, a rate
+    stated by hand at the hand-computed continuous value (see
+    ``tests/pricing/test_rates.py``), and one stated at the unconverted
+    quoted yield. The first must match the second exactly and differ from
+    the third -- so the conversion reaches the solve, not only the label.
+    """
+    fred = RiskFreeRateSource()
+    fred.adopt(FRED_RATE)
+    at_fred = _derived(await _chain(make_provider, fred))
+
+    by_hand = RiskFreeRateSource()
+    by_hand.adopt(
+        RiskFreeRate(
+            rate=Decimal("0.0413857528"),
+            provenance=RateProvenance.FRED_DGS3MO,
+            observation_date=date(2026, 9, 22),
+        )
+    )
+    at_hand = _derived(await _chain(make_provider, by_hand))
+
+    unconverted = RiskFreeRateSource()
+    unconverted.adopt(
+        RiskFreeRate(
+            rate=Decimal("0.0416"),
+            provenance=RateProvenance.FRED_DGS3MO,
+            observation_date=date(2026, 9, 22),
+        )
+    )
+    at_quoted = _derived(await _chain(make_provider, unconverted))
+
+    assert at_fred, "nothing was derived; this test would prove nothing"
+    assert at_fred.keys() == at_hand.keys()
+    for symbol, snapshot in at_fred.items():
+        assert snapshot.greeks == at_hand[symbol].greeks, symbol
+        assert snapshot.implied_volatility == at_hand[symbol].implied_volatility, symbol
+    moved = [
+        symbol
+        for symbol in at_fred.keys() & at_quoted.keys()
+        if at_fred[symbol].greeks != at_quoted[symbol].greeks
+    ]
+    assert moved, "the 2bp conversion moved no derived greek; nothing pins it"
 
 
 async def test_the_rate_is_actually_used_not_merely_labelled(make_provider: Any) -> None:
     """Three providers over the same recorded chain.
 
-    A FRED rate of 4.25% must reproduce the default's 0.0425 greeks exactly --
-    which pins the percent-to-fraction conversion -- while a 1.00% rate must
-    move them.
+    A FRED rate of 4.25% must reproduce the default's greeks exactly -- which
+    pins that the fallback and an observation share one convention (both
+    quoted yields, converted to continuous by Q16's rule) -- while a 1.00%
+    rate must move them.
     """
     default = _derived(await _chain(make_provider, None))
 

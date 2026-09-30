@@ -8,6 +8,9 @@ Phase 3 decision 19. Three pieces, each small:
 * :func:`latest_dgs3mo_rate` is **the** definition of the rate in use: the
   latest stored ``DGS3MO`` row whose value is not ``NULL``, as a
   :class:`~corollary.pricing.rates.RiskFreeRate` dated by its observation.
+  The table holds FRED's quoted percent as published; the continuous rate
+  pricing uses is derived from it on the way out, by
+  :func:`~corollary.pricing.rates.rate_from_dgs3mo` (owner decision Q16).
 * :func:`refresh_dgs3mo` / :func:`catch_up_dgs3mo` are the context job's
   bodies: fetch, store, then adopt the table's answer into the process's
   :class:`~corollary.pricing.rates.RiskFreeRateSource`. A call that completes
@@ -221,7 +224,9 @@ def seed_rate_source(
             "event": "risk_free_rate_seeded",
             "rule": (
                 "derived greeks use the latest stored FRED DGS3MO observation, "
-                "and the 0.0425 default only when none was ever obtained"
+                "and the 4.25% default only when none was ever obtained; either "
+                "quoted yield is converted to a continuous rate, "
+                "r = ln(1 + y*91/365) / (91/365)"
             ),
             **_describe(current),
         },

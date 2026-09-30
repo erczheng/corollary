@@ -5,6 +5,12 @@ which rate they used, and use FRED's when it is reachable.* Three fields per
 row -- ``riskFreeRate``, ``riskFreeRateSource``, ``riskFreeRateDate`` --
 present exactly where ``ivSource`` is ``derived``: a vendor IV used no rate of
 ours, and an absent IV used none.
+
+**Convention (owner decision Q16):** ``riskFreeRate`` is the **continuously
+compounded** rate the derived IV was solved at -- the number pricing used --
+not FRED's quoted bond-equivalent yield. A quoted 4.16% is served as
+``0.0413857528``; the fallback's 4.25% as ``0.0422764153``. Both figures are
+hand-computed in ``tests/pricing/test_rates.py``.
 """
 
 from datetime import date
@@ -27,7 +33,8 @@ def test_a_derived_row_names_the_fred_rate_it_was_solved_at(
     derived = [row for row in chain if row["ivSource"] == "derived"]
     assert derived, "nothing was derived; this test would prove nothing"
     for row in derived:
-        assert Decimal(str(row["riskFreeRate"])) == Decimal("0.0416")
+        # Continuous, as pricing used it -- not the quoted 0.0416.
+        assert Decimal(str(row["riskFreeRate"])) == Decimal("0.0413857528")
         assert row["riskFreeRateSource"] == "fred_dgs3mo"
         assert row["riskFreeRateDate"] == "2026-09-22"
 
@@ -42,7 +49,8 @@ def test_without_fred_a_derived_row_says_default(
     ]
     assert derived
     for row in derived:
-        assert Decimal(str(row["riskFreeRate"])) == Decimal("0.0425")
+        # The fallback converts by the same rule: 4.25% quoted.
+        assert Decimal(str(row["riskFreeRate"])) == Decimal("0.0422764153")
         assert row["riskFreeRateSource"] == "default"
         assert row["riskFreeRateDate"] is None
 

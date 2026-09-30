@@ -841,11 +841,33 @@ first. A premium 403 goes back to the owner rather than being worked around.
   session, the real IPO date, and `has_options`.
 
 **Q16 — The risk-free rate is converted to continuous compounding (2026-09-26).**
-*Status: scheduled after step 4.* `DGS3MO` is a bond-equivalent yield, and the
-pricing model wants a continuously compounded rate. The owner's decision:
-convert it, **`r = ln(1 + y·t) / t` with t = 91/365**. The same unit corrects
-decision 19's as-built note, whose "about 8bp at 4%" was worked with annual
-compounding; that note is left as it stands until then.
+*Status: done (unit FRED-CC, after step 4).* `DGS3MO` is a bond-equivalent
+yield, and the pricing model wants a continuously compounded rate. The owner's
+decision: convert it, **`r = ln(1 + y·t) / t` with t = 91/365**, in exact
+`Decimal` where the math allows, and correct decision 19's as-built note, whose
+"about 8bp at 4%" was worked with annual compounding.
+
+*As built.* `pricing/rates.py` gains `DGS3MO_TERM_YEARS = 91/365` (a 13-week
+bill on a 365-day year: FRED titles the series *"… Quoted on an Investment
+Basis"* and the Treasury's yield-curve methodology says *"The inputs for the
+bills are bid discount rates corresponding to their bond equivalent yields"*,
+but neither states a day count, so the owner's t stands) and
+`continuous_rate_from_bill_yield`, which `rate_from_dgs3mo` now applies. `ln`
+is `Decimal.ln` under an explicit 40-digit context, never a float and never the
+caller's ambient context, and the result is rounded to `RATE_QUANTUM = 1E-10`.
+At 4.00% the continuous rate is **3.98019%, 1.98bp lower**; FRED's 2026-09-22
+print of 4.16% becomes 0.0413857528. `fred_observation` still stores FRED's
+quoted percent: the conversion happens where the rate source produces the
+pricing rate. **The fallback is read as a quoted yield** — 0.0425 stood in for
+the same quantity FRED publishes — and converted by the same rule, so
+`FALLBACK_DGS3MO_PERCENT = 4.25` becomes 0.0422764153 and a FRED observation of
+4.25% prices identically to the default. **The chain's `riskFreeRate` reports
+the continuous rate pricing used**, not the quoted yield; the field set is
+unchanged, the convention is stated on `schemas.OptionContract`, and
+`tests/api/test_chain_risk_free_rate.py` pins it. Tests hand-compute the
+conversion by Taylor series at 60 digits (4%, 0%, 20%, 4.16%, 1%), pin the
+greeks to the converted rate rather than the quoted one, and pin the
+fallback's convention.
 
 ---
 
@@ -1427,8 +1449,12 @@ date travels with the rate, so staleness is visible rather than replaced by
 the placeholder. The placeholder is no longer a default argument anywhere in
 `pricing/`: it exists once, as `pricing/rates.py`'s `FALLBACK_RISK_FREE_RATE`,
 labelled `default`, and every pricing entry point requires a rate. `DGS3MO` is
-a bond-equivalent yield used without conversion to continuous compounding
-(about 8bp at 4%).
+a bond-equivalent yield, and since owner decision Q16 it is converted to
+continuous compounding before Black-Scholes sees it:
+`r = ln(1 + y·91/365) / (91/365)`, which at 4% is 3.98019% — **1.98bp lower**,
+not the "about 8bp" this note first stated (that figure used annual
+compounding and was wrong). The fallback is converted by the same rule, and
+the chain's `riskFreeRate` serves the converted, continuous rate. See Q16.
 
 ### 20. Every operator action notifies; the engine controls reach the bell too
 

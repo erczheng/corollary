@@ -1264,8 +1264,9 @@ RateProvenance: TypeAlias = Literal["fred_dgs3mo", "default"]
 """Where the risk-free rate behind a derived IV came from.
 
 Phase 3 decision 19: ``fred_dgs3mo`` is the latest stored FRED ``DGS3MO``
-observation (its date travels beside it); ``default`` is the stated 0.0425
-fallback, used only while no observation has ever been obtained. Mirrors
+observation (its date travels beside it); ``default`` is the stated 4.25%
+fallback, used only while no observation has ever been obtained. Either way
+the rate served is continuous, converted from the quoted yield (Q16). Mirrors
 :class:`corollary.pricing.rates.RateProvenance`.
 """
 
@@ -1327,10 +1328,15 @@ class OptionContract(ApiModel):
     #: silently mixing vendor and derived analytics is worse than either
     #: alone. ``None`` where :attr:`iv` is.
     iv_source: AnalyticsSource | None = None
-    #: **Not in ``types.ts``.** The annual risk-free rate, as a fraction
-    #: (``0.0416`` is 4.16%), a ``derived`` :attr:`iv` was solved at. Decision
-    #: 19: derived greeks state which rate they used. ``None`` unless
-    #: :attr:`iv_source` is ``derived`` -- a vendor IV used no rate of ours.
+    #: **Not in ``types.ts``.** The annual risk-free rate a ``derived``
+    #: :attr:`iv` was solved at, as a fraction, and **continuously
+    #: compounded** -- the ``r`` pricing actually used, not FRED's quoted
+    #: yield (owner decision Q16). A quoted ``DGS3MO`` of 4.16% is served as
+    #: ``0.0413857528``, ``ln(1 + 0.0416 * 91/365) / (91/365)``; the
+    #: fallback's 4.25% as ``0.0422764153``. See
+    #: :mod:`corollary.pricing.rates`. Decision 19: derived greeks state which
+    #: rate they used. ``None`` unless :attr:`iv_source` is ``derived`` -- a
+    #: vendor IV used no rate of ours.
     risk_free_rate: JsonMoney | None = None
     #: Where :attr:`risk_free_rate` came from. ``None`` exactly when it is.
     risk_free_rate_source: RateProvenance | None = None

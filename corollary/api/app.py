@@ -399,7 +399,8 @@ def _seed_risk_free_rate(app: FastAPI, db_engine: Engine) -> None:
             detail = "(the error could not be rendered)"
         logger.error(
             "the stored risk-free rate could not be read; derived greeks use the "
-            "0.0425 default, labelled, and FRED refreshes cannot be stored until "
+            "quoted 4.25 percent default (0.0422764153 continuous), labelled, and FRED "
+            "refreshes cannot be stored until "
             "this is fixed -- if the database is not migrated, run "
             "`uv run alembic upgrade head`",
             extra={

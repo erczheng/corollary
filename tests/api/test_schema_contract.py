@@ -58,7 +58,9 @@ DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     # succeeds and are derived where it does not, and a chain must record
     # which of the two a number came from. Phase 3 decision 19: a derived one
     # also states the risk-free rate it was solved at, and where that came
-    # from (FRED DGS3MO and its date, or the default).
+    # from (FRED DGS3MO and its date, or the default). ``riskFreeRate`` is the
+    # continuously compounded rate pricing used, not FRED's quoted yield
+    # (owner decision Q16); tests/api/test_chain_risk_free_rate.py pins it.
     "OptionContract": frozenset(
         {"ivSource", "riskFreeRate", "riskFreeRateSource", "riskFreeRateDate"}
     ),

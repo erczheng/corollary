@@ -33,10 +33,13 @@ Phase 2.
 Two assumptions, stated rather than hidden
 ------------------------------------------
 
-**Risk-free rate.** An injected parameter. The market-data provider
-passes the latest stored FRED ``DGS3MO`` observation (Phase 3 decision 19;
-see :mod:`corollary.pricing.rates`), and every derived snapshot records which
-rate it was solved at and its observation date.
+**Risk-free rate.** An injected parameter, **continuously compounded** -- the
+``r`` in ``exp(-r*T)``. The market-data provider passes the latest stored
+FRED ``DGS3MO`` observation (Phase 3 decision 19; see
+:mod:`corollary.pricing.rates`), converted from its quoted bond-equivalent
+yield by ``r = ln(1 + y*91/365) / (91/365)`` (owner decision Q16) before it
+arrives here, and every derived snapshot records which rate it was solved at
+and its observation date.
 ``rate`` is a **required** keyword on :func:`price`, :func:`greeks`,
 :func:`implied_volatility` and :func:`derive_analytics`: this module supplies
 no rate of its own. The fallback number,

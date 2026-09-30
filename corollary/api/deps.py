@@ -429,7 +429,7 @@ class ServiceRegistry:
             logger.warning(
                 "FRED is unavailable: %s is not set. Derived greeks use the "
                 "latest stored DGS3MO observation if one exists, else the "
-                "0.0425 default, and say which",
+                "quoted 4.25 percent default (0.0422764153 continuous), and say which",
                 FRED_API_KEY_ENV,
                 extra={
                     "event": "fred_unavailable",
