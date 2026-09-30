@@ -132,6 +132,7 @@ from corollary.sockets import (
     JSON_CODEC,
     MSGPACK_CODEC,
     Codec,
+    RepeatedWarning,
     SocketConnect,
     StreamActivityRecorder,
     VendorSocket,
@@ -2397,6 +2398,25 @@ class AlpacaQuoteStream(VendorStream):
         #: instead. Emptied the moment every frame is answered, and pruned by
         #: each reply that acknowledges one of them. Per connection.
         self._unanswered_additions: frozenset[str] = frozenset()
+        #: The two per-frame warnings, loud once per rule and then counted.
+        #: 2026-09-29: the option stream's msgpack Timestamp ``t`` was refused
+        #: on every quote and logged 632 identical lines in ~25 minutes. See
+        #: :class:`corollary.sockets.RepeatedWarning`. Flushed when a session
+        #: ends, so a count is never left unsaid. Logging only -- neither
+        #: touches rule 9's inputs, which ``VendorStream`` records before a
+        #: frame is decoded.
+        self._unreadable_quotes = RepeatedWarning(
+            logger,
+            event="stream_quote_unreadable",
+            summary=f"unreadable quote on the {stream.label} stream",
+            now=now,
+        )
+        self._undecodable_frames = RepeatedWarning(
+            logger,
+            event="stream_frame_undecodable",
+            summary=f"undecodable frame on the {stream.label} stream",
+            now=now,
+        )
 
     # -- what a caller can read -------------------------------------------
 
@@ -2470,12 +2490,12 @@ class AlpacaQuoteStream(VendorStream):
         try:
             decoded = self._codec.decode(frame)
         except Exception as exc:  # WireFormatError, and whatever msgpack raises
-            logger.warning(
+            self._undecodable_frames.warn(
+                type(exc).__name__,
                 "undecodable frame on the %s stream: %s",
                 self._stream.label,
                 self._detail(str(exc)),
                 extra={
-                    "event": "stream_frame_undecodable",
                     "stream": self._stream.label,
                     "codec": self._codec.name,
                     "detail": self._detail(str(exc)),
@@ -2553,12 +2573,13 @@ class AlpacaQuoteStream(VendorStream):
             quote = _quote(symbol, message)
         except (ProviderError, ArithmeticError, KeyError, TypeError, ValueError) as exc:
             detail = self._detail(str(exc))
-            logger.warning(
+            # Loud once per rule, then counted: see `_unreadable_quotes`.
+            self._unreadable_quotes.warn(
+                type(exc).__name__,
                 "unreadable quote on the %s stream: %s",
                 self._stream.label,
                 detail,
                 extra={
-                    "event": "stream_quote_unreadable",
                     "stream": self._stream.label,
                     "symbol": symbol if isinstance(symbol, str) else None,
                     "detail": detail,
@@ -2603,7 +2624,14 @@ class AlpacaQuoteStream(VendorStream):
         self._pending_replies = ()
         self._unanswered_frames = 0
         self._unanswered_additions = frozenset()
-        await super().run_session()
+        try:
+            await super().run_session()
+        finally:
+            # A count still pending when the connection ends is reported now,
+            # not whenever the next bad frame happens to arrive -- which, if
+            # the fault or the socket is gone, would be never.
+            self._unreadable_quotes.flush()
+            self._undecodable_frames.flush()
 
     async def apply_plan(self, plan: SubscriptionPlan) -> PlanRevision:
         """Take a new plan mid-session and converge on it. The difference only.

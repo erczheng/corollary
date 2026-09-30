@@ -40,7 +40,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Protocol, runtime_checkable
 
 import msgpack
@@ -54,7 +54,9 @@ __all__ = [
     "JSON_CODEC",
     "MSGPACK_CODEC",
     "MAX_RECONNECT_DELAY_SECONDS",
+    "REPEATED_WARNING_INTERVAL",
     "Codec",
+    "RepeatedWarning",
     "SocketClosed",
     "SocketConnect",
     "StreamActivityRecorder",
@@ -246,6 +248,131 @@ JSON_CODEC: Final = Codec("json", binary=False)
 #: other format -- *"unlike the stock and crypto stream, the option stream is
 #: only available in msgpack format"*.
 MSGPACK_CODEC: Final = Codec("msgpack", binary=True)
+
+
+#: How long a repeated stream warning is counted before the count is
+#: reported. One minute: on 2026-09-29 one bad field produced 632 identical
+#: lines in ~25 minutes; at this interval the same fault is one full warning
+#: and then one count per minute it persists.
+REPEATED_WARNING_INTERVAL: Final = timedelta(seconds=60)
+
+
+class _Tally:
+    """One rule's open window: when it started and what it has swallowed."""
+
+    __slots__ = ("since", "suppressed", "message", "extra")
+
+    def __init__(self, since: datetime) -> None:
+        self.since = since
+        self.suppressed = 0
+        self.message = ""
+        self.extra: dict[str, Any] = {}
+
+
+class RepeatedWarning:
+    """A stream warning that is loud once per rule, then counted -- never silent.
+
+    A frame-level fault repeats on every frame. Logged every time, it buries
+    everything else the stream has to say (rule 8 wants the rejection
+    *findable*, and a wall of one line is not); dropped after the first, it
+    hides that the fault is still happening. So, per ``rule``:
+
+    - the **first** occurrence is a full WARNING with its sample, exactly as
+      the caller wrote it, tagged ``occurrence="first"``;
+    - repeats inside :data:`REPEATED_WARNING_INTERVAL` are **counted**, and
+      the latest sample kept;
+    - the first repeat at or past the interval logs one WARNING,
+      ``occurrence="aggregate"``, carrying the count (``suppressed``, which
+      includes that repeat), when the window opened, and the latest sample --
+      then opens a new window;
+    - :meth:`flush` reports a pending count and closes every window. The
+      stream calls it when a session ends, so a count is never left unsaid
+      because the fault stopped, or the socket did;
+    - a rule whose window expired with nothing pending starts over: its next
+      occurrence is loud again, because it is a new episode.
+
+    Keyed by ``rule`` so a *new* kind of failure is loud on arrival rather
+    than folded into an old one's count. Callers pass a small fixed
+    vocabulary (the exception type), never vendor text, so the key set is
+    bounded.
+
+    **Logging only.** Nothing here records activity, opens or closes a
+    socket, or can halt: rule 9's inputs are recorded by
+    :class:`VendorStream` before a frame is decoded, and this sits after.
+    """
+
+    def __init__(
+        self,
+        log: logging.Logger,
+        *,
+        event: str,
+        summary: str,
+        now: Callable[[], datetime],
+        interval: timedelta = REPEATED_WARNING_INTERVAL,
+    ) -> None:
+        self._log = log
+        self._event = event
+        self._summary = summary
+        self._now = now
+        self._interval = interval
+        self._tallies: dict[str, _Tally] = {}
+
+    def warn(
+        self, rule: str, message: str, *args: object, extra: Mapping[str, Any]
+    ) -> None:
+        """One occurrence. ``message % args`` must already be redacted."""
+        at = self._now()
+        tally = self._tallies.get(rule)
+        if tally is not None and at - tally.since >= self._interval:
+            if tally.suppressed:
+                tally.suppressed += 1
+                tally.message = message % args
+                tally.extra = dict(extra)
+                self._report(rule, tally)
+                self._tallies[rule] = _Tally(at)
+                return
+            tally = None  # a quiet window: this is a new episode
+        if tally is None:
+            self._tallies[rule] = _Tally(at)
+            self._log.warning(
+                message,
+                *args,
+                extra={
+                    **extra,
+                    "event": self._event,
+                    "rule": rule,
+                    "occurrence": "first",
+                },
+            )
+            return
+        tally.suppressed += 1
+        tally.message = message % args
+        tally.extra = dict(extra)
+
+    def flush(self) -> None:
+        """Report every pending count, once, and close every window."""
+        for rule, tally in self._tallies.items():
+            if tally.suppressed:
+                self._report(rule, tally)
+        self._tallies = {}
+
+    def _report(self, rule: str, tally: _Tally) -> None:
+        self._log.warning(
+            "%s: %d more since %s (rule %s); latest: %s",
+            self._summary,
+            tally.suppressed,
+            tally.since.isoformat(),
+            rule,
+            tally.message,
+            extra={
+                **tally.extra,
+                "event": self._event,
+                "rule": rule,
+                "occurrence": "aggregate",
+                "suppressed": tally.suppressed,
+                "since": tally.since.isoformat(),
+            },
+        )
 
 
 #: The longest a client waits between reconnect attempts.

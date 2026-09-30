@@ -104,3 +104,27 @@ def test_json_shaped_bytes_on_a_msgpack_socket_are_not_reinterpreted() -> None:
 
 def test_a_lone_brace_byte_on_a_msgpack_socket_is_the_integer_123() -> None:
     assert MSGPACK_CODEC.decode(b"{") == 123
+
+
+# --------------------------------------------------------------------------
+# msgpack codec: the Timestamp ext survives decoding untouched
+# --------------------------------------------------------------------------
+
+
+def test_a_msgpack_timestamp_ext_reaches_the_caller_as_a_timestamp() -> None:
+    """The option stream's ``t`` is ext type -1. Decoding must neither drop
+    it nor turn it into a float (``Timestamp.to_unix()`` is one); the
+    conversion to a ``datetime`` is ``wire.as_datetime``'s, done exactly."""
+    stamp = msgpack.Timestamp(seconds=1790707644, nanoseconds=970813166)
+    frame = msgpack.packb([{"T": "q", "t": stamp, "bp": 4.15}], use_bin_type=True)
+    decoded = MSGPACK_CODEC.decode(frame)
+    assert isinstance(decoded[0]["t"], msgpack.Timestamp)
+    assert decoded[0]["t"] == stamp
+    assert decoded[0]["bp"] == Decimal("4.15")
+
+
+def test_a_json_socket_cannot_produce_a_timestamp_ext() -> None:
+    """Why accepting the ext in ``as_datetime`` is msgpack-only by
+    construction: JSON has no such value, so a stamp there stays a string."""
+    decoded = JSON_CODEC.decode('[{"T":"q","t":"2026-09-29T18:47:24.970813166Z"}]')
+    assert decoded[0]["t"] == "2026-09-29T18:47:24.970813166Z"

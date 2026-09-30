@@ -11,9 +11,13 @@ holds the doubles, and the delay is injected.
 """
 
 import asyncio
+import json
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
+import msgpack
 import pytest
 
 from corollary.api.fanout import Fanout, quote_sink
@@ -37,7 +41,12 @@ from corollary.engine.stream import (
     plan_subscriptions,
     underlying_unit,
 )
-from corollary.sockets import JSON_CODEC, MSGPACK_CODEC, SocketClosed
+from corollary.sockets import (
+    JSON_CODEC,
+    MSGPACK_CODEC,
+    REPEATED_WARNING_INTERVAL,
+    SocketClosed,
+)
 from corollary.wire import ERROR_BODY_MAX
 from tests.sockets_support import (
     T0,
@@ -45,6 +54,7 @@ from tests.sockets_support import (
     FakeConnect,
     FakeSocket,
     NoMoreSockets,
+    RawFrame,
     SpyActivity,
     SpySleep,
 )
@@ -119,6 +129,7 @@ def build(
     activity: SpyActivity | None = None,
     on_quote: Any = None,
     hold_open: bool = False,
+    now: Clock | None = None,
 ) -> tuple[AlpacaQuoteStream, FakeSocket, SpyActivity, list[Quote]]:
     recorder = activity or SpyActivity()
     received: list[Quote] = []
@@ -136,7 +147,7 @@ def build(
         on_quote=sink,
         connect=FakeConnect(socket),
         sleep=SpySleep(),
-        now=Clock(),
+        now=now if now is not None else Clock(),
     )
     return client, socket, recorder, received
 
@@ -1697,3 +1708,168 @@ async def test_a_revision_may_not_widen_a_cap_the_server_lowered() -> None:
         assert revision.dispatched is True
     finally:
         await _quiet(session, socket)
+
+
+# --------------------------------------------------------------------------
+# The option stream's ``t`` is a msgpack Timestamp ext (found live 2026-09-29)
+# --------------------------------------------------------------------------
+#
+# Every live option quote was refused -- 632 warnings in ~25 minutes -- because
+# the stream stamps ``t`` as msgpack ext -1 and ``as_datetime`` took only
+# strings. ``quote_frame`` above packs ``t`` as a string, which is why nothing
+# here failed. The fixture is SYNTHETIC: built from the Timestamp values in
+# the live log line, not captured from the vendor.
+
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "alpaca"
+TIMESTAMP_FRAME = json.loads(
+    (FIXTURES / "p4_option_stream_quote_msgpack_synthetic.json").read_text(
+        encoding="utf-8"
+    )
+)
+LIVE_STAMP = msgpack.Timestamp(seconds=1790707644, nanoseconds=970813166)
+
+#: 0xc1 is the one byte msgpack never uses, so this frame cannot decode.
+UNDECODABLE = b"\xc1"
+
+
+def stamped_quote(symbol: str = CONTRACT) -> dict[str, Any]:
+    return {**quote_frame(symbol), "t": LIVE_STAMP}
+
+
+def records_for(caplog: pytest.LogCaptureFixture, event: str) -> list[Any]:
+    return [r for r in caplog.records if getattr(r, "event", "") == event]
+
+
+async def test_the_synthetic_option_frame_is_labelled_as_synthetic() -> None:
+    assert TIMESTAMP_FRAME["synthetic"] is True
+    assert TIMESTAMP_FRAME["description"].startswith("SYNTHETIC")
+
+
+async def test_an_option_quote_stamped_with_a_msgpack_timestamp_is_published() -> None:
+    expected = TIMESTAMP_FRAME["expected"]
+    plan = option_plan(expected["symbol"])
+    client, _, _, received = build(
+        [
+            CONNECTED,
+            AUTHENTICATED,
+            subscription(expected["symbol"]),
+            RawFrame(bytes.fromhex(TIMESTAMP_FRAME["frame_hex"])),
+        ],
+        plan=plan,
+    )
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+
+    [quote] = received
+    assert quote.symbol == expected["symbol"]
+    assert quote.bid == Decimal(expected["bid"])
+    assert quote.ask == Decimal(expected["ask"])
+    assert quote.bid_size == expected["bid_size"]
+    assert quote.at == datetime(2026, 9, 29, 18, 47, 24, 970813, tzinfo=timezone.utc)
+    assert quote.at.isoformat() == expected["at"]
+
+
+async def test_every_stamped_quote_in_a_frame_is_published(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    plan = option_plan(CONTRACT, OTHER_CONTRACT)
+    client, _, _, received = build(
+        [
+            CONNECTED,
+            AUTHENTICATED,
+            subscription(CONTRACT, OTHER_CONTRACT),
+            [stamped_quote(CONTRACT), stamped_quote(OTHER_CONTRACT)],
+        ],
+        plan=plan,
+    )
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+    assert [q.symbol for q in received] == [CONTRACT, OTHER_CONTRACT]
+    assert records_for(caplog, "stream_quote_unreadable") == []
+
+
+async def test_a_timestamp_the_decoder_cannot_read_still_costs_one_quote() -> None:
+    """Garbage in ``t`` -- an epoch number, another ext type -- is refused."""
+    plan = option_plan(CONTRACT, OTHER_CONTRACT)
+    client, _, _, received = build(
+        [
+            CONNECTED,
+            AUTHENTICATED,
+            subscription(CONTRACT, OTHER_CONTRACT),
+            [
+                {**quote_frame(CONTRACT), "t": 1790707644},
+                {**quote_frame(CONTRACT), "t": msgpack.ExtType(5, bytes(8))},
+                stamped_quote(OTHER_CONTRACT),
+            ],
+        ],
+        plan=plan,
+    )
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+    assert [q.symbol for q in received] == [OTHER_CONTRACT]
+
+
+async def test_a_flood_of_unreadable_quotes_is_loud_once_then_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """632 lines in 25 minutes becomes one warning plus a count per minute.
+
+    The count is reported when the session ends too, so a fault that stops
+    -- or a socket that drops -- never leaves a tally unsaid.
+    """
+    clock = Clock()
+    bad = {**quote_frame(CONTRACT), "t": 1790707644}
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [[bad] for _ in range(50)]
+    frames.append(lambda: clock.advance(REPEATED_WARNING_INTERVAL.total_seconds()))
+    frames += [[bad] for _ in range(10)]
+    client, _, _, _ = build(frames, plan=option_plan(CONTRACT), now=clock)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+
+    records = records_for(caplog, "stream_quote_unreadable")
+    assert [r.occurrence for r in records] == ["first", "aggregate", "aggregate"]
+    assert records[0].rule == "ProviderError"
+    assert "1790707644" in records[0].getMessage(), "the first carries its sample"
+    assert records[1].suppressed == 50  # 49 in the window, plus the one past it
+    assert records[2].suppressed == 9  # the rest, reported when the session ends
+    assert 1 + records[1].suppressed + records[2].suppressed == 60, "none unaccounted"
+
+
+async def test_a_flood_of_undecodable_frames_is_loud_once_then_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [RawFrame(UNDECODABLE) for _ in range(20)]
+    client, _, _, _ = build(frames, plan=option_plan(CONTRACT))
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+    records = records_for(caplog, "stream_frame_undecodable")
+    assert [r.occurrence for r in records] == ["first", "aggregate"]
+    assert records[1].suppressed == 19
+
+
+@pytest.mark.risk
+async def test_unreadable_frames_count_as_activity_and_never_close_the_stream() -> None:
+    """Rule 9's liveness is the *socket's*, recorded before decoding.
+
+    A frame that arrives proves the connection is up whether or not we can
+    read it, so it refreshes the activity clock -- as it always did, before
+    and after this fix. What it must not do is look like a close: a burst of
+    bad frames records no ``record_stream_closed`` and so cannot halt. A dead
+    connection is still caught, by its close or by frames ceasing, neither of
+    which a bad frame can fake.
+    """
+    bad = {**quote_frame(CONTRACT), "t": 1790707644}
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [[bad] for _ in range(5)]
+    frames += [RawFrame(UNDECODABLE) for _ in range(5)]
+    client, _, recorder, received = build(frames, plan=option_plan(CONTRACT))
+    with pytest.raises(SocketClosed):
+        await client.run_session()
+    assert received == []
+    assert len(recorder.messages) == 13  # 3 handshake frames + 10 bad ones
+    assert len(recorder.closes) == 1, "only the vendor close at the end"
