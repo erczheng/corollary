@@ -61,7 +61,8 @@ from corollary.data.providers.massive import MASSIVE_API_KEY_ENV, MassiveProvide
 from corollary.data.news.pollers import MassiveNewsSource
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import MarketDataProvider
-from corollary.data.seeds import SeedError, SpdrSeed, load_spdr_seed
+from corollary.data.providers.sec import SEC_USER_AGENT_ENV, SecProvider
+from corollary.data.seeds import SeedError, SpdrSeed
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 # Re-exported: the holder lives beside the jobs that read it, so the object a
@@ -165,6 +166,9 @@ FredFactory = Callable[[], FredProvider]
 #: ``None`` is a stated absence: ``MassiveProvider.available_from_env``
 #: answers it, logged, when ``MASSIVE_API_KEY`` is unset.
 MassiveFactory = Callable[[], MassiveNewsSource | None]
+#: How the registry builds SEC EDGAR. ``None`` is a stated absence:
+#: ``SecProvider.from_env`` logs an unset ``SEC_USER_AGENT`` once, by name.
+SecFactory = Callable[[], SecProvider | None]
 
 
 def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
@@ -218,6 +222,7 @@ class ServiceRegistry:
         rates: RiskFreeRateSource | None = None,
         missing_live_credentials: Sequence[str] = (),
         massive: MassiveFactory | None = None,
+        sec: SecFactory | None = None,
     ) -> None:
         self._factories: dict[AccountMode, BrokerFactory] = dict(brokers)
         #: The process's one risk-free rate (Phase 3 decision 19): the
@@ -240,6 +245,12 @@ class ServiceRegistry:
         self._massive_factory: MassiveFactory | None = massive
         self._massive: MassiveNewsSource | None = None
         self._massive_resolved = False
+        #: Optional, like Massive: SEC EDGAR for the ``spdr_holdings`` job
+        #: (unit 4SEC-B2). One client per process, so SEC's 10/s fair-access
+        #: ceiling is counted by one limiter.
+        self._sec_factory: SecFactory | None = sec
+        self._sec: SecProvider | None = None
+        self._sec_resolved = False
         self._provider_factory = provider
         #: Optional because it is the one service whose absence is a designed
         #: state rather than a failure -- see :func:`_fundamentals_from_env`.
@@ -292,6 +303,7 @@ class ServiceRegistry:
             rates=rates,
             missing_live_credentials=missing,
             massive=lambda: MassiveProvider.available_from_env(source),
+            sec=lambda: SecProvider.from_env(source),
         )
 
     def broker(self, mode: AccountMode) -> BrokerAccount:
@@ -466,6 +478,32 @@ class ServiceRegistry:
             )
         return self._massive
 
+    def sec_provider(self) -> SecProvider | None:
+        """The one SEC EDGAR client, built on first call -- or ``None``, said once.
+
+        **Never raises**, for :meth:`massive_provider`'s reason. An unset
+        ``SEC_USER_AGENT`` is logged inside ``SecProvider.from_env``, by name;
+        anything else a factory raises is logged here by class name only,
+        since its message could quote the User-Agent (rule 6).
+        """
+        if self._sec_resolved:
+            return self._sec
+        self._sec_resolved = True
+        if self._sec_factory is None:
+            return None
+        try:
+            self._sec = self._sec_factory()
+        except Exception as exc:
+            logger.error(
+                "the SEC provider could not be built; the SPDR N-PORT snapshot is unavailable",
+                extra={
+                    "event": "sec_unavailable",
+                    "variable": SEC_USER_AGENT_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return self._sec
+
     async def aclose(self) -> None:
         """Close whatever was actually built. Called from the lifespan.
 
@@ -482,6 +520,8 @@ class ServiceRegistry:
             built.append(self._fred)
         if self._massive is not None:
             built.append(self._massive)
+        if self._sec is not None:
+            built.append(self._sec)
         self._brokers.clear()
         self._provider = None
         self._fundamentals = None
@@ -489,6 +529,8 @@ class ServiceRegistry:
         self._fred_resolved = False
         self._massive = None
         self._massive_resolved = False
+        self._sec = None
+        self._sec_resolved = False
         for service in built:
             close = getattr(service, "aclose", None)
             if close is None:
@@ -505,8 +547,9 @@ class ServiceRegistry:
 # News state the routes read and never fetch (Phase 3 step 4)
 # --------------------------------------------------------------------------
 
-#: How the SPDR seed is loaded. A callable on ``app.state`` so a test can hand
-#: in a seed without writing the package's seed file.
+#: How the SPDR seed is loaded. A callable on ``app.state`` -- in production
+#: a :class:`~corollary.data.seeds.nport.DatabaseSeedLoader` serving the latest
+#: accepted N-PORT snapshot -- so a test can hand in a seed directly.
 SeedLoader = Callable[[], SpdrSeed | None]
 
 
@@ -785,13 +828,21 @@ def position_underlyings(request: Request) -> PositionUnderlyings:
 
 
 def spdr_seed(request: Request) -> SpdrSeed | None:
-    """The SPDR seed, ``None`` when it has not been built, 503 when it is malformed.
+    """The SPDR seed, ``None`` when none was accepted, 503 when it cannot be read.
 
-    Absent is an ordinary, stated state (``load_spdr_seed`` logs it once).
-    Malformed is refused rather than degraded: a half-read seed would misfile
-    sectors and shrink the watch universe's count under the cap in silence.
+    Absent -- no accepted N-PORT snapshot yet, which is today's real state
+    while XLB is refused -- is an ordinary, stated state. Unreadable
+    (malformed, or a loader not yet bound to its database) is refused rather
+    than degraded: a half-read seed would misfile sectors and shrink the
+    watch universe's count under the cap in silence.
     """
-    loader: SeedLoader = getattr(request.app.state, "spdr_seed_loader", load_spdr_seed)
+    loader: SeedLoader | None = getattr(request.app.state, "spdr_seed_loader", None)
+    if loader is None:
+        raise ApiError(
+            status_code=503,
+            code="spdr_seed_invalid",
+            message="The SPDR holdings seed cannot be read: this app has no seed loader.",
+        )
     try:
         return loader()
     except SeedError as exc:

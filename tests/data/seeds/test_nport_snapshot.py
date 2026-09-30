@@ -190,10 +190,10 @@ class FakeIsinResolver:
     ) -> None:
         self.mapping = dict(XLB_ISINS if mapping is None else mapping)
         self.broken = broken
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str]] = []
 
-    async def resolve(self, isin: str, *, fund: str, name: str) -> str | None:
-        self.calls.append((isin, fund, name))
+    async def resolve(self, isin: str, *, fund: str) -> str | None:
+        self.calls.append((isin, fund))
         if isin in self.broken:
             raise ProviderError(f"ISIN source for {isin}: HTTP 503")
         return self.mapping.get(isin)
@@ -469,16 +469,16 @@ async def test_the_default_seam_refuses_xlb_and_keeps_the_previous(
 
 
 @pytest.mark.asyncio
-async def test_the_seam_is_asked_once_per_isin_with_its_fund_and_name(
+async def test_the_seam_is_asked_once_per_isin_with_its_fund(
     sessions: Callable[[], Session],
 ) -> None:
     isins = FakeIsinResolver()
     outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=isins)
     assert outcome.status == "accepted", outcome.reason
-    asked = [isin for isin, _, _ in isins.calls]
+    asked = [isin for isin, _ in isins.calls]
     assert len(asked) == len(set(asked))
     assert set(asked) == {isin for _, isin, _, _ in ISIN_ONLY_LINES}
-    assert ("IE000S9YS762", "XLB", "Linde PLC") in isins.calls
+    assert ("IE000S9YS762", "XLB") in isins.calls
     # The ISIN seam never sees a line that has a CUSIP.
     assert not set(asked) & set(SURVEY)
 
@@ -498,9 +498,7 @@ async def test_an_isin_two_funds_hold_is_asked_once_with_the_first_fund(
     ).encode("utf-8")
     isins = FakeIsinResolver()
     await build(sessions, fake, FakeResolver(), isin_resolver=isins)
-    assert [c for c in isins.calls if c[0] == "IE000S9YS762"] == [
-        ("IE000S9YS762", "XLB", "Linde PLC")
-    ]
+    assert [c for c in isins.calls if c[0] == "IE000S9YS762"] == [("IE000S9YS762", "XLB")]
 
 
 @pytest.mark.asyncio
@@ -577,7 +575,7 @@ async def test_a_malformed_isin_is_never_resolved_by_name(sessions: Callable[[],
         nport.SkippedLine("XLB", "Linde PLC", None, None, Decimal("14.05959437799"),
                           SnapshotRule.NO_CUSIP)
     ]
-    assert all(name != "Linde PLC" for _, _, name in isins.calls)
+    assert "IE000S9YS76X" not in [isin for isin, _ in isins.calls]
     # Without Linde's 14.06, XLB's other lines sum below 90: the whole snapshot is refused.
     assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
     assert outcome.reason is not None and "XLB" in outcome.reason
@@ -769,3 +767,111 @@ def test_the_validator_refuses_a_missing_fund() -> None:
     funds = _funds(_all(["20"] * 5))
     del funds["XLC"]
     assert [(p.rule, p.etf) for p in validate_funds(funds)] == [(SnapshotRule.MISSING_FUND, "XLC")]
+
+
+# ------------------------------------------------------------------ B2: audit lows
+
+
+def test_the_isin_seam_is_never_handed_a_holding_name() -> None:
+    """Structural, not advisory: the seam cannot derive a ticker from a name it never gets."""
+    import inspect
+
+    for seam in (IsinResolver, NoIsinResolver):
+        params = list(inspect.signature(seam.resolve).parameters)
+        assert params == ["self", "isin", "fund"], seam
+
+
+@pytest.mark.asyncio
+async def test_a_fund_with_two_original_filings_refuses_as_a_duplicate_filing(
+    sessions: Callable[[], Session],
+) -> None:
+    fake = FakeSec()
+    # XLU's accession serves XLK's document: XLK has two originals, XLU none.
+    fake.docs[ACCESSION_OF["XLU"]] = DOC_OF_ACCESSION[ACCESSION_OF["XLK"]].read_bytes()
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.DUPLICATE_FILING)
+    assert outcome.reason is not None and "XLK" in outcome.reason
+    assert [r.rule for r in snapshot_rows(sessions)] == ["duplicate_filing"]
+
+
+@pytest.mark.asyncio
+async def test_a_document_reporting_another_date_refuses_as_a_report_date_mismatch(
+    sessions: Callable[[], Session],
+) -> None:
+    fake = FakeSec()
+    xlu = ACCESSION_OF["XLU"]
+    text = DOC_OF_ACCESSION[xlu].read_text("utf-8")
+    assert text.count("<repPdDate>2026-06-30</repPdDate>") == 1
+    fake.docs[xlu] = text.replace(
+        "<repPdDate>2026-06-30</repPdDate>", "<repPdDate>2026-03-31</repPdDate>"  # SYNTHETIC
+    ).encode("utf-8")
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.REPORT_DATE_MISMATCH)
+    assert outcome.reason is not None and "XLU" in outcome.reason
+    assert [r.rule for r in snapshot_rows(sessions)] == ["report_date_mismatch"]
+
+
+@pytest.mark.asyncio
+async def test_each_selection_failure_is_classified_by_its_own_rule() -> None:
+    """The classifier mirrors ``select_sector_documents``'s own checks, cause by cause."""
+    import dataclasses
+
+    fake = FakeSec()
+    provider = sec_provider(fake)
+    try:
+        series = await provider.sector_fund_series()
+        filings = await provider.latest_nport_filings()
+        documents = [(f, await provider.nport_holdings(f.accession)) for f in filings.filings]
+    finally:
+        await provider.aclose()
+    classify = nport.selection_failure_rule
+    assert classify(series, documents, filings) is None  # nothing wrong: no rule
+    stranger = dataclasses.replace(documents[0][0], accession="0000000000-26-000001")
+    assert classify(series, [(stranger, documents[0][1]), *documents], filings) is (
+        SnapshotRule.FILING_NOT_INDEXED
+    )
+    xlu_doc = next(d for f, d in documents if f.accession == ACCESSION_OF["XLU"])
+    without_xlu = [(f, d) for f, d in documents if d is not xlu_doc]
+    assert classify(series, without_xlu, filings) is SnapshotRule.MISSING_FUND
+    xlk = next((f, d) for f, d in documents if f.accession == ACCESSION_OF["XLK"])
+    assert classify(series, [*documents, xlk], filings) is SnapshotRule.DUPLICATE_FILING
+    moved = dataclasses.replace(xlu_doc, report_date=date(2026, 3, 31))
+    shifted = [(f, moved if d is xlu_doc else d) for f, d in documents]
+    assert classify(series, shifted, filings) is SnapshotRule.REPORT_DATE_MISMATCH
+
+
+def _insert_accepted_at(
+    sessions: Callable[[], Session], report: date, built_at: datetime, symbol_suffix: str
+) -> int:
+    with sessions() as session, session.begin():
+        snap = SpdrHoldingsSnapshot(
+            report_date=report, filed_date=report + timedelta(days=60), built_at=built_at,
+            status="accepted", rule=None, reason=None, skipped_lines=0,
+        )
+        session.add(snap)
+        session.flush()
+        for n, (etf, sector) in enumerate(SPDR_SECTORS.items()):
+            for i in range(5):
+                session.add(SpdrHoldingRow(
+                    snapshot_id=snap.id, etf=etf, symbol=f"{etf}{symbol_suffix}{chr(65 + i)}",
+                    sector=sector, series_id="S000000000", accession="0000000000-26-000000",
+                    cusip=f"SYN{n:05d}{i}", name="SYNTHETIC", weight=Decimal("20"),
+                ))
+        return snap.id
+
+
+def test_a_reused_snapshot_id_cannot_serve_a_deleted_snapshot_from_the_cache(
+    sessions: Callable[[], Session],
+) -> None:
+    """0010's id has no AUTOINCREMENT, so SQLite hands a deleted max id out again."""
+    first_id = _insert_accepted_at(sessions, date(2026, 3, 31), NOW - timedelta(days=90), "")
+    first = load_spdr_seed_from_db(sessions)
+    assert first is not None and first.as_of == date(2026, 3, 31)
+    with sessions() as session, session.begin():  # another process deletes it, no invalidate
+        session.query(SpdrHoldingRow).delete()
+        session.query(SpdrHoldingsSnapshot).delete()
+    second_id = _insert_accepted_at(sessions, date(2026, 6, 30), NOW, "Z")
+    assert second_id == first_id  # the reuse this guards against
+    second = load_spdr_seed_from_db(sessions)
+    assert second is not None and second.as_of == date(2026, 6, 30)
+    assert "XLKZA" in second.symbols()

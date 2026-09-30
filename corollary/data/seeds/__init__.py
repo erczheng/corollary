@@ -1,10 +1,14 @@
-"""Hand-kept seed files, and the loader for the SPDR holdings seed (spec decision 6).
+"""The SPDR holdings seed's interface (:class:`SpdrSeed`) and its CSV form.
 
-``spdr_holdings.csv`` is built from State Street's eleven Select Sector SPDR
-holdings files by ``scripts/build_spdr_seed.py``, which the owner runs by hand,
-quarterly, against files the owner downloaded. Nothing here downloads it and
-nothing schedules it: a scrape of State Street's site was rejected because its
-terms were never checked.
+**Where the running app's seed comes from now:** decision 6's hand-built
+State Street seed was replaced (owner decision, Phase 3 step 4) by the eleven
+Select Sector SPDRs' SEC NPORT-P filings, built weekly by the
+``spdr_holdings`` context job into the database and served by
+:class:`corollary.data.seeds.nport.DatabaseSeedLoader`. Unit 4SEC-B2 retired
+``scripts/build_spdr_seed.py`` and its SSGA fixtures. The CSV parser and
+:func:`load_spdr_seed` below remain because ``corollary.data.news.pollers``
+still defaults to :func:`load_spdr_seed` when no loader is handed in; the
+lifespan always hands one in, and no file is written anywhere by the app.
 
 One seed does three jobs:
 
@@ -358,7 +362,7 @@ def load_spdr_seed(path: Path | None = None) -> SpdrSeed | None:
                 extra={
                     "event": "spdr_seed_missing",
                     "path": key,
-                    "remedy": "run scripts/build_spdr_seed.py against the eleven downloaded holdings files",
+                    "remedy": "the running app reads the SEC N-PORT snapshot from the database, not this file",
                 },
             )
         return None

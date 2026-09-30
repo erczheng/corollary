@@ -119,7 +119,14 @@ class SnapshotRule(StrEnum):
     """Why a snapshot was refused, aborted, or a line skipped. Stored and logged."""
 
     # Refusals -- recorded, the previous snapshot stays current.
-    MISSING_FUND = "missing_fund"
+    MISSING_FUND = "missing_fund"  # no original NPORT-P for a sector fund's series
+    # The other three ways ``select_sector_documents`` refuses a quarter, each
+    # recorded under its own rule (unit 4SEC-B2; B1 filed them all as
+    # ``missing_fund``, which sent the reader looking for the wrong problem).
+    FILING_NOT_INDEXED = "filing_not_indexed"  # a document's filing is not in the index
+    DUPLICATE_FILING = "duplicate_filing"  # two original NPORT-P for one series
+    REPORT_DATE_MISMATCH = "report_date_mismatch"  # document repPdDate != index reportDate
+    SELECTION_FAILED = "selection_failed"  # the selector refused for a cause none of the above
     AMENDMENT = "amendment"
     TOO_FEW_EQUITIES = "too_few_equities"
     WEIGHT_BAND = "weight_band"
@@ -157,15 +164,19 @@ class IsinResolver(Protocol):
     (the line is then logged and skipped, never guessed), or raises
     :class:`~corollary.data.providers.interface.ProviderError` when its
     source failed (the build aborts and stores nothing; the next run
-    retries). ``fund`` and ``name`` are the first line carrying that ISIN in
-    fund order, passed for the resolver's own logging and checks -- an
-    implementation must **not** derive a ticker from ``name`` (owner's
-    rule). Each ISIN is asked once per build. Anything other than
+    retries). ``fund`` is the first fund carrying that ISIN in fund order,
+    passed for the resolver's own logging and checks.
+
+    **The holding's name is deliberately not a parameter** (unit 4SEC-B2,
+    B1 audit). The owner's rule is "never guess a ticker from the name";
+    passed a name, a resolver *could*, and the rule would rest on every
+    implementation remembering it. Not passed, it cannot. Only identifiers
+    cross this seam. Each ISIN is asked once per build. Anything other than
     ``ProviderError`` is a programming error and propagates, still before
     anything is stored.
     """
 
-    async def resolve(self, isin: str, *, fund: str, name: str) -> str | None: ...
+    async def resolve(self, isin: str, *, fund: str) -> str | None: ...
 
 
 class NoIsinResolver:
@@ -174,7 +185,7 @@ class NoIsinResolver:
     This is the fail-closed state until the owner chooses an ISIN source.
     """
 
-    async def resolve(self, isin: str, *, fund: str, name: str) -> str | None:
+    async def resolve(self, isin: str, *, fund: str) -> str | None:
         return None
 
 
@@ -297,6 +308,42 @@ def validate_funds(funds: Mapping[str, Sequence[ResolvedHolding]]) -> list[FundP
     return problems
 
 
+def selection_failure_rule(
+    series_by_ticker: Mapping[str, str],
+    documents: Sequence[tuple[NportFiling, NportDocument]],
+    filings: NportFilings,
+) -> SnapshotRule | None:
+    """Which rule :func:`~corollary.data.providers.sec.select_sector_documents` refuses on.
+
+    Pure. It mirrors the selector's own checks **in the selector's order** --
+    every document's filing is in the index; then, per sector ticker in
+    ``series_by_ticker`` order, exactly one original for its series (none is
+    :attr:`SnapshotRule.MISSING_FUND`, more is
+    :attr:`SnapshotRule.DUPLICATE_FILING`), and that original's document
+    reports the index's date -- so the rule recorded is the cause of the
+    message recorded beside it. ``None`` when none applies; the builder then
+    records :attr:`SnapshotRule.SELECTION_FAILED` rather than guess.
+    ``tests/data/seeds/test_nport_snapshot.py`` pins each cause.
+    """
+    indexed = set(filings.filings)
+    if any(filing not in indexed for filing, _ in documents):
+        return SnapshotRule.FILING_NOT_INDEXED
+    originals: dict[str, list[tuple[NportFiling, NportDocument]]] = {}
+    for filing, document in documents:
+        if not filing.is_amendment:
+            originals.setdefault(document.series_id, []).append((filing, document))
+    for series_id in series_by_ticker.values():
+        candidates = originals.get(series_id, [])
+        if not candidates:
+            return SnapshotRule.MISSING_FUND
+        if len(candidates) > 1:
+            return SnapshotRule.DUPLICATE_FILING
+        filing, document = candidates[0]
+        if document.report_date != filing.report_date:
+            return SnapshotRule.REPORT_DATE_MISMATCH
+    return None
+
+
 # ------------------------------------------------------------------ the build
 
 
@@ -393,8 +440,9 @@ async def _build(
     try:
         selection = select_sector_documents(series, documents, filings=filings)
     except SecError as exc:
+        rule = selection_failure_rule(series, documents, filings) or SnapshotRule.SELECTION_FAILED
         return _refuse(session_factory, clock, filings.report_date, index_filed,
-                       SnapshotRule.MISSING_FUND, str(exc), ())
+                       rule, str(exc), ())
     filed = max(fund.filing.filing_date for fund in selection.funds.values())
     if selection.amended:
         unattributed = [f.accession for f in selection.unattributed_amendments]
@@ -514,9 +562,7 @@ async def _resolve(
             elif isin is not None:
                 if isin not in isin_answers:
                     try:
-                        isin_answers[isin] = await isin_resolver.resolve(
-                            isin, fund=etf, name=line.name
-                        )
+                        isin_answers[isin] = await isin_resolver.resolve(isin, fund=etf)
                     except ProviderError as exc:
                         raise _Abort(
                             SnapshotRule.ISIN_LOOKUP_FAILED,
@@ -618,10 +664,21 @@ def latest_snapshot_attempt(session_factory: Callable[[], Session]) -> SnapshotA
         return None if row is None else _attempt(row)
 
 
-#: bind URL -> (the newest attempt id when loaded, the seed). The id check
-#: makes the cache self-invalidating even across processes; the builder also
-#: clears it on every record.
-_SEED_CACHE: dict[str, tuple[int | None, SpdrSeed | None]] = {}
+#: What decides whether a cached seed still holds: ``(id, built_at)`` of the
+#: newest attempt of any status, and of the latest accepted one.
+_CacheKey = tuple[tuple[int, datetime] | None, tuple[int, datetime] | None]
+
+#: bind URL -> (the key when loaded, the seed). The key check makes the cache
+#: self-invalidating even across processes; the builder also clears it on
+#: every record.
+#:
+#: **Not the id alone** (unit 4SEC-B2, B1 audit): migration 0010's id column
+#: has no ``sqlite_autoincrement``, so SQLite hands the id of a deleted
+#: newest row to the next insert, and an id-only key would go on serving the
+#: deleted snapshot. ``built_at`` rides with each id, so a reused id carries a
+#: different key. The newest attempt covers a refusal changing
+#: ``newer_report_date``; the latest accepted covers the served rows.
+_SEED_CACHE: dict[str, tuple[_CacheKey, SpdrSeed | None]] = {}
 
 
 def invalidate_spdr_seed_cache() -> None:
@@ -636,19 +693,66 @@ def load_spdr_seed_from_db(session_factory: Callable[[], Session]) -> SpdrSeed |
     ``stale_after_days`` :data:`~corollary.data.seeds.NPORT_STALE_AFTER_DAYS`,
     and ``newer_report_date`` the newest *refused* attempt's report date when
     it is newer than the loaded one ("a newer filing exists but has not been
-    loaded"). Cached; one ``max(id)`` query per call decides whether the cache
-    still holds.
+    loaded"). Cached; two one-row queries per call -- ``(id, built_at)`` of
+    the newest attempt and of the latest accepted one -- decide whether the
+    cache still holds (see :data:`_SEED_CACHE` for why not ``max(id)``).
     """
     with session_factory() as session:
         bind = session.get_bind()
-        key = str(bind.engine.url)
-        newest = session.scalar(select(func.max(SpdrHoldingsSnapshot.id)))
-        cached = _SEED_CACHE.get(key)
-        if cached is not None and cached[0] == newest:
+        url = str(bind.engine.url)
+        newest = session.execute(
+            select(SpdrHoldingsSnapshot.id, SpdrHoldingsSnapshot.built_at)
+            .order_by(SpdrHoldingsSnapshot.id.desc())
+            .limit(1)
+        ).first()
+        accepted = session.execute(
+            select(SpdrHoldingsSnapshot.id, SpdrHoldingsSnapshot.built_at)
+            .where(SpdrHoldingsSnapshot.status == ACCEPTED)
+            .order_by(SpdrHoldingsSnapshot.report_date.desc(), SpdrHoldingsSnapshot.id.desc())
+            .limit(1)
+        ).first()
+        key: _CacheKey = (
+            None if newest is None else (newest[0], newest[1]),
+            None if accepted is None else (accepted[0], accepted[1]),
+        )
+        cached = _SEED_CACHE.get(url)
+        if cached is not None and cached[0] == key:
             return cached[1]
         seed = _read_seed(session)
-    _SEED_CACHE[key] = (newest, seed)
+    _SEED_CACHE[url] = (key, seed)
     return seed
+
+
+class DatabaseSeedLoader:
+    """:func:`load_spdr_seed_from_db` as the zero-argument loader the app state holds.
+
+    ``create_app`` builds one before it knows its database when the engine
+    is resolved in the lifespan, so the session factory may be bound after
+    construction (:meth:`bind`, once). Called unbound it raises
+    :class:`~corollary.data.seeds.SeedError` -- the watch routes answer that
+    with a 503 naming it -- rather than serve "no seed" for a database it
+    never read. It holds a session factory and nothing else, so handing it
+    to the context jobs gives them no path to the app.
+    """
+
+    def __init__(self, session_factory: Callable[[], Session] | None = None) -> None:
+        self._sessions = session_factory
+
+    @property
+    def bound(self) -> bool:
+        return self._sessions is not None
+
+    def bind(self, session_factory: Callable[[], Session]) -> None:
+        if self._sessions is not None:
+            raise RuntimeError("the SPDR seed loader is already bound to a database")
+        self._sessions = session_factory
+
+    def __call__(self) -> SpdrSeed | None:
+        if self._sessions is None:
+            raise SeedError(
+                "the SPDR seed's database is not bound yet (the app has not started)"
+            )
+        return load_spdr_seed_from_db(self._sessions)
 
 
 def _read_seed(session: Session) -> SpdrSeed | None:

@@ -571,7 +571,7 @@ class WatchTierPoller:
                 extra={
                     "event": "watch_universe_seed_missing",
                     "universe_size": len(symbols),
-                    "remedy": "run scripts/build_spdr_seed.py",
+                    "remedy": "the weekly spdr_holdings job rebuilds it from SEC N-PORT",
                 },
             )
         self._last = symbol

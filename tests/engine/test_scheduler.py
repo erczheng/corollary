@@ -95,6 +95,10 @@ from corollary.pricing.rates import RateProvenance, RiskFreeRateSource
 from corollary.ratelimit import FRED_HOST, HostRateLimiter
 from tests.data.providers.test_fred_provider import FAKE_KEY, fixture_body_text
 from tests.engine.test_runtime import read_state, resume_engine
+from tests.data.seeds.test_nport_snapshot import FakeResolver, FakeSec, sec_provider
+from corollary.data.seeds import nport
+from corollary.db.models import SpdrHoldingsSnapshot
+from corollary.ratelimit import SEC_DATA_HOST
 
 UTC = timezone.utc
 
@@ -707,6 +711,7 @@ _SHIPPED_NAMES = [
     "asset_directory",
     "tradeability_cache",
     "news_prune",
+    "spdr_holdings",
 ]
 
 
@@ -753,8 +758,18 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
     assert by_name["asset_directory"].catch_up is not None
     assert by_name["news_watch_tier"].catch_up is not None
     for name in _SHIPPED_NAMES[2:]:
-        if name not in ("asset_directory", "news_watch_tier"):
+        if name not in ("asset_directory", "news_watch_tier", "spdr_holdings"):
             assert by_name[name].catch_up is None, name
+    # The SPDR sector seed (unit 4SEC-B2): weekly, Monday 09:00 ET, plus a
+    # start-up catch-up when no attempt was ever recorded or the last is old.
+    spdr = by_name["spdr_holdings"]
+    assert spdr.schedule == AtTime(scheduler_module.SPDR_HOLDINGS_AT, scheduler_module.SPDR_HOLDINGS_DAYS)
+    assert scheduler_module.SPDR_HOLDINGS_AT == time(9, 0)
+    assert spdr.catch_up is not None
+    # From a Tuesday, the next slot is the following Monday at 09:00 EDT.
+    assert spdr.schedule.next_run(datetime(2026, 9, 29, 12, 0, tzinfo=UTC)) == datetime(
+        2026, 10, 5, 13, 0, tzinfo=UTC
+    )
 
     hosts = {name: by_name[name].inputs.get("host") for name in _SHIPPED_NAMES[2:]}
     assert hosts == {
@@ -765,6 +780,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
         "asset_directory": ALPACA_PAPER_TRADING_HOST,
         "tradeability_cache": ALPACA_DATA_HOST,
         "news_prune": "local",
+        "spdr_holdings": SEC_DATA_HOST,
     }
     for job in jobs:
         assert job.rule.strip(), job.name
@@ -1622,10 +1638,11 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     # FRED configured, served from the recorded fixture: the FRED job's real
     # body -- HTTP, parse, upsert through the writable session, adopt -- runs
     # here rather than its no-key no-op.
-    async with _recorded_fred() as fred:
+    async with _recorded_fred() as fred, _recorded_sec() as sec:
         rates = RiskFreeRateSource()
         alpaca = FailingAlpacaNews() if mode == "alpaca_news_fails" else FakeAlpacaContext()
         finnhub, massive = FakeFinnhubNews(), FakeMassive()
+        cusips = FakeResolver()
         services = _news_services(
             db_engine,
             alpaca=alpaca,
@@ -1633,6 +1650,8 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             massive=massive,
             fred=fred,
             rates=rates,
+            sec=sec,
+            cusips=cusips,
         )
         assert isinstance(services.position_underlyings, HeldPositionUnderlyings)
         shipped = context_jobs(services, clock=clock)
@@ -1684,6 +1703,11 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     # The FRED body really ran: the recorded 2026-09-22 close is in use.
     assert rates.current().provenance is RateProvenance.FRED_DGS3MO
     assert rates.current().observation_date == date(2026, 9, 22)
+    # The SPDR body really ran: SEC and the CUSIP lookup were asked, and the
+    # real quarter's refusal (XLB below the band) was recorded.
+    assert cusips.calls
+    attempt = nport.latest_snapshot_attempt(lambda: Session(db_engine))
+    assert attempt is not None and attempt.status == "refused"
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
@@ -1948,3 +1972,145 @@ async def test_a_drain_that_times_out_is_logged_and_never_raises(
         assert getattr(said[0], "open_sessions") == 1
     finally:
         stuck.close()
+
+
+# --------------------------------------------------------------------------
+# The SPDR sector seed from SEC N-PORT (unit 4SEC-B2)
+# --------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _recorded_sec(fake: FakeSec | None = None) -> AsyncIterator[object]:
+    """SEC served from the recorded 2026-06-30 quarter, offline."""
+    provider = sec_provider(fake if fake is not None else FakeSec())
+    try:
+        yield provider
+    finally:
+        await provider.aclose()
+
+
+SPDR_NOW = datetime(2026, 9, 29, 13, 0, tzinfo=UTC)
+
+
+def _spdr_jobs(db_engine: Engine, **extra: object) -> tuple[ContextServices, ScheduledJob]:
+    services = _news_services(db_engine, **extra)
+    return services, _jobs_by_name(services, lambda: SPDR_NOW)["spdr_holdings"]
+
+
+def _attempts(db_engine: Engine) -> list[SpdrHoldingsSnapshot]:
+    with Session(db_engine) as session:
+        return list(session.query(SpdrHoldingsSnapshot).order_by(SpdrHoldingsSnapshot.id))
+
+
+@pytest.mark.asyncio
+async def test_without_sec_user_agent_the_spdr_job_skips_and_never_succeeds(db_engine: Engine) -> None:
+    _, job = _spdr_jobs(db_engine, sec=None, cusips=FakeResolver())
+    assert job.catch_up is not None
+    for body in (job.run, job.catch_up):
+        outcome = await body()
+        assert isinstance(outcome, JobSkipped)
+        assert "SEC_USER_AGENT" in outcome.reason
+    assert _attempts(db_engine) == []
+
+
+@pytest.mark.asyncio
+async def test_without_a_cusip_lookup_the_spdr_job_skips(db_engine: Engine) -> None:
+    async with _recorded_sec() as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=None)
+        outcome = await job.run()
+    assert isinstance(outcome, JobSkipped)
+    assert _attempts(db_engine) == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_snapshot_is_the_job_doing_its_work_and_is_recorded(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real quarter, the default ``NoIsinResolver``: refused on XLB, and a success of the job."""
+    async with _recorded_sec() as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        outcome = await job.run()
+    assert outcome is None
+    [attempt] = _attempts(db_engine)
+    assert (attempt.status, attempt.rule) == ("refused", "weight_band")
+    [record] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_refused"]
+    assert record.rule == "weight_band"
+
+
+@pytest.mark.asyncio
+async def test_an_already_loaded_quarter_is_a_skip_not_a_success(db_engine: Engine) -> None:
+    from tests.data.seeds.test_nport_snapshot import FakeIsinResolver
+
+    async with _recorded_sec() as sec:
+        accepted = await nport.build_spdr_snapshot(
+            sec, FakeResolver(), lambda: Session(db_engine), isin_resolver=FakeIsinResolver()
+        )
+        assert accepted.status == "accepted"
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        outcome = await job.run()
+    assert isinstance(outcome, JobSkipped)
+    assert "2026-06-30" in outcome.reason
+    assert len(_attempts(db_engine)) == 1
+
+
+@pytest.mark.asyncio
+async def test_sec_refusing_access_is_a_failure_logged_at_error(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeSec()
+    fake.status = 403
+    async with _recorded_sec(fake) as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
+            await job.run()
+    assert raised.value.rule is nport.SnapshotRule.SEC_ACCESS_REFUSED
+    assert _attempts(db_engine) == []
+    [record] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_sec_access_refused"]
+    assert record.levelno == logging.ERROR
+    assert "synthetic.tester" not in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_build_is_a_failure_under_the_scheduler_not_a_retry_storm(
+    db_engine: Engine,
+) -> None:
+    """An abort raises; the scheduler records one failure and waits for the next weekly slot."""
+    fake = FakeSec()
+    fake.status = 403
+    async with _recorded_sec(fake) as sec:
+        services = _news_services(db_engine, sec=sec, cusips=FakeResolver())
+        clock = FakeClock(SPDR_NOW, stop_at=SPDR_NOW + timedelta(days=2))
+        job = _jobs_by_name(services, clock)["spdr_holdings"]
+        scheduler = Scheduler([job], secrets=no_secrets, clock=clock, sleep=clock.sleep)
+        await run_until_parked(scheduler, clock, timeout=30)
+    status = scheduler.status()["spdr_holdings"]
+    assert status.failures == 1  # the catch-up; Monday's slot is outside the window
+    assert status.runs == 0
+    assert status.last_error_type == "SpdrSnapshotAborted"
+
+
+@pytest.mark.asyncio
+async def test_the_spdr_catch_up_runs_only_when_no_recent_attempt_exists(db_engine: Engine) -> None:
+    async with _recorded_sec() as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert job.catch_up is not None
+        assert await job.catch_up() is None  # nothing ever attempted: builds (refused)
+        assert len(_attempts(db_engine)) == 1
+        # Stamped on the job's clock; moved explicitly to either side of 7 days.
+        with Session(db_engine) as session, session.begin():
+            row = session.query(SpdrHoldingsSnapshot).one()
+            row.built_at = SPDR_NOW - timedelta(days=6, hours=23)
+        skipped = await job.catch_up()
+        assert isinstance(skipped, JobSkipped)
+        assert len(_attempts(db_engine)) == 1
+        with Session(db_engine) as session, session.begin():
+            row = session.query(SpdrHoldingsSnapshot).one()
+            row.built_at = SPDR_NOW - timedelta(days=7, seconds=1)
+        assert await job.catch_up() is None  # older than seven days: builds again
+        assert len(_attempts(db_engine)) == 2
+
+
+def test_the_services_default_seed_loader_reads_the_database(db_engine: Engine) -> None:
+    services = ContextServices(session_factory=lambda: Session(db_engine))
+    assert services.seed_loader is not None
+    assert services.seed_loader() is None  # no accepted snapshot: no seed, no file read

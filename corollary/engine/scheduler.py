@@ -171,7 +171,16 @@ from corollary.data.news.pollers import (
     watch_interval,
 )
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
-from corollary.data.seeds import SpdrSeed, load_spdr_seed
+from corollary.data.seeds import SpdrSeed
+from corollary.data.seeds.nport import (
+    CusipResolver,
+    NoIsinResolver,
+    NportSource,
+    SnapshotRule,
+    build_spdr_snapshot,
+    latest_snapshot_attempt,
+    load_spdr_seed_from_db,
+)
 from corollary.pricing.rates import DGS3MO_SERIES, RiskFreeRateSource
 from corollary.ratelimit import (
     ALPACA_DATA_HOST,
@@ -179,6 +188,8 @@ from corollary.ratelimit import (
     FINNHUB_HOST,
     FRED_HOST,
     MASSIVE_HOST,
+    SEC_DATA_HOST,
+    SEC_WWW_HOST,
 )
 from corollary.wire import vendor_detail
 
@@ -189,6 +200,9 @@ __all__ = [
     "FINNHUB_MARKET_NEWS_EVERY",
     "MASSIVE_NEWS_EVERY",
     "NEWS_PRUNE_AT",
+    "SPDR_HOLDINGS_AT",
+    "SPDR_HOLDINGS_CATCH_UP_AFTER",
+    "SPDR_HOLDINGS_DAYS",
     "TRADEABILITY_EVERY",
     "AlpacaContextSource",
     "AtTime",
@@ -208,6 +222,7 @@ __all__ = [
     "ScheduledJob",
     "Scheduler",
     "SchedulerFactory",
+    "SpdrSnapshotAborted",
     "TwoRate",
     "WatchTierCadence",
     "build_context_scheduler",
@@ -1264,9 +1279,27 @@ class ContextServices:
     position_underlyings: PositionUnderlyingsSource = _no_position_underlyings
     #: The SPDR seed, for the sector leaders. The lifespan passes
     #: ``app.state.spdr_seed_loader`` so the jobs and the watch routes agree.
-    seed_loader: Callable[[], SpdrSeed | None] = load_spdr_seed
+    #: ``None`` means the accepted N-PORT snapshot in *this* services'
+    #: database (:func:`~corollary.data.seeds.nport.load_spdr_seed_from_db`
+    #: over :attr:`session_factory`), filled in by ``__post_init__`` -- never
+    #: a file in the source tree (unit 4SEC-B2 retired the SSGA CSV).
+    seed_loader: Callable[[], SpdrSeed | None] | None = None
+    #: SEC EDGAR, for the ``spdr_holdings`` job -- or ``None`` when
+    #: ``SEC_USER_AGENT`` is unset (SEC requires a declared User-Agent and
+    #: none is invented); the job then skips.
+    sec: NportSource | None = None
+    #: The market-data provider's CUSIP -> asset lookup (Alpaca's
+    #: ``/v2/assets/{cusip}``) -- or ``None``, and the ``spdr_holdings`` job
+    #: skips. A reference-data read, never the broker.
+    cusips: CusipResolver | None = None
 
     def __post_init__(self) -> None:
+        if self.seed_loader is None:
+            object.__setattr__(
+                self,
+                "seed_loader",
+                functools.partial(load_spdr_seed_from_db, self.session_factory),
+            )
         if self.news_store is not None and self.news_store.assets is not self.assets:
             raise ValueError(
                 "the news store holds a different asset directory from the one "
@@ -1426,12 +1459,14 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
         if services.news_store is not None
         else NewsStore(session_factory=services.session_factory, assets=services.assets)
     )
+    seed_loader = services.seed_loader
+    assert seed_loader is not None  # filled by ContextServices.__post_init__
     universe: UniverseSource = functools.partial(
         build_watch_universe,
         markets=services.markets,
         position_underlyings=services.position_underlyings,
         session_factory=services.session_factory,
-        seed_loader=services.seed_loader,
+        seed_loader=seed_loader,
     )
     watch = WatchTierPoller(provider=services.finnhub, universe=universe, store=store)
     alpaca_news = AlpacaNewsPoller(provider=services.alpaca, store=store)
@@ -1536,6 +1571,151 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
     ]
 
 
+# -- the SPDR sector seed from SEC N-PORT (Phase 3 step 4, unit 4SEC-B2) ----
+
+#: Weekly, Monday 09:00 ET: the eleven funds file NPORT-P quarterly, public
+#: about 60 days after the quarter ends, so a weekly look finds a new quarter
+#: within seven days of SEC posting it. The week is the clock here, not the
+#: session -- EDGAR answers on a market holiday -- so the day rule is
+#: :func:`on_weekdays`, not :func:`trading_days`.
+SPDR_HOLDINGS_AT = time(9, 0)
+SPDR_HOLDINGS_DAYS: DayRule = on_weekdays(0)
+#: The start-up catch-up builds only when no attempt was ever recorded, or the
+#: latest recorded attempt (accepted or refused) is older than this. An
+#: "unchanged" run records nothing, so while the loaded quarter stays current
+#: a start past this age asks SEC's index once (a few requests on SEC's own
+#: bucket) and skips; an abort records nothing either, so the next start
+#: retries it.
+SPDR_HOLDINGS_CATCH_UP_AFTER = timedelta(days=7)
+
+
+class SpdrSnapshotAborted(Exception):
+    """The SPDR build stored nothing because a vendor failed; the job's failure.
+
+    ``rule`` is the builder's :class:`~corollary.data.seeds.nport.SnapshotRule`.
+    Raised, so the scheduler records a failure with the job's rule and inputs;
+    the job then waits for its next weekly slot (a failure is never retried
+    on a tighter loop). The builder has already logged it at ERROR.
+    """
+
+    def __init__(self, rule: SnapshotRule, reason: str) -> None:
+        super().__init__(f"{rule.value}: {reason}")
+        self.rule = rule
+        self.reason = reason
+
+
+def _spdr_unavailable(services: ContextServices) -> JobSkipped | None:
+    if services.sec is None:
+        return JobSkipped(
+            "SEC_USER_AGENT is unset (or unusable), so the SEC N-PORT source is "
+            "unavailable; the loaded SPDR snapshot, if any, stays"
+        )
+    if services.cusips is None:
+        return JobSkipped(
+            "the market-data provider offers no CUSIP lookup, so N-PORT holdings "
+            "cannot be resolved to tickers; the loaded SPDR snapshot, if any, stays"
+        )
+    return None
+
+
+async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+    """Build the SPDR sector snapshot from the latest N-PORT quarter.
+
+    * ``accepted`` -- stored and now current: work done.
+    * ``refused`` -- **work done too**: the job did what it is for, and the
+      builder recorded the attempt (rule and reason) and logged it with its
+      rule at WARNING; the previous accepted snapshot stays current. A skip
+      would say "nothing to do", which is not what happened.
+    * ``unchanged`` -- :class:`JobSkipped`: no newer quarter than the loaded.
+    * ``aborted`` -- :class:`SpdrSnapshotAborted`, a failure: nothing stored.
+      :attr:`SnapshotRule.SEC_ACCESS_REFUSED` is also logged here at ERROR
+      under its own event, because SEC refusing the declared User-Agent is an
+      operator problem no retry fixes.
+
+    The ISIN seam is :class:`NoIsinResolver` -- fail closed until the owner
+    chooses an ISIN source -- and the directory is the shared day's asset
+    directory (``None`` before its first fetch: then only the ticker shape
+    of an ISIN answer is checked, and ``NoIsinResolver`` answers none).
+    """
+    unavailable = _spdr_unavailable(services)
+    if unavailable is not None:
+        return unavailable
+    assert services.sec is not None and services.cusips is not None
+    outcome = await build_spdr_snapshot(
+        services.sec,
+        services.cusips,
+        services.session_factory,
+        isin_resolver=NoIsinResolver(),
+        directory=services.assets.current(),
+        clock=clock,
+    )
+    if outcome.status == "unchanged":
+        loaded = outcome.report_date.isoformat() if outcome.report_date else "unknown"
+        return JobSkipped(
+            f"no NPORT-P quarter newer than the loaded {loaded}; nothing rebuilt"
+        )
+    if outcome.status == "aborted":
+        rule = outcome.rule if outcome.rule is not None else SnapshotRule.SEC_UNAVAILABLE
+        reason = outcome.reason or ""
+        if rule is SnapshotRule.SEC_ACCESS_REFUSED:
+            logger.error(
+                "SEC refused access to the N-PORT source; check the declared "
+                "SEC_USER_AGENT. The SPDR snapshot is not updated and the job "
+                "waits for its next weekly slot",
+                extra={
+                    "event": "spdr_snapshot_sec_access_refused",
+                    "rule": rule.value,
+                    "variable": "SEC_USER_AGENT",
+                    "at": clock().isoformat(),
+                },
+            )
+        raise SpdrSnapshotAborted(rule, reason)
+    return None
+
+
+async def _spdr_holdings_catch_up(
+    services: ContextServices, clock: UtcClock
+) -> JobSkipped | None:
+    """At start: build only when nothing was ever attempted, or the last attempt is old."""
+    unavailable = _spdr_unavailable(services)
+    if unavailable is not None:
+        return unavailable
+    attempt = latest_snapshot_attempt(services.session_factory)
+    if attempt is not None and clock() - attempt.built_at <= SPDR_HOLDINGS_CATCH_UP_AFTER:
+        return JobSkipped(
+            f"the latest SPDR snapshot attempt ({attempt.status}, report date "
+            f"{attempt.report_date.isoformat()}) was recorded at "
+            f"{attempt.built_at.isoformat()}, within "
+            f"{SPDR_HOLDINGS_CATCH_UP_AFTER.days} days; the weekly slot will look"
+        )
+    return await _spdr_holdings(services, clock)
+
+
+def _spdr_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
+    return ScheduledJob(
+        name="spdr_holdings",
+        schedule=AtTime(SPDR_HOLDINGS_AT, SPDR_HOLDINGS_DAYS),
+        run=functools.partial(_spdr_holdings, services, clock),
+        catch_up=functools.partial(_spdr_holdings_catch_up, services, clock),
+        rule=(
+            "the SPDR sector seed (ticker -> sector, the sector leaders) from "
+            "the Select Sector SPDRs' NPORT-P, CUSIPs resolved by the asset "
+            "lookup; a refused snapshot is recorded with its rule and the "
+            "previous accepted one stays current; when this fails nothing is "
+            "stored and the loaded seed stays in use, with its dates"
+        ),
+        inputs={
+            "host": SEC_DATA_HOST,
+            "endpoint": "/submissions/CIK0001064641.json",
+            "also": (
+                f"{SEC_WWW_HOST} /files/company_tickers_mf.json and "
+                f"/Archives/edgar/data/1064641/.../primary_doc.xml, "
+                f"{ALPACA_PAPER_TRADING_HOST} /v2/assets/{{cusip}}"
+            ),
+        },
+    )
+
+
 def context_jobs(
     services: ContextServices, *, clock: UtcClock = _utc_now
 ) -> list[ScheduledJob]:
@@ -1573,6 +1753,7 @@ def context_jobs(
             },
         ),
         *_news_jobs(services, clock),
+        _spdr_job(services, clock),
     ]
 
 

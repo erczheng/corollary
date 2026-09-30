@@ -61,6 +61,7 @@ WAF or proxy in front of it that reflects request headers would write one
 into a body this layer quotes.
 """
 
+import functools
 import logging
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -98,7 +99,8 @@ from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
 from corollary.api.routes.markets import UNIVERSE_SYMBOLS
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.news.pollers import NewsStore
-from corollary.data.seeds import load_spdr_seed
+from corollary.data.providers.sec import SEC_USER_AGENT_ENV
+from corollary.data.seeds.nport import CusipResolver, DatabaseSeedLoader
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
     ALPACA_LIVE_SECRET_ENV,
@@ -160,6 +162,10 @@ SECRET_ENV_VARS: Final[tuple[str, ...]] = (
     "FINNHUB_API_KEY",
     "FRED_API_KEY",
     "DISCORD_WEBHOOK_URL",
+    # Not a credential, but rule 6 treats it as one: it carries the owner's
+    # name and email, and SEC sees it on every request. sec.py scrubs it from
+    # its own errors; this scrubs it from any response body as well.
+    SEC_USER_AGENT_ENV,
 )
 
 #: ``(exception, status, code)``. Registered in this order, though order does
@@ -542,6 +548,17 @@ def _finnhub_news_source(registry: ServiceRegistry) -> FinnhubNewsSource | None:
     return cast(FinnhubNewsSource, fundamentals)
 
 
+def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
+    """The market-data provider's CUSIP lookup, for the ``spdr_holdings`` job -- or ``None``.
+
+    The same provider object the other Alpaca jobs hold, so its budgets are
+    counted once. A reference-data read on ``paper-api.``; never the broker.
+    """
+    if provider is None or not _offers(provider, ("asset_by_cusip",)):
+        return None
+    return cast(CusipResolver, provider)
+
+
 def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextServices:
     """Everything the context jobs are built from, out of this app's own state.
 
@@ -561,6 +578,7 @@ def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextService
     """
     registry: ServiceRegistry = app.state.registry
     holder: AssetDirectoryHolder = app.state.asset_directory
+    alpaca = _alpaca_context_source(registry)
     return ContextServices(
         session_factory=sessions,
         # ``None`` when FRED_API_KEY is unset -- said once, inside.
@@ -568,13 +586,17 @@ def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextService
         rates=registry.rates,
         assets=holder,
         news_store=NewsStore(session_factory=sessions, assets=holder),
-        alpaca=_alpaca_context_source(registry),
+        alpaca=alpaca,
         finnhub=_finnhub_news_source(registry),
         # ``None`` when MASSIVE_API_KEY is unset -- said once, inside.
         massive=registry.massive_provider(),
         markets=UNIVERSE_SYMBOLS,
         position_underlyings=HeldPositionUnderlyings(app.state.position_underlyings),
         seed_loader=app.state.spdr_seed_loader,
+        # ``None`` when SEC_USER_AGENT is unset -- said once, inside -- and
+        # the ``spdr_holdings`` job skips.
+        sec=registry.sec_provider(),
+        cusips=_cusip_source(alpaca),
     )
 
 
@@ -669,6 +691,12 @@ def create_app(
         # evaluates and finds nothing. That is rule 9 with nothing to judge,
         # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
+        # The SPDR seed is the accepted N-PORT snapshot in *this* database
+        # (unit 4SEC-B2). An app built without an engine learns it here; a
+        # test's own loader (any other callable) is left alone.
+        seed_loader = app.state.spdr_seed_loader
+        if isinstance(seed_loader, DatabaseSeedLoader) and not seed_loader.bound:
+            seed_loader.bind(functools.partial(Session, db_engine))
         # Decision 19: the risk-free rate derived greeks are solved at starts
         # as the latest stored FRED DGS3MO observation, or the labelled
         # default when none was ever stored. One indexed read. A failure here
@@ -895,11 +923,15 @@ def create_app(
     # ``None`` until its first success, which the watch routes refuse on
     # with a 503 rather than accept an unvalidated ticker), and the position
     # underlyings are replaced by the news cycle after it reads positions --
-    # so no news route depends on a broker. The seed loader is a callable so
-    # a test can supply a seed without writing the package's seed file.
+    # so no news route depends on a broker. The seed loader serves the latest
+    # accepted N-PORT snapshot from the database (bound in the lifespan when
+    # the engine is not known yet), and is a callable so a test can supply a
+    # seed directly.
     app.state.asset_directory = AssetDirectoryHolder()
     app.state.position_underlyings = PositionUnderlyings()
-    app.state.spdr_seed_loader = load_spdr_seed
+    app.state.spdr_seed_loader = DatabaseSeedLoader(
+        None if db_engine is None else functools.partial(Session, db_engine)
+    )
 
     for exception, status_code, code in _VENDOR_FAILURES:
         app.add_exception_handler(exception, _vendor_handler(status_code, code))

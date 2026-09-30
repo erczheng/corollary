@@ -41,6 +41,8 @@ from fastapi import FastAPI
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
+from corollary.data.seeds import SeedError
+from corollary.data.seeds.nport import DatabaseSeedLoader, invalidate_spdr_seed_cache
 from corollary.api.app import create_app
 from corollary.api.deps import (
     POSITION_UNDERLYINGS_TTL,
@@ -454,6 +456,11 @@ async def test_the_jobs_are_handed_the_app_state_the_routes_read(
         assert services.alpaca is None
         assert services.finnhub is None
         assert services.massive is None
+        # No SEC factory in a test registry, and no CUSIP lookup: the
+        # ``spdr_holdings`` job skips. The seed is the database's snapshot.
+        assert services.sec is None and services.cusips is None
+        assert isinstance(app.state.spdr_seed_loader, DatabaseSeedLoader)
+        assert app.state.spdr_seed_loader.bound
 
 
 class NewsAlpaca(FakeAlpacaContext):
@@ -869,6 +876,7 @@ _PLACEHOLDER_ENV = {
     FINNHUB_API_KEY_ENV: "placeholder-finnhub",
     FRED_API_KEY_ENV: "placeholder-fred",
     MASSIVE_API_KEY_ENV: "placeholder-massive",
+    "SEC_USER_AGENT": "Placeholder Tester placeholder.tester@example.com",  # SYNTHETIC
 }
 
 
@@ -1028,6 +1036,10 @@ async def test_nothing_the_lifespan_hands_the_jobs_can_reach_a_broker_or_the_run
             assert services.alpaca is not None and services.finnhub is not None
             assert services.massive is not None and services.fred is not None
             assert id(services.alpaca) in reached
+            # The SPDR job's two vendors (unit 4SEC-B2) are walked too: SEC,
+            # and the CUSIP lookup -- the very market-data provider, not a broker.
+            assert services.sec is not None and id(services.sec) in reached
+            assert services.cusips is services.alpaca
 
         # The import half: every module an object in the services comes from
         # is corollary code the scan may walk, and none of it -- transitively
@@ -1091,3 +1103,58 @@ async def test_shutdown_waits_for_a_jobs_in_flight_database_write(db_engine: Eng
         threading.Timer(0.3, release.set).start()
     order.append("lifespan returned")
     assert order == ["thread committed", "lifespan returned"]
+
+
+# --------------------------------------------------------------------------
+# The SPDR seed is the database's accepted N-PORT snapshot (unit 4SEC-B2)
+# --------------------------------------------------------------------------
+
+
+def test_the_apps_seed_loader_serves_the_accepted_snapshot_from_its_database(
+    db_engine: Engine,
+) -> None:
+    from datetime import date
+    from decimal import Decimal
+
+    from corollary.data.seeds import SPDR_SECTORS
+    from corollary.db.models import SpdrHoldingRow, SpdrHoldingsSnapshot
+
+    invalidate_spdr_seed_cache()
+    app = create_app(db_engine=db_engine)
+    loader = app.state.spdr_seed_loader
+    assert isinstance(loader, DatabaseSeedLoader) and loader.bound
+    assert loader() is None  # nothing accepted: no leaders, seedMissing
+    with Session(db_engine) as session, session.begin():
+        refused = SpdrHoldingsSnapshot(
+            report_date=date(2026, 6, 30), filed_date=date(2026, 8, 28), built_at=NOW,
+            status="refused", rule="weight_band", reason="XLB below 90", skipped_lines=29,
+        )
+        session.add(refused)
+    assert loader() is None  # a refusal is not a seed
+    with Session(db_engine) as session, session.begin():
+        snap = SpdrHoldingsSnapshot(
+            report_date=date(2026, 3, 31), filed_date=date(2026, 5, 29), built_at=NOW,
+            status="accepted", rule=None, reason=None, skipped_lines=0,
+        )
+        session.add(snap)
+        session.flush()
+        for n, (etf, sector) in enumerate(SPDR_SECTORS.items()):
+            for i in range(5):
+                session.add(SpdrHoldingRow(
+                    snapshot_id=snap.id, etf=etf, symbol=f"{etf}{chr(65 + i)}", sector=sector,
+                    series_id="S000000000", accession="0000000000-26-000000",
+                    cusip=f"SYN{n:05d}{i}", name="SYNTHETIC", weight=Decimal("20"),
+                ))
+    seed = loader()
+    assert seed is not None
+    assert seed.as_of == date(2026, 3, 31)
+    assert seed.newer_report_date == date(2026, 6, 30)
+    assert seed.sector_of("XLKA") == SPDR_SECTORS["XLK"]
+    invalidate_spdr_seed_cache()
+
+
+def test_an_unbound_seed_loader_refuses_rather_than_answering_no_seed() -> None:
+    loader = DatabaseSeedLoader()
+    assert not loader.bound
+    with pytest.raises(SeedError, match="not bound"):
+        loader()
