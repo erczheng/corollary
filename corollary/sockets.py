@@ -285,6 +285,11 @@ class RepeatedWarning:
       ``occurrence="aggregate"``, carrying the count (``suppressed``, which
       includes that repeat), when the window opened, and the latest sample --
       then opens a new window;
+    - :meth:`report_due` reports every pending count whose window has run
+      the interval, and opens a new window for it. The stream calls it on
+      every frame, of any kind, so a burst that *stops* is still counted
+      within about one interval while the socket keeps talking -- rather
+      than whenever the fault next recurs, which may be hours;
     - :meth:`flush` reports a pending count and closes every window. The
       stream calls it when a session ends, so a count is never left unsaid
       because the fault stopped, or the socket did;
@@ -293,8 +298,10 @@ class RepeatedWarning:
 
     Keyed by ``rule`` so a *new* kind of failure is loud on arrival rather
     than folded into an old one's count. Callers pass a small fixed
-    vocabulary (the exception type), never vendor text, so the key set is
-    bounded.
+    vocabulary naming *what* failed -- the quote field, the decode failure's
+    class chain -- never vendor text, so the key set is bounded. A key as
+    coarse as one exception class every fault shares would make this a
+    single bucket, which is the failure the keying exists to prevent.
 
     **Logging only.** Nothing here records activity, opens or closes a
     socket, or can halt: rule 9's inputs are recorded by
@@ -348,6 +355,27 @@ class RepeatedWarning:
         tally.suppressed += 1
         tally.message = message % args
         tally.extra = dict(extra)
+
+    def report_due(self) -> None:
+        """Report each pending count whose window has run the interval.
+
+        A reported window is replaced by a new one opened now, exactly as
+        :meth:`warn` does at the boundary, so a fault that resumes inside it
+        is counted rather than loud. A window that ran the interval with
+        nothing pending is closed, so the rule's next occurrence is a new
+        episode and loud. Cheap when nothing is open: it is called per frame.
+        """
+        if not self._tallies:
+            return
+        at = self._now()
+        for rule, tally in list(self._tallies.items()):
+            if at - tally.since < self._interval:
+                continue
+            if tally.suppressed:
+                self._report(rule, tally)
+                self._tallies[rule] = _Tally(at)
+            else:
+                del self._tallies[rule]
 
     def flush(self) -> None:
         """Report every pending count, once, and close every window."""

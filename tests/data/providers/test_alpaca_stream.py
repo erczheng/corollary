@@ -1831,10 +1831,12 @@ async def test_a_flood_of_unreadable_quotes_is_loud_once_then_counted(
 
     records = records_for(caplog, "stream_quote_unreadable")
     assert [r.occurrence for r in records] == ["first", "aggregate", "aggregate"]
-    assert records[0].rule == "ProviderError"
+    assert [r.rule for r in records] == ["t", "t", "t"], "keyed on the field"
     assert "1790707644" in records[0].getMessage(), "the first carries its sample"
-    assert records[1].suppressed == 50  # 49 in the window, plus the one past it
-    assert records[2].suppressed == 9  # the rest, reported when the session ends
+    # The first frame past the interval reports the window's 49 on arrival,
+    # before its own quote is read; that quote opens the next window.
+    assert records[1].suppressed == 49
+    assert records[2].suppressed == 10  # the rest, reported when the session ends
     assert 1 + records[1].suppressed + records[2].suppressed == 60, "none unaccounted"
 
 
@@ -1873,3 +1875,121 @@ async def test_unreadable_frames_count_as_activity_and_never_close_the_stream() 
     assert received == []
     assert len(recorder.messages) == 13  # 3 handshake frames + 10 bad ones
     assert len(recorder.closes) == 1, "only the vendor close at the end"
+
+
+async def test_a_new_field_fault_is_loud_while_another_fields_window_is_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bucket is the field that failed, not the exception class.
+
+    Nearly every fault in the translation arrives as ``ProviderError``, so a
+    bucket keyed on the class was one bucket for every quote fault: a ``bp``
+    that broke while ``t`` was already broken was folded into ``t``'s count
+    and never logged in full.
+    """
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [[{**quote_frame(CONTRACT), "t": 1790707644}] for _ in range(5)]
+    frames.append([{**quote_frame(CONTRACT), "bp": "not-a-price"}])
+    frames.append([{**quote_frame(CONTRACT), "as": "not-a-size"}])
+    frames.append([{k: v for k, v in quote_frame(CONTRACT).items() if k != "S"}])
+    client, _, _, _ = build(frames, plan=option_plan(CONTRACT))
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+    records = records_for(caplog, "stream_quote_unreadable")
+    assert [(r.rule, r.occurrence) for r in records] == [
+        ("t", "first"),
+        ("bp", "first"),
+        ("as", "first"),
+        ("symbol", "first"),
+        ("t", "aggregate"),  # the four repeats, reported when the session ends
+    ]
+    assert records[4].suppressed == 4
+    assert "not-a-price" in records[1].getMessage(), "the new fault carries its sample"
+
+
+async def test_a_bursts_tail_is_reported_within_an_interval_while_frames_flow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A burst that stops is still counted on time, not at session end."""
+    clock = Clock()
+    bad = {**quote_frame(CONTRACT), "t": 1790707644}
+    seen: list[int] = []
+
+    def aggregates() -> None:
+        seen.append(
+            sum(
+                1
+                for r in records_for(caplog, "stream_quote_unreadable")
+                if r.occurrence == "aggregate"
+            )
+        )
+
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [[bad] for _ in range(10)]
+    for _ in range(7):  # good quotes every 10 s after the burst stops
+        frames.append(lambda: clock.advance(10))
+        frames.append([quote_frame(CONTRACT)])
+        frames.append(aggregates)
+    client, _, _, received = build(frames, plan=option_plan(CONTRACT), now=clock)
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+
+    assert len(received) == 7
+    # Nothing at 10..50 s; reported by the frame at 60 s -- one interval.
+    assert seen == [0, 0, 0, 0, 0, 1, 1]
+    records = records_for(caplog, "stream_quote_unreadable")
+    assert [r.occurrence for r in records] == ["first", "aggregate"]
+    assert records[1].suppressed == 9, "the whole tail, once, and not again at flush"
+
+
+async def test_a_new_kind_of_undecodable_frame_is_loud_on_arrival(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Not-msgpack and non-finite are both ``WireFormatError``; not one bucket."""
+    non_finite = quote_frame()
+    non_finite["bs"] = float("nan")
+    frames: list[Any] = [CONNECTED, AUTHENTICATED, subscription(CONTRACT)]
+    frames += [RawFrame(UNDECODABLE) for _ in range(3)]
+    frames.append([non_finite])
+    client, _, _, _ = build(frames, plan=option_plan(CONTRACT))
+    with caplog.at_level("WARNING"):
+        with pytest.raises(SocketClosed):
+            await client.run_session()
+    records = records_for(caplog, "stream_frame_undecodable")
+    assert [r.occurrence for r in records] == ["first", "first", "aggregate"]
+    assert records[0].rule != records[1].rule
+    assert records[2].rule == records[0].rule
+    assert records[2].suppressed == 2
+
+
+class _Hostile:
+    """SYNTHETIC: every conversion raises -- a vendor value nobody expected."""
+
+    def __str__(self) -> str:
+        raise RecursionError("str")
+
+    __repr__ = __str__
+
+    def __int__(self) -> int:
+        raise OverflowError("int")
+
+    def __float__(self) -> float:
+        raise MemoryError("float")
+
+
+@pytest.mark.parametrize("field", ["S", "bp", "ap", "bs", "as", "t"])
+async def test_the_fault_classifier_never_raises_on_a_hostile_value(field: str) -> None:
+    """It runs inside ``_publish``'s except: a raise there would escape the
+    session loop and kill the socket with no close recorded."""
+    from corollary.data.providers.alpaca import AlpacaQuoteStream
+
+    message = {"S": "SPY260930C00500000", "bp": 1, "ap": 1, "bs": 1, "as": 1, "t": "x", field: _Hostile()}
+    assert AlpacaQuoteStream._unreadable_field(message) in {"symbol", "bp", "ap", "bs", "as", "t", "other"}
+
+
+async def test_the_classifier_covers_every_field_the_quote_reader_reads() -> None:
+    from corollary.data.providers.alpaca import AlpacaQuoteStream
+
+    assert [f for f, _ in AlpacaQuoteStream._QUOTE_FIELD_READERS] == ["bp", "ap", "bs", "as", "t"]

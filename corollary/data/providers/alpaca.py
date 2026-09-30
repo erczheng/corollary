@@ -2401,7 +2401,11 @@ class AlpacaQuoteStream(VendorStream):
         #: The two per-frame warnings, loud once per rule and then counted.
         #: 2026-09-29: the option stream's msgpack Timestamp ``t`` was refused
         #: on every quote and logged 632 identical lines in ~25 minutes. See
-        #: :class:`corollary.sockets.RepeatedWarning`. Flushed when a session
+        #: :class:`corollary.sockets.RepeatedWarning`. The quote bucket is
+        #: keyed on the field that failed (:meth:`_unreadable_field`), the
+        #: frame bucket on the failure's class chain (:meth:`_undecodable_kind`)
+        #: -- never on one class every fault shares. Due counts are reported
+        #: on every frame (:meth:`_messages`) and flushed when a session
         #: ends, so a count is never left unsaid. Logging only -- neither
         #: touches rule 9's inputs, which ``VendorStream`` records before a
         #: frame is decoded.
@@ -2487,11 +2491,17 @@ class AlpacaQuoteStream(VendorStream):
         explanation into a parse failure loses exactly the thing worth
         reading.
         """
+        # Any frame, readable or not, is the clock that reports a burst's
+        # tail: a fault that stopped is still counted within about one
+        # interval, not whenever it next recurs. Logging only -- the frame was
+        # already recorded as activity by `VendorStream`, before this.
+        self._unreadable_quotes.report_due()
+        self._undecodable_frames.report_due()
         try:
             decoded = self._codec.decode(frame)
         except Exception as exc:  # WireFormatError, and whatever msgpack raises
             self._undecodable_frames.warn(
-                type(exc).__name__,
+                self._undecodable_kind(exc),
                 "undecodable frame on the %s stream: %s",
                 self._stream.label,
                 self._detail(str(exc)),
@@ -2573,9 +2583,9 @@ class AlpacaQuoteStream(VendorStream):
             quote = _quote(symbol, message)
         except (ProviderError, ArithmeticError, KeyError, TypeError, ValueError) as exc:
             detail = self._detail(str(exc))
-            # Loud once per rule, then counted: see `_unreadable_quotes`.
+            # Loud once per field, then counted: see `_unreadable_quotes`.
             self._unreadable_quotes.warn(
-                type(exc).__name__,
+                self._unreadable_field(message),
                 "unreadable quote on the %s stream: %s",
                 self._stream.label,
                 detail,
@@ -2609,6 +2619,58 @@ class AlpacaQuoteStream(VendorStream):
                 },
                 exc_info=True,
             )
+
+    #: The fields `_quote` reads, in the order it reads them, each with the
+    #: reader it uses. Only :meth:`_unreadable_field` consults this.
+    _QUOTE_FIELD_READERS: Final[tuple[tuple[str, Callable[[Any], object]], ...]] = (
+        ("bp", _price_or_none),
+        ("ap", _price_or_none),
+        ("bs", _as_int),
+        ("as", _as_int),
+        ("t", _as_datetime),
+    )
+
+    @classmethod
+    def _unreadable_field(cls, message: Mapping[str, Any]) -> str:
+        """Which field an unreadable quote failed on -- a fixed vocabulary.
+
+        ``symbol``, ``bp``, ``ap``, ``bs``, ``as``, ``t``, or ``other``: the
+        :class:`~corollary.sockets.RepeatedWarning` key, so a *second* field
+        breaking is loud on arrival instead of folded into the first one's
+        count. Nearly every fault in the translation is a ``ProviderError``
+        (via ``translating``), so the exception class could not tell them
+        apart. Derived by re-reading each field with `_quote`'s own reader,
+        in `_quote`'s order -- never from the error text, which is the
+        vendor's. Runs only on the failure path. ``other`` is the honest
+        answer when no single field fails alone (a sink-side or constructor
+        fault, or a field `_quote` gains before this list does).
+        """
+        symbol = message.get("S")
+        if not isinstance(symbol, str) or not symbol:
+            return "symbol"
+        for field, read in cls._QUOTE_FIELD_READERS:
+            if field not in message and field == "t":
+                return "t"  # `_quote` indexes ``t``; the others default
+            try:
+                read(message.get(field))
+            except Exception:  # classification only: any failure names the field
+                return field
+        return "other"
+
+    @staticmethod
+    def _undecodable_kind(exc: BaseException) -> str:
+        """An undecodable frame's key: its class, and its cause's if it has one.
+
+        ``WireFormatError`` alone covers not-UTF-8, not-msgpack, not-JSON and
+        a non-finite number; the cause is what differs (``UnicodeDecodeError``,
+        msgpack's own class, ``JSONDecodeError``, none). Class names are ours
+        or a library's -- a bounded set, never vendor text.
+        """
+        name = type(exc).__name__
+        cause = exc.__cause__
+        if cause is None:
+            return name
+        return f"{name}<-{type(cause).__name__}"
 
     async def run_session(self) -> None:
         """One connection, and one thing to forget before it: what was subscribed.

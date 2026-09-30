@@ -476,3 +476,48 @@ async def test_after_a_quiet_interval_the_next_occurrence_is_loud_again(
     records = _throttle_records(caplog)
     assert [r.occurrence for r in records] == ["first", "first"]
     assert records[1].getMessage() == "unreadable: b"
+
+
+async def test_report_due_reports_a_pending_count_once_its_window_has_passed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A burst's tail is reported by time, not by the fault recurring.
+
+    Before ``report_due`` the only reporters were the next occurrence past
+    the interval and ``flush()``: a thirty-second burst at 10:00 was counted
+    and then said nothing until the fault next happened or the session ended,
+    which could be hours.
+    """
+    clock = Clock()
+    throttle = _throttle(clock)
+    with caplog.at_level("WARNING"):
+        throttle.report_due()  # nothing open: nothing to say
+        throttle.warn("ProviderError", "unreadable: %s", "a", extra={})
+        throttle.warn("ProviderError", "unreadable: %s", "b", extra={})
+        throttle.warn("ProviderError", "unreadable: %s", "c", extra={"symbol": "Z"})
+        clock.advance(REPEATED_WARNING_INTERVAL.total_seconds() - 1)
+        throttle.report_due()  # the window is still open
+        assert len(_throttle_records(caplog)) == 1
+        clock.advance(1)
+        throttle.report_due()
+        throttle.report_due()  # a count is reported exactly once
+        throttle.flush()  # and flush does not report it a second time
+    records = _throttle_records(caplog)
+    assert [r.occurrence for r in records] == ["first", "aggregate"]
+    assert records[1].suppressed == 2
+    assert records[1].symbol == "Z"
+    assert "unreadable: c" in records[1].getMessage()
+
+
+async def test_report_due_leaves_a_quiet_window_to_expire_and_the_next_is_loud(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = Clock()
+    throttle = _throttle(clock)
+    with caplog.at_level("WARNING"):
+        throttle.warn("ProviderError", "unreadable: %s", "a", extra={})
+        clock.advance(REPEATED_WARNING_INTERVAL.total_seconds())
+        throttle.report_due()  # nothing pending: nothing to report
+        throttle.warn("ProviderError", "unreadable: %s", "b", extra={})
+    records = _throttle_records(caplog)
+    assert [r.occurrence for r in records] == ["first", "first"]
