@@ -680,3 +680,91 @@ async def test_requests_to_both_sec_hosts_are_paced_by_one_bucket() -> None:
     await provider.nport_holdings(filings.filings[2].accession)  # www, fifth
     assert clock.slept == [pytest.approx(0.25)]
     assert {r.url.host for r in recorder.requests} == {SEC_DATA_HOST, SEC_WWW_HOST}
+
+
+# ------------------------------------------------------------ the real recording
+#
+# tests/fixtures/sec/ is SEC as served on 2026-09-28 (ce8696a): the trust's 22
+# NPORT-P rows for 2026-06-30, the eleven sector funds' primary_doc.xml byte for
+# byte, and one Premium Income header. The ten Premium Income documents nobody
+# recorded are served that one header -- same trust, same quarter, another series.
+
+REAL = Path(__file__).resolve().parents[2] / "fixtures" / "sec"
+REAL_SERIES = {
+    "XLB": "S000006414", "XLC": "S000062095", "XLE": "S000006410", "XLF": "S000006411",
+    "XLI": "S000006413", "XLK": "S000006415", "XLP": "S000006409", "XLRE": "S000051152",
+    "XLU": "S000006416", "XLV": "S000006412", "XLY": "S000006408",
+}
+REAL_ACCESSIONS = {
+    json.loads((REAL / f"nport_{t}_primary_doc.meta.json").read_text("utf-8"))["accession"]: t
+    for t in REAL_SERIES
+}
+
+
+def real_route(request: httpx.Request) -> httpx.Response:
+    url = request.url
+    if url.host == SEC_WWW_HOST and url.path == "/files/company_tickers_mf.json":
+        return httpx.Response(200, text=(REAL / "company_tickers_mf.trimmed.json").read_text("utf-8"))
+    if url.host == SEC_DATA_HOST and url.path == "/submissions/CIK0001064641.json":
+        return httpx.Response(200, text=(REAL / "CIK0001064641.trimmed.json").read_text("utf-8"))
+    prefix = "/Archives/edgar/data/1064641/"
+    if url.host == SEC_WWW_HOST and url.path.startswith(prefix):
+        digits = url.path[len(prefix):].split("/")[0]
+        ticker = REAL_ACCESSIONS.get(f"{digits[:10]}-{digits[10:12]}-{digits[12:]}")
+        name = (
+            f"nport_{ticker}_primary_doc.xml" if ticker
+            else "nport_excluded_S000093831_header.xml"
+        )
+        return httpx.Response(200, content=(REAL / name).read_bytes())
+    raise AssertionError(f"unrouted {request.method} {url}")
+
+
+async def test_real_the_eleven_are_selected_among_the_trusts_twenty_two() -> None:
+    provider, recorder = make(real_route)
+    series = await provider.sector_fund_series()
+    filings = await provider.latest_nport_filings()
+    assert series == REAL_SERIES
+    assert filings.report_date == QUARTER
+    assert len(filings.originals) == 22 and filings.amendments == ()
+    docs = [(f, await provider.nport_holdings(f.accession)) for f in filings.filings]
+    selection = select_sector_documents(series, docs, filings=filings)
+
+    assert {t: f.series_id for t, f in selection.funds.items()} == REAL_SERIES
+    assert {f.filing.accession: t for t, f in selection.funds.items()} == REAL_ACCESSIONS
+    assert all(f.filing.filing_date == date(2026, 8, 28) for f in selection.funds.values())
+    assert selection.excluded_series == ("S000093831",)
+    assert selection.amended == () and selection.unattributed_amendments == ()
+    archive = [r for r in recorder.requests if "/Archives/" in r.url.path]
+    assert len(archive) == 22
+
+
+@pytest.mark.parametrize(
+    ("ticker", "holdings", "equity", "categories"),
+    [("XLK", 79, 74, {"DE", "EC", "STIV"}), ("XLU", 36, 31, {"DE", "EC", "STIV"}), ("XLE", 21, 21, {"EC"})],
+)
+async def test_real_only_ec_lines_are_equity(
+    ticker: str, holdings: int, equity: int, categories: set[str]
+) -> None:
+    document = parse_nport_document((REAL / f"nport_{ticker}_primary_doc.xml").read_bytes())
+    assert document.series_id == REAL_SERIES[ticker]
+    assert document.report_date == QUARTER and document.skipped == 0
+    assert len(document.holdings) == holdings
+    assert {h.asset_cat for h in document.holdings} == categories
+    assert len(document.equity) == equity
+    assert all(h.asset_cat == "EC" for h in document.equity)
+
+
+async def test_real_ec_lines_without_a_cusip_are_isin_only_issuers_not_cash() -> None:
+    """The 29 are foreign-domiciled members with ``000000000`` and a real ISIN."""
+    no_cusip: dict[str, list[str]] = {}
+    for ticker in REAL_SERIES:
+        raw = (REAL / f"nport_{ticker}_primary_doc.xml").read_bytes()
+        for h in parse_nport_document(raw).equity:
+            if h.cusip is None:
+                assert h.isin is not None and h.isin[:2] != "US", h
+                assert h.pct_val > 0
+                no_cusip.setdefault(ticker, []).append(h.name)
+    assert {t: len(v) for t, v in no_cusip.items()} == {
+        "XLB": 5, "XLF": 6, "XLI": 5, "XLK": 5, "XLP": 1, "XLV": 2, "XLY": 5
+    }
+    assert "Linde PLC" in no_cusip["XLB"] and "Chubb Ltd" in no_cusip["XLF"]

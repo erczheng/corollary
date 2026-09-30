@@ -89,7 +89,15 @@ AS_OF_LABEL: Final = "as_of"
 SEED_COLUMNS: Final[tuple[str, str, str, str]] = ("etf", "sector", "symbol", "weight")
 
 #: Decision 6: the panel warns once the seed is *more than* this many days old.
+#: Applies to the hand-built CSV seed only.
 STALE_AFTER_DAYS: Final = 100
+
+#: **ASSUMPTION** (owner, Phase 3 step 4): an N-PORT snapshot is always 2-5
+#: months old when it is filed, so decision 6's 100 days would warn
+#: permanently. A snapshot built from N-PORT warns when its report date is
+#: *more than* about this many days old -- or when a newer filing exists that
+#: has not been loaded (:attr:`SpdrSeed.newer_report_date`).
+NPORT_STALE_AFTER_DAYS: Final = 200
 
 #: How many leaders per fund the consensus roll-up takes (decision 6).
 LEADERS_PER_FUND: Final = 5
@@ -155,6 +163,14 @@ class SpdrSeed:
 
     as_of: date
     rows: tuple[SpdrHolding, ...]
+    #: When the source was filed -- N-PORT's filing date. ``None`` for the CSV seed.
+    filed_date: date | None = None
+    #: The report date of a newer filing that was seen but not loaded (its
+    #: snapshot was refused), or ``None``. Always ``None`` for the CSV seed.
+    newer_report_date: date | None = None
+    #: The age past which :meth:`is_stale` warns: :data:`STALE_AFTER_DAYS` for
+    #: the CSV seed, :data:`NPORT_STALE_AFTER_DAYS` for an N-PORT snapshot.
+    stale_after_days: int = STALE_AFTER_DAYS
     _sector_by_symbol: Mapping[str, str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -213,8 +229,29 @@ class SpdrSeed:
         return (today - self.as_of).days
 
     def is_stale(self, today: date) -> bool:
-        """Decision 6's warning: *more than* :data:`STALE_AFTER_DAYS` old."""
-        return self.age_days(today) > STALE_AFTER_DAYS
+        """Warn? True when any of :meth:`staleness` applies."""
+        return bool(self.staleness(today))
+
+    def staleness(self, today: date) -> tuple[str, ...]:
+        """Why the seed is stale, as sentences; empty when it is not.
+
+        *More than* :attr:`stale_after_days` old (decision 6's 100 for the CSV
+        seed; the assumed 200 for N-PORT), or a newer filing exists but its
+        snapshot was not loaded.
+        """
+        reasons: list[str] = []
+        if self.newer_report_date is not None:
+            reasons.append(
+                f"a newer filing (report date {self.newer_report_date.isoformat()}) "
+                "exists but has not been loaded"
+            )
+        age = self.age_days(today)
+        if age > self.stale_after_days:
+            reasons.append(
+                f"the holdings are as of {self.as_of.isoformat()}, {age} days old "
+                f"(more than {self.stale_after_days})"
+            )
+        return tuple(reasons)
 
 
 def _heavier(row: SpdrHolding, current: SpdrHolding) -> bool:

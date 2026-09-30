@@ -62,7 +62,13 @@ EXPECTED_TABLES = {
     "ticker_tradeability",
     # 0009 -- owner decision Q12: the vendor's IPO date, cached per ticker
     "ticker_ipo_date",
+    # 0010 -- step 4: the SPDR sector seed, built from SEC N-PORT
+    "spdr_holdings_snapshot",
+    "spdr_holding",
 }
+
+#: Everything 0010 created.
+_0010_TABLES = {"spdr_holdings_snapshot", "spdr_holding"}
 
 #: Everything 0008 created, so a downgrade past it can say so once.
 _0008_TABLES = {
@@ -115,7 +121,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -142,7 +148,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0009"]
+    assert script.get_heads() == ["0010"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -155,7 +161,7 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert EXPECTED_TABLES - {"ticker_ipo_date"} <= tables
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -163,6 +169,25 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     eng.dispose()
     assert EXPECTED_TABLES <= tables
 
+
+
+def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
+    """The two snapshot tables come and go together; 0009's are untouched."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0009")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert tables & _0010_TABLES == set()
+    assert EXPECTED_TABLES - _0010_TABLES <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
 
 _OPERATOR_EVENTS = {
     "operator_halt",
@@ -234,7 +259,10 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "fred_observation" not in tables
-    assert EXPECTED_TABLES - {"fred_observation", "ticker_ipo_date"} - _0008_TABLES <= tables
+    assert (
+        EXPECTED_TABLES - {"fred_observation", "ticker_ipo_date"} - _0008_TABLES - _0010_TABLES
+        <= tables
+    )
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -286,3 +314,63 @@ def test_downgrade_removes_everything(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & EXPECTED_TABLES == set()
+
+
+# Autogenerate does not compare CHECK constraints, so the model/migration match
+# test above cannot see a CHECK that one side has and the other lacks. These run
+# the same rows against both.
+_SPDR_ID_CASES = [
+    # (cusip, isin, accepted)
+    ("67066G104", None, True),  # a CUSIP line
+    (None, "IE000S9YS762", True),  # an ISIN-only line resolved through the seam
+    ("67066G104", "US67066G1040", True),
+    (None, None, False),  # ck_spdr_holding_identifier: nothing to trace it by
+    ("67066G10", None, False),  # ck_spdr_holding_cusip: eight characters
+    ("67066g104", None, False),  # ck_spdr_holding_cusip: lower case
+    (None, "IE000S9YS76", False),  # ck_spdr_holding_isin: eleven characters
+    (None, "ie000s9ys762", False),  # ck_spdr_holding_isin: lower case
+]
+
+
+@pytest.mark.parametrize("built_by", ["alembic", "models"])
+@pytest.mark.parametrize(("cusip", "isin", "accepted"), _SPDR_ID_CASES)
+def test_0010_spdr_holding_identifier_checks(
+    db_path: Path, built_by: str, cusip: str | None, isin: str | None, accepted: bool
+) -> None:
+    from datetime import date, datetime, timezone
+
+    from sqlalchemy.exc import IntegrityError
+
+    from corollary.db.models import SpdrHoldingRow, SpdrHoldingsSnapshot
+
+    url = sqlite_url(db_path)
+    if built_by == "alembic":
+        command.upgrade(_config(url), "head")
+        eng = create_db_engine(url)
+    else:
+        eng = create_db_engine(url)
+        Base.metadata.create_all(eng)
+    try:
+        with Session(eng) as sess, sess.begin():
+            snap = SpdrHoldingsSnapshot(
+                report_date=date(2026, 6, 30), filed_date=date(2026, 8, 28),
+                built_at=datetime(2026, 9, 28, tzinfo=timezone.utc),
+                status="accepted", rule=None, reason=None, skipped_lines=0,
+            )
+            sess.add(snap)
+            sess.flush()
+            snapshot_id = snap.id
+        row = SpdrHoldingRow(
+            snapshot_id=snapshot_id, etf="XLB", symbol="SYNA", sector="Materials",
+            series_id="S000006414", accession="0000000000-26-000000",
+            cusip=cusip, isin=isin, name="SYNTHETIC", weight=Decimal("1.5"),
+        )
+        with Session(eng) as sess:
+            sess.add(row)
+            if accepted:
+                sess.commit()
+            else:
+                with pytest.raises(IntegrityError):
+                    sess.commit()
+    finally:
+        eng.dispose()

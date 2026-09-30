@@ -1496,3 +1496,122 @@ class TickerIpoDate(Base):
     ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
     ipo_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+#: A snapshot attempt is one of these (migration 0010). ``refused`` is
+#: recorded so the UI can say why the seed did not move, and never becomes
+#: current.
+SPDR_SNAPSHOT_STATUSES: tuple[str, ...] = ("accepted", "refused")
+
+
+class SpdrHoldingsSnapshot(Base):
+    """One attempt to build the SPDR sector seed from a quarter's N-PORT filings.
+
+    Phase 3 step 4, owner decision: the eleven Select Sector SPDRs' holdings
+    come from SEC N-PORT, with CUSIPs resolved to tickers by Alpaca, and are
+    stored here rather than written into the source tree. The builder is
+    :mod:`corollary.data.seeds.nport`.
+
+    **The current seed is the latest ``accepted`` row** -- by ``report_date``,
+    then ``id``. A ``refused`` row records the rule and the reason the
+    attempt failed validation (fail closed: the previous accepted snapshot
+    stays current) and holds no ``spdr_holding`` rows. An attempt that was
+    *aborted* -- SEC refused access, or a CUSIP lookup failed with something
+    other than "unknown" -- stores nothing at all and is retried next run.
+
+    ``report_date`` is N-PORT's ``repPdDate`` (the holdings' as-of date) for
+    the quarter the filing index named; ``filed_date`` is the latest filing
+    date among the funds' filings. ``built_at`` is when the attempt finished,
+    UTC -- deliberately not called ``loaded_at``, since a refused attempt
+    loaded nothing. ``skipped_lines`` counts equity lines that were logged and
+    skipped (no CUSIP, a CUSIP Alpaca does not know, an unusable symbol or
+    weight).
+    """
+
+    __tablename__ = "spdr_holdings_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('accepted', 'refused')",
+            name="ck_spdr_holdings_snapshot_status",
+        ),
+        # An accepted snapshot carries no refusal; a refused one always says why.
+        CheckConstraint(
+            "(status = 'accepted' AND rule IS NULL AND reason IS NULL) OR "
+            "(status = 'refused' AND rule IS NOT NULL AND rule <> '' "
+            "AND reason IS NOT NULL AND reason <> '')",
+            name="ck_spdr_holdings_snapshot_verdict",
+        ),
+        CheckConstraint(
+            "typeof(skipped_lines) = 'integer' AND skipped_lines >= 0",
+            name="ck_spdr_holdings_snapshot_skipped_lines",
+        ),
+        Index("ix_spdr_holdings_snapshot_status_report_date", "status", "report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    filed_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    built_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skipped_lines: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class SpdrHoldingRow(Base):
+    """One resolved common-equity holding of one fund in an accepted snapshot.
+
+    ``weight`` is N-PORT's ``pctVal`` -- percent of the fund's net assets --
+    as the exact decimal text the filing wrote, stored as ``Money`` (TEXT).
+    SQL comparison of it is refused; the loader compares in Python.
+
+    ``series_id`` and ``accession`` name the fund's filing, so any row traces
+    back to the document it came from. ``symbol`` is Alpaca's answer for the
+    ``cusip``, class shares in the dot form (``BRK.B``); a symbol is never
+    derived from ``name``. A line N-PORT filed with no CUSIP (``000000000``)
+    and only an ISIN is stored with ``cusip`` NULL and the ``isin`` that an
+    :class:`~corollary.data.seeds.nport.IsinResolver` answered for; ``isin``
+    is also kept, when the filing gave one, on CUSIP-resolved rows. Every row
+    carries at least one of the two (CHECK). The key is ``(snapshot_id, etf, symbol)`` -- the
+    seed's own invariant that no symbol appears twice within a fund.
+    """
+
+    __tablename__ = "spdr_holding"
+    __table_args__ = (
+        CheckConstraint(
+            "etf <> '' AND etf = upper(etf)", name="ck_spdr_holding_etf"
+        ),
+        CheckConstraint(
+            "symbol <> '' AND symbol = upper(symbol)", name="ck_spdr_holding_symbol"
+        ),
+        CheckConstraint(
+            "cusip IS NULL OR (length(cusip) = 9 AND cusip = upper(cusip))",
+            name="ck_spdr_holding_cusip",
+        ),
+        CheckConstraint(
+            "isin IS NULL OR (length(isin) = 12 AND isin = upper(isin))",
+            name="ck_spdr_holding_isin",
+        ),
+        CheckConstraint(
+            "cusip IS NOT NULL OR isin IS NOT NULL", name="ck_spdr_holding_identifier"
+        ),
+        CheckConstraint(
+            f"({_money_shape('weight')}) AND substr(weight, 1, 1) <> '-'",
+            name="ck_spdr_holding_weight",
+        ),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("spdr_holdings_snapshot.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    etf: Mapped[str] = mapped_column(String(8), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    sector: Mapped[str] = mapped_column(String(64), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(10), nullable=False)
+    accession: Mapped[str] = mapped_column(String(20), nullable=False)
+    cusip: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    isin: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    weight: Mapped[Decimal] = mapped_column(Money, nullable=False)
