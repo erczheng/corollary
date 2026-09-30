@@ -103,7 +103,8 @@ Consequences, in order of cost:
    economic calendar's *"consensus, prior, actual"* is the premium half. See Q3.
 2. **Sector leaders cannot come from an endpoint.** `/etf/holdings` is premium,
    and so is `/index/constituents`, which would have been the fallback for the
-   breadth universe. Decision 6 uses a committed seed.
+   breadth universe. Decision 6 uses a seed — since Q14, built from the
+   trust's SEC N-PORT filings.
 3. **Dividends need a different vendor.** Alpaca's corporate actions endpoint is
    the candidate; whether it returns *announced* future ex-dates is unverified.
 4. What is free is exactly what Phase 3 needs from Finnhub apart from the above:
@@ -325,6 +326,42 @@ the default `python-httpx/0.28.1` user agent:
   FRED URL carries the key, and nothing may log one unredacted, exception
   messages included (`httpx` errors quote the request URL).
 
+### SEC N-PORT
+
+Added with Q14. **Researched 2026-09-26; recorded live 2026-09-28** (ce8696a,
+`tests/fixtures/sec/`).
+
+- **The filer is the Select Sector SPDR Trust, CIK 0001064641.** CIK 1100949
+  carries a similar name and is dead. The filing index is
+  `https://data.sec.gov/submissions/CIK0001064641.json`; each filing's holdings
+  are its `primary_doc.xml` under `https://www.sec.gov/Archives/edgar/data/`.
+- **22 NPORT-P filings per quarter**, one per series: the 11 sector funds and
+  11 Premium Income funds, series **S000093831–S000093841**, which are
+  excluded. A filing is selected by `seriesId`, never by name:
+
+  | Fund | Series | Fund | Series |
+  |---|---|---|---|
+  | XLB | S000006414 | XLP | S000006409 |
+  | XLC | S000062095 | XLRE | S000051152 |
+  | XLE | S000006410 | XLU | S000006416 |
+  | XLF | S000006411 | XLV | S000006412 |
+  | XLI | S000006413 | XLY | S000006408 |
+  | XLK | S000006415 | | |
+
+- **Latency: ~58 days.** The recorded filings report **2026-06-30** and were
+  filed **2026-08-28**.
+- **Holdings are the `assetCat=EC` lines, weighted by `pctVal`.** Per fund, EC
+  `pctVal` sums to **99.45–99.93** across the eleven.
+- **29 EC lines carry only an ISIN** — foreign-domiciled S&P 500 members, Linde
+  among them at 14.06% of XLB — written as `<cusip>000000000</cusip>`. They do
+  not resolve through a CUSIP lookup (Q14's open question).
+- **CUSIP → ticker is Alpaca `GET /v2/assets/{cusip}`, one call per CUSIP.**
+  **474 of 474** real CUSIPs resolved, Berkshire as `BRK.B` in the dot form. No
+  live 404 was observed. The bulk `/v2/assets` list carries **no `cusip`
+  field**, so the per-CUSIP call is the only route.
+- **SEC fair access: ≤10 requests per second, with a declared User-Agent**
+  (`SEC_USER_AGENT`, never logged).
+
 ### Not verified
 
 Carried forward as implementation-time checks, most of them step 0. Step 0 ran
@@ -381,8 +418,13 @@ still open.
 **Added with Q9 (decision 21), 2026-09-24 — spec-read, not probed.** The
 planning session cannot read `.env`, so none of these ran against a key.
 
-- **Whether Alpaca `/v1beta1/news` with no `symbols` returns every Benzinga
-  article, and how many a day.** The reference marks `symbols` optional and says
+*Step 4 measured these on 2026-09-25 (`scripts/measure_phase3_news.py`,
+651191c); what it resolved is struck through, with the result stated inline.*
+
+- ~~**How many a day Alpaca `/v1beta1/news` with no `symbols` returns.**~~
+  Measured: **639** untickered articles on Fri 2026-09-25 and **741** on Wed
+  2026-09-23 — above decision 21's 200–500 assumption. **Still open: whether
+  that is every Benzinga article**, which a count cannot show. The reference marks `symbols` optional and says
   the endpoint *"returns the latest news articles across stocks and crypto"*;
   it does not say that omitting `symbols` means the whole feed. Step 0 probed
   only the symbol-filtered form. Its 1,564 watch-universe articles over 14
@@ -391,7 +433,10 @@ planning session cannot read `.env`, so none of these ran against a key.
   therefore probably larger than 130 a day, and the storage estimate in
   decision 21 assumes 200–500. Crypto tags (`BTCUSD` and the like) will arrive
   too and are dropped at ingest. Step 4 measures the volume.
-- **Finnhub `/news?category=general` mostly carries no ticker.** Finnhub's
+- ~~**Finnhub `/news?category=general` mostly carries no ticker.**~~
+  Confirmed: **0 of 100** market-news rows carried a non-empty `related`, so
+  Finnhub market news contributes `MARKET` items and no discovery candidates.
+  Finnhub's
   OpenAPI sample response has `"related": ""` on a single-company headline
   (*"Square surges after reporting 64% jump in revenue…"*). If that is typical,
   market news is almost entirely `MARKET` items and **contributes almost no
@@ -399,8 +444,10 @@ planning session cannot read `.env`, so none of these ran against a key.
   takes `category=merger`, which this spec does not add, since those rows are
   likely untagged as well. Step 4 records the share of rows with a non-empty
   `related`.
-- **Finnhub `/company-news` is *"only available for North American
-  companies"*** (OpenAPI description). ARM (Arm Holdings, a UK issuer with a US
+- ~~**Finnhub `/company-news` is *"only available for North American
+  companies"*** (OpenAPI description).~~ Resolved: **ARM returns rows**, and no
+  watch symbol went 30 days without Finnhub rows (among the thinnest over 30
+  days: AEP 25, RBRK 42 and TTWO 61 rows). ARM (Arm Holdings, a UK issuer with a US
   listing) is in the Markets universe and may return nothing. Step 4 checks
   each watch symbol returns rows at least once, and logs the ones that never do.
 - **Finnhub's 30-calls-per-second ceiling** (OpenAPI *Rate Limits*: *"On top of
@@ -415,8 +462,16 @@ planning session cannot read `.env`, so none of these ran against a key.
   only chains are adjusted. Hence decision 21's second check: a contract with
   `root_symbol` equal to the ticker. That `underlying_symbols` and
   `root_symbol` combine as a filter on one request is **not verified**, and
-  step 4's fixture establishes it.
-- **Every article-volume and storage figure in decision 21 is an estimate.**
+  step 4's fixture establishes it. ~~Not verified~~ **Resolved in step 4:**
+  they combine (the `GME1` fixture). `has_options` comes from one
+  `/v2/assets` request's `attributes`. The contracts endpoint defaults
+  `expiration_date_lte` to *this week* when it is not given. The
+  only optionable name found whose chains are adjusted-only was **AIFU**.
+- ~~**Every article-volume and storage figure in decision 21 is an
+  estimate.**~~ Measured in step 4: **2,201 articles a day** (Fri 2026-09-25,
+  W = 67) against the ~1,500–2,000 estimate — above it but under twice it, so
+  **retention stands at 90 days**. The per-feed figures are in step 4's
+  status.
   Step 0's per-symbol Finnhub counts were not retained (only the per-session
   label figures were). Step 4 measures the real daily volume per feed, and the
   retention window is revisited if the measurement is more than twice the
@@ -738,6 +793,60 @@ only**, independent of the seed, the Markets list and open positions.
   seed's leader count; *Feeds and budgets* carries the arithmetic at the
   ceiling.
 
+**Q14 — The SPDR seed comes from SEC N-PORT, automated (2026-09-26); decision 6
+is replaced.** The owner will not download State Street's files, so decision
+6's hand-refreshed CSV, built by a script from files the owner downloaded, has
+no one to run it. The owner's decision: **build the seed automatically from the
+funds' own regulatory filings.** The source is what the owner chose; the
+constraints below are recorded in *SEC N-PORT* under Constraints.
+
+- **The source.** The Select Sector SPDR Trust, CIK **0001064641** (CIK
+  1100949 is a dead namesake, not the trust). It files **NPORT-P quarterly**,
+  public ~58 days after quarter end: **22 filings per quarter** — the 11
+  sector funds and 11 Premium Income funds, the sector funds selected by
+  `seriesId`. Holdings are the `assetCat=EC` lines, weighted by `pctVal`.
+- **Tickers.** N-PORT carries CUSIPs, not tickers. Each CUSIP is resolved
+  through Alpaca `GET /v2/assets/{cusip}`, one call per CUSIP.
+- **Identity.** SEC requires a declared User-Agent: `SEC_USER_AGENT`,
+  `"Name email"`, quoted in `.env` because it contains a space, and **never
+  logged**.
+- *Parent-session assumptions the owner can override:* snapshots are stored in
+  the database and checked **weekly**. A snapshot is **validated whole** — all
+  11 funds present, each with at least 5 equities, and each fund's resolved
+  weights summing to 90–110 — and one that fails is **refused whole, and the
+  previous snapshot is kept**. An amended filing is refused. **Staleness** is a
+  newer filing that has not been loaded, or a report date more than ~200 days
+  old; this replaces decision 6's 100-day warning, which was sized to a
+  quarterly hand refresh and not to a filing published ~58 days late.
+- **Open owner question: the ISIN-only lines.** 29 equity lines carry only an
+  ISIN — foreign-domiciled S&P 500 members, such as Linde at 14.06% of XLB.
+  N-PORT writes them as `<cusip>000000000</cusip>`, which resolves to nothing.
+  With no ISIN resolution, the default, XLB's resolved weights sum to
+  **73.36**, below the 90 floor, so **the real 2026-06-30 snapshot is
+  refused**: the running system has no sector leaders, and says so. How to
+  resolve an ISIN is the owner's call. The hook is a pluggable
+  `IsinResolver`, whose default resolves nothing.
+
+**Q15 — Finnhub's IPO calendar joins step 7 (2026-09-26).** The owner wants the
+upcoming IPOs on the calendar. Finnhub `/calendar/ipo` is marked
+`premium`/`freeTier` **null** in the swagger document — neither free nor
+premium — and is **unverified on this project's key**, so step 7 probes it
+first. A premium 403 goes back to the owner rather than being worked around.
+
+- Upcoming IPOs — date, symbol, name, exchange, price range, shares, status —
+  land as `calendar_event` rows of a new kind, **`ipo`**, refreshed daily, and
+  show as a row in the calendar panel.
+- The calendar does not bypass discovery: a listed IPO reaches *Movers in the
+  news* only once it clears Q10 and Q12's checks — at least one completed
+  session, the real IPO date, and `has_options`.
+
+**Q16 — The risk-free rate is converted to continuous compounding (2026-09-26).**
+*Status: scheduled after step 4.* `DGS3MO` is a bond-equivalent yield, and the
+pricing model wants a continuously compounded rate. The owner's decision:
+convert it, **`r = ln(1 + y·t) / t` with t = 91/365**. The same unit corrects
+decision 19's as-built note, whose "about 8bp at 4%" was worked with annual
+compounding; that note is left as it stands until then.
+
 ---
 
 ## Decisions
@@ -890,6 +999,13 @@ Rejected: storing the composite (drifts from its breakdown); a fixed z clip at
 renormalising weights silently when a component is missing.
 
 ### 6. Sector membership and leaders come from a committed seed of SPDR holdings
+
+*(Replaced by Q14, 2026-09-26, as to the source.)* The seed is built
+automatically from the trust's SEC N-PORT filings and stored as database
+snapshots, not a committed CSV refreshed by hand; the 100-day warning becomes
+Q14's staleness rule. What the seed is *for* — sector, the ~500-name universe,
+the top-five consensus — is unchanged. The text below is the original
+decision, kept so the reasoning is not re-run.
 
 `/etf/holdings` and `/index/constituents` are premium. State Street publishes
 each Select Sector SPDR's full holdings, with weights, as a downloadable file.
@@ -1599,16 +1715,21 @@ If the owner later wants a source the feeds miss, that is a **vendor
 decision** (Benzinga Pro, or Marketaux from PRD §7's deferred list), made and
 paid for deliberately, not a scraper.
 
-**Storage and retention.** Estimates, until step 4 measures the real volume
-(*Not verified*):
+**Storage and retention.** The planning estimates, with step 4's measurement
+beside them (Fri 2026-09-25, W = 67, `scripts/measure_phase3_news.py`):
 
-| Feed | Articles a day | Basis |
-|---|---|---|
-| Finnhub watch tier | ~1,000 | NVDA ran ~90 a day and five names reached the 250 cap in 14 days (step 0). Per-symbol counts were not retained. |
-| Alpaca, whole feed | 200–500 | The watch-filtered slice alone was ~112 a day. |
-| Massive | ~190 | Measured. |
-| Finnhub market news | ~100 | Estimate. |
-| **Total** | **~1,500–2,000** | About three times decision 3's first-draft 500. |
+| Feed | Articles a day (estimate) | Measured | Basis |
+|---|---|---|---|
+| Finnhub watch tier | ~1,000 | **1,399** rows summed over symbols (858 distinct articles) | NVDA ran ~90 a day and five names reached the 250 cap in 14 days (step 0). Per-symbol counts were not retained. Measured max: NVDA 169/day; no symbol hit the cap. |
+| Alpaca, whole feed | 200–500 | **639** (741 on Wed 2026-09-23) | The watch-filtered slice alone was ~112 a day. |
+| Massive | ~190 | **131** | Measured. |
+| Finnhub market news | ~100 | **~32**, extrapolated (~45–50 on a weekday, from partial data) | Estimate. |
+| **Total** | **~1,500–2,000** | **2,201** | About three times decision 3's first-draft 500. |
+
+The measured total is above the estimate but under twice it, which is the
+threshold *Not verified* set for revisiting retention, so **the 90-day rule
+below stands**. The storage figures that follow are the estimate's and were
+not re-derived.
 
 Around that, ~3 ticker rows per article, and ~1,000–1,200 labels a day
 (Massive's ~780 insights a session market-wide, from step 0's 7,843 over ten
@@ -1667,7 +1788,7 @@ Rejected:
 corollary/
 ├── data/
 │   ├── seeds/
-│   │   ├── spdr_holdings.csv     # decision 6, as-of in header
+│   │   ├── nport.py              # decision 6 / Q14: N-PORT snapshots, validated whole
 │   │   ├── central_banks_2026.csv
 │   │   ├── central_banks_2027.csv
 │   │   └── econ_release_times.csv  # Q3: per-release ET times, human-kept
@@ -2060,7 +2181,8 @@ by this spec; these are the amendments it owes.
     Finnhub.
   - Sector leaders become plural: *"the top five holdings of each SPDR sector
     ETF, weighted by fund weight, from a committed seed of the funds' published
-    holdings"*.
+    holdings"*. *(Since Q14 the seed is built from the funds' SEC N-PORT
+    filings; step 10 words the PRD line to match.)*
   - A note that Finnhub's economic calendar, ETF holdings, both dividends
     endpoints, index constituents and `/news-sentiment` are premium, verified
     from Finnhub's own OpenAPI document (`premium` field) on 2026-09-23, and
@@ -2179,10 +2301,12 @@ human read of StockTwits' and Massive's terms for automated access.
   was checked and is **not triggered as measured**: the strict rules estimate
   is 4.2 labels per session, of which Finnhub `/company-news` supplies 3.7 —
   measured across the whole 66-name watch universe. It therefore holds only if
-  step 4 ingests Finnhub company news for that whole universe; *Feeds and
-  budgets* still budgets company news for ~30 symbols, and at that scope the
-  figure was not measured and may not clear 1.5. An Alpaca-only rules tier, at
-  1.2, would trigger it. Either case goes back to the owner.
+  step 4 ingests Finnhub company news for that whole universe — which, after
+  Q9, it does: *Feeds and budgets* budgets the watch tier over the whole watch
+  universe (W = 66 at 4.4/min, ≤7.2/min at W = 108, and after Q13 W ≤ 123 in
+  the worst case), not the ~30 symbols an earlier draft budgeted. An
+  Alpaca-only rules tier, at 1.2, would trigger it, and would go back to the
+  owner.
   *Depends on:* nothing.
 - *Files:* `scripts/probe_phase3.py`, `tests/fixtures/{finnhub,alpaca,massive,stocktwits,fred}/`.
 - *Done when:* every *Not verified* item above is struck through or moved to
@@ -2191,17 +2315,42 @@ human read of StockTwits' and Massive's terms for automated access.
   labels per session — decision 13's second risk has gone back to the owner.
 
 **1. Notifications land; rule 9's halt alert is delivered.**
-- *Status:* **done 2026-09-24** (45171a1 backend, 787fe80 bell).
+- *Status:* **done 2026-09-30** (45171a1 backend, 787fe80 bell; the code was
+  done 2026-09-24, and the forced watchdog halt was the last live check).
   Hung-webhook-does-not-delay-halt, failed-delivery recording and webhook
   redaction are pinned in `risk` tests. **Live checks on `:app`, 2026-09-24,
   against a scratch database, at the owner's request:** a test embed through
   `DiscordNotifier` was delivered (`HTTP 204`); a manual halt and resume
   (decision 20) each landed on the bell and in Discord (`HTTP 204`).
-  **Still outstanding: the forced *watchdog* halt.** Attempted overnight by
-  freezing the process for 120 s — correctly, nothing fired: outside a session
-  the sockets are closed and the connection condition is unarmed (the session
-  gate in `engine/sockets.py`). It can only be forced during regular trading
-  hours. *Depends on:* nothing.
+  **The forced watchdog halt, done in session, twice.** A first attempt,
+  overnight, froze the process for 120 s and correctly fired nothing: outside
+  a session the sockets are closed and the connection condition is unarmed
+  (the session gate in `engine/sockets.py`). So both live runs were in
+  regular trading hours:
+  - **2026-09-29:** `:app` from this worktree, port 8765, a scratch database
+    at 0010. Cold start came up halted; `POST /api/engine/resume` at
+    18:48:10Z landed an `operator_resume` bell entry. The process was
+    suspended (`NtSuspendProcess`) at 18:48:29Z; the host then slept and lost
+    its network, and the process was released at 19:13:36Z — ~25 minutes
+    rather than the planned 120 s. At 19:13:41Z the engine halted itself,
+    rule `stream_closed` (`equity_quotes` could not connect, `getaddrinfo`
+    failed), and a `critical` `engine_error` bell entry landed. **Discord was
+    not delivered** (`ConnectError`, the network being down); the failure was
+    recorded and the halt was not delayed by it. It never auto-resumed.
+  - **2026-09-30:** `:app` from a clean detached worktree at ce8696a, port
+    8765, a fresh scratch database at 0009. Cold start halted; resume at
+    19:03:44Z landed on the bell and in Discord (`HTTP 204`).
+    `NtSuspendProcess` on the server PID from 19:03:49Z to 19:05:49Z —
+    exactly 120 s. At 19:05:54.50Z the engine halted itself, rule
+    `stream_closed` (*"The equity_quotes stream closed (no close frame
+    received or sent) and has since reconnected… the halt does not clear
+    without an explicit resume"*). The bell entry was delivered at
+    19:05:54.503Z and **Discord at 19:05:54.788Z (`HTTP 204`)**. The socket
+    reconnected and the engine stayed halted; it was stopped still halted.
+
+  Both live halts came from the **connection** condition (`stream_closed`),
+  not `HEARTBEAT_STALE`. The heartbeat path is covered by `risk` tests only;
+  no live run has exercised it. *Depends on:* nothing.
 - *Files:* `corollary/engine/notify.py`, `corollary/engine/runtime.py` (wire
   the notifier), `corollary/db/models.py`, migration 0005,
   `corollary/api/routes/notifications.py`, `web/src/components/NotificationBell.tsx`,
@@ -2236,18 +2385,59 @@ human read of StockTwits' and Massive's terms for automated access.
 
 **4. News ingestion, both tiers: watch and discovery, deduplicated, served;
 tradeability and the watch list.**
-- *Status:* not started. *Depends on:* 0, 2.
+- *Status:* **done 2026-09-30, except the sector leaders and the feed's
+  sector column**, which both wait on Q14's ISIN question: the snapshot job
+  runs, and records the refusal of the real 2026-06-30 snapshot, so the
+  running system has no leaders, files every ticker under `Other` with
+  `sectorsAvailable: false`, and says so.
+  Commits: 6ac3746 tradeability and watch universe (pure), d72d912 schema
+  0008, a8bf4f3 Alpaca's reads, c87d40a Finnhub and Massive news, e7c473c the
+  article store, 616cab7 retention, e7a90ce the tradeability cache, 95cb4b6
+  and 41e58c0 recent IPOs (Q10, Q12), 87505c0 routes, 9527a98 pollers, 068a0c5
+  the feed panel, 8247852 the manual-watch cap (Q13), c9c772a scheduler
+  wiring, 696b1ec the SEC provider, ce8696a the SEC fixtures, 35500d6 N-PORT
+  snapshots (Q14), 651191c the measurement, and `c3887e9` the snapshot
+  job's wiring. *Depends on:* 0, 2.
+
+  **The measurements** (`scripts/measure_phase3_news.py`, Fri 2026-09-25,
+  W = 67):
+  - Finnhub watch tier **1,399** rows summed over symbols (**858** distinct
+    articles); Alpaca untickered **639** (**741** on Wed 2026-09-23); Massive
+    **131**; Finnhub market news **~32**, extrapolated (~45–50 on a weekday,
+    from partial data). **Total 2,201 a day** — above the ~1,500–2,000
+    estimate but under twice it, so **retention stands at 90 days**.
+  - **0 of 100** Finnhub market-news rows carry a `related` ticker.
+  - **No watch symbol went 30 days without Finnhub rows** (AEP 25, RBRK 42,
+    TTWO 61 over 30 days); ARM returns rows.
+  - **No symbol hit the cap**; the maximum was NVDA at 169 a day.
+
+  **Established by fixture:** Alpaca's `underlying_symbols` and `root_symbol`
+  combine on one contracts request (`GME1`); `has_options` comes from one
+  `/v2/assets` request's `attributes`; the contracts endpoint defaults
+  `expiration_date_lte` to *this week*; and the only adjusted-only optionable
+  name found was **AIFU**.
+
+  **A live bug found and fixed on the way** (68e607f, follow-up 2dbe9ea): option-stream msgpack
+  timestamps were being rejected, so **no live option quote had ever been
+  applied from the stream**. They decode now.
 - *Files:*
-  - `corollary/data/news/{ingest,watchlist,tradeability,retention}.py`
+  - `corollary/data/news/{article,assets,ingest,pollers,watchlist,tradeability,retention}.py`
   - `corollary/data/providers/{alpaca,finnhub,massive}.py`: Massive moves here
-    from step 5 for article ingestion, and its insights stay step 5's
-  - `corollary/data/seeds/spdr_holdings.csv` (for sector and the watch
-    universe)
-  - migrations for `news_article*` (with `feed`), `watch_symbol`,
+    from step 5 for article ingestion, and its insights stay step 5's;
+    `alpaca.py` also gains the per-CUSIP asset lookup (Q14)
+  - `corollary/data/providers/sec.py` (N-PORT, on a shared SEC bucket in
+    `corollary/ratelimit.py`) and `corollary/data/seeds/nport.py` (snapshots,
+    validated whole) — replacing the committed `spdr_holdings.csv` and its
+    State Street builder, `scripts/build_spdr_seed.py`, which is removed (Q14)
+  - `tests/fixtures/record_sec.py` and `tests/fixtures/sec/`
+  - migrations **0008** (`news_article*` with `feed`, `watch_symbol`,
     `ticker_tradeability`, the `watchlist` audit category and the
-    `watchlist_changed` route
+    `watchlist_changed` route), **0009** (`ticker_ipo_date`, Q12) and
+    **0010** (the SPDR holdings snapshots, Q14)
+  - `scripts/measure_phase3_news.py` (counts only)
   - `corollary/api/routes/news.py` (feed with `scope`, and the watch routes),
-    `corollary/engine/scheduler.py` (the poll set and the nightly prune)
+    `corollary/engine/scheduler.py` (the poll set, the nightly prune and the
+    weekly N-PORT snapshot check)
   - News feed panel and the manual-watch list, `web/src/lib/notifications.ts`
     (the new event)
 - *Done when:*
@@ -2321,16 +2511,28 @@ discovery panel.**
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
 - *Status:* not started. *Depends on:* 0, 2, 3.
+- *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
+  project's key first**: its swagger flags are null, and a premium 403 goes
+  back to the owner before any of the IPO work is built.
 - *Files:* `corollary/data/calendar.py`, `corollary/data/seeds/` (including
   `econ_release_times.csv`), `corollary/api/routes/calendar.py`, migration for
-  `calendar_event`, the calendar panel.
+  `calendar_event` (including the `ipo` kind), `corollary/data/providers/finnhub.py`
+  (`/calendar/ipo`), a recorded `tests/fixtures/finnhub/` IPO-calendar fixture,
+  the calendar panel.
 - *Done when:* the next two weeks show real earnings (with sessions), the next
   FOMC with its time, economic releases on FRED's dates at the table's times
   with consensus shown unavailable and actuals filled after release, dividends
-  or a stated reason they are absent, and a manual entry round-trips.
+  or a stated reason they are absent, and a manual entry round-trips. **And
+  (Q15):** the probe's result is recorded; if the endpoint answers on the free
+  key, upcoming IPOs — date, symbol, name, exchange, price range, shares,
+  status — land daily as `ipo` `calendar_event` rows and show in the panel, and
+  a listed IPO reaches Movers only through Q10 and Q12's checks and
+  `has_options`, never from the calendar row; if it answers 403, it has gone
+  back to the owner.
 
 **8. Composite and Market Pulse.**
-- *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4.
+- *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4 —
+  which has no accepted snapshot until Q14's ISIN question is answered.
 - *Files:* `corollary/data/macro/{components,composite}.py`, migration for
   `composite_component_value`, `/api/news/composite`, `/api/markets/pulse`,
   `SentimentGauge`, `web/src/pages/Research.tsx`,
@@ -2342,7 +2544,8 @@ geopolitical.**
 
 **9. Social attention and analyst consensus.**
 - *Status:* not started. *Depends on:* 0 (the StockTwits terms read can stop
-  the social half), 2, the holdings seed.
+  the social half), 2, the holdings seed (no accepted snapshot until Q14's
+  ISIN question is answered).
 - *Files:* `corollary/data/providers/stocktwits.py`,
   `corollary/data/news/social.py`, `corollary/data/providers/finnhub.py`,
   migrations, `/api/news/{social,consensus}`, the two panels,
