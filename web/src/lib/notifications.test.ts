@@ -75,6 +75,26 @@ describe('operator events', () => {
     expect(routedTo(NOTIFICATION_ROUTES, event, 'discord')).toBe(discord)
   })
 
+  /** Owner decision 2026-09-30: an adopted NPORT-P/A for a loaded quarter.
+   * Info, on decision 20's info defaults (bell off, Discord on — a
+   * parent-session assumption), and `account: null`: the sector seed belongs
+   * to no book. */
+  it('shows an adopted SPDR amendment in both books, info, Discord only by default', () => {
+    expect(severityFor('spdr_seed_amended')).toBe('info')
+    expect(NOTIFICATION_EVENT_LABEL.spdr_seed_amended).toBe('SPDR seed amended')
+    expect(routedTo(NOTIFICATION_ROUTES, 'spdr_seed_amended', 'bell')).toBe(false)
+    expect(routedTo(NOTIFICATION_ROUTES, 'spdr_seed_amended', 'discord')).toBe(true)
+    const n = buildNotification(
+      'spdr_seed_amended', 'SPDR seed amended', 'Adopted NPORT-P/A for 2026-06-30: XLK 0001410368-26-099999.', null, '2026-09-30T12:00:00Z',
+    )
+    expect(n.severity).toBe('info')
+    expect(SEVERITY_CLASS[n.severity]).not.toContain('error')
+    for (const mode of ['paper', 'cash'] as const) {
+      expect(visibleNotifications([n], mode)).toEqual([n])
+      expect(unreadCount([n], mode)).toBe(1)
+    }
+  })
+
   /** A human choosing to halt is not a fault — same split as bearish/error. */
   it('never dresses an operator halt as critical', () => {
     expect(severityFor('operator_halt')).not.toBe('critical')

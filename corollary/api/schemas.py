@@ -304,6 +304,9 @@ NotificationEvent: TypeAlias = Literal[
     "notification_routes_changed",
     # A manual watch added or removed (Phase 3 decision 20, migration 0008).
     "watchlist_changed",
+    # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
+    # 2026-09-30, migration 0011), emitted by the ``spdr_holdings`` job.
+    "spdr_seed_amended",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]

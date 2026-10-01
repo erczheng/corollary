@@ -133,9 +133,11 @@ arrives with its own, explicit handle on the runtime when Phase 4 lands.
 """
 
 import asyncio
+import collections
 import functools
 import logging
 import threading
+import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -180,6 +182,7 @@ from corollary.data.seeds.nport import (
     build_spdr_snapshot,
     latest_snapshot_attempt,
     load_spdr_seed_from_db,
+    stored_snapshot_amendments,
 )
 from corollary.pricing.rates import DGS3MO_SERIES, RiskFreeRateSource
 from corollary.ratelimit import (
@@ -1230,6 +1233,125 @@ class ContextSessions:
         return drained
 
 
+
+#: The event an adopted NPORT-P/A raises (owner decision 2026-09-30). Routed by
+#: ``notification_route`` (migration 0011), which a human may change.
+SPDR_SEED_AMENDED: Final = "spdr_seed_amended"
+
+#: How many undelivered notices :class:`ContextNotices` holds before it drops
+#: (and logs) the oldest. The only producer today is a weekly job; the bound
+#: exists so an app whose deliverer never started cannot grow without limit.
+CONTEXT_NOTICE_BACKLOG: Final = 64
+
+
+@dataclass(frozen=True)
+class ContextNotice:
+    """One notification a context job asks for: words only.
+
+    No channels (``notification_route`` decides those at emission, never the
+    caller) and no sink -- the job hands this to :class:`ContextNotices` and
+    is done. ``account`` is ``None``: a context feed belongs to no book.
+    """
+
+    event: str
+    severity: str
+    title: str
+    body: str
+    at: datetime
+    correlation_id: str
+    account: str | None = None
+
+
+class ContextNotices:
+    """The context jobs' outbox -- how a job notifies **without** holding the runtime.
+
+    Decision 1 keeps the engine runtime out of :class:`ContextServices`, and
+    the one notification path (decision 14) is the runtime's
+    ``notify_operator_action``. So a job never calls a notifier: it ``put``s
+    a :class:`ContextNotice` here, and the lifespan -- which owns the runtime
+    and is not reachable from any job -- drains this and hands each notice
+    to that path (``corollary.api.app``). This object holds a deque and a
+    lock and nothing else, so the isolation walk finds no broker, registry,
+    runtime or supervisor behind it.
+
+    Decision 20: ``put`` **never raises and never blocks** on delivery, so a
+    notice can neither delay nor fail the job that asked for it. Thread-safe,
+    since a job body may run work in a worker thread.
+    """
+
+    def __init__(self, *, limit: int = CONTEXT_NOTICE_BACKLOG) -> None:
+        self._limit = limit
+        self._pending: collections.deque[ContextNotice] = collections.deque()
+        self._lock = threading.Lock()
+
+    def put(self, notice: ContextNotice) -> None:
+        dropped: ContextNotice | None = None
+        with self._lock:
+            if len(self._pending) >= self._limit:
+                dropped = self._pending.popleft()
+            self._pending.append(notice)
+        if dropped is not None:
+            logger.error(
+                "the context notice outbox is full; the oldest undelivered notice was dropped",
+                extra={
+                    "event": "context_notice_dropped",
+                    "notification_event": dropped.event,
+                    "title": dropped.title,
+                    "at": dropped.at.isoformat(),
+                    "correlation_id": dropped.correlation_id,
+                    "limit": self._limit,
+                },
+            )
+
+    def drain(self) -> list[ContextNotice]:
+        """Every pending notice, oldest first, removed from the outbox."""
+        with self._lock:
+            pending = list(self._pending)
+            self._pending.clear()
+        return pending
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
+
+def spdr_amended_notice(
+    session_factory: Callable[[], Session],
+    snapshot_id: int,
+    adopted: Mapping[str, str],
+    at: datetime,
+) -> ContextNotice | None:
+    """The ``spdr_seed_amended`` notice for an accepted snapshot, from its **stored** rows.
+
+    Decision 20: every value quoted is read back from what was written.
+    ``adopted`` (the build's ``etf -> accession``) only selects which funds to
+    name, and must agree with the stored rows -- ``None`` if the snapshot is
+    missing, not accepted, or any adopted fund's stored accession differs,
+    so the notice and the table cannot disagree.
+    Names the report date, the filed date, and each amended fund with its
+    accession -- public SEC identifiers; nothing here reads the environment,
+    so no key or URL can reach the words (rule 6).
+    """
+    if not adopted:
+        return None
+    stored = stored_snapshot_amendments(session_factory, snapshot_id, adopted)
+    if stored is None or dict(stored.accessions) != dict(adopted):
+        return None
+    funds = ", ".join(f"{etf} {accession}" for etf, accession in sorted(stored.accessions.items()))
+    return ContextNotice(
+        event=SPDR_SEED_AMENDED,
+        severity="info",
+        title="SPDR seed amended",
+        body=(
+            f"Adopted NPORT-P/A for the {stored.report_date.isoformat()} report date "
+            f"(filed through {stored.filed_date.isoformat()}): {funds}. The sector "
+            "seed now serves the amended holdings."
+        ),
+        at=at,
+        correlation_id=uuid.uuid4().hex,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ContextServices:
     """Everything a context job may be built from -- and, by omission, what it may not.
@@ -1292,6 +1414,11 @@ class ContextServices:
     #: ``/v2/assets/{cusip}``) -- or ``None``, and the ``spdr_holdings`` job
     #: skips. A reference-data read, never the broker.
     cusips: CusipResolver | None = None
+    #: Where a job puts a notification (:class:`ContextNotices`). The lifespan
+    #: passes the one it drains into the runtime's notification path; a
+    #: private default is an outbox nobody delivers, which is what a test's
+    #: services want.
+    notices: ContextNotices = field(default_factory=ContextNotices)
 
     def __post_init__(self) -> None:
         if self.seed_loader is None:
@@ -1670,7 +1797,42 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
                 },
             )
         raise SpdrSnapshotAborted(rule, reason)
+    if outcome.status == "accepted" and outcome.adopted_amendments:
+        _notify_spdr_amended(services, outcome.snapshot_id, outcome.adopted_amendments, clock)
     return None
+
+
+def _notify_spdr_amended(
+    services: ContextServices,
+    snapshot_id: int | None,
+    adopted: Mapping[str, str],
+    clock: UtcClock,
+) -> None:
+    """Put one ``spdr_seed_amended`` notice. **Never raises** (decision 20).
+
+    The snapshot has already committed; a notice that cannot be built is a
+    logged error and the job still succeeded. Exactly one per adoption: the
+    builder only reports ``adopted_amendments`` on the run that stored them,
+    and answers ``unchanged`` once they are carried.
+    """
+    try:
+        if snapshot_id is None:
+            raise ValueError("an accepted snapshot without an id")
+        notice = spdr_amended_notice(services.session_factory, snapshot_id, adopted, clock())
+        if notice is None:
+            raise ValueError(
+                f"stored snapshot {snapshot_id} does not carry the adopted amendments"
+            )
+        services.notices.put(notice)
+    except Exception as exc:
+        logger.error(
+            "the spdr_seed_amended notice could not be built; the amended snapshot stands",
+            extra={
+                "event": "spdr_seed_amended_not_notified",
+                "snapshot_id": snapshot_id,
+                "error_type": type(exc).__name__,
+            },
+        )
 
 
 async def _spdr_holdings_catch_up(

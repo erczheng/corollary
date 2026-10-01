@@ -108,6 +108,11 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     # ``info``, a record for Discord, not worth the bell.
     ("watchlist_changed", "bell", False),
     ("watchlist_changed", "discord", True),
+    # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
+    # 2026-09-30, migration 0011): ``info``. Decision 20's info-event
+    # defaults -- bell off, Discord on -- a parent-session assumption.
+    ("spdr_seed_amended", "bell", False),
+    ("spdr_seed_amended", "discord", True),
 )
 
 

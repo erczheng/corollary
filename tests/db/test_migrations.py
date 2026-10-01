@@ -148,7 +148,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0010"]
+    assert script.get_heads() == ["0011"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -169,6 +169,47 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     eng.dispose()
     assert EXPECTED_TABLES <= tables
 
+
+
+def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
+    db_path: Path,
+) -> None:
+    """Bell off, Discord on (decision 20's info defaults); route rows only, no schema."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("spdr_seed_amended", "bell")] is False
+    assert routes[("spdr_seed_amended", "discord")] is True
+
+    command.downgrade(cfg, "0010")
+    routes = _route_rows(url)
+    assert not {event for event, _channel in routes} & {"spdr_seed_amended"}
+    assert len(routes) == 28
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables  # 0011 dropped nothing
+
+    command.upgrade(cfg, "head")
+    assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
+
+
+def test_0011_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
+    """``seed.py`` runs on every startup; an edited row must survive 0011."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "0010")
+    eng = create_db_engine(url)
+    with Session(eng) as sess:
+        sess.add(NotificationRoute(event="spdr_seed_amended", channel="discord", enabled=False))
+        sess.commit()
+    eng.dispose()
+
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("spdr_seed_amended", "discord")] is False
+    assert routes[("spdr_seed_amended", "bell")] is False
 
 
 def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
@@ -228,8 +269,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     assert len(routes) == 16  # 0001's table, untouched
 
     command.upgrade(cfg, "head")
-    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows.
-    assert len(_route_rows(url)) == 28
+    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows and
+    # 0011's two ``spdr_seed_amended`` rows.
+    assert len(_route_rows(url)) == 30
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:

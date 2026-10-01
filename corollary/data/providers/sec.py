@@ -95,6 +95,7 @@ __all__ = [
     "NportFilings",
     "NportHolding",
     "SecAccessRefused",
+    "SecUnavailable",
     "SecError",
     "SecProvider",
     "SectorFund",
@@ -152,6 +153,11 @@ _REASON_SAMPLE: Final = 5
 
 class SecError(ProviderError):
     """SEC could not answer, or answered with something that is not the document."""
+
+
+class SecUnavailable(SecError):
+    """SEC could not be reached, or answered with a non-200 status: an outage
+    to retry, never a fact about the document asked for."""
 
 
 class SecAccessRefused(SecError):
@@ -833,7 +839,7 @@ class SecProvider:
             # ``.request.headers`` carries the User-Agent.
             failure = f"GET {label} failed ({type(exc).__name__}): {self._scrub(str(exc))}"
         if response is None:
-            raise SecError(failure)
+            raise SecUnavailable(failure)
         body_size = len(response.content)
         refused_page = SEC_BLOCK_MARKER in response.text.lower()
         if response.status_code == 403 or refused_page:
@@ -849,7 +855,7 @@ class SecProvider:
                 "process may be sharing this address"
             )
         if response.status_code != 200:
-            raise SecError(
+            raise SecUnavailable(
                 f"GET {label} returned HTTP {response.status_code} "
                 f"({body_size} bytes, body not quoted)"
             )

@@ -2114,3 +2114,154 @@ def test_the_services_default_seed_loader_reads_the_database(db_engine: Engine) 
     services = ContextServices(session_factory=lambda: Session(db_engine))
     assert services.seed_loader is not None
     assert services.seed_loader() is None  # no accepted snapshot: no seed, no file read
+
+
+# --------------------------------------------------------------------------
+# spdr_seed_amended: an adopted NPORT-P/A notifies once (owner decision 2026-09-30)
+# --------------------------------------------------------------------------
+
+
+def _with_isin_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job's builder, with XLB's ISIN seam filled so the real quarter can accept.
+
+    The job itself passes ``NoIsinResolver`` (fail closed until the owner picks
+    an ISIN source), under which the recorded quarter is always refused on
+    XLB; the notice path needs an accept to be reachable at all.
+    """
+    from tests.data.seeds.test_nport_snapshot import FakeIsinResolver
+
+    real = nport.build_spdr_snapshot
+
+    async def seeded(*args: object, **kwargs: object) -> nport.SnapshotOutcome:
+        kwargs["isin_resolver"] = FakeIsinResolver()
+        return await real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(scheduler_module, "build_spdr_snapshot", seeded)
+
+
+def _amended_fake(pct_from: str = "0.461687304177", pct_to: str = "0.561687304177") -> FakeSec:
+    from tests.data.seeds.test_nport_snapshot import AMENDMENT, with_amendments, xlk_doc
+
+    return with_amendments(
+        FakeSec(), {AMENDMENT: ("2026-09-15", xlk_doc(pct_from=pct_from, pct_to=pct_to))}
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_amendment_notifies_once_and_a_rerun_notifies_nothing(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.data.seeds.test_nport_snapshot import AMENDMENT
+
+    _with_isin_seam(monkeypatch)
+    async with _recorded_sec() as sec:
+        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None
+    # A normal quarter accepted from its originals announces nothing new.
+    assert [a.status for a in _attempts(db_engine)] == ["accepted"]
+    assert services.notices.drain() == []
+
+    async with _recorded_sec(_amended_fake()) as sec:
+        services2, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None
+        [notice] = services2.notices.drain()
+        assert (notice.event, notice.severity, notice.account) == ("spdr_seed_amended", "info", None)
+        assert notice.title == "SPDR seed amended"
+        assert "2026-06-30" in notice.body and f"XLK {AMENDMENT}" in notice.body
+        assert "2026-09-15" in notice.body
+        assert notice.at == SPDR_NOW and notice.correlation_id
+        assert "synthetic.tester" not in notice.body.lower()  # never the User-Agent
+
+        # The same amendment again: unchanged, a skip, and no second notice.
+        outcome = await job.run()
+        assert isinstance(outcome, JobSkipped)
+        assert services2.notices.drain() == []
+    assert [a.status for a in _attempts(db_engine)] == ["accepted", "accepted"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_amendment_notifies_nothing_and_keeps_the_previous(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_isin_seam(monkeypatch)
+    async with _recorded_sec() as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None
+    bad = _amended_fake(pct_from="5.277342107815", pct_to="25.277342107815")
+    async with _recorded_sec(bad) as sec:
+        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None  # a refusal is the job doing its work
+    assert services.notices.drain() == []
+    assert [(a.status, a.rule) for a in _attempts(db_engine)] == [
+        ("accepted", None), ("refused", "weight_band")
+    ]
+    seed = nport.load_spdr_seed_from_db(lambda: Session(db_engine))
+    assert seed is not None and seed.filed_date == date(2026, 8, 28)
+
+
+@pytest.mark.asyncio
+async def test_a_notice_that_cannot_be_built_never_fails_the_job(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Decision 20: the amended snapshot stands; the failure is a logged error."""
+    _with_isin_seam(monkeypatch)
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("the notice builder broke")
+
+    monkeypatch.setattr(scheduler_module, "spdr_amended_notice", broken)
+    async with _recorded_sec() as sec:
+        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None
+    async with _recorded_sec(_amended_fake()) as sec:
+        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert await job.run() is None
+    assert services.notices.drain() == []
+    assert [a.status for a in _attempts(db_engine)] == ["accepted", "accepted"]
+    [record] = [
+        r for r in caplog.records if getattr(r, "event", "") == "spdr_seed_amended_not_notified"
+    ]
+    assert record.levelno == logging.ERROR and record.error_type == "RuntimeError"
+
+
+def test_the_notice_is_built_from_the_stored_rows_or_not_at_all(db_engine: Engine) -> None:
+    """An ``adopted`` map the stored rows do not carry builds no notice."""
+    from tests.data.seeds.test_nport_snapshot import insert_accepted
+
+    sessions = lambda: Session(db_engine)  # noqa: E731
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    with Session(db_engine) as session:
+        snapshot_id = session.query(SpdrHoldingsSnapshot).one().id
+    at = SPDR_NOW
+    assert scheduler_module.spdr_amended_notice(sessions, snapshot_id, {}, at) is None
+    assert scheduler_module.spdr_amended_notice(
+        sessions, snapshot_id, {"XLK": "0001410368-26-099999"}, at
+    ) is None  # stored rows carry 0000000000-26-000000
+    notice = scheduler_module.spdr_amended_notice(
+        sessions, snapshot_id, {"XLK": "0000000000-26-000000"}, at
+    )
+    assert notice is not None and "XLK 0000000000-26-000000" in notice.body
+    assert "2026-03-31" in notice.body
+    assert scheduler_module.spdr_amended_notice(
+        sessions, snapshot_id + 99, {"XLK": "0000000000-26-000000"}, at
+    ) is None
+
+
+def test_the_outbox_drains_oldest_first_and_drops_loudly_when_full(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    outbox = scheduler_module.ContextNotices(limit=2)
+
+    def notice(n: int) -> scheduler_module.ContextNotice:
+        return scheduler_module.ContextNotice(
+            event="spdr_seed_amended", severity="info", title=f"t{n}", body="b",
+            at=SPDR_NOW, correlation_id=f"c{n}",
+        )
+
+    for n in range(3):
+        outbox.put(notice(n))
+    assert len(outbox) == 2
+    assert [n.title for n in outbox.drain()] == ["t1", "t2"]
+    assert outbox.drain() == [] and len(outbox) == 0
+    [record] = [r for r in caplog.records if getattr(r, "event", "") == "context_notice_dropped"]
+    assert record.levelno == logging.ERROR and record.correlation_id == "c0"

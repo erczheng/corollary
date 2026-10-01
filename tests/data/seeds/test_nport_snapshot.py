@@ -623,21 +623,224 @@ async def test_a_missing_fund_refuses(sessions: Callable[[], Session]) -> None:
     assert load_spdr_seed_from_db(sessions) is None
 
 
-@pytest.mark.asyncio
-async def test_an_amendment_refuses_and_keeps_the_previous(sessions: Callable[[], Session]) -> None:
-    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
-    fake = FakeSec()
-    amendment = "0001410368-26-099999"
-    fake.submissions = submissions([{
-        "accessionNumber": amendment, "form": "NPORT-P/A", "filingDate": "2026-09-15",
+# ------------------------------------------------------------------ NPORT-P/A: adopt or refuse
+#
+# Owner decision 2026-09-30: an amendment for a quarter already loaded (or
+# being loaded) is adopted under the same validation, the latest-filed one per
+# fund; a refusal keeps the previous snapshot whole. The notice itself is the
+# job's (tests/engine/test_scheduler.py); here the builder's outcome carries
+# what it adopted, and nothing on a refusal.
+
+XLK_SERIES = "S000006415"
+AMENDMENT = "0001410368-26-099999"  # SYNTHETIC accession
+LATER_AMENDMENT = "0001410368-26-099998"  # SYNTHETIC accession
+
+
+def amendment_row(accession: str, filed: str) -> dict[str, str]:
+    return {
+        "accessionNumber": accession, "form": "NPORT-P/A", "filingDate": filed,
         "reportDate": "2026-06-30", "primaryDocument": "primary_doc.xml",
-    }])
-    fake.docs[amendment] = DOC_OF_ACCESSION[ACCESSION_OF["XLK"]].read_bytes()
+    }
+
+
+def xlk_doc(*, pct_from: str = "0.461687304177", pct_to: str | None = None) -> bytes:
+    """XLK's recorded document, one ``pctVal`` edited -- a SYNTHETIC amendment."""
+    raw = DOC_OF_ACCESSION[ACCESSION_OF["XLK"]].read_text("utf-8")
+    if pct_to is not None:
+        assert raw.count(f"<pctVal>{pct_from}</pctVal>") == 1
+        raw = raw.replace(f"<pctVal>{pct_from}</pctVal>", f"<pctVal>{pct_to}</pctVal>")
+    return raw.encode("utf-8")
+
+
+def with_amendments(fake: FakeSec, docs: dict[str, tuple[str, bytes]]) -> FakeSec:
+    fake.submissions = submissions([amendment_row(a, filed) for a, (filed, _) in docs.items()])
+    for accession, (_, body) in docs.items():
+        fake.docs[accession] = body
+    return fake
+
+
+def xlk_rows(sessions: Callable[[], Session], snapshot_id: int) -> list[SpdrHoldingRow]:
+    with sessions() as session:
+        return list(session.scalars(
+            select(SpdrHoldingRow).where(
+                SpdrHoldingRow.snapshot_id == snapshot_id, SpdrHoldingRow.etf == "XLK"
+            )
+        ))
+
+
+def xlk_total(sessions: Callable[[], Session], snapshot_id: int) -> Decimal:
+    return sum((r.weight for r in xlk_rows(sessions, snapshot_id)), Decimal(0))
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_for_the_loaded_quarter_is_adopted_and_served(
+    sessions: Callable[[], Session],
+) -> None:
+    first = await build_accept(sessions, FakeSec(), FakeResolver())
+    assert first.status == "accepted" and first.adopted_amendments == {}
+    assert first.snapshot_id is not None
+    original_total = xlk_total(sessions, first.snapshot_id)
+
+    fake = with_amendments(FakeSec(), {
+        AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.561687304177")),
+    })
+    outcome = await build_accept(sessions, fake, FakeResolver())
+
+    assert outcome.status == "accepted", outcome.reason
+    assert outcome.report_date == REPORT
+    assert outcome.adopted_amendments == {"XLK": AMENDMENT}
+    assert outcome.snapshot_id is not None and outcome.snapshot_id != first.snapshot_id
+    assert {r.accession for r in xlk_rows(sessions, outcome.snapshot_id)} == {AMENDMENT}
+    assert xlk_total(sessions, outcome.snapshot_id) == original_total + Decimal("0.1")
+    # Every other fund still carries its original filing.
+    with sessions() as session:
+        others = set(session.scalars(
+            select(SpdrHoldingRow.accession).where(
+                SpdrHoldingRow.snapshot_id == outcome.snapshot_id, SpdrHoldingRow.etf != "XLK"
+            )
+        ))
+    assert others == {ACCESSION_OF[t] for t in FUNDS if t != "XLK"}
+    [_, second] = snapshot_rows(sessions)
+    assert (second.status, second.report_date, second.filed_date) == (
+        "accepted", REPORT, date(2026, 9, 15)
+    )
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.as_of == REPORT and seed.filed_date == date(2026, 9, 15)
+    assert sum((h.weight for h in seed.rows if h.etf == "XLK"), Decimal(0)) == (
+        original_total + Decimal("0.1")
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_amendment_is_not_adopted_again(sessions: Callable[[], Session]) -> None:
+    await build_accept(sessions, FakeSec(), FakeResolver())
+    docs = {AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.561687304177"))}
+    adopted = await build_accept(sessions, with_amendments(FakeSec(), docs), FakeResolver())
+    assert adopted.adopted_amendments == {"XLK": AMENDMENT}
+
+    resolver = FakeResolver()
+    again = await build_accept(sessions, with_amendments(FakeSec(), docs), resolver)
+    assert again.status == "unchanged" and again.adopted_amendments == {}
+    assert resolver.calls == []  # nothing re-resolved
+    assert len(snapshot_rows(sessions)) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_latest_filed_amendment_wins(sessions: Callable[[], Session]) -> None:
+    await build_accept(sessions, FakeSec(), FakeResolver())
+    fake = with_amendments(FakeSec(), {
+        AMENDMENT: ("2026-09-20", xlk_doc(pct_to="0.661687304177")),
+        LATER_AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.561687304177")),
+    })
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert outcome.status == "accepted", outcome.reason
+    # Filing date decides, not accession order (099998 sorts first and was filed earlier).
+    assert outcome.adopted_amendments == {"XLK": AMENDMENT}
+    assert outcome.snapshot_id is not None
+    assert {r.accession for r in xlk_rows(sessions, outcome.snapshot_id)} == {AMENDMENT}
+
+
+@pytest.mark.asyncio
+async def test_two_amendments_filed_the_same_day_for_one_fund_refuse(
+    sessions: Callable[[], Session],
+) -> None:
+    await build_accept(sessions, FakeSec(), FakeResolver())
+    fake = with_amendments(FakeSec(), {
+        AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.561687304177")),
+        LATER_AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.661687304177")),
+    })
     outcome = await build_accept(sessions, fake, FakeResolver())
     assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.AMENDMENT)
     assert outcome.reason is not None and "XLK" in outcome.reason
+    assert outcome.adopted_amendments == {}
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.filed_date == FILED
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_that_fails_the_band_refuses_whole_and_keeps_the_previous(
+    sessions: Callable[[], Session],
+) -> None:
+    first = await build_accept(sessions, FakeSec(), FakeResolver())
+    assert first.seed is not None
+    fake = with_amendments(FakeSec(), {
+        AMENDMENT: ("2026-09-15", xlk_doc(pct_from="5.277342107815", pct_to="25.277342107815")),
+    })
+    outcome = await build_accept(sessions, fake, FakeResolver())
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    assert outcome.reason is not None and "XLK" in outcome.reason
+    assert outcome.adopted_amendments == {}
+    assert [(r.status, r.report_date) for r in snapshot_rows(sessions)] == [
+        ("accepted", REPORT), ("refused", REPORT)
+    ]
+    assert holding_count(sessions) == len(first.seed.rows)  # the refusal stored no rows
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and set(seed.rows) == set(first.seed.rows) and seed.filed_date == FILED
+    assert seed.newer_report_date is None  # same quarter: not "a newer filing exists"
+
+
+@pytest.mark.asyncio
+async def test_an_amendment_with_no_usable_series_id_refuses_whole(
+    sessions: Callable[[], Session],
+) -> None:
+    """No usable ``seriesId``: the amendment cannot be attributed, so nothing is adopted."""
+    first = await build_accept(sessions, FakeSec(), FakeResolver())
+    blank = xlk_doc().replace(
+        f"<seriesId>{XLK_SERIES}</seriesId>".encode(), b"<seriesId></seriesId>"
+    )
+    fake = with_amendments(FakeSec(), {AMENDMENT: ("2026-09-15", blank)})
+    resolver = FakeResolver()
+    outcome = await build_accept(sessions, fake, resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.AMENDMENT)
+    assert outcome.reason is not None and AMENDMENT in outcome.reason
+    assert outcome.adopted_amendments == {}
+    assert resolver.calls == []
+    seed = load_spdr_seed_from_db(sessions)
+    assert first.seed is not None and seed is not None and set(seed.rows) == set(first.seed.rows)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_amendment_refuses_a_new_quarter_and_keeps_the_previous(
+    sessions: Callable[[], Session],
+) -> None:
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    fake = with_amendments(FakeSec(), {AMENDMENT: ("2026-09-15", b"<not-xml")})
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.AMENDMENT)
+    assert outcome.reason is not None and AMENDMENT in outcome.reason
     seed = load_spdr_seed_from_db(sessions)
     assert seed is not None and seed.as_of == date(2026, 3, 31)
+
+
+@pytest.mark.asyncio
+async def test_a_new_quarter_with_an_amendment_loads_the_amended_holdings(
+    sessions: Callable[[], Session],
+) -> None:
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    fake = with_amendments(FakeSec(), {
+        AMENDMENT: ("2026-09-15", xlk_doc(pct_to="0.561687304177")),
+    })
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert outcome.status == "accepted", outcome.reason
+    assert outcome.adopted_amendments == {"XLK": AMENDMENT}
+    assert outcome.snapshot_id is not None
+    assert {r.accession for r in xlk_rows(sessions, outcome.snapshot_id)} == {AMENDMENT}
+
+
+@pytest.mark.asyncio
+async def test_another_series_amendment_is_attributed_away_and_changes_nothing(
+    sessions: Callable[[], Session],
+) -> None:
+    """A Premium Income fund's P/A (the recorded excluded header) is not a sector fund's."""
+    await build_accept(sessions, FakeSec(), FakeResolver())
+    fake = with_amendments(FakeSec(), {AMENDMENT: ("2026-09-15", EXCLUDED_DOC.read_bytes())})
+    resolver = FakeResolver()
+    outcome = await build_accept(sessions, fake, resolver)
+    assert outcome.status == "unchanged" and outcome.adopted_amendments == {}
+    assert fake.archive_requests == [AMENDMENT]  # only the amendment was fetched
+    assert resolver.calls == [] and len(snapshot_rows(sessions)) == 1
 
 
 # ------------------------------------------------------------------ aborts store nothing
@@ -875,3 +1078,27 @@ def test_a_reused_snapshot_id_cannot_serve_a_deleted_snapshot_from_the_cache(
     second = load_spdr_seed_from_db(sessions)
     assert second is not None and second.as_of == date(2026, 6, 30)
     assert "XLKZA" in second.symbols()
+
+
+
+@pytest.mark.asyncio
+async def test_an_sec_outage_on_an_amendment_aborts_rather_than_refusing(
+    sessions: Callable[[], Session],
+) -> None:
+    """SYNTHETIC: a 503 on the amendment's document is an outage, not a fact
+    about the amendment -- abort under sec_unavailable (retried on restart),
+    store nothing, keep the previous snapshot."""
+
+    class AmendmentOutage(FakeSec):
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            digits = AMENDMENT.replace("-", "")
+            if request.url.path.startswith(f"/Archives/edgar/data/1064641/{digits}"):
+                return httpx.Response(503, text="Service Unavailable")
+            return super().__call__(request)
+
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    fake = with_amendments(AmendmentOutage(), {AMENDMENT: ("2026-09-15", b"<unused")})
+    outcome = await build_accept(sessions, fake, FakeResolver())
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.SEC_UNAVAILABLE)
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.as_of == date(2026, 3, 31)

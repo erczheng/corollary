@@ -61,6 +61,8 @@ WAF or proxy in front of it that reflects request headers would write one
 into a body this layer quotes.
 """
 
+import asyncio
+import contextlib
 import functools
 import logging
 import os
@@ -84,6 +86,7 @@ from corollary.api.deps import (
     ServiceRegistry,
 )
 from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
+from corollary.api.operator import deliver_notice
 from corollary.api.routes import (
     account_router,
     activity_router,
@@ -122,9 +125,15 @@ from corollary.engine.execution.interface import (
     BrokerRateLimitedError,
 )
 from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
-from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
+from corollary.engine.runtime import (
+    DISCORD_WEBHOOK_ENV,
+    EngineRuntime,
+    LoggingNotifier,
+    OperatorNotice,
+)
 from corollary.engine.scheduler import (
     AlpacaContextSource,
+    ContextNotices,
     ContextServices,
     ContextSessions,
     HeldPositionUnderlyings,
@@ -560,7 +569,72 @@ def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
     return cast(CusipResolver, provider)
 
 
-def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextServices:
+#: How often the lifespan hands the context jobs' queued notices to the
+#: runtime. The only producer is the weekly ``spdr_holdings`` job, so a
+#: second's latency costs nothing, and polling keeps every awaitable out of
+#: the outbox a job holds (a waiting future would hang the drainer's task --
+#: and through it the runtime -- off an object the isolation walk follows).
+CONTEXT_NOTICE_INTERVAL_SECONDS: Final = 1.0
+
+
+def flush_context_notices(notices: ContextNotices, runtime: EngineRuntime | None) -> int:
+    """Hand every queued context notice to the one notification path. **Never raises.**
+
+    Each becomes an :class:`~corollary.engine.runtime.OperatorNotice` for
+    :func:`~corollary.api.operator.deliver_notice`, which calls
+    ``EngineRuntime.notify_operator_action`` -- the same ``_channels_for``
+    routing gate and the same fan-out (bell row and Discord) as every other
+    notice, decision 14's one path. A missing runtime is a log line there.
+    Returns how many were handed on.
+    """
+    handed = 0
+    for queued in notices.drain():
+        try:
+            deliver_notice(
+                runtime,
+                OperatorNotice(
+                    event=queued.event,
+                    severity=queued.severity,
+                    title=queued.title,
+                    body=queued.body,
+                    at=queued.at,
+                    correlation_id=queued.correlation_id,
+                    account=queued.account,
+                ),
+            )
+            handed += 1
+        except Exception as exc:
+            logger.error(
+                "a context notice could not be handed to the runtime",
+                extra={
+                    "event": "context_notice_not_delivered",
+                    "notification_event": queued.event,
+                    "correlation_id": queued.correlation_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+    return handed
+
+
+async def deliver_context_notices(
+    notices: ContextNotices,
+    runtime: EngineRuntime | None,
+    *,
+    interval: float = CONTEXT_NOTICE_INTERVAL_SECONDS,
+) -> None:
+    """The lifespan's loop over :func:`flush_context_notices`, until cancelled.
+
+    Owned by the lifespan and never handed to a job: it holds the runtime,
+    which is exactly what :class:`ContextServices` must not reach.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        flush_context_notices(notices, runtime)
+
+
+def _context_services(
+    app: FastAPI, sessions: ContextSessions, notices: ContextNotices
+) -> ContextServices:
     """Everything the context jobs are built from, out of this app's own state.
 
     **Shared, never copied:** the asset directory is ``app.state.asset_directory``
@@ -598,6 +672,9 @@ def _context_services(app: FastAPI, sessions: ContextSessions) -> ContextService
         # the ``spdr_holdings`` job skips.
         sec=registry.sec_provider(),
         cusips=_cusip_source(alpaca),
+        # The outbox the lifespan drains into the runtime's notification
+        # path; the jobs hold only this, never the runtime (decision 1).
+        notices=notices,
     )
 
 
@@ -820,15 +897,22 @@ def create_app(
         # ``holder.replace`` and nothing else, and catches its own failures.
         context_scheduler: Scheduler | None = None
         context_sessions = ContextSessions(db_engine)
+        context_notices = ContextNotices()
+        app.state.context_notices = context_notices
+        notice_task: asyncio.Task[None] | None = None
         refresher: PaperPositionsRefresher | None = None
         try:
             if scheduler is not no_scheduler:
                 context_scheduler = scheduler(
-                    _context_services(app, context_sessions), app.state.secret_values
+                    _context_services(app, context_sessions, context_notices),
+                    app.state.secret_values,
                 )
             if context_scheduler is not None:
                 refresher = _position_refresher(app)
                 refresher.start()
+                notice_task = asyncio.create_task(
+                    deliver_context_notices(context_notices, runtime)
+                )
                 context_scheduler.start()
         except Exception as exc:
             logger.error(
@@ -863,6 +947,18 @@ def create_app(
                 # no commit lands after this lifespan has returned. Never
                 # raises, so the rule 9 alerts below keep their grace.
                 await context_sessions.drain()
+            # Then the notices those jobs queued: the loop stops, and one
+            # last flush hands on anything a job put before it finished --
+            # while the runtime and the Discord sink are still open.
+            if notice_task is not None:
+                notice_task.cancel()
+                # Suppress any exception, not only the cancellation: a drain
+                # task that had died would otherwise re-raise here and skip
+                # the final flush, the sockets and runtime.aclose() -- rule 9's
+                # shutdown order must not rest on the drain never failing.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await notice_task
+            flush_context_notices(context_notices, runtime)
             # Then the sockets, ahead of the runtime: they report into the
             # watchdog, and a socket
             # still reading while the supervisor it reports to is gone is a

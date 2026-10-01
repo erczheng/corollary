@@ -40,13 +40,29 @@ The owner's rules, as implemented
   :data:`WEIGHT_BAND_HIGH`] inclusive -- or the **whole** snapshot is refused
   and the previous accepted one stays current. The refusal is recorded (rule
   and reason) and logged with its rule.
-* **An NPORT-P/A refuses the snapshot** (parent-session assumption, fail
-  closed). :attr:`~corollary.data.providers.sec.SectorSelection.amended` is
-  derived from the filing index, so an amendment the index lists but that
-  cannot be attributed to a series flags every fund -- an unattributed P/A
-  anywhere in the trust therefore blocks the update. Every indexed
-  amendment's document is fetched precisely so that a Premium Income fund's
-  amendment can be attributed away and does not.
+* **An NPORT-P/A is adopted, under the same validation** (owner decision,
+  2026-09-30, replacing unit 4SEC-B2's refuse-on-amendment). For the quarter
+  being loaded -- or the one already loaded -- every indexed amendment's
+  document is fetched and attributed to its fund by ``genInfo/seriesId``;
+  that fund's holdings come from its **latest-filed** amendment instead of
+  its original, and the rebuilt snapshot passes or fails exactly the checks
+  an original does (all eleven, >= 5, 90-110, the ISIN seam). An accepted
+  rebuild of a loaded quarter is a new accepted row with the same report
+  date and a later filed date; the loader already serves the newest accepted
+  row of the latest report date. :attr:`SnapshotOutcome.adopted_amendments`
+  names the funds whose amendment this snapshot adopted that the previous
+  current one did not carry -- the ``spdr_holdings`` job notifies
+  ``spdr_seed_amended`` from it, and only from an accepted outcome.
+  **Fail closed, whole:** an amendment that cannot be attributed (its
+  document cannot be fetched or read -- ``parse_nport_document`` refuses a
+  document with no usable ``seriesId`` -- or reports another date), or two
+  amendments for one fund filed the same day (no "latest" to pick), refuses
+  the snapshot under :attr:`SnapshotRule.AMENDMENT`; a rebuild that fails
+  validation is refused under its own rule. Either way the previous accepted
+  snapshot stays served and nothing is notified. A Premium Income fund's
+  amendment is attributed away and changes nothing. A loaded quarter whose
+  sector amendments are all already adopted is ``unchanged``: nothing is
+  re-resolved, nothing stored.
 * **Aborts store nothing.** SEC refusing access (:class:`SecAccessRefused`,
   logged at ERROR -- never retried here), SEC being unreachable or answering
   garbage, or the asset lookup failing with anything other than "unknown
@@ -67,7 +83,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -77,12 +93,18 @@ from typing import Final, Literal, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from corollary.data.providers.interface import AssetDirectory, EquityAsset, ProviderError
+from corollary.data.providers.interface import (
+    AssetDirectory,
+    EquityAsset,
+    ProviderError,
+    RateLimitedError,
+)
 from corollary.data.providers.sec import (
     NportDocument,
     NportFiling,
     NportFilings,
     SecAccessRefused,
+    SecUnavailable,
     SecError,
     SectorFund,
     select_sector_documents,
@@ -251,6 +273,23 @@ class SnapshotOutcome:
     holdings: Mapping[str, tuple[ResolvedHolding, ...]] = field(default_factory=dict)
     skipped: tuple[SkippedLine, ...] = ()
     seed: SpdrSeed | None = None
+    #: ``etf -> accession`` of each NPORT-P/A this snapshot adopted that the
+    #: previously current snapshot did not carry. Filled only on ``accepted``;
+    #: empty for an original-only quarter, a refusal, and every other status.
+    adopted_amendments: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AmendmentChoice:
+    """Which NPORT-P/A each sector fund takes, or why none can be adopted.
+
+    ``chosen`` maps a ticker to its latest-filed amendment and document.
+    ``problem`` is the refusal reason when any amendment is unattributable or
+    ambiguous; ``chosen`` is then empty -- nothing is partially adopted.
+    """
+
+    chosen: Mapping[str, tuple[NportFiling, NportDocument]] = field(default_factory=dict)
+    problem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +383,58 @@ def selection_failure_rule(
     return None
 
 
+def choose_amendments(
+    series_by_ticker: Mapping[str, str],
+    fetched: Sequence[tuple[NportFiling, NportDocument]],
+    unreadable: Sequence[tuple[NportFiling, str]],
+) -> AmendmentChoice:
+    """Attribute the quarter's NPORT-P/A documents to sector funds; pick the latest per fund.
+
+    Pure. ``fetched`` are the amendments whose documents were read;
+    ``unreadable`` the ones that could not be fetched or parsed, with why
+    (``parse_nport_document`` refuses a document with no usable
+    ``seriesId``, so "no seriesId" arrives here). Fail closed, whole:
+
+    * any unreadable amendment -- it could be any fund's -- is a problem;
+    * an amendment attributed to a sector fund whose document reports a date
+      other than its filing's is a problem;
+    * two amendments for one fund sharing the latest filing date is a
+      problem: there is no "latest" to adopt, and accession order is a filer
+      agent's sequence, not a filing time.
+
+    An amendment for any other series (a Premium Income fund's) is ignored.
+    """
+    if unreadable:
+        named = "; ".join(f"{f.accession} ({why[:160]})" for f, why in unreadable)
+        return AmendmentChoice(problem=f"NPORT-P/A that cannot be attributed to a fund: {named}")
+    ticker_of = {series_id: ticker for ticker, series_id in series_by_ticker.items()}
+    by_ticker: dict[str, list[tuple[NportFiling, NportDocument]]] = {}
+    for filing, document in fetched:
+        ticker = ticker_of.get(document.series_id)
+        if ticker is None:
+            continue
+        if document.report_date != filing.report_date:
+            return AmendmentChoice(problem=(
+                f"NPORT-P/A {filing.accession} for {ticker} is listed for "
+                f"{filing.report_date.isoformat()} but its document reports "
+                f"{document.report_date.isoformat()}"
+            ))
+        by_ticker.setdefault(ticker, []).append((filing, document))
+    chosen: dict[str, tuple[NportFiling, NportDocument]] = {}
+    for ticker in sorted(by_ticker):
+        candidates = by_ticker[ticker]
+        latest = max(filing.filing_date for filing, _ in candidates)
+        tied = sorted(f.accession for f, _ in candidates if f.filing_date == latest)
+        if len(tied) > 1:
+            return AmendmentChoice(problem=(
+                f"{ticker} has {len(tied)} NPORT-P/A filed {latest.isoformat()} "
+                f"({', '.join(tied)}); no latest amendment to adopt"
+            ))
+        [pick] = [(f, d) for f, d in candidates if f.filing_date == latest]
+        chosen[ticker] = pick
+    return AmendmentChoice(chosen=chosen)
+
+
 # ------------------------------------------------------------------ the build
 
 
@@ -411,49 +502,87 @@ async def _build(
         raise _Abort(SnapshotRule.SEC_UNAVAILABLE, str(exc)) from None
 
     current = _current_accepted(session_factory)
-    if current is not None and filings.report_date <= current.report_date:
-        if filings.amendments:
-            logger.warning(
-                "spdr snapshot: %d NPORT-P/A filed for %s, already loaded from the originals; "
-                "the loaded snapshot stays",
-                len(filings.amendments),
-                filings.report_date.isoformat(),
-                extra={
-                    "event": "spdr_snapshot_amendment_after_load",
-                    "rule": SnapshotRule.AMENDMENT.value,
-                    "report_date": filings.report_date.isoformat(),
-                    "accessions": [f.accession for f in filings.amendments],
-                },
-            )
+    if current is not None and filings.report_date < current.report_date:
+        return SnapshotOutcome(status="unchanged", report_date=current.report_date)
+    reloading = current is not None and filings.report_date == current.report_date
+    if reloading and not filings.amendments:
+        assert current is not None
         return SnapshotOutcome(status="unchanged", report_date=current.report_date)
 
+    # Amendments first: on a loaded quarter they decide whether there is any
+    # work at all, before 22 originals and ~474 CUSIPs are asked again.
+    amendment_docs: list[tuple[NportFiling, NportDocument]] = []
+    unreadable: list[tuple[NportFiling, str]] = []
+    for filing in filings.amendments:
+        try:
+            amendment_docs.append((filing, await sec.nport_holdings(filing.accession)))
+        except SecAccessRefused as exc:
+            raise _Abort(SnapshotRule.SEC_ACCESS_REFUSED, str(exc)) from None
+        except (SecUnavailable, RateLimitedError) as exc:
+            # An outage is not a fact about the amendment: abort under the
+            # same rule the originals use, so a restart retries it instead of
+            # a stored refusal suppressing the catch-up for a week.
+            raise _Abort(SnapshotRule.SEC_UNAVAILABLE, str(exc)) from None
+        except SecError as exc:
+            # Unattributable, not an abort (owner decision 2026-09-30): an
+            # amendment nobody can read could be any fund's, so the quarter is
+            # refused whole and the previous snapshot stays.
+            unreadable.append((filing, str(exc)))
+    choice = choose_amendments(series, amendment_docs, unreadable)
+    # What the previously current snapshot carried, per fund. A new quarter's
+    # originals never match an old quarter's accessions, so every amendment a
+    # new quarter adopts counts as adopted.
+    carried = _carried_accessions(session_factory, current.id) if current is not None else {}
+    adopted = {
+        ticker: filing.accession
+        for ticker, (filing, _) in choice.chosen.items()
+        if carried.get(ticker) != filing.accession
+    }
+    index_filed = max((f.filing_date for f in filings.filings), default=filings.report_date)
+    if reloading and choice.problem is None and not adopted:
+        assert current is not None
+        logger.info(
+            "spdr snapshot: %d NPORT-P/A for %s, none a sector fund's that is not "
+            "already adopted; the loaded snapshot stays",
+            len(filings.amendments), filings.report_date.isoformat(),
+            extra={
+                "event": "spdr_snapshot_amendments_already_adopted",
+                "report_date": filings.report_date.isoformat(),
+                "accessions": [f.accession for f in filings.amendments],
+                "carried": sorted(carried.values()),
+            },
+        )
+        return SnapshotOutcome(status="unchanged", report_date=current.report_date)
+    if choice.problem is not None:
+        return _refuse(session_factory, clock, filings.report_date, index_filed,
+                       SnapshotRule.AMENDMENT, choice.problem, ())
+
     documents: list[tuple[NportFiling, NportDocument]] = []
-    for filing in filings.filings:
+    for filing in filings.originals:
         try:
             documents.append((filing, await sec.nport_holdings(filing.accession)))
         except SecAccessRefused as exc:
             raise _Abort(SnapshotRule.SEC_ACCESS_REFUSED, str(exc)) from None
         except SecError as exc:
             raise _Abort(SnapshotRule.SEC_UNAVAILABLE, str(exc)) from None
+    # Every amendment was read (an unreadable one refused above), so the
+    # selector's own ``amended``/``unattributed`` flags are superseded by
+    # ``choice``: it is handed the amendment documents only so that none is
+    # reported as unfetched.
+    documents.extend(amendment_docs)
 
-    index_filed = max((f.filing_date for f in filings.originals), default=filings.report_date)
     try:
         selection = select_sector_documents(series, documents, filings=filings)
     except SecError as exc:
         rule = selection_failure_rule(series, documents, filings) or SnapshotRule.SELECTION_FAILED
         return _refuse(session_factory, clock, filings.report_date, index_filed,
                        rule, str(exc), ())
-    filed = max(fund.filing.filing_date for fund in selection.funds.values())
-    if selection.amended:
-        unattributed = [f.accession for f in selection.unattributed_amendments]
-        reason = (
-            f"NPORT-P/A filed for {', '.join(selection.amended)}"
-            + (f" (unattributed: {', '.join(unattributed)})" if unattributed else "")
-        )
-        return _refuse(session_factory, clock, filings.report_date, filed,
-                       SnapshotRule.AMENDMENT, reason, ())
+    funds: dict[str, SectorFund] = dict(selection.funds)
+    for ticker, (filing, document) in choice.chosen.items():
+        funds[ticker] = SectorFund(ticker, series[ticker], filing, document)
+    filed = max(fund.filing.filing_date for fund in funds.values())
 
-    holdings, skipped = await _resolve(selection.funds, resolver, isin_resolver, directory)
+    holdings, skipped = await _resolve(funds, resolver, isin_resolver, directory)
     problems = validate_funds(holdings)
     if problems:
         reason = "; ".join(f"{p.rule.value}: {p.detail}" for p in problems)
@@ -506,11 +635,12 @@ async def _build(
         extra={"event": "spdr_snapshot_accepted", "snapshot_id": snapshot_id,
                "report_date": filings.report_date.isoformat(), "filed_date": filed.isoformat(),
                "holdings": len(seed.rows), "skipped_lines": len(skipped),
+               "adopted_amendments": dict(adopted),
                "at": built_at.isoformat()},
     )
     return SnapshotOutcome(
         status="accepted", report_date=filings.report_date, snapshot_id=snapshot_id,
-        holdings=holdings, skipped=skipped, seed=seed,
+        holdings=holdings, skipped=skipped, seed=seed, adopted_amendments=adopted,
     )
 
 
@@ -645,6 +775,60 @@ def _current_accepted(session_factory: Callable[[], Session]) -> SnapshotAttempt
             .limit(1)
         ).first()
         return None if row is None else _attempt(row)
+
+
+def _carried_accessions(session_factory: Callable[[], Session], snapshot_id: int) -> dict[str, str]:
+    """``etf -> accession`` a stored snapshot's holdings were built from.
+
+    One filing per fund by construction (every row of a fund is resolved
+    from one document); a fund with rows from two accessions is a
+    corrupted snapshot, and is left out so that whatever is chosen now
+    counts as new and is rebuilt rather than trusted.
+    """
+    with session_factory() as session:
+        pairs = session.execute(
+            select(SpdrHoldingRow.etf, SpdrHoldingRow.accession)
+            .where(SpdrHoldingRow.snapshot_id == snapshot_id)
+            .distinct()
+        ).all()
+    seen: dict[str, set[str]] = {}
+    for etf, accession in pairs:
+        seen.setdefault(etf, set()).add(accession)
+    return {etf: next(iter(acc)) for etf, acc in seen.items() if len(acc) == 1}
+
+
+@dataclass(frozen=True)
+class StoredAmendments:
+    """A stored accepted snapshot's dates and some funds' accessions: for the notice."""
+
+    snapshot_id: int
+    report_date: date
+    filed_date: date
+    #: ``etf -> accession`` as stored, for the funds asked about that have rows.
+    accessions: Mapping[str, str]
+
+
+def stored_snapshot_amendments(
+    session_factory: Callable[[], Session], snapshot_id: int, etfs: Iterable[str]
+) -> StoredAmendments | None:
+    """Read back a stored **accepted** snapshot's dates and ``etfs``' accessions.
+
+    Decision 20: the ``spdr_seed_amended`` notice quotes what was written,
+    not what the build held in memory. ``None`` if the row is missing or not
+    accepted. A fund whose rows carry two accessions is left out (see
+    :func:`_carried_accessions`), so it can never match.
+    """
+    with session_factory() as session:
+        row = session.get(SpdrHoldingsSnapshot, snapshot_id)
+        if row is None or row.status != ACCEPTED:
+            return None
+        report_date, filed_date = row.report_date, row.filed_date
+    wanted = set(etfs)
+    carried = _carried_accessions(session_factory, snapshot_id)
+    return StoredAmendments(
+        snapshot_id=snapshot_id, report_date=report_date, filed_date=filed_date,
+        accessions={etf: acc for etf, acc in carried.items() if etf in wanted},
+    )
 
 
 def _attempt(row: SpdrHoldingsSnapshot) -> SnapshotAttempt:

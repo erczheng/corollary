@@ -980,7 +980,9 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The routable events: PRD.md §10's eight, plus six operator events.
+/** The routable events: PRD.md §10's eight, six operator events, and one engine record
+ * (`spdr_seed_amended`, owner decision 2026-09-30: an NPORT-P/A adopted into the
+ * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action).
  *
  * The owner's call: "any action i do should be put into the discord". So a
  * human halt or resume, and every change to risk limits, data feeds or the
@@ -1009,6 +1011,7 @@ export type NotificationEvent =
   | 'data_feeds_changed'
   | 'notification_routes_changed'
   | 'watchlist_changed'
+  | 'spdr_seed_amended'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -1025,6 +1028,7 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   data_feeds_changed: 'Data feeds changed',
   notification_routes_changed: 'Notification routing changed',
   watchlist_changed: 'News watchlist changed',
+  spdr_seed_amended: 'SPDR seed amended',
 }
 
 /** Routing per channel.

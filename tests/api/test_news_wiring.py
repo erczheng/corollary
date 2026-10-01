@@ -1032,6 +1032,10 @@ async def test_nothing_the_lifespan_hands_the_jobs_can_reach_a_broker_or_the_run
         assert id(app.state.position_underlyings) in reached
         assert id(app.state.asset_directory) in reached
         assert id(db_engine) in reached
+        # The notice outbox (owner decision 2026-09-30) is walked too, and is
+        # the one the lifespan drains -- a job's only way to notify.
+        assert services.notices is app.state.context_notices
+        assert id(services.notices) in reached
         if wiring == "real_providers":
             assert services.alpaca is not None and services.finnhub is not None
             assert services.massive is not None and services.fred is not None
@@ -1158,3 +1162,83 @@ def test_an_unbound_seed_loader_refuses_rather_than_answering_no_seed() -> None:
     assert not loader.bound
     with pytest.raises(SeedError, match="not bound"):
         loader()
+
+
+# --------------------------------------------------------------------------
+# Context notices reach the runtime's one notification path
+# --------------------------------------------------------------------------
+
+
+class _RecordingRuntime:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.notices: list[object] = []
+        self.fail = fail
+
+    def notify_operator_action(self, notice: object) -> object:
+        if self.fail:
+            raise RuntimeError("https://discord.example/webhook/SYNTHETIC")
+        self.notices.append(notice)
+        return notice
+
+
+def _context_notice(n: int) -> object:
+    from corollary.engine.scheduler import ContextNotice
+
+    return ContextNotice(
+        event="spdr_seed_amended", severity="info", title="SPDR seed amended",
+        body=f"body {n}", at=datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc),
+        correlation_id=f"c{n}",
+    )
+
+
+def test_queued_context_notices_are_handed_to_the_runtime_as_operator_notices() -> None:
+    from corollary.api.app import flush_context_notices
+    from corollary.engine.runtime import OperatorNotice
+    from corollary.engine.scheduler import ContextNotices
+
+    outbox = ContextNotices()
+    outbox.put(_context_notice(1))  # type: ignore[arg-type]
+    outbox.put(_context_notice(2))  # type: ignore[arg-type]
+    runtime = _RecordingRuntime()
+    assert flush_context_notices(outbox, runtime) == 2  # type: ignore[arg-type]
+    assert [type(n) for n in runtime.notices] == [OperatorNotice, OperatorNotice]
+    first = runtime.notices[0]
+    assert isinstance(first, OperatorNotice)
+    assert (first.event, first.severity, first.account, first.correlation_id) == (
+        "spdr_seed_amended", "info", None, "c1"
+    )
+    assert flush_context_notices(outbox, runtime) == 0  # type: ignore[arg-type]
+
+
+def test_a_failing_or_missing_runtime_never_raises_out_of_the_flush(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from corollary.api.app import flush_context_notices
+    from corollary.engine.scheduler import ContextNotices
+
+    outbox = ContextNotices()
+    outbox.put(_context_notice(1))  # type: ignore[arg-type]
+    flush_context_notices(outbox, _RecordingRuntime(fail=True))  # type: ignore[arg-type]
+    outbox.put(_context_notice(2))  # type: ignore[arg-type]
+    flush_context_notices(outbox, None)
+    assert len(outbox) == 0
+    assert "discord.example" not in caplog.text  # class name only (rule 6)
+
+
+@pytest.mark.asyncio
+async def test_the_lifespan_delivers_a_queued_context_notice_into_the_bell_table(
+    registry: ServiceRegistry, db_engine: Engine
+) -> None:
+    """End to end: a notice put on the outbox becomes a stored ``notification`` row."""
+    from corollary.db.models import NotificationRecord
+
+    captured: list[ContextServices] = []
+    app = create_app(registry=registry, db_engine=db_engine, scheduler=_refusing_scheduler(captured))
+    async with app.router.lifespan_context(app):
+        (services,) = captured
+        services.notices.put(_context_notice(7))  # type: ignore[arg-type]
+    # The scheduler factory returned None, so no loop ran: shutdown's final
+    # flush is what delivered it.
+    with Session(db_engine) as session:
+        rows = session.query(NotificationRecord).filter_by(event="spdr_seed_amended").all()
+    assert [(r.severity, r.account) for r in rows] == [("info", None)]

@@ -680,6 +680,7 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "data_feeds_changed",
         "notification_routes_changed",
         "watchlist_changed",
+        "spdr_seed_amended",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -691,6 +692,13 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
     # Phase 3 decision 20: a manual watch is a record for Discord, not a bell.
     assert routed["watchlist_changed"] == {
         "event": "watchlist_changed",
+        "bell": False,
+        "discord": True,
+    }
+    # Owner decision 2026-09-30 (migration 0011): an adopted NPORT-P/A, on
+    # decision 20's info-event defaults -- a parent-session assumption.
+    assert routed["spdr_seed_amended"] == {
+        "event": "spdr_seed_amended",
         "bell": False,
         "discord": True,
     }
