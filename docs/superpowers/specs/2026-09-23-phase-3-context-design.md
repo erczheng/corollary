@@ -875,8 +875,9 @@ greeks to the converted rate rather than the quoted one, and pin the
 fallback's convention.
 
 **Q17 — The ISIN-only holdings resolve through OpenFIGI (2026-09-30); Q14's
-open question is answered.** *Status: blocked on rule 1's structural guard —
-no provider, no recorder, no fixture.* The owner chose **OpenFIGI** as Q14's
+open question is answered.** *Status: unblocked by Q21 (2026-09-30) — the
+provider exists (`corollary/data/providers/openfigi.py`, synthetic tests
+only); recorder and live fixture are next.* The owner chose **OpenFIGI** as Q14's
 `IsinResolver`.
 
 - *Parent-session specifics the owner can override:*
@@ -913,7 +914,7 @@ no provider, no recorder, no fixture.* The owner chose **OpenFIGI** as Q14's
   The endpoint is **`POST https://api.openfigi.com/v3/mapping`**, one job per
   ISIN (`idType: "ID_ISIN"`). The 29 lines are three keyless requests
   (10/10/9) or one keyed.
-- **Blocked: the mapping endpoint is POST-only.**
+- **Blocked (resolved by Q21): the mapping endpoint is POST-only.**
   `tests/test_hard_rules.py::test_nothing_on_the_vendor_surface_issues_a_non_get_request`
   — rule 1's structural guard — forbids a non-GET call in
   `tests/fixtures/record_*.py`, `scripts/*.py`, `corollary/data/providers`,
@@ -962,6 +963,70 @@ zero readable quotes in N seconds) beside the connection clock.
 **Q20 — Scope pauses after step 4's follow-ups (2026-09-30).** Step 4's
 follow-ups finish; **step 5 and everything after it is not started until the
 owner says so.**
+
+**Q21 — OpenFIGI's mapping POST is exempted from rule 1's GET-only guard
+(2026-09-30); resolves Q17's blocker and the open part of Q14/Q20.** *Status:
+guard and provider done (synthetic tests; no live call yet).* The owner chose
+**option A** of Q17's blocker: a narrow exemption in the guard itself.
+
+- **Reasoning (the owner's).** The guard's stated purpose is *"nothing reaches
+  Alpaca with a verb that changes anything"*. OpenFIGI is not a broker host,
+  and the exemption keeps that purpose while changing its wording — from "no
+  write verb on the vendor surface" to "none except this one, which cannot
+  reach a broker". A mapping job is a lookup that happens to be spelled POST.
+- **Scope: one file, one URL, one call site.** The exemption lives in
+  `tests/test_hard_rules.py` as named constants (`OPENFIGI_EXEMPT_PATH`,
+  `OPENFIGI_EXEMPT_URL`, `OPENFIGI_EXEMPT_VERB`,
+  `OPENFIGI_EXEMPT_MAX_CALL_SITES`): in `corollary/data/providers/openfigi.py`
+  only, one `self._client.post(...)` whose URL argument is the **inline string
+  literal** `https://api.openfigi.com/v3/mapping` — never a name, since a
+  module global can be rebound at runtime (audit 2026-10-01) — and whose
+  keywords are **exactly** `json`, `headers` and `follow_redirects=False`
+  (the literal `False`), so a redirect can never carry the key header to
+  another host. No wildcard, no host-only match. A module constant, an
+  f-string, a concatenation, a `url=` keyword, a missing or extra keyword, a
+  `**kwargs` splat, any other receiver, or a second call site (even to the
+  same URL — which voids the exemption for both) still fails, as does any
+  reference to `globals`/`vars`/`setattr`/`exec`/`eval`/`locals` in that
+  file. The provider builds its own `httpx.AsyncClient(timeout=…,
+  transport=…)` exactly once and accepts only a test `transport=`, never a
+  client, so no injected `base_url`, default headers, hooks or auth can ride
+  along; a guard test pins that construction. Rule 1's write-verb set also
+  gained `stream` (httpx's method-taking `client.stream("POST", …)`), and the
+  guard now refuses a write verb *referenced* without a direct call
+  (`f = client.post`, `functools.partial(client.post, …)`) and any by-name
+  lookup (`getattr`/`attrgetter`/`methodcaller`/`__getattribute__`) whose
+  name is non-literal or a literal write verb. The positive guard
+  (`self._client` calls are `get`/`aclose` only) subtracts the same one site
+  by the same predicate.
+- **Proven on synthetic source**, through the same pure checker the real-tree
+  gate calls: the guard still trips on (a) a POST to an Alpaca host from that
+  same file, (b) a POST to any other OpenFIGI path (`/v3/search`,
+  `/v3/mapping/`, `http://…`, built at runtime), (c) a POST to the exact
+  mapping URL from any other file (`finnhub.py`, a `record_openfigi.py`,
+  `scripts/`, path near-misses), plus `.request("POST", …)`, `.send(…)` and
+  `.put(…)` in the exempted file. A further test pins that the real tree uses
+  the exemption at exactly one site.
+- **The exempted file cannot reach the broker.** A guard test parses
+  `openfigi.py` and the transitive closure of its `corollary.*` imports
+  (parent packages included) and refuses any import of
+  `corollary.engine.execution*`, the `alpaca` SDK, or
+  `corollary.data.providers.alpaca`, including relative imports and
+  `importlib.import_module`/`__import__` (a non-literal argument is refused
+  outright); and refuses any string literal or identifier in the file
+  containing `alpaca` in any case — which makes an `ALPACA_*` environment
+  read or a broker host unspellable there. Stated limit: a name assembled at
+  runtime from fragments is a deliberate evasion this does not catch.
+- **The body is pinned:** a JSON list of `{"idType": "ID_ISIN", "idValue": …}`
+  and nothing else — no `exchCode`; acceptance filters to US listings on the
+  response side (Q17), and a request-side filter would hide the
+  multi-listing evidence that refusal depends on. The recorder (next unit)
+  calls the provider's `map_isins` rather than POSTing itself, so no second
+  file needs an exemption.
+- **Bucket:** `api.openfigi.com` at **12 per 60 s** in the shared limiter —
+  worst rolling minute `C + r·T` = 24 against the keyless 25; worst 6 s 13.2
+  against the keyed 25. One bucket under whichever ceiling applies; the key
+  buys batch size (100 jobs, not 10), not rate.
 
 ---
 

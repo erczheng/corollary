@@ -63,6 +63,10 @@ __all__ = [
     "FINNHUB_REQUESTS_PER_MINUTE",
     "FRED_HOST",
     "FRED_REQUESTS_PER_MINUTE",
+    "OPENFIGI_BUCKET_REQUESTS_PER_MINUTE",
+    "OPENFIGI_HOST",
+    "OPENFIGI_KEYED_REQUESTS_PER_6_SECONDS",
+    "OPENFIGI_KEYLESS_REQUESTS_PER_MINUTE",
     "MASSIVE_HOST",
     "MASSIVE_REQUESTS_PER_MINUTE",
     "STOCKTWITS_HOST",
@@ -115,6 +119,23 @@ MASSIVE_REQUESTS_PER_MINUTE = 5
 #: FRED -- VIX, credit spreads, the 3-month bill, release dates.
 FRED_HOST = "api.stlouisfed.org"
 FRED_REQUESTS_PER_MINUTE = 120
+
+#: OpenFIGI -- ISIN to FIGI/ticker mapping for the N-PORT lines that carry no
+#: CUSIP (spec Q17, Q21). Its documented ceilings: keyless **25 requests per
+#: minute**, keyed **25 requests per 6 seconds** (250/min).
+OPENFIGI_HOST = "api.openfigi.com"
+OPENFIGI_KEYLESS_REQUESTS_PER_MINUTE = 25
+OPENFIGI_KEYED_REQUESTS_PER_6_SECONDS = 25
+
+#: The bucket actually used, keyed or not: **12 per 60 s**. A token bucket's
+#: worst case over any window T is ``C + r*T`` (module docstring), so 12 + 12
+#: = 24 in any rolling minute, under the keyless 25 -- whereas a bucket of 25
+#: would admit 50 after an idle spell. Keyed, the worst 6-second window is
+#: 12 + 1.2 = 13.2 against 25, and the worst minute 24 against 250, so the one
+#: bucket stays under whichever ceiling applies without knowing which. The key
+#: buys batch size (100 jobs a request, not 10), not request rate -- the 29
+#: ISIN-only lines are three requests keyless, one keyed.
+OPENFIGI_BUCKET_REQUESTS_PER_MINUTE = 12
 
 #: StockTwits -- keyless symbol streams, metered **per hour**, not per minute.
 STOCKTWITS_HOST = "api.stocktwits.com"
@@ -177,6 +198,7 @@ DEFAULT_PER_HOST_BUDGETS: Mapping[str, HostBudget] = MappingProxyType(
         FINNHUB_HOST: HostBudget(FINNHUB_REQUESTS_PER_MINUTE),
         MASSIVE_HOST: HostBudget(MASSIVE_REQUESTS_PER_MINUTE),
         FRED_HOST: HostBudget(FRED_REQUESTS_PER_MINUTE),
+        OPENFIGI_HOST: HostBudget(OPENFIGI_BUCKET_REQUESTS_PER_MINUTE),
         STOCKTWITS_HOST: HostBudget(STOCKTWITS_REQUESTS_PER_HOUR, 3600.0),
         SEC_BUCKET: HostBudget(SEC_REQUESTS_PER_SECOND, 1.0),
     }

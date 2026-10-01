@@ -1,0 +1,57 @@
+{
+  "_synthetic": "SYNTHETIC: hand-built for tests/data/providers/test_openfigi_provider.py. Not a recording -- no live call was made to build it. The response shape follows OpenFIGI's v3 mapping documentation (https://www.openfigi.com/api/documentation): one result per job, in job order, each carrying exactly one of data / warning / error. Every FIGI below is INVENTED; tickers and names are illustrative only. The live recording (next unit) must confirm the shape before any acceptance rule relies on a field.",
+  "request": [
+    {"idType": "ID_ISIN", "idValue": "IE000S9YS762"},
+    {"idType": "ID_ISIN", "idValue": "IE00BLP1HW54"},
+    {"idType": "ID_ISIN", "idValue": "US0000000002"},
+    {"idType": "ID_ISIN", "idValue": "XS0000000009"}
+  ],
+  "response": [
+    {
+      "data": [
+        {
+          "figi": "BBG000SYNTH1",
+          "name": "SYNTHETIC LINDE PLC",
+          "ticker": "LIN",
+          "exchCode": "US",
+          "compositeFIGI": "BBG000SYNTH1",
+          "securityType": "Common Stock",
+          "marketSector": "Equity",
+          "shareClassFIGI": "BBG001SYNTH1",
+          "securityType2": "Common Stock",
+          "securityDescription": "LIN"
+        }
+      ]
+    },
+    {
+      "data": [
+        {
+          "figi": "BBG000SYNTH2",
+          "name": "SYNTHETIC AON PLC",
+          "ticker": "AON",
+          "exchCode": "US",
+          "compositeFIGI": "BBG000SYNTH2",
+          "securityType": "Common Stock",
+          "marketSector": "Equity",
+          "shareClassFIGI": "BBG001SYNTH2",
+          "securityType2": "Common Stock",
+          "securityDescription": "AON"
+        },
+        {
+          "figi": "BBG000SYNTH3",
+          "name": "SYNTHETIC AON PLC",
+          "ticker": "4VK",
+          "exchCode": "GR",
+          "compositeFIGI": "BBG000SYNTH4",
+          "securityType": "Common Stock",
+          "marketSector": "Equity",
+          "shareClassFIGI": "BBG001SYNTH2",
+          "securityType2": "Common Stock",
+          "securityDescription": null
+        }
+      ]
+    },
+    {"warning": "No identifier found."},
+    {"error": "Invalid idValue format."}
+  ]
+}

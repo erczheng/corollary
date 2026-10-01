@@ -96,7 +96,7 @@ What is here and what is not:
 import ast
 import inspect
 import re
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath
 
 import pytest
 
@@ -307,7 +307,23 @@ def vendor_surface() -> tuple[Path, ...]:
 #: those is how a mid-session re-plan converges, and it narrows a read -- and
 #: ``tests/engine/execution/test_trade_update_stream.py`` does the same for
 #: ``auth`` and ``listen``. An order placed over a socket would fail both.
-WRITE_VERBS = frozenset({"post", "put", "patch", "delete", "request", "send"})
+#:
+#: ``stream`` is here for the same reason as ``request``: ``httpx``'s
+#: ``client.stream("POST", url)`` takes the method as an argument. And the
+#: guard flags a *reference* to any of these names, not only a direct call --
+#: ``f = client.post; f(...)``, ``functools.partial(client.post, ...)`` -- so
+#: a data field cannot share a name with one: ``SubscriptionPlan``'s socket
+#: field is ``stream_kind`` and the recorders read ``response.url``, not
+#: ``response.request.url``, for exactly that reason.
+WRITE_VERBS = frozenset(
+    {"post", "put", "patch", "delete", "request", "send", "stream"}
+)
+
+#: Calls that look an attribute up by a name given as data. A non-literal name
+#: is refused outright (the guard cannot know it is not a write verb); a
+#: literal that *is* a write verb is refused as the reference it spells.
+ATTRIBUTE_LOOKUPS = frozenset({"getattr", "attrgetter", "methodcaller"})
+DUNDER_LOOKUPS = frozenset({"__getattribute__", "__getattr__"})
 
 #: Fragments of a method name that would mean the broker can change something.
 WRITE_SHAPED = (
@@ -738,21 +754,240 @@ def test_nothing_on_the_vendor_surface_issues_a_non_get_request() -> None:
     the transport protocol and nothing else. A websocket frame changes nothing
     at the vendor; what those frames may *say* is
     :func:`test_no_vendor_socket_frame_carries_an_action_outside_the_allowlist`.
+
+    **A second exemption, for an HTTP write that never reaches a broker (Q21,
+    owner decision 2026-09-30):** one ``self._client.post(...)`` call site in
+    ``corollary/data/providers/openfigi.py``, to exactly
+    :data:`OPENFIGI_EXEMPT_URL`. See :data:`OPENFIGI_EXEMPT_PATH` for the
+    reasoning and :func:`_openfigi_mapping_posts` for the mechanism. The
+    purpose stated above survives it unchanged: nothing reaches *Alpaca* with
+    a verb that changes anything.
+
+    The check itself is :func:`_write_verb_offenders`, a pure function over a
+    path and its source, so the tests below can prove the exemption's edges
+    on synthetic source without any real file having to break first.
     """
     offenders = []
     for path in _sources(*vendor_surface()):
-        for node in ast.walk(_tree(path)):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in WRITE_VERBS
-                and not _is_websocket_frame_write(path, node.func)
-            ):
-                offenders.append(f"{_where(path)}:{node.lineno} .{node.func.attr}()")
+        offenders.extend(
+            _write_verb_offenders(_rel(path), path.read_text(encoding="utf-8"))
+        )
     assert offenders == [], f"a write verb reaches the vendor: {sorted(offenders)}"
 
 
-def _is_websocket_frame_write(path: Path, func: ast.Attribute) -> bool:
+def _rel(path: Path) -> str:
+    """``path`` relative to the repo, POSIX-spelled -- the key the exemption matches."""
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
+def _lookup_name(node: ast.Call) -> tuple[str, ast.expr | None] | None:
+    """``(lookup, name-argument)`` if ``node`` looks an attribute up by name.
+
+    ``getattr(obj, name)``, ``operator.attrgetter(name)``,
+    ``operator.methodcaller(name, ...)``, ``obj.__getattribute__(name)``. The
+    name argument is ``None`` when the call is missing it or splats it --
+    which is as unknowable as a variable, and is treated as one.
+    """
+    func = node.func
+    called = (
+        func.id
+        if isinstance(func, ast.Name)
+        else func.attr
+        if isinstance(func, ast.Attribute)
+        else None
+    )
+    if called is None:
+        return None
+    if called == "getattr":
+        index = 1
+    elif called in ATTRIBUTE_LOOKUPS or called in DUNDER_LOOKUPS:
+        index = 0
+    else:
+        return None
+    args = node.args
+    if len(args) <= index or any(isinstance(a, ast.Starred) for a in args[: index + 1]):
+        return called, None
+    return called, args[index]
+
+
+def _write_verb_offenders(rel: str, source: str) -> list[str]:
+    """Every write-verb call or reference in ``source`` that no exemption covers.
+
+    Three shapes are refused:
+
+    * a call ``x.<verb>(...)`` -- the original check;
+    * an *uncalled* reference ``x.<verb>`` in any context -- because
+      ``f = client.post; f(...)`` and ``functools.partial(client.post, ...)``
+      are the same write with one more line in between;
+    * a by-name lookup (:func:`_lookup_name`) whose name is not a string
+      literal, or is a literal write verb -- ``getattr(client, verb)``.
+
+    Both exemptions cover a *direct call* and nothing else: the websocket
+    frame write ``self._connection.send(...)`` in ``sockets.py``, and the one
+    OpenFIGI call node. An uncalled ``self._connection.send`` is refused
+    like any other reference.
+
+    ``rel`` is the repo-relative POSIX path of the file the source came from;
+    both exemptions are keyed on it. Pure, so the real tree and the synthetic
+    sources in the exemption tests go through exactly the same code.
+    """
+    tree = ast.parse(source, filename=rel)
+    exempt = _openfigi_mapping_posts(rel, tree)
+    called_funcs = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Attribute, ast.Name))
+    }
+    lookups = ATTRIBUTE_LOOKUPS | DUNDER_LOOKUPS
+    offenders = []
+    for node in ast.walk(tree):
+        # A lookup function itself passed around uncalled -- ``g = getattr`` --
+        # would carry a by-name lookup past the check below.
+        spelled = (
+            node.id
+            if isinstance(node, ast.Name)
+            else node.attr
+            if isinstance(node, ast.Attribute)
+            else None
+        )
+        if spelled in lookups and id(node) not in called_funcs:
+            offenders.append(f"{rel}:{node.lineno} {spelled} (uncalled reference)")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in WRITE_VERBS
+            and not _is_websocket_frame_write(PurePosixPath(rel), node.func)
+            and id(node) not in exempt
+        ):
+            offenders.append(f"{rel}:{node.lineno} .{node.func.attr}()")
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr in WRITE_VERBS
+            and id(node) not in called_funcs
+        ):
+            offenders.append(f"{rel}:{node.lineno} .{node.attr} (uncalled reference)")
+        if isinstance(node, ast.Call):
+            lookup = _lookup_name(node)
+            if lookup is None:
+                continue
+            called, name = lookup
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                offenders.append(f"{rel}:{node.lineno} {called}(<non-literal name>)")
+            elif name.value in WRITE_VERBS:
+                offenders.append(f"{rel}:{node.lineno} {called}({name.value!r})")
+    return offenders
+
+
+# --------------------------------------------------------------------------
+# The one HTTP write exemption: OpenFIGI's mapping endpoint (spec Q21)
+# --------------------------------------------------------------------------
+
+#: **Owner decision 2026-09-30, option A** (spec Q21, resolving the open part
+#: of Q14/Q17/Q20). The guard's stated purpose is *"nothing reaches Alpaca
+#: with a verb that changes anything"*. OpenFIGI is not a broker host: its
+#: mapping endpoint turns ISINs into FIGIs and tickers and is POST-only. An
+#: exemption scoped to that one endpoint keeps the purpose while changing the
+#: guard's wording from "no write verb on the vendor surface" to "no write
+#: verb on the vendor surface except this one, which cannot reach a broker".
+#:
+#: Exactly one file, exactly one URL, at most one call site -- no wildcard,
+#: no host-only match. Any other non-GET anywhere still fails, including a
+#: second POST in this same file, a POST to any other OpenFIGI path, and a
+#: POST to the mapping URL from any other file. The exempted file is held
+#: structurally unable to reach the broker by
+#: :func:`test_the_openfigi_provider_cannot_reach_the_broker`.
+OPENFIGI_EXEMPT_PATH = "corollary/data/providers/openfigi.py"
+
+#: The one URL, compared for exact string equality against the **inline
+#: literal** at the call site. Not a name, not a module constant: a module
+#: global can be rebound at runtime in ways the AST cannot count, so the only
+#: URL the exemption believes is the one spelled in the call itself.
+OPENFIGI_EXEMPT_URL = "https://api.openfigi.com/v3/mapping"
+
+#: The one verb, called on the one receiver (``self._client``).
+OPENFIGI_EXEMPT_VERB = "post"
+
+#: The exempt call's keywords, exactly: no more, no fewer. ``json`` is the
+#: body, ``headers`` carries the optional key, and ``follow_redirects`` must
+#: be spelled, as the literal ``False``, so a 3xx can never carry the key-
+#: bearing request to another host. Anything else -- ``auth``, ``cookies``,
+#: ``extensions``, a ``**`` splat -- is a way the call could change shape.
+OPENFIGI_EXEMPT_KEYWORDS = frozenset({"json", "headers", "follow_redirects"})
+
+#: How many call sites may use the exemption. A second one -- even to the same
+#: URL -- voids it for every site in the file, so both are reported.
+OPENFIGI_EXEMPT_MAX_CALL_SITES = 1
+
+#: Builtins that can rebind a name, or reach code, without a node the AST can
+#: count. Any reference to one in the exempted file voids the exemption: the
+#: call site's static shape -- receiver, verb, literal URL -- would no longer
+#: be the whole story.
+DYNAMIC_REBINDERS = frozenset({"globals", "vars", "setattr", "exec", "eval", "locals"})
+
+
+def _is_mapping_post_shape(node: ast.Call) -> bool:
+    """``self._client.post("<the mapping URL>", json=..., headers=..., follow_redirects=False)``.
+
+    One positional argument, which must be the URL as an inline ``str``
+    literal; keywords exactly :data:`OPENFIGI_EXEMPT_KEYWORDS`, with no splat,
+    and ``follow_redirects`` the literal ``False`` (by identity, so ``0`` is
+    not ``False`` here).
+    """
+    func = node.func
+    if not (
+        isinstance(func, ast.Attribute)
+        and func.attr == OPENFIGI_EXEMPT_VERB
+        and isinstance(func.value, ast.Attribute)
+        and func.value.attr == "_client"
+        and isinstance(func.value.value, ast.Name)
+        and func.value.value.id == "self"
+    ):
+        return False
+    if len(node.args) != 1:
+        return False
+    url = node.args[0]
+    if not (
+        isinstance(url, ast.Constant)
+        and isinstance(url.value, str)
+        and url.value == OPENFIGI_EXEMPT_URL
+    ):
+        return False
+    names = [kw.arg for kw in node.keywords]
+    if None in names or len(names) != len(set(names)):
+        return False
+    if set(names) != OPENFIGI_EXEMPT_KEYWORDS:
+        return False
+    redirects = next(kw.value for kw in node.keywords if kw.arg == "follow_redirects")
+    return isinstance(redirects, ast.Constant) and redirects.value is False
+
+
+def _openfigi_mapping_posts(rel: str, tree: ast.Module) -> set[int]:
+    """The ``id()`` of each exempt call node in ``tree`` -- empty unless all conditions hold.
+
+    The path must be exactly :data:`OPENFIGI_EXEMPT_PATH`; the file must
+    reference none of :data:`DYNAMIC_REBINDERS`; and no more than
+    :data:`OPENFIGI_EXEMPT_MAX_CALL_SITES` calls may match the shape. Past the
+    cap the exemption is void for *every* site, so all of them are reported.
+    """
+    if rel != OPENFIGI_EXEMPT_PATH:
+        return set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id in DYNAMIC_REBINDERS) or (
+            isinstance(node, ast.Attribute) and node.attr in DYNAMIC_REBINDERS
+        ):
+            return set()
+    sites = {
+        id(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _is_mapping_post_shape(node)
+    }
+    if len(sites) > OPENFIGI_EXEMPT_MAX_CALL_SITES:
+        return set()
+    return sites
+
+
+def _is_websocket_frame_write(path: PurePath, func: ast.Attribute) -> bool:
     """``self._connection.send(...)`` in ``corollary/sockets.py``, and nothing else."""
     return (
         path.name == "sockets.py"
@@ -892,18 +1127,679 @@ def test_the_only_http_call_on_the_vendor_surface_is_get() -> None:
     the set, because it holds no HTTP client at all -- the websocket half of
     the same question is
     :func:`test_the_websocket_connection_is_only_ever_read_written_and_closed`.
+
+    **The OpenFIGI mapping POST (Q21) is subtracted by the same predicate**
+    the negative form uses, :func:`_openfigi_mapping_posts` -- so one exempt
+    ``self._client.post`` in ``openfigi.py`` leaves this set unchanged, and a
+    second post anywhere, or one that misses the exemption's shape, adds
+    ``"post"`` and fails.
     """
     client_calls = set()
     for path in _sources(*VENDOR_PACKAGES):
-        for node in ast.walk(_tree(path)):
+        tree = _tree(path)
+        exempt = _openfigi_mapping_posts(_rel(path), tree)
+        for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Attribute)
                 and node.func.value.attr == "_client"
+                and id(node) not in exempt
             ):
                 client_calls.add(node.func.attr)
     assert client_calls == {"get", "aclose"}, client_calls
+
+
+# --------------------------------------------------------------------------
+# The OpenFIGI exemption's edges (Q21), proven on synthetic source
+#
+# Every source below goes through _write_verb_offenders, the same function
+# the real-tree guard calls, so an edge proven here is an edge the gate holds.
+# --------------------------------------------------------------------------
+
+#: The exemption's one admitted shape: the exact URL as an inline literal,
+#: and exactly the three pinned keywords.
+_URL = '"https://api.openfigi.com/v3/mapping"'
+_KW = "json=jobs, headers=self._headers(), follow_redirects=False"
+ADMITTED = (
+    "class P:\n"
+    "    async def map(self, jobs):\n"
+    f"        return await self._client.post({_URL}, {_KW})\n"
+)
+
+
+def _post_with(args: str) -> str:
+    """The admitted class with the post call's argument list replaced."""
+    return (
+        "class P:\n"
+        "    async def map(self, jobs, **kw):\n"
+        f"        return await self._client.post({args})\n"
+    )
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    [
+        ADMITTED,
+        # Keyword order is not part of the shape.
+        _post_with(f"{_URL}, follow_redirects=False, headers=self._headers(), json=jobs"),
+    ],
+    ids=["literal", "keywords_reordered"],
+)
+def test_the_openfigi_exemption_admits_its_one_call_site(source: str) -> None:
+    assert _write_verb_offenders(OPENFIGI_EXEMPT_PATH, source) == []
+
+
+#: The URL passed by a module constant -- even an exact, ``Final``, bound-once
+#: one. A module global can be rebound at runtime in ways the AST cannot
+#: count, so the exemption believes only the literal at the call site.
+_MAPPING_CONSTANT = (
+    "from typing import Final\n"
+    'OPENFIGI_MAPPING_URL: Final = "https://api.openfigi.com/v3/mapping"\n'
+)
+
+#: Sources at the exempted path that must still trip the guard. Each is the
+#: admitted file with one thing changed, or with one thing added.
+TRIPS_IN_THE_EXEMPTED_FILE = {
+    # (a) a POST to the broker, beside the admitted call
+    "alpaca_order_beside_it": ADMITTED
+    + "    async def order(self, body):\n"
+    '        return await self._client.post("https://paper-api.alpaca.markets/v2/orders", json=body)\n',
+    "alpaca_order_alone": _post_with(
+        f'"https://paper-api.alpaca.markets/v2/orders", {_KW}'
+    ),
+    # (b) another path on api.openfigi.com, or the mapping URL spelled otherwise
+    "openfigi_search": _post_with(f'"https://api.openfigi.com/v3/search", {_KW}'),
+    "trailing_slash": _post_with(f'"https://api.openfigi.com/v3/mapping/", {_KW}'),
+    "http_scheme": _post_with(f'"http://api.openfigi.com/v3/mapping", {_KW}'),
+    "f_string": 'BASE = "https://api.openfigi.com"\n'
+    + _post_with(f'f"{{BASE}}/v3/mapping", {_KW}'),
+    "concatenation": 'BASE = "https://api.openfigi.com"\n'
+    + _post_with(f'BASE + "/v3/mapping", {_KW}'),
+    "attribute_url": _post_with(f"self.url, {_KW}"),
+    # (finding 2) the URL by name: never resolved, however it is bound
+    "constant": _MAPPING_CONSTANT + _post_with(f"OPENFIGI_MAPPING_URL, {_KW}"),
+    "constant_rebound_via_globals": _MAPPING_CONSTANT
+    + _post_with(f"OPENFIGI_MAPPING_URL, {_KW}")
+    + 'globals()["OPENFIGI_MAPPING_URL"] = "https://paper-api.alpaca.markets/v2/orders"\n',
+    # a dynamic rebinder anywhere in the file voids the exemption
+    "setattr_anywhere": ADMITTED + 'setattr(P, "x", 1)\n',
+    "builtins_setattr_anywhere": "import builtins\n"
+    + ADMITTED
+    + 'builtins.setattr(P, "x", 1)\n',
+    # a second call site -- even to the same URL
+    "two_call_sites_same_url": ADMITTED
+    + "    async def again(self, jobs):\n"
+    f"        return await self._client.post({_URL}, {_KW})\n",
+    # (finding 3) the keyword set is exact, and follow_redirects is literally False
+    "no_keywords": _post_with(_URL),
+    "missing_follow_redirects": _post_with(f"{_URL}, json=jobs, headers=self._headers()"),
+    "missing_headers": _post_with(f"{_URL}, json=jobs, follow_redirects=False"),
+    "missing_json": _post_with(f"{_URL}, headers=self._headers(), follow_redirects=False"),
+    "follow_redirects_true": _post_with(
+        f"{_URL}, json=jobs, headers=self._headers(), follow_redirects=True"
+    ),
+    "follow_redirects_zero": _post_with(
+        f"{_URL}, json=jobs, headers=self._headers(), follow_redirects=0"
+    ),
+    "follow_redirects_variable": _post_with(
+        f"{_URL}, json=jobs, headers=self._headers(), follow_redirects=self.redirects"
+    ),
+    "extra_auth": _post_with(f"{_URL}, {_KW}, auth=self.auth"),
+    "extra_extensions": _post_with(f"{_URL}, {_KW}, extensions={{}}"),
+    "extra_content": _post_with(f"{_URL}, {_KW}, content=b''"),
+    "kwargs_splat": _post_with(f"{_URL}, {_KW}, **kw"),
+    "kwargs_splat_alone": _post_with(f"{_URL}, **kw"),
+    "url_keyword": _post_with(f"url={_URL}, {_KW}"),
+    "two_positionals": _post_with(f"{_URL}, jobs, {_KW}"),
+    "starred_url": _post_with(f"*[{_URL}], {_KW}"),
+    # other write verbs, whatever their URL
+    "request_post": "class P:\n"
+    "    async def map(self, jobs):\n"
+    f'        return await self._client.request("POST", {_URL}, json=jobs)\n',
+    "send": "class P:\n"
+    "    async def map(self, request):\n"
+    "        return await self._client.send(request)\n",
+    "put_to_mapping": "class P:\n"
+    "    async def map(self, jobs):\n"
+    f"        return await self._client.put({_URL}, {_KW})\n",
+    # (finding 4) httpx's streaming request takes the method as an argument
+    "stream_post": "class P:\n"
+    "    async def map(self, jobs):\n"
+    f'        async with self._client.stream("POST", {_URL}, json=jobs) as r:\n'
+    "            return r\n",
+    # the shape bent: another receiver
+    "module_level_httpx_post": "import httpx\n"
+    "def map(jobs):\n"
+    f"    return httpx.post({_URL}, json=jobs, follow_redirects=False)\n",
+    "other_receiver": "class P:\n"
+    "    async def map(self, jobs):\n"
+    f"        return await self._broker.post({_URL}, {_KW})\n",
+    # (finding 5) the write verb referenced rather than called, or looked up by name
+    "bound_method_alias": ADMITTED
+    + "    async def again(self, jobs):\n"
+    "        f = self._client.post\n"
+    f"        return await f({_URL}, {_KW})\n",
+    "functools_partial": "import functools\n"
+    + ADMITTED
+    + "    def later(self):\n"
+    "        return functools.partial(self._client.post, 'x')\n",
+    "getattr_non_literal": ADMITTED
+    + "    async def again(self, verb):\n"
+    f"        return await getattr(self._client, verb)({_URL})\n",
+    "getattr_literal_write_verb": ADMITTED
+    + "    async def again(self):\n"
+    f'        return await getattr(self._client, "post")({_URL})\n',
+    "getattr_aliased": ADMITTED + "g = getattr\n",
+}
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    list(TRIPS_IN_THE_EXEMPTED_FILE.values()),
+    ids=list(TRIPS_IN_THE_EXEMPTED_FILE),
+)
+def test_the_openfigi_exemption_does_not_cover_anything_else_in_its_file(
+    source: str,
+) -> None:
+    assert _write_verb_offenders(OPENFIGI_EXEMPT_PATH, source) != []
+
+
+@pytest.mark.risk
+def test_a_second_call_site_voids_the_exemption_for_both() -> None:
+    """Past the cap, every site is reported -- not just the later one."""
+    offenders = _write_verb_offenders(
+        OPENFIGI_EXEMPT_PATH, TRIPS_IN_THE_EXEMPTED_FILE["two_call_sites_same_url"]
+    )
+    assert len(offenders) == 2, offenders
+
+
+#: Write verbs reached without a direct call, anywhere on the surface (finding
+#: 5). Checked at non-OpenFIGI paths, so that exemption is not in play.
+WRITE_VERBS_REACHED_INDIRECTLY = {
+    "bound_method_alias": "def f(client):\n    p = client.post\n    return p('u')\n",
+    "partial": "import functools\n"
+    "def f(client):\n    return functools.partial(client.post, 'u')\n",
+    "passed_as_callback": "def f(client, run):\n    return run(client.delete, 'u')\n",
+    "stream_reference": "def f(client):\n    s = client.stream\n    return s('POST', 'u')\n",
+    "getattr_variable": "def f(client, verb):\n    return getattr(client, verb)('u')\n",
+    "getattr_literal_post": "def f(client):\n    return getattr(client, 'post')('u')\n",
+    "getattr_literal_stream": "def f(client):\n"
+    "    return getattr(client, 'stream')('POST', 'u')\n",
+    "getattr_with_default": "def f(client, verb):\n    return getattr(client, verb, None)\n",
+    "getattr_splat": "def f(client, a):\n    return getattr(*a)\n",
+    "attrgetter_variable": "from operator import attrgetter\n"
+    "def f(client, verb):\n    return attrgetter(verb)(client)('u')\n",
+    "attrgetter_literal_put": "import operator\n"
+    "def f(client):\n    return operator.attrgetter('put')(client)('u')\n",
+    "methodcaller_literal_patch": "import operator\n"
+    "def f(client):\n    return operator.methodcaller('patch', 'u')(client)\n",
+    "dunder_getattribute": "def f(client, verb):\n"
+    "    return client.__getattribute__(verb)('u')\n",
+    "getattr_aliased": "g = getattr\ndef f(client):\n    return g(client, 'post')('u')\n",
+    "websocket_send_uncalled": "class S:\n"
+    "    def f(self):\n        return self._connection.send\n",
+}
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    list(WRITE_VERBS_REACHED_INDIRECTLY.values()),
+    ids=list(WRITE_VERBS_REACHED_INDIRECTLY),
+)
+def test_a_write_verb_reached_without_a_direct_call_trips_the_guard(source: str) -> None:
+    """``f = client.post; f(...)`` is the same write; so is ``getattr(client, verb)``.
+
+    Also checked at ``corollary/sockets.py`` itself: that file's exemption
+    covers the direct frame write ``self._connection.send(...)`` and nothing
+    else, so an uncalled reference there is refused like any other.
+    """
+    assert _write_verb_offenders("corollary/sockets.py", source) != []
+    assert _write_verb_offenders("corollary/data/providers/finnhub.py", source) != []
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(r):\n    return getattr(r, 'status_code', None)\n",
+        "import operator\n"
+        "def f(rows):\n    return sorted(rows, key=operator.attrgetter('symbol'))\n",
+        "def f(client):\n    return client.get('u')\n",
+        "class S:\n    async def f(self):\n        await self._connection.send('x')\n",
+    ],
+    ids=["getattr_literal_read", "attrgetter_literal_read", "get_call", "websocket_frame_write"],
+)
+def test_a_read_or_a_literal_non_write_lookup_does_not_trip(source: str) -> None:
+    """The indirect-reference check is not simply refusing every lookup."""
+    assert _write_verb_offenders("corollary/sockets.py", source) == []
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "corollary/data/providers/finnhub.py",
+        "corollary/data/providers/alpaca.py",
+        "corollary/engine/execution/alpaca.py",
+        "tests/fixtures/record_openfigi.py",
+        "scripts/probe_phase3.py",
+        # near-misses on the one path
+        "corollary/data/providers/openfigi_v2.py",
+        "corollary/data/openfigi.py",
+        "corollary\\data\\providers\\openfigi.py",
+        "/corollary/data/providers/openfigi.py",
+    ],
+)
+def test_the_openfigi_exemption_holds_in_exactly_one_file(rel: str) -> None:
+    """(c) The admitted source, verbatim, anywhere else trips the guard."""
+    assert _write_verb_offenders(rel, ADMITTED) != []
+
+
+@pytest.mark.risk
+def test_the_real_openfigi_provider_uses_the_exemption_exactly_once() -> None:
+    """The exemption is live, and used by exactly one call site.
+
+    An exemption nothing uses is a hole waiting for a caller; one used twice
+    would already fail the guard. Pinned here so the count is a stated fact
+    about the tree rather than an inference from a green gate.
+    """
+    path = REPO_ROOT / OPENFIGI_EXEMPT_PATH
+    assert path.is_file(), f"the exempted file {OPENFIGI_EXEMPT_PATH} does not exist"
+    sites = _openfigi_mapping_posts(OPENFIGI_EXEMPT_PATH, _tree(path))
+    assert len(sites) == OPENFIGI_EXEMPT_MAX_CALL_SITES == 1
+
+
+# --------------------------------------------------------------------------
+# The exempted file cannot reach the broker (Q21, owner condition 2)
+# --------------------------------------------------------------------------
+
+#: Module prefixes the exempted file may not import, directly or transitively:
+#: the broker package, the vendor SDK, and the Alpaca market-data provider
+#: (which holds the Alpaca credentials).
+BROKER_REACH = (
+    "corollary.engine.execution",
+    "alpaca",
+    "corollary.data.providers.alpaca",
+)
+
+#: Calls that import a module named by a runtime string.
+DYNAMIC_IMPORTERS = frozenset({"import_module", "__import__"})
+
+
+def _targets_broker(module: str) -> bool:
+    return any(module == p or module.startswith(p + ".") for p in BROKER_REACH)
+
+
+def _module_imports(
+    module: str, tree: ast.Module, *, is_package: bool
+) -> tuple[set[str], list[str]]:
+    """Every module name ``tree`` imports, plus the dynamic imports it cannot name.
+
+    ``from a.b import c`` yields both ``a.b`` and ``a.b.c``, because ``c`` may
+    be a submodule. Relative imports resolve against ``module``'s package --
+    which for a package's own ``__init__.py`` (``is_package``) is ``module``
+    itself, and for a plain module file is its parent. Resolving an
+    ``__init__``'s ``from . import alpaca`` against the parent put it one
+    level too high (``corollary.data.alpaca``), where it matched nothing the
+    reach check refuses. Keyword-only and required, so no caller can forget
+    which kind of file it read. A
+    call to ``importlib.import_module``/``__import__`` with a literal yields
+    that literal; with anything else it is reported, because a module chosen
+    at runtime is one this check cannot see.
+    """
+    names: set[str] = set()
+    dynamic: list[str] = []
+    package = module.split(".") if is_package else module.split(".")[:-1]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - (node.level - 1)]
+                stem = ".".join(base + ([node.module] if node.module else []))
+            else:
+                stem = node.module or ""
+            names.add(stem)
+            names.update(f"{stem}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if called in DYNAMIC_IMPORTERS:
+                first = node.args[0] if node.args else None
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names.add(first.value)
+                else:
+                    dynamic.append(f"{module}:{node.lineno} {called}(<non-literal>)")
+    return names, dynamic
+
+
+def _broker_reach_offenders(module: str, source: str, *, is_package: bool = False) -> list[str]:
+    """What, in one file's own text, could reach the broker or its credentials.
+
+    Imports of :data:`BROKER_REACH`; dynamic imports; and any string literal
+    or identifier mentioning ``alpaca`` in any case -- which is what makes an
+    ``ALPACA_*`` environment read, an Alpaca host, or an attribute walk to
+    ``corollary.data.providers.alpaca`` unspellable here.
+    """
+    tree = ast.parse(source)
+    names, offenders = _module_imports(module, tree, is_package=is_package)
+    offenders = list(offenders)
+    offenders += [f"imports {name}" for name in sorted(names) if _targets_broker(name)]
+    for node in ast.walk(tree):
+        text: str | None = None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.Name):
+            text = node.id
+        elif isinstance(node, ast.Attribute):
+            text = node.attr
+        elif isinstance(node, ast.alias):
+            text = node.asname
+        if text is not None and "alpaca" in text.lower():
+            offenders.append(f"line {getattr(node, 'lineno', '?')}: {text[:60]!r}")
+    return offenders
+
+
+def _module_file(module: str) -> Path | None:
+    """The source file for a ``corollary.*`` module, or ``None`` if it is not one."""
+    base = REPO_ROOT.joinpath(*module.split("."))
+    if base.with_suffix(".py").is_file():
+        return base.with_suffix(".py")
+    if (base / "__init__.py").is_file():
+        return base / "__init__.py"
+    return None
+
+
+def _transitive_corollary_imports(module: str) -> dict[str, set[str]]:
+    """Every module reachable from ``module`` through ``corollary.*`` imports.
+
+    Keyed by importing module, valued by what it imports (including
+    third-party names, so the SDK is seen wherever it is imported). Parent
+    packages are walked too, because importing ``a.b.c`` executes
+    ``a/__init__.py`` and ``a/b/__init__.py``.
+    """
+    seen: dict[str, set[str]] = {}
+    queue = [module]
+    while queue:
+        current = queue.pop()
+        if current in seen:
+            continue
+        path = _module_file(current)
+        if path is None:
+            continue
+        names, _ = _module_imports(
+            current, _tree(path), is_package=path.name == "__init__.py"
+        )
+        seen[current] = names
+        parts = current.split(".")
+        parents = [".".join(parts[:i]) for i in range(1, len(parts))]
+        queue.extend(n for n in names | set(parents) if n.startswith("corollary"))
+    return seen
+
+
+@pytest.mark.risk
+def test_the_openfigi_provider_cannot_reach_the_broker() -> None:
+    """The exempted file imports nothing that could place, or authenticate, an order.
+
+    Owner condition 2 of Q21: no import from ``corollary/engine/execution``,
+    from the ``alpaca`` SDK, or from ``data/providers/alpaca.py``; no
+    ``ALPACA_*`` variable read. Checked on the file's own text and over the
+    transitive closure of its ``corollary.*`` imports, so a helper module
+    that imports the broker cannot carry it in by the back door.
+
+    *What this does not catch:* a forbidden name assembled at runtime from
+    fragments. That is a deliberate evasion rather than an accident, and the
+    dynamic-import rule refuses the only way such a name could be imported.
+    """
+    module = OPENFIGI_EXEMPT_PATH.removesuffix(".py").replace("/", ".")
+    path = REPO_ROOT / OPENFIGI_EXEMPT_PATH
+    direct = _broker_reach_offenders(module, path.read_text(encoding="utf-8"))
+    assert direct == [], f"{OPENFIGI_EXEMPT_PATH} can reach the broker: {direct}"
+
+    closure = _transitive_corollary_imports(module)
+    assert module in closure, "the closure walk did not start from the file"
+    reached = sorted(
+        f"{importer} -> {name}"
+        for importer, names in closure.items()
+        for name in names
+        if _targets_broker(name)
+    )
+    assert reached == [], f"{OPENFIGI_EXEMPT_PATH} reaches the broker transitively: {reached}"
+
+
+#: Sources the reach check must refuse -- one per way in.
+REACHES_THE_BROKER = {
+    "import_execution": "import corollary.engine.execution.alpaca\n",
+    "from_execution": "from corollary.engine.execution.alpaca import AlpacaBroker\n",
+    "from_engine_import_execution": "from corollary.engine import execution\n",
+    "sdk": "import alpaca\n",
+    "sdk_submodule": "from alpaca.trading.client import TradingClient\n",
+    "alpaca_provider": "from corollary.data.providers.alpaca import AlpacaProvider\n",
+    "providers_import_alpaca": "from corollary.data.providers import alpaca\n",
+    "relative_alpaca": "from . import alpaca\n",
+    "relative_alpaca_module": "from .alpaca import AlpacaProvider\n",
+    "import_module_literal": "import importlib\n"
+    'importlib.import_module("corollary.engine.execution.alpaca")\n',
+    "import_module_dynamic": "import importlib\nname = 'x'\nimportlib.import_module(name)\n",
+    "dunder_import": '__import__("alpaca")\n',
+    "env_read": 'import os\nkey = os.environ["ALPACA_PAPER_API_KEY"]\n',
+    "getenv_read": 'import os\nkey = os.getenv("ALPACA_PAPER_SECRET_KEY")\n',
+    "alpaca_host": 'URL = "https://paper-api.alpaca.markets/v2/orders"\n',
+}
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source", list(REACHES_THE_BROKER.values()), ids=list(REACHES_THE_BROKER)
+)
+def test_the_broker_reach_check_refuses_every_way_in(source: str) -> None:
+    module = OPENFIGI_EXEMPT_PATH.removesuffix(".py").replace("/", ".")
+    assert _broker_reach_offenders(module, source) != []
+
+
+@pytest.mark.risk
+def test_the_broker_reach_check_passes_a_clean_provider() -> None:
+    """The check is not simply refusing everything."""
+    module = OPENFIGI_EXEMPT_PATH.removesuffix(".py").replace("/", ".")
+    clean = (
+        "import httpx\n"
+        "from corollary.ratelimit import default_limiter\n"
+        "from corollary.data.providers.interface import ProviderError\n"
+        'KEY_ENV = "OPENFIGI_API_KEY"\n'
+    )
+    assert _broker_reach_offenders(module, clean) == []
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    ("module", "is_package", "source", "expected"),
+    [
+        # A plain module file: relative imports resolve against its parent.
+        ("corollary.data.providers.openfigi", False, "from . import interface\n",
+         "corollary.data.providers.interface"),
+        ("corollary.data.providers.openfigi", False, "from .. import macro\n",
+         "corollary.data.macro"),
+        # A package __init__: its package is the module itself.
+        ("corollary.data.providers", True, "from . import alpaca\n",
+         "corollary.data.providers.alpaca"),
+        ("corollary.data.providers", True, "from .alpaca import AlpacaProvider\n",
+         "corollary.data.providers.alpaca"),
+        ("corollary.data.providers", True, "from .. import wire\n",
+         "corollary.data.wire"),
+        ("corollary.engine", True, "from .execution import alpaca\n",
+         "corollary.engine.execution.alpaca"),
+    ],
+    ids=["module_dot", "module_dotdot", "init_dot", "init_dot_module", "init_dotdot",
+         "engine_init"],
+)
+def test_relative_imports_resolve_against_the_right_package(
+    module: str, is_package: bool, source: str, expected: str
+) -> None:
+    names, dynamic = _module_imports(module, ast.parse(source), is_package=is_package)
+    assert expected in names, sorted(names)
+    assert dynamic == []
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    ["from . import alpaca\n", "from .alpaca import AlpacaProvider\n"],
+    ids=["dot_alpaca", "dot_alpaca_module"],
+)
+def test_a_package_init_reaching_the_alpaca_provider_is_refused(source: str) -> None:
+    """Finding 1: resolved against the parent, ``corollary.data.alpaca`` passed."""
+    assert _broker_reach_offenders("corollary.data.providers", source, is_package=True) != []
+
+
+@pytest.mark.risk
+def test_the_closure_walk_sees_a_relative_import_in_a_parent_package_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: ``providers/__init__.py`` importing ``.alpaca`` is reached.
+
+    Importing ``corollary.data.providers.openfigi`` executes the package's
+    ``__init__.py``, so a broker import there is one the exempted file carries
+    in. A synthetic tree under ``tmp_path`` stands in for the real one.
+    """
+    providers = tmp_path / "corollary" / "data" / "providers"
+    providers.mkdir(parents=True)
+    (tmp_path / "corollary" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "corollary" / "data" / "__init__.py").write_text("", encoding="utf-8")
+    (providers / "__init__.py").write_text(
+        "from .alpaca import AlpacaProvider\n", encoding="utf-8"
+    )
+    (providers / "openfigi.py").write_text("import httpx\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    closure = _transitive_corollary_imports("corollary.data.providers.openfigi")
+    reached = sorted(
+        f"{importer} -> {name}"
+        for importer, names in closure.items()
+        for name in names
+        if _targets_broker(name)
+    )
+    assert "corollary.data.providers -> corollary.data.providers.alpaca" in reached, reached
+    assert all(r.startswith("corollary.data.providers -> ") for r in reached), reached
+
+
+#: What ``self._client`` in the exempted file may be constructed with.
+#: Everything that could carry the key elsewhere or reshape the request --
+#: ``base_url``, ``headers``, ``event_hooks``, ``auth``, ``follow_redirects``,
+#: ``mounts``, ``cookies`` -- is absent by construction.
+OPENFIGI_CLIENT_KEYWORDS = frozenset({"timeout", "transport"})
+
+
+def _openfigi_client_offenders(source: str) -> list[str]:
+    """Why the exempted file's ``_client`` binding is not the one pinned shape.
+
+    Exactly one binding of any ``*._client`` attribute (assignment, annotated
+    or augmented assignment, ``del``), whose value is ``httpx.AsyncClient(...)``
+    with no positional argument, no splat and keywords within
+    :data:`OPENFIGI_CLIENT_KEYWORDS`. And no ``__dict__`` / ``__setattr__``
+    reference, which could bind it without an attribute node.
+    """
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    bindings: list[ast.Attribute] = []
+    values: list[ast.expr | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__setattr__"}:
+            offenders.append(f"line {node.lineno}: .{node.attr}")
+        if isinstance(node, ast.Attribute) and node.attr == "_client":
+            if not isinstance(node.ctx, ast.Load):
+                bindings.append(node)
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Attribute) and t.attr == "_client" for t in node.targets):
+                values.append(node.value)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            if isinstance(node.target, ast.Attribute) and node.target.attr == "_client":
+                values.append(node.value if isinstance(node, ast.AnnAssign) else None)
+    if len(bindings) != 1 or len(values) != 1:
+        return offenders + [f"{len(bindings)} bindings of ._client, not exactly 1"]
+    value = values[0]
+    if not (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "AsyncClient"
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "httpx"
+    ):
+        shown = ast.unparse(value) if value is not None else "<augmented>"
+        return offenders + [f"._client is bound to {shown!r}, not httpx.AsyncClient(...)"]
+    if value.args:
+        offenders.append("httpx.AsyncClient(...) takes a positional argument")
+    for kw in value.keywords:
+        if kw.arg is None or kw.arg not in OPENFIGI_CLIENT_KEYWORDS:
+            offenders.append(f"httpx.AsyncClient(...) takes {kw.arg or '**splat'}=")
+    return offenders
+
+
+@pytest.mark.risk
+def test_the_openfigi_provider_builds_its_own_bare_client() -> None:
+    """Finding 3: no injected client can carry the key, or the request, elsewhere.
+
+    The exempt call pins its own keywords, but an ``httpx.AsyncClient`` handed
+    in from outside could still bring a ``base_url``, default headers, event
+    hooks, auth or redirect-following with it. So the provider constructs its
+    client itself, exactly once, from ``timeout`` and an optional test
+    ``transport`` -- and this holds it there.
+    """
+    path = REPO_ROOT / OPENFIGI_EXEMPT_PATH
+    assert _openfigi_client_offenders(path.read_text(encoding="utf-8")) == []
+
+
+_BARE_CLIENT = (
+    "import httpx\n"
+    "class P:\n"
+    "    def __init__(self, transport=None):\n"
+    "        self._client = httpx.AsyncClient(timeout=15.0, transport=transport)\n"
+)
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "source",
+    [
+        # injected
+        "class P:\n    def __init__(self, client):\n        self._client = client\n",
+        "import httpx\nclass P:\n    def __init__(self, client=None):\n"
+        "        self._client = client or httpx.AsyncClient()\n",
+        # built with something that reshapes the request
+        _BARE_CLIENT.replace("timeout=15.0", "base_url='https://x'"),
+        _BARE_CLIENT.replace("timeout=15.0", "headers={'a': 'b'}"),
+        _BARE_CLIENT.replace("timeout=15.0", "event_hooks={}"),
+        _BARE_CLIENT.replace("timeout=15.0", "follow_redirects=True"),
+        _BARE_CLIENT.replace("timeout=15.0", "auth=('u', 'p')"),
+        _BARE_CLIENT.replace("timeout=15.0", "**kw"),
+        # bound twice, or rebound some other way
+        _BARE_CLIENT + "    def swap(self, c):\n        self._client = c\n",
+        _BARE_CLIENT + "    def swap(self):\n        del self._client\n",
+        _BARE_CLIENT + "    def swap(self, c):\n        self.__dict__['_client'] = c\n",
+        _BARE_CLIENT + "    def swap(self, c):\n        object.__setattr__(self, '_client', c)\n",
+        # never bound
+        "class P:\n    pass\n",
+    ],
+    ids=["injected", "injected_or_default", "base_url", "headers", "event_hooks",
+         "follow_redirects", "auth", "splat", "rebound", "deleted", "dunder_dict",
+         "dunder_setattr", "unbound"],
+)
+def test_the_client_shape_check_refuses_every_other_construction(source: str) -> None:
+    assert _openfigi_client_offenders(source) != []
+
+
+@pytest.mark.risk
+def test_the_client_shape_check_passes_the_bare_client() -> None:
+    assert _openfigi_client_offenders(_BARE_CLIENT) == []
 
 
 @pytest.mark.risk
