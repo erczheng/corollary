@@ -13,6 +13,8 @@ news covers the whole watch universe, and a market-wide discovery tier surfaces
 off-watch-list names in the news. Decision 21 carries it; decisions 3, 4, 12,
 13 and 20 are amended in place, and every detail the owner did not state is
 labelled a parent-session assumption.
+**Paused 2026-09-30 (Q20)** after step 4's follow-ups: step 5 and beyond wait
+on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -354,7 +356,8 @@ Added with Q14. **Researched 2026-09-26; recorded live 2026-09-28** (ce8696a,
   `pctVal` sums to **99.45–99.93** across the eleven.
 - **29 EC lines carry only an ISIN** — foreign-domiciled S&P 500 members, Linde
   among them at 14.06% of XLB — written as `<cusip>000000000</cusip>`. They do
-  not resolve through a CUSIP lookup (Q14's open question).
+  not resolve through a CUSIP lookup (Q14's open question; OpenFIGI since
+  Q17).
 - **CUSIP → ticker is Alpaca `GET /v2/assets/{cusip}`, one call per CUSIP.**
   **474 of 474** real CUSIPs resolved, Berkshire as `BRK.B` in the dot form. No
   live 404 was observed. The bulk `/v2/assets` list carries **no `cusip`
@@ -814,7 +817,8 @@ constraints below are recorded in *SEC N-PORT* under Constraints.
   the database and checked **weekly**. A snapshot is **validated whole** — all
   11 funds present, each with at least 5 equities, and each fund's resolved
   weights summing to 90–110 — and one that fails is **refused whole, and the
-  previous snapshot is kept**. An amended filing is refused. **Staleness** is a
+  previous snapshot is kept**. An amended filing is refused *(replaced by Q18,
+  2026-09-30: an amendment is adopted under the same validation)*. **Staleness** is a
   newer filing that has not been loaded, or a report date more than ~200 days
   old; this replaces decision 6's 100-day warning, which was sized to a
   quarterly hand refresh and not to a filing published ~58 days late.
@@ -825,7 +829,8 @@ constraints below are recorded in *SEC N-PORT* under Constraints.
   **73.36**, below the 90 floor, so **the real 2026-06-30 snapshot is
   refused**: the running system has no sector leaders, and says so. How to
   resolve an ISIN is the owner's call. The hook is a pluggable
-  `IsinResolver`, whose default resolves nothing.
+  `IsinResolver`, whose default resolves nothing. *(Answered by Q17,
+  2026-09-30: OpenFIGI — blocked on rule 1's GET-only guard.)*
 
 **Q15 — Finnhub's IPO calendar joins step 7 (2026-09-26).** The owner wants the
 upcoming IPOs on the calendar. Finnhub `/calendar/ipo` is marked
@@ -868,6 +873,95 @@ unchanged, the convention is stated on `schemas.OptionContract`, and
 conversion by Taylor series at 60 digits (4%, 0%, 20%, 4.16%, 1%), pin the
 greeks to the converted rate rather than the quoted one, and pin the
 fallback's convention.
+
+**Q17 — The ISIN-only holdings resolve through OpenFIGI (2026-09-30); Q14's
+open question is answered.** *Status: blocked on rule 1's structural guard —
+no provider, no recorder, no fixture.* The owner chose **OpenFIGI** as Q14's
+`IsinResolver`.
+
+- *Parent-session specifics the owner can override:*
+  - **Probe first.** Terms and limits are read from OpenFIGI's official pages
+    only, and a restrictive term stops the work and goes back to the owner.
+  - **A new provider on the shared limiter, with its own bucket**
+    (decision 15). `OPENFIGI_API_KEY` is **optional**: unset means the keyless
+    limits, not an error.
+  - **Acceptance is fail-closed.** A result counts only if it is a US-listed
+    equity, it gives **exactly one** ticker, and that ticker is an **active US
+    equity in Alpaca's asset list**. Several candidates, no match, or a ticker
+    Alpaca does not list leaves the line **unresolved**, logged with fund,
+    name, ISIN and weight — never guessed. The resolver is given the ISIN and
+    **never the name**: the name is carried for the log line only.
+  - Class shares in the dot form, as Q14's CUSIP path already returns
+    (`BRK.B`). **The 90–110 band is unchanged** — resolution can lift a fund
+    into it; nothing about it moves the floor.
+  - **ISIN → ticker is cached in the database**, so each ISIN costs one
+    lookup, ever. An unresolved result is not an answer and is retried on the
+    next run.
+- **Probe result (2026-09-30): the terms do not restrict this use.** The
+  [terms of service](https://www.openfigi.com/docs/terms-of-service) (updated
+  2018-11-27) §1 dedicates FIGI identifiers to the public domain — they *"may
+  be freely reproduced, distributed … by anyone for any purpose, commercial or
+  non-commercial"*. The related descriptions — ticker, name, `exchCode` — are
+  provided *"AS IS"* (§3, liability capped at $50) and are **not** expressly
+  public-domain, but no use restriction is stated; committing tickers as
+  fixtures redistributes those descriptions, which the text does not forbid.
+  [The API page](https://www.openfigi.com/api): *"free to use without daily,
+  weekly or monthly limitations"*. Limits, per the
+  [documentation](https://www.openfigi.com/api/documentation): keyless **25
+  requests/minute × 10 jobs**, keyed **25 requests/6 s × 100 jobs**, the key
+  in header `X-OPENFIGI-APIKEY`, and a **429** carrying `ratelimit-*` headers.
+  The endpoint is **`POST https://api.openfigi.com/v3/mapping`**, one job per
+  ISIN (`idType: "ID_ISIN"`). The 29 lines are three keyless requests
+  (10/10/9) or one keyed.
+- **Blocked: the mapping endpoint is POST-only.**
+  `tests/test_hard_rules.py::test_nothing_on_the_vendor_surface_issues_a_non_get_request`
+  — rule 1's structural guard — forbids a non-GET call in
+  `tests/fixtures/record_*.py`, `scripts/*.py`, `corollary/data/providers`,
+  `corollary/engine/execution` and `corollary/sockets.py`. So **neither the
+  recorder nor the provider can exist** without an owner decision: (a) a
+  narrow, named exemption keyed on the file *and* the exact URL, with a test
+  pinning the request body's shape, or (b) another route. The guard is not
+  weakened, and not evaded by a POST spelled some other way, in the meantime.
+  Until then **the sector snapshot stays refused** (XLB **73.36**), and step
+  4's sector leaders and sector column wait.
+- **The 29 ISIN-only lines** (2026-06-30 filings, `tests/fixtures/sec/`),
+  issuer name for the record only:
+
+  | Fund | ISIN-only lines |
+  |---|---|
+  | XLB | Amcor JE00BV7DQ550, CRH IE0001827041, Linde IE000S9YS762, Smurfit Westrock IE00028FXN24, LyondellBasell NL0009434992 — together **~26.5%** of XLB |
+  | XLF (6) | Aon IE00BLP1HW54, Arch Capital BMG0450A1053, Everest BMG3223R1088, Invesco BMG491BT1088, Willis Towers Watson IE00BDB6Q211, Chubb CH0044328745 |
+  | XLI (5) | Allegion IE00BFRT3W74, Eaton IE00B8KQN827, Johnson Controls IE00BY7QL619, Pentair IE00BLS09M33, Trane IE00BK9ZQ967 |
+  | XLK (5) | Accenture IE00B4BNMY34, Seagate IE00BKVD2N49, TE Connectivity IE000IVNQZ81, NXP NL0009538784, Flex SG9999000020 |
+  | XLP (1) | Bunge CH1300646267 |
+  | XLV (2) | Medtronic IE00BTN1Y115, STERIS IE00BFY8C754 |
+  | XLY (5) | Carnival BMG2004J1036, Aptiv JE00BTDN8H13, Norwegian Cruise Line BMG667211046, Garmin CH0114405324, Royal Caribbean LR0008862868 |
+  | XLC, XLE, XLRE, XLU | none |
+
+**Q18 — N-PORT amendments are adopted, and notified (2026-09-30); replaces
+Q14's "an amended filing is refused".** *Status: done (commit:
+05b652b).* When an **NPORT-P/A** arrives for a report period already loaded, it
+is loaded under the **same validation** as an original. If it passes, it
+becomes the current snapshot; if it fails, it is **refused whole and the
+current snapshot is kept**, the refusal recorded like any other. Adoption — and
+only adoption — emits a new **`info`** notification, **`spdr_seed_amended`**.
+*Parent-session assumption the owner can override:* it routes on decision 20's
+terms for info events, **bell off, Discord on**.
+
+**Q19 — Rule 9's data-freshness gap is a Phase 6 carry-forward (2026-09-30).**
+*Status: no code in Phase 3; recorded in PRD §11 under Phase 6.* Rule 9's
+connection clock counts a stream of **unusable** frames as alive: activity is
+recorded before a frame is decoded (`corollary/sockets.py`), so a socket that
+delivers nothing readable still reads as live. That happened on 2026-09-29,
+when ~25 minutes of rejected option quotes kept the option socket "live". The
+cause was fixed (68e607f, 2dbe9ea); the class of gap remains. It is harmless
+while nothing is marked or sized off stream quotes, and Phase 6 is where that
+stops being true — so Phase 6 adds a **data-freshness signal** (for example,
+zero readable quotes in N seconds) beside the connection clock.
+
+**Q20 — Scope pauses after step 4's follow-ups (2026-09-30).** Step 4's
+follow-ups finish; **step 5 and everything after it is not started until the
+owner says so.**
 
 ---
 
@@ -2267,10 +2361,11 @@ by this spec; these are the amendments it owes.
   warning), `Engine resumed by operator` (bell ✓ Discord ✓, info), `Risk limits
   changed`, `Data feeds changed` and `Notification routing changed` (each bell
   off, Discord ✓, info). Add the note that bell reads and dismissals never
-  notify.
+  notify. And from Q18: `SPDR seed amended` (bell off, Discord ✓, info).
 - **PRD §11** — Phase 3's done-criterion (below). And under Phase 4: the LLM
   sentiment tier (decision 18), and the scanner reading the demotion flag once
-  per scan (decision 13).
+  per scan (decision 13). Under Phase 6, rule 9's data-freshness signal
+  (Q19) — *applied 2026-09-30*, with the owner decision.
 - **CLAUDE.md, Working with market data** — one sentence beside the
   `min_avg_volume` warning: decision 21's discovery ADV filter is the first
   consumer of that rule, and it reads `ALPACA_STOCK_FEED_HISTORICAL`.
@@ -2304,6 +2399,9 @@ step 0 could send back — the rules tier's volume against the demotion window
 (decision 13's second known risk) — was put to the owner as Q9 and answered:
 company news covers the whole watch universe, and a discovery tier is added
 (decision 21). Step 5's re-measurement can still reopen it.
+*Since 2026-09-30 two things wait on the owner again:* step 4's sector leaders
+and sector column wait on Q17's guard decision, and Q20 pauses step 5 and
+everything after it until the owner says to go on.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -2412,10 +2510,13 @@ human read of StockTwits' and Massive's terms for automated access.
 **4. News ingestion, both tiers: watch and discovery, deduplicated, served;
 tradeability and the watch list.**
 - *Status:* **done 2026-09-30, except the sector leaders and the feed's
-  sector column**, which both wait on Q14's ISIN question: the snapshot job
-  runs, and records the refusal of the real 2026-06-30 snapshot, so the
-  running system has no leaders, files every ticker under `Other` with
-  `sectorsAvailable: false`, and says so.
+  sector column**, which both wait on **Q17's guard decision** — the source
+  is chosen (OpenFIGI), but its mapping endpoint is POST-only and rule 1's
+  GET-only guard forbids it until the owner rules on an exemption or another
+  route. Meanwhile the snapshot job runs, and records the refusal of the real
+  2026-06-30 snapshot, so the running system has no leaders, files every
+  ticker under `Other` with `sectorsAvailable: false`, and says so. Q18's
+  amendment handling landed as a follow-up (commit: 05b652b).
   Commits: 6ac3746 tradeability and watch universe (pure), d72d912 schema
   0008, a8bf4f3 Alpaca's reads, c87d40a Finnhub and Massive news, e7c473c the
   article store, 616cab7 retention, e7a90ce the tradeability cache, 95cb4b6
@@ -2558,7 +2659,8 @@ geopolitical.**
 
 **8. Composite and Market Pulse.**
 - *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4 —
-  which has no accepted snapshot until Q14's ISIN question is answered.
+  which has no accepted snapshot until Q17's guard decision lands. Paused by
+  Q20.
 - *Files:* `corollary/data/macro/{components,composite}.py`, migration for
   `composite_component_value`, `/api/news/composite`, `/api/markets/pulse`,
   `SentimentGauge`, `web/src/pages/Research.tsx`,
@@ -2570,8 +2672,8 @@ geopolitical.**
 
 **9. Social attention and analyst consensus.**
 - *Status:* not started. *Depends on:* 0 (the StockTwits terms read can stop
-  the social half), 2, the holdings seed (no accepted snapshot until Q14's
-  ISIN question is answered).
+  the social half), 2, the holdings seed (no accepted snapshot until Q17's
+  guard decision lands). Paused by Q20.
 - *Files:* `corollary/data/providers/stocktwits.py`,
   `corollary/data/news/social.py`, `corollary/data/providers/finnhub.py`,
   migrations, `/api/news/{social,consensus}`, the two panels,
