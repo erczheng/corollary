@@ -130,7 +130,7 @@ def record_pages() -> None:
         )
         print(f"page 1: HTTP {first.status_code}")
         body = _decode(first)
-        save("p4_reference_news_asc_page1", str(first.request.url), first.status_code, body, credentials.token)
+        save("p4_reference_news_asc_page1", str(first.url), first.status_code, body, credentials.token)
         next_url = body.get("next_url") if isinstance(body, dict) else None
         if not next_url:
             raise SystemExit("page 1 carried no next_url; nothing to follow")
@@ -141,7 +141,7 @@ def record_pages() -> None:
             raise SystemExit("next_url carries userinfo; not following it")
         second = client.get(target, headers=headers)
         print(f"page 2: HTTP {second.status_code}")
-        save("p4_reference_news_asc_page2", str(second.request.url), second.status_code, _decode(second), credentials.token)
+        save("p4_reference_news_asc_page2", str(second.url), second.status_code, _decode(second), credentials.token)
 
 
 def record_unauthorized() -> None:
@@ -160,7 +160,7 @@ def record_unauthorized() -> None:
         )
     save(
         "p4_unauthorized",
-        str(response.request.url),
+        str(response.url),
         response.status_code,
         _decode(response),
         credentials.token,

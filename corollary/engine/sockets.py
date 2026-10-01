@@ -702,7 +702,7 @@ class SocketSupervisor:
                 ),
                 "reason": "markets_visible",
                 "socket": EQUITY_SOCKET,
-                "stream": revised.stream.label,
+                "stream": revised.stream_kind.label,
                 "correlation_id": revised.correlation_id,
                 "previous_correlation_id": plans.equity.correlation_id,
                 # Counts only, everywhere below. These symbols came from a
@@ -999,7 +999,7 @@ class SocketSupervisor:
         client's constructor rather than subscribed and never quoted.
         """
         build = (
-            option_quote_stream if plan.stream is Stream.OPTION else stock_quote_stream
+            option_quote_stream if plan.stream_kind is Stream.OPTION else stock_quote_stream
         )
         return build(
             plan=plan,

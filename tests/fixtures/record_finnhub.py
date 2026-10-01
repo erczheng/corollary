@@ -216,7 +216,7 @@ def record_news() -> None:
                 )
             # The URL carries no token -- it travels in the header -- and is
             # scanned with the body regardless.
-            save_news(name, str(response.request.url), response.status_code, response.text, secrets)
+            save_news(name, str(response.url), response.status_code, response.text, secrets)
 
 
 def main() -> None:

@@ -2338,9 +2338,9 @@ class AlpacaQuoteStream(VendorStream):
         now: Callable[[], datetime] = utcnow,
         correlation_ids: Callable[[], str] | None = None,
     ) -> None:
-        if plan.stream is not stream:
+        if plan.stream_kind is not stream:
             raise ValueError(
-                f"a {stream.label} stream was handed a {plan.stream.label} "
+                f"a {stream.label} stream was handed a {plan.stream_kind.label} "
                 "plan. The plan carries its own stream so that this cannot be "
                 "inferred from a cap, and a plan on the wrong socket is "
                 "admitted, subscribed and never quoted"
@@ -2722,10 +2722,10 @@ class AlpacaQuoteStream(VendorStream):
         symbols fits inside thirty equity slots, is admitted, and is never
         quoted.
         """
-        if plan.stream is not self._stream:
+        if plan.stream_kind is not self._stream:
             raise ValueError(
                 f"a {self._stream.label} stream was handed a "
-                f"{plan.stream.label} plan to revise. The plan carries its "
+                f"{plan.stream_kind.label} plan to revise. The plan carries its "
                 "own stream so that this cannot be inferred from a cap, and a "
                 "plan on the wrong socket is admitted, subscribed and never "
                 "quoted"

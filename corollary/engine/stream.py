@@ -506,8 +506,10 @@ class SubscriptionPlan:
     #: Which socket this plan is for. Carried rather than inferred: two plans
     #: of one decision share a correlation id, and telling their records apart
     #: by recognising 30 versus 200 is inference from a number that collapses
-    #: the day the two caps coincide.
-    stream: Stream
+    #: the day the two caps coincide. Named ``stream_kind`` rather than
+    #: ``stream`` because rule 1's guard refuses any reference to httpx's
+    #: ``stream`` verb on the vendor surface, and cannot tell a field from it.
+    stream_kind: Stream
     cap: int
     #: When the caller computed this plan, normalised to UTC.
     at: datetime
@@ -850,7 +852,7 @@ def replan_at_cap(
         at=at,
         correlation_id=correlation_id,
         cap=cap,
-        stream=plan.stream,
+        stream=plan.stream_kind,
     )
 
 
@@ -1009,7 +1011,7 @@ def plan_subscriptions(
         subscribed=tuple(subscribed),
         admitted=tuple(admitted),
         dropped=tuple(dropped),
-        stream=stream,
+        stream_kind=stream,
         cap=cap,
         at=moment,
         correlation_id=correlation_id,
@@ -1212,11 +1214,11 @@ def _log_acknowledgement(reconciled: AcknowledgedSubscription) -> None:
         len(absent),
         len(plan.subscribed),
         reconciled.channel,
-        plan.stream.label,
+        plan.stream_kind.label,
         extra={
             "event": "stream_subscription_unacknowledged",
             "correlation_id": plan.correlation_id,
-            "stream": plan.stream.label,
+            "stream": plan.stream_kind.label,
             "rule": DropRule.NOT_ACKNOWLEDGED.value,
             "channel": reconciled.channel,
             "absent": list(absent),
@@ -1266,13 +1268,13 @@ def _log_out_of_step(
     logger.warning(
         "out of step with the %s stream: %d symbol(s) across %d unanswered "
         "frame(s) cannot be claimed either way",
-        plan.stream.label,
+        plan.stream_kind.label,
         len(unanswered),
         unanswered_frames,
         extra={
             "event": "stream_subscription_out_of_step",
             "correlation_id": plan.correlation_id,
-            "stream": plan.stream.label,
+            "stream": plan.stream_kind.label,
             "rule": "out_of_step",
             "channel": reconciled.channel,
             "unanswered_count": len(unanswered),
@@ -1337,7 +1339,7 @@ def _log(plan: SubscriptionPlan) -> None:
             extra={
                 "event": "stream_subscription_dropped",
                 "correlation_id": plan.correlation_id,
-                "stream": plan.stream.label,
+                "stream": plan.stream_kind.label,
                 "rule": unit.rule.value,
                 "key": unit.key,
                 "priority": unit.priority.label,
@@ -1362,7 +1364,7 @@ def _log(plan: SubscriptionPlan) -> None:
         extra={
             "event": "stream_subscription_budget_exceeded",
             "correlation_id": plan.correlation_id,
-            "stream": plan.stream.label,
+            "stream": plan.stream_kind.label,
             "not_streamed": plan.not_streamed,
             "dropped_symbols": list(plan.dropped_symbols),
             "dropped_units": len(engine_dropped),
@@ -1395,12 +1397,12 @@ def _log_client_tier(plan: SubscriptionPlan) -> None:
     logger.info(
         "%d client-supplied rows were trimmed from the %s stream's %d slots",
         plan.client_not_streamed,
-        plan.stream.label,
+        plan.stream_kind.label,
         plan.cap,
         extra={
             "event": "stream_client_tier_trimmed",
             "correlation_id": plan.correlation_id,
-            "stream": plan.stream.label,
+            "stream": plan.stream_kind.label,
             # Derived from the units rather than written as
             # ``markets_visible``: there is one client tier today, and a
             # hard-coded label would quietly misname the second one.

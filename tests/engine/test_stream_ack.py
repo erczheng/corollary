@@ -235,7 +235,7 @@ def test_replanning_at_a_lower_cap_keeps_the_stream_and_drops_the_tail() -> None
     assert plan.not_streamed == 0
 
     replanned = replan_at_cap(plan, cap=2, at=T0, correlation_id="cid-2")
-    assert replanned.stream is Stream.OPTION
+    assert replanned.stream_kind is Stream.OPTION
     assert replanned.cap == 2
     assert replanned.subscribed == (
         "AAPL241220C00150000",
