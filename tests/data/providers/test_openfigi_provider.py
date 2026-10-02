@@ -1,10 +1,11 @@
 """OpenFIGI's ISIN mapping -- every test here is SYNTHETIC.
 
-No live call is made and no recording exists yet: the responses come from
+No live call is made: the responses come from
 ``tests/fixtures/openfigi_synthetic/`` (hand-built, labelled SYNTHETIC) or are
 built inline, and are served through an ``httpx.MockTransport`` so the request
 the provider actually builds -- URL, method, body, headers -- is what is
-asserted on. The live recording (next unit) must confirm the response shape.
+asserted on. The live recording is ``tests/fixtures/openfigi/``, read by
+``test_openfigi_recorded.py``; it confirmed the response shape assumed here.
 
 What is pinned:
 
@@ -280,6 +281,43 @@ async def test_duplicates_are_asked_once_and_an_empty_input_asks_nothing() -> No
         results = await provider.map_isins([isin(1), isin(1), isin(2)])
     assert [job["idValue"] for job in json.loads(seen[0].content)] == [isin(1), isin(2)]
     assert list(results) == [isin(1), isin(2)]
+
+
+@pytest.mark.asyncio
+async def test_map_isin_batches_returns_each_requests_jobs_and_decoded_reply() -> None:
+    """The recorder's seam: what was sent, what came back, and the parse of it.
+
+    One request per batch, exactly as :meth:`map_isins` makes them (that
+    method is built on this one), and each batch carries the jobs that went
+    on the wire and the body OpenFIGI answered with -- so a fixture can store
+    both without the recorder ever making a request of its own.
+    """
+    seen: list[httpx.Request] = []
+    isins = [isin(n) for n in range(29)]
+    async with make_provider(echo_warning, seen=seen) as provider:
+        batches = await provider.map_isin_batches(isins)
+    assert [len(b.jobs) for b in batches] == [10, 10, 9]
+    assert len(seen) == 3
+    for batch, request in zip(batches, seen):
+        assert list(batch.jobs) == json.loads(request.content)
+        assert batch.payload == [{"warning": "No identifier found."}] * len(batch.jobs)
+        assert list(batch.results) == list(batch.isins)
+        assert all(r.warning == "No identifier found." for r in batch.results.values())
+    assert [i for b in batches for i in b.isins] == isins
+
+
+@pytest.mark.asyncio
+async def test_map_isin_batches_validates_before_any_request_and_dedupes() -> None:
+    seen: list[httpx.Request] = []
+    async with make_provider(echo_warning, seen=seen) as provider:
+        assert await provider.map_isin_batches([]) == []
+        with pytest.raises(ValueError):
+            await provider.map_isin_batches([isin(1), "not-an-isin"])
+        with pytest.raises(TypeError):
+            await provider.map_isin_batches(isin(1))
+        assert seen == []
+        batches = await provider.map_isin_batches([isin(1), isin(1)])
+    assert [b.isins for b in batches] == [(isin(1),)]
 
 
 # ------------------------------------------------------------------ parsing

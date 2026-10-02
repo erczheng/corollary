@@ -876,8 +876,11 @@ fallback's convention.
 
 **Q17 — The ISIN-only holdings resolve through OpenFIGI (2026-09-30); Q14's
 open question is answered.** *Status: unblocked by Q21 (2026-09-30) — the
-provider exists (`corollary/data/providers/openfigi.py`, synthetic tests
-only); recorder and live fixture are next.* The owner chose **OpenFIGI** as Q14's
+provider exists (`corollary/data/providers/openfigi.py`); the live
+recording is in (`tests/fixtures/record_openfigi.py`, keyless, 3 requests of
+10/10/9 on 2026-10-01 ET (`recorded_at` 2026-10-02T01:03:45Z): all 29 matched, every record Equity / Common Stock, one
+ticker per ISIN across every US exchange code, no class share among them);
+the resolver, cache and snapshot rebuild are next.* The owner chose **OpenFIGI** as Q14's
 `IsinResolver`.
 
 - *Parent-session specifics the owner can override:*

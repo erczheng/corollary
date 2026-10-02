@@ -3,7 +3,10 @@
 Phase 3 spec Q17 chose OpenFIGI as the ``IsinResolver`` for the 29 holdings
 the SPDR funds' N-PORT filings identify by ISIN alone. This module is the
 entire OpenFIGI surface area: one public method,
-:meth:`OpenFigiProvider.map_isins`. It *finds candidates*; it accepts none.
+:meth:`OpenFigiProvider.map_isins`, built on
+:meth:`OpenFigiProvider.map_isin_batches`, which also returns each request's
+jobs and decoded reply so the fixture recorder can store them without a
+request of its own. It *finds candidates*; it accepts none.
 Q17's acceptance rule -- a US-listed equity, exactly one ticker, active in the
 broker's asset list -- belongs to the resolver that calls this, on the
 response side.
@@ -83,6 +86,7 @@ __all__ = [
     "OPENFIGI_API_KEY_ENV",
     "OPENFIGI_KEY_HEADER",
     "FigiRecord",
+    "MappingBatch",
     "MappingResult",
     "OpenFigiCredentials",
     "OpenFigiError",
@@ -194,6 +198,24 @@ class MappingResult:
     @property
     def matched(self) -> bool:
         return bool(self.records)
+
+
+@dataclass(frozen=True, slots=True)
+class MappingBatch:
+    """One mapping request: the ISINs asked, the jobs sent, the reply, its parse.
+
+    ``jobs`` is exactly the body that went on the wire and ``payload`` the
+    body OpenFIGI answered with, decoded (:func:`~corollary.wire.decode_json`)
+    and otherwise untouched. They exist for the fixture recorder, which stores
+    both; nothing in the engine reads them. ``results`` is
+    :func:`parse_mapping_response` of ``payload`` -- the same answer
+    :meth:`OpenFigiProvider.map_isins` gives for these ISINs.
+    """
+
+    isins: tuple[str, ...]
+    jobs: tuple[dict[str, str], ...]
+    payload: Any
+    results: dict[str, MappingResult]
 
 
 def validate_isin(value: object) -> str:
@@ -406,22 +428,42 @@ class OpenFigiProvider:
 
     # ------------------------------------------------------------ endpoint
 
-    async def map_isins(self, isins: Sequence[str]) -> dict[str, MappingResult]:
-        """What OpenFIGI says about each ISIN, keyed in first-seen order.
+    async def map_isin_batches(self, isins: Sequence[str]) -> list[MappingBatch]:
+        """Each request :meth:`map_isins` makes, with its jobs and decoded reply.
 
         Every ISIN is shape-checked before any request, and one bad value
         refuses the whole call. Duplicates are asked once. Batches go out
         sequentially at :attr:`jobs_per_request`, each drawing one token from
-        the ``api.openfigi.com`` bucket; any failure ends the call with no
-        partial result and no retry.
+        the ``api.openfigi.com`` bucket and each through :meth:`_post_jobs`,
+        the one exempt call site; any failure ends the call with no partial
+        result and no retry.
         """
         if isinstance(isins, str):
             raise TypeError("map_isins takes a sequence of ISINs, not one string")
         unique = list(dict.fromkeys(validate_isin(isin) for isin in isins))
-        results: dict[str, MappingResult] = {}
+        batches: list[MappingBatch] = []
         size = self.jobs_per_request
         for start in range(0, len(unique), size):
             batch = unique[start : start + size]
-            payload = await self._post_jobs(mapping_jobs(batch))
-            results.update(parse_mapping_response(batch, payload, secrets=self._secrets))
+            jobs = mapping_jobs(batch)
+            payload = await self._post_jobs(jobs)
+            batches.append(
+                MappingBatch(
+                    isins=tuple(batch),
+                    jobs=tuple(jobs),
+                    payload=payload,
+                    results=parse_mapping_response(batch, payload, secrets=self._secrets),
+                )
+            )
+        return batches
+
+    async def map_isins(self, isins: Sequence[str]) -> dict[str, MappingResult]:
+        """What OpenFIGI says about each ISIN, keyed in first-seen order.
+
+        The parsed half of :meth:`map_isin_batches`, merged across batches:
+        the same validation, deduplication, batching and refusal rules.
+        """
+        results: dict[str, MappingResult] = {}
+        for batch in await self.map_isin_batches(isins):
+            results.update(batch.results)
         return results
