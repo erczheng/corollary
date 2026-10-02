@@ -173,6 +173,47 @@ def test_the_provider_takes_a_transport_never_a_client() -> None:
         )
 
 
+class _ForwardingMock(httpx.MockTransport):
+    """A MockTransport subclass -- which could override ``handle_async_request``."""
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [
+        pytest.param(lambda: httpx.AsyncHTTPTransport(), id="real_transport"),
+        pytest.param(lambda: _ForwardingMock(echo_warning), id="mock_subclass"),
+        pytest.param(lambda: object(), id="not_a_transport"),
+    ],
+)
+def test_the_provider_refuses_any_transport_but_a_plain_mock(
+    transport: Callable[[], object],
+) -> None:
+    """OF-U1b finding 5: a transport sees the exempt request and can send it anywhere.
+
+    Production and the recorder pass none; tests pass an ``httpx.MockTransport``.
+    Anything else -- a real transport, or a subclass that could override
+    ``handle_async_request`` -- is refused at construction, through either
+    entry point.
+    """
+    with pytest.raises(TypeError, match="MockTransport"):
+        OpenFigiProvider(
+            credentials=OpenFigiCredentials(),
+            transport=transport(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="MockTransport"):
+        OpenFigiProvider.from_env(env={}, transport=transport())
+
+
+@pytest.mark.asyncio
+async def test_the_provider_accepts_no_transport_and_a_plain_mock() -> None:
+    async with OpenFigiProvider.from_env(env={}) as keyless:
+        assert keyless.jobs_per_request == 10
+    async with OpenFigiProvider.from_env(
+        env={}, transport=httpx.MockTransport(echo_warning)
+    ) as mocked:
+        assert mocked.jobs_per_request == 10
+
+
 def test_mapping_jobs_is_the_pinned_shape() -> None:
     assert mapping_jobs(["IE000S9YS762"]) == [
         {"idType": "ID_ISIN", "idValue": "IE000S9YS762"}

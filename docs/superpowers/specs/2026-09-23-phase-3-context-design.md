@@ -991,14 +991,35 @@ guard and provider done (synthetic tests; no live call yet).* The owner chose
   file. The provider builds its own `httpx.AsyncClient(timeout=…,
   transport=…)` exactly once and accepts only a test `transport=`, never a
   client, so no injected `base_url`, default headers, hooks or auth can ride
-  along; a guard test pins that construction. Rule 1's write-verb set also
-  gained `stream` (httpx's method-taking `client.stream("POST", …)`), and the
-  guard now refuses a write verb *referenced* without a direct call
-  (`f = client.post`, `functools.partial(client.post, …)`) and any by-name
-  lookup (`getattr`/`attrgetter`/`methodcaller`/`__getattribute__`) whose
-  name is non-literal or a literal write verb. The positive guard
-  (`self._client` calls are `get`/`aclose` only) subtracts the same one site
-  by the same predicate.
+  along; a guard test pins that construction, and pins every later use of
+  `*._client` in that file to the exempt post and a called `.aclose()` — no
+  attribute store or `del` on it (`event_hooks`, `auth`, `_transport`), no
+  alias, no passing it out, no other method (audit OF-U1b). The transport
+  itself must be `None` or a plain `httpx.MockTransport` (not a subclass);
+  anything else is a `TypeError` at construction, through `from_env` too.
+  Rule 1's write-verb set also gained `stream` (httpx's method-taking
+  `client.stream("POST", …)`), the transport layer's `handle_async_request`
+  / `handle_request`, and httpx 0.28's private `_send_single_request` /
+  `_send_handling_auth` / `_send_handling_redirects`. Across the whole vendor
+  surface the guard refuses: a write verb *referenced* without a direct call
+  (`f = client.post`, `functools.partial(client.post, …)`); any by-name
+  lookup (`getattr`/`inspect.getattr_static`/`attrgetter`/`methodcaller`/
+  `__getattribute__`) any of whose names is non-literal or has a write verb
+  as a dotted segment (every `attrgetter` argument is checked); any
+  `from httpx import …`, any `from m import <write verb>` and any
+  `import *`, plus every use of a name so imported; any reference to
+  `__dict__`, `vars`, `getmembers`/`getmembers_static`, `exec`, `eval` or
+  the bare builtin `compile`; any `httpx.Request(…)`/`build_request(…)`
+  whose method is not the inline literal `"GET"`; and any store to a
+  `.method`. The positive guard (`self._client` calls are `get`/`aclose`
+  only) subtracts the same one site by the same predicate. **Stated
+  limits** (written out in `_write_verb_offenders`' docstring): it is a
+  per-file static check, so it does not see a write verb arriving as a value
+  from a caller off the surface, `setattr`/`object.__setattr__` on a
+  request's `method` outside the OpenFIGI file, or an HTTP stack other than
+  httpx's spellings (`urlopen(url, data=…)` imported by name, a raw socket,
+  a private sender a later httpx adds under a new name). The surface uses
+  none of these today.
 - **Proven on synthetic source**, through the same pure checker the real-tree
   gate calls: the guard still trips on (a) a POST to an Alpaca host from that
   same file, (b) a POST to any other OpenFIGI path (`/v3/search`,

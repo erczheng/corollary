@@ -20,8 +20,10 @@ vendor surface. The owner exempted exactly one call site: this file, a single
 global can be rebound at runtime -- and whose keywords are exactly ``json``,
 ``headers`` and ``follow_redirects=False``, so a redirect can never carry the
 key to another host. The client is built here, from a timeout and an optional
-test transport, and never injected: an outside client could bring a
-``base_url``, default headers or event hooks the call site cannot see. A
+test ``httpx.MockTransport`` (nothing else is accepted), and never injected:
+an outside client could bring a ``base_url``, default headers or event hooks
+the call site cannot see, and after construction it is touched only by that
+post and ``aclose``. A
 second post here -- any URL, including that one -- fails the guard. The
 guard's purpose is unchanged: nothing reaches the *broker* with a verb that
 changes anything. To keep that true structurally, this file imports nothing
@@ -280,16 +282,30 @@ class OpenFigiProvider:
     it is built; a whole client could carry a ``base_url``, default headers,
     event hooks, auth or redirect-following that the exempt call site cannot
     see. ``tests/test_hard_rules.py`` holds this construction to
-    ``httpx.AsyncClient(timeout=..., transport=...)``, bound once.
+    ``httpx.AsyncClient(timeout=..., transport=...)``, bound once, and holds
+    every later use of the client to the exempt post and ``aclose``.
+
+    **And the transport is a plain** ``httpx.MockTransport`` **or nothing.**
+    A transport is handed the finished request and sends it wherever it
+    likes, so any other transport -- a real one, or a ``MockTransport``
+    subclass overriding ``handle_async_request`` -- would sit between the
+    exempt call site and the wire, unseen by the guard. Production and the
+    recorder pass none; anything else is a ``TypeError`` here, through
+    :meth:`from_env` as well.
     """
 
     def __init__(
         self,
         *,
         credentials: OpenFigiCredentials,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx.MockTransport | None = None,
         limiter: HostRateLimiter | None = None,
     ) -> None:
+        if transport is not None and type(transport) is not httpx.MockTransport:
+            raise TypeError(
+                "OpenFigiProvider takes transport=None (production) or a plain "
+                f"httpx.MockTransport (tests), not {type(transport).__name__}"
+            )
         self._credentials = credentials
         self._client = httpx.AsyncClient(timeout=15.0, transport=transport)
         self._limiter = limiter if limiter is not None else default_limiter()

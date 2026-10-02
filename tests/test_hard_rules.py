@@ -315,15 +315,54 @@ def vendor_surface() -> tuple[Path, ...]:
 #: a data field cannot share a name with one: ``SubscriptionPlan``'s socket
 #: field is ``stream_kind`` and the recorders read ``response.url``, not
 #: ``response.request.url``, for exactly that reason.
+#:
+#: ``handle_async_request`` / ``handle_request`` are the transport layer under
+#: every ``httpx`` client: ``transport.handle_async_request(request)`` sends a
+#: request of whatever method it was built with, with no client in the way.
+#: The three ``_send_*`` names are ``httpx`` 0.28's private send path on a
+#: client, which does the same; they are named exactly rather than matched by
+#: a ``_send`` prefix, because ``finnhub.py`` has its own GET wrapper called
+#: ``_send`` and ``sockets.py`` a ``_send_lock``.
 WRITE_VERBS = frozenset(
-    {"post", "put", "patch", "delete", "request", "send", "stream"}
+    {
+        "post",
+        "put",
+        "patch",
+        "delete",
+        "request",
+        "send",
+        "stream",
+        "handle_async_request",
+        "handle_request",
+        "_send_single_request",
+        "_send_handling_auth",
+        "_send_handling_redirects",
+    }
 )
 
 #: Calls that look an attribute up by a name given as data. A non-literal name
 #: is refused outright (the guard cannot know it is not a write verb); a
-#: literal that *is* a write verb is refused as the reference it spells.
-ATTRIBUTE_LOOKUPS = frozenset({"getattr", "attrgetter", "methodcaller"})
+#: literal that *is* a write verb -- or, dotted, has one as any segment, which
+#: is how ``attrgetter('_client.post')`` walks -- is refused as the reference
+#: it spells. ``getattr_static`` is ``inspect``'s, and takes the name second.
+ATTRIBUTE_LOOKUPS = frozenset({"getattr", "getattr_static", "attrgetter", "methodcaller"})
 DUNDER_LOOKUPS = frozenset({"__getattribute__", "__getattr__"})
+
+#: Ways to reach an attribute through a *mapping* rather than by name --
+#: ``type(c).__dict__['post']``, ``vars(type(c))['post']``,
+#: ``dict(inspect.getmembers(c))['post']``. A subscript key is data the guard
+#: does not follow, so any reference to one of these is refused on the vendor
+#: surface outright, called or not. The surface uses none of them.
+MAPPING_LOOKUPS = frozenset({"__dict__", "vars", "getmembers", "getmembers_static"})
+
+#: Builtins that turn text into code, where no write verb is an AST node at
+#: all. ``exec`` and ``eval`` are refused in any spelling; ``compile`` only as
+#: the bare builtin, because ``re.compile`` is everywhere on the surface.
+CODE_FROM_TEXT = frozenset({"exec", "eval"})
+
+#: Calls that build an ``httpx`` request object, method first. One built with
+#: anything but the literal ``"GET"`` is a write waiting for a sender.
+REQUEST_BUILDERS = frozenset({"Request", "build_request"})
 
 #: Fragments of a method name that would mean the broker can change something.
 WRITE_SHAPED = (
@@ -780,52 +819,121 @@ def _rel(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
 
-def _lookup_name(node: ast.Call) -> tuple[str, ast.expr | None] | None:
-    """``(lookup, name-argument)`` if ``node`` looks an attribute up by name.
+def spelled_as(node: ast.AST) -> str | None:
+    """A ``Name``'s id or an ``Attribute``'s attr; ``None`` for anything else."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
-    ``getattr(obj, name)``, ``operator.attrgetter(name)``,
-    ``operator.methodcaller(name, ...)``, ``obj.__getattribute__(name)``. The
-    name argument is ``None`` when the call is missing it or splats it --
-    which is as unknowable as a variable, and is treated as one.
-    """
+
+def _called_name(node: ast.Call) -> str | None:
+    """The bare name or final attribute a call is spelled with, if either."""
     func = node.func
-    called = (
-        func.id
-        if isinstance(func, ast.Name)
-        else func.attr
-        if isinstance(func, ast.Attribute)
-        else None
-    )
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _lookup_names(node: ast.Call) -> tuple[str, list[ast.expr | None]] | None:
+    """``(lookup, name-arguments)`` if ``node`` looks an attribute up by name.
+
+    ``getattr(obj, name)``, ``inspect.getattr_static(obj, name)``,
+    ``operator.attrgetter(name, *more)`` -- **every** positional argument,
+    since each is a name it fetches -- ``operator.methodcaller(name, ...)``
+    and ``obj.__getattribute__(name)``. A name argument is ``None`` when the
+    call is missing it or splats it, which is as unknowable as a variable and
+    is treated as one.
+    """
+    called = _called_name(node)
     if called is None:
         return None
-    if called == "getattr":
+    args = node.args
+    if called == "attrgetter":
+        if not args or any(isinstance(a, ast.Starred) for a in args):
+            return called, [None]
+        return called, list(args)
+    if called in {"getattr", "getattr_static"}:
         index = 1
     elif called in ATTRIBUTE_LOOKUPS or called in DUNDER_LOOKUPS:
         index = 0
     else:
         return None
-    args = node.args
     if len(args) <= index or any(isinstance(a, ast.Starred) for a in args[: index + 1]):
-        return called, None
-    return called, args[index]
+        return called, [None]
+    return called, [args[index]]
+
+
+def _request_method_offender(node: ast.Call) -> str | None:
+    """Why a request-object construction is not a plain ``GET``, if it is not.
+
+    ``httpx.Request(method, url)`` and ``client.build_request(method, url)``
+    take the method first, positionally or as ``method=``. Only the inline
+    literal ``"GET"`` passes; a splat, a missing method or a variable is as
+    unknowable as ``"POST"`` and is refused the same way.
+    """
+    if _called_name(node) not in REQUEST_BUILDERS:
+        return None
+    method: ast.expr | None = None
+    if node.args:
+        method = None if isinstance(node.args[0], ast.Starred) else node.args[0]
+    elif any(kw.arg is None for kw in node.keywords):
+        method = None
+    else:
+        method = next((kw.value for kw in node.keywords if kw.arg == "method"), None)
+    if isinstance(method, ast.Constant) and method.value == "GET":
+        return None
+    shown = ast.unparse(method) if method is not None else "<unknown>"
+    return f"{_called_name(node)}({shown}, ...)"
 
 
 def _write_verb_offenders(rel: str, source: str) -> list[str]:
     """Every write-verb call or reference in ``source`` that no exemption covers.
 
-    Three shapes are refused:
+    These shapes are refused:
 
     * a call ``x.<verb>(...)`` -- the original check;
     * an *uncalled* reference ``x.<verb>`` in any context -- because
       ``f = client.post; f(...)`` and ``functools.partial(client.post, ...)``
       are the same write with one more line in between;
-    * a by-name lookup (:func:`_lookup_name`) whose name is not a string
-      literal, or is a literal write verb -- ``getattr(client, verb)``.
+    * a by-name lookup (:func:`_lookup_names`) any of whose names is not a
+      string literal, or has a write verb as any dotted segment --
+      ``getattr(client, verb)``, ``attrgetter('symbol', '_client.post')``;
+    * an import that brings a write verb in as a **bare name** --
+      ``from httpx import post as fetch``, then ``fetch(...)``, which has no
+      attribute node at all. Any ``from httpx import`` is refused (the surface
+      spells ``httpx.X`` throughout), as is any ``from m import <verb>`` from
+      anywhere and any ``import *``; and every use of a name so imported is
+      reported as well as the import;
+    * a reference to a mapping lookup (:data:`MAPPING_LOOKUPS` --
+      ``__dict__``, ``vars``, ``getmembers``) or to code-from-text
+      (:data:`CODE_FROM_TEXT`, and the bare builtin ``compile``);
+    * a request object built with any method but the literal ``"GET"``
+      (:func:`_request_method_offender`), and any store to a ``.method``.
 
     Both exemptions cover a *direct call* and nothing else: the websocket
     frame write ``self._connection.send(...)`` in ``sockets.py``, and the one
     OpenFIGI call node. An uncalled ``self._connection.send`` is refused
     like any other reference.
+
+    **What this does not catch.** It is a static check over one file's AST,
+    so it cannot see:
+
+    * a write verb that arrives as a *value* from outside the file -- a
+      parameter bound by the caller to ``client.post`` -- since the reference
+      is in the caller, which is either on the surface (and refused there) or
+      off it (and outside this guard's scope);
+    * a name assembled at runtime and passed to something not listed above
+      -- ``setattr``/``object.__setattr__`` on a request's ``method``, for
+      instance, is refused only in the OpenFIGI file
+      (:data:`DYNAMIC_REBINDERS`), not across the surface;
+    * an HTTP stack other than ``httpx``'s spellings: ``urllib.request``'s
+      ``urlopen(url, data=...)`` imported by name, a raw ``socket``/``ssl``
+      connection, or an ``httpx`` private sender a future release adds under
+      a new name. The surface imports none of these today.
 
     ``rel`` is the repo-relative POSIX path of the file the source came from;
     both exemptions are keyed on it. Pure, so the real tree and the synthetic
@@ -841,7 +949,40 @@ def _write_verb_offenders(rel: str, source: str) -> list[str]:
     }
     lookups = ATTRIBUTE_LOOKUPS | DUNDER_LOOKUPS
     offenders = []
+    imported_verbs: set[str] = set()
     for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = node.module or ""
+        for alias in node.names:
+            local = alias.asname or alias.name
+            if alias.name == "*":
+                offenders.append(f"{rel}:{node.lineno} from {module} import *")
+            elif module == "httpx" or module.startswith("httpx."):
+                offenders.append(f"{rel}:{node.lineno} from {module} import {alias.name}")
+            elif alias.name in WRITE_VERBS:
+                offenders.append(f"{rel}:{node.lineno} from {module} import {alias.name}")
+            if alias.name in WRITE_VERBS:
+                imported_verbs.add(local)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in imported_verbs:
+            offenders.append(f"{rel}:{node.lineno} {node.id} (an imported write verb)")
+        if spelled_as(node) in MAPPING_LOOKUPS:
+            offenders.append(f"{rel}:{node.lineno} {spelled_as(node)} (a mapping lookup)")
+        if spelled_as(node) in CODE_FROM_TEXT or (
+            isinstance(node, ast.Name) and node.id == "compile"
+        ):
+            offenders.append(f"{rel}:{node.lineno} {spelled_as(node)} (code from text)")
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "method"
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            offenders.append(f"{rel}:{node.lineno} .method rebound")
+        if isinstance(node, ast.Call):
+            built = _request_method_offender(node)
+            if built is not None:
+                offenders.append(f"{rel}:{node.lineno} {built}")
         # A lookup function itself passed around uncalled -- ``g = getattr`` --
         # would carry a by-name lookup past the check below.
         spelled = (
@@ -868,14 +1009,15 @@ def _write_verb_offenders(rel: str, source: str) -> list[str]:
         ):
             offenders.append(f"{rel}:{node.lineno} .{node.attr} (uncalled reference)")
         if isinstance(node, ast.Call):
-            lookup = _lookup_name(node)
+            lookup = _lookup_names(node)
             if lookup is None:
                 continue
-            called, name = lookup
-            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
-                offenders.append(f"{rel}:{node.lineno} {called}(<non-literal name>)")
-            elif name.value in WRITE_VERBS:
-                offenders.append(f"{rel}:{node.lineno} {called}({name.value!r})")
+            called, names = lookup
+            for name in names:
+                if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                    offenders.append(f"{rel}:{node.lineno} {called}(<non-literal name>)")
+                elif WRITE_VERBS & set(name.value.split(".")):
+                    offenders.append(f"{rel}:{node.lineno} {called}({name.value!r})")
     return offenders
 
 
@@ -1341,7 +1483,72 @@ WRITE_VERBS_REACHED_INDIRECTLY = {
     "getattr_aliased": "g = getattr\ndef f(client):\n    return g(client, 'post')('u')\n",
     "websocket_send_uncalled": "class S:\n"
     "    def f(self):\n        return self._connection.send\n",
+    # (OF-U1b finding 1) a write verb imported by name is a bare-name call
+    "from_httpx_import_post": "from httpx import post\n"
+    "def f(base, auth, order):\n"
+    "    return post(f'{base}/v2/orders', headers=auth, json=order)\n",
+    "from_httpx_import_post_as": "from httpx import post as fetch\n"
+    "def f(u):\n    return fetch(u)\n",
+    "from_httpx_import_a_type": "from httpx import AsyncClient\n",
+    "from_httpx_submodule_import": "from httpx._api import get\n",
+    "from_elsewhere_import_write_verb": "from corollary.sockets import send\n",
+    "from_elsewhere_import_write_verb_as": "from somewhere import delete as d\n",
+    "star_import": "from somewhere import *\n",
+    # (OF-U1b finding 2) dotted and multi-argument attrgetter; getattr_static
+    "attrgetter_dotted": "import operator\n"
+    "def f(self):\n    return operator.attrgetter('_client.post')(self)('u')\n",
+    "attrgetter_second_argument": "import operator\n"
+    "def f(c):\n    return operator.attrgetter('symbol', 'post')(c)[1]('u')\n",
+    "attrgetter_second_argument_non_literal": "import operator\n"
+    "def f(c, verb):\n    return operator.attrgetter('symbol', verb)(c)[1]('u')\n",
+    "getattr_static_literal": "import inspect\n"
+    "def f(c):\n    return inspect.getattr_static(c, 'post')(c, 'u')\n",
+    "getattr_static_non_literal": "import inspect\n"
+    "def f(c, verb):\n    return inspect.getattr_static(c, verb)(c, 'u')\n",
+    "getattr_static_by_name": "from inspect import getattr_static\n"
+    "def f(c):\n    return getattr_static(c, 'put')(c, 'u')\n",
+    "getattr_static_uncalled": "import inspect\ng = inspect.getattr_static\n",
+    # (OF-U1b finding 4) attributes reached through a mapping, not a name
+    "type_dict_subscript": "def f(c):\n    return type(c).__dict__['post'](c, 'u')\n",
+    "vars_subscript": "def f(c):\n    return vars(type(c))['post'](c, 'u')\n",
+    "vars_uncalled": "v = vars\n",
+    "getmembers": "import inspect\n"
+    "def f(c):\n    return dict(inspect.getmembers(c))['post']('u')\n",
+    "exec_text": "def f():\n    exec('import httpx; httpx.post(\"u\")')\n",
+    "eval_text": "def f(c):\n    return eval('c.po' + 'st')('u')\n",
+    "compile_text": "def f(src):\n    return compile(src, 'x', 'exec')\n",
+    # (OF-U1b finding 5) the transport layer under every client
+    "handle_async_request": "async def f(transport, request):\n"
+    "    return await transport.handle_async_request(request)\n",
+    "handle_request": "def f(transport, request):\n"
+    "    return transport.handle_request(request)\n",
+    "httpx_private_send": "async def f(client, request):\n"
+    "    return await client._send_single_request(request)\n",
+    # (OF-U1b, considered) a request object built with a non-GET method
+    "request_object_post": "import httpx\n"
+    "def f(u):\n    return httpx.Request('POST', u)\n",
+    "request_object_lowercase_post": "import httpx\n"
+    "def f(u):\n    return httpx.Request('post', u)\n",
+    "request_object_method_keyword": "import httpx\n"
+    "def f(u):\n    return httpx.Request(method='PUT', url=u)\n",
+    "request_object_non_literal_method": "import httpx\n"
+    "def f(m, u):\n    return httpx.Request(m, u)\n",
+    "request_object_splat": "import httpx\n"
+    "def f(a):\n    return httpx.Request(*a)\n",
+    "build_request_post": "def f(c, u):\n    return c.build_request('POST', u)\n",
+    "request_method_rebound": "def f(r):\n    r.method = b'POST'\n",
 }
+
+
+@pytest.mark.risk
+def test_an_imported_write_verb_is_refused_at_the_import_and_at_every_use() -> None:
+    """``from httpx import post as fetch`` is reported twice: the import, and the call."""
+    offenders = _write_verb_offenders(
+        "corollary/data/providers/finnhub.py",
+        WRITE_VERBS_REACHED_INDIRECTLY["from_httpx_import_post_as"],
+    )
+    assert any(":1 " in o and "import" in o for o in offenders), offenders
+    assert any(":3 " in o and "fetch" in o for o in offenders), offenders
 
 
 @pytest.mark.risk
@@ -1370,8 +1577,19 @@ def test_a_write_verb_reached_without_a_direct_call_trips_the_guard(source: str)
         "def f(rows):\n    return sorted(rows, key=operator.attrgetter('symbol'))\n",
         "def f(client):\n    return client.get('u')\n",
         "class S:\n    async def f(self):\n        await self._connection.send('x')\n",
+        "import operator\n"
+        "def f(rows):\n    return operator.attrgetter('leg.symbol', 'strike')(rows[0])\n",
+        "import inspect\ndef f(c):\n    return inspect.getattr_static(c, 'symbol')\n",
+        "import httpx\ndef f(u):\n    return httpx.Request('GET', u)\n",
+        "import httpx\ndef f(u):\n    return httpx.Request(method='GET', url=u)\n",
+        "def f(c, u):\n    return c.build_request('GET', u)\n",
+        "import httpx\nimport re\nfrom corollary.wire import decode_json\nP = re.compile('x')\n",
+        "def f(r):\n    return r.method\n",
     ],
-    ids=["getattr_literal_read", "attrgetter_literal_read", "get_call", "websocket_frame_write"],
+    ids=["getattr_literal_read", "attrgetter_literal_read", "get_call", "websocket_frame_write",
+         "attrgetter_dotted_read", "getattr_static_read", "request_object_get",
+         "request_object_get_keyword", "build_request_get", "ordinary_imports_and_re_compile",
+         "request_method_read"],
 )
 def test_a_read_or_a_literal_non_write_lookup_does_not_trip(source: str) -> None:
     """The indirect-reference check is not simply refusing every lookup."""
@@ -1707,12 +1925,51 @@ def _openfigi_client_offenders(source: str) -> list[str]:
     with no positional argument, no splat and keywords within
     :data:`OPENFIGI_CLIENT_KEYWORDS`. And no ``__dict__`` / ``__setattr__``
     reference, which could bind it without an attribute node.
+
+    **And once built, the client is used exactly two ways** (OF-U1b finding
+    3): the one exempt post (:func:`_is_mapping_post_shape`) and a call to
+    ``.aclose()``. Every other read of ``*._client`` is refused -- an
+    attribute store (``self._client.event_hooks = ...``, ``.auth``,
+    ``._transport``), a ``del``, a method that mutates (``.headers.update``),
+    an alias (``c = self._client``), passing it out, a ``with``, even a
+    ``get``. An event hook or an ``Auth.auth_flow`` runs on the exempt request
+    before it is sent and can rewrite its URL and headers, so the call site's
+    pinned shape is only the whole story while nothing else can reach the
+    client.
     """
     tree = ast.parse(source)
     offenders: list[str] = []
     bindings: list[ast.Attribute] = []
     values: list[ast.expr | None] = []
+    parents: dict[int, ast.AST] = {
+        id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+    }
     for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Attribute, ast.Subscript))
+            and not isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "_client"
+        ):
+            offenders.append(f"line {node.lineno}: the client mutated after construction")
+        if isinstance(node, ast.Attribute) and node.attr == "_client" and isinstance(
+            node.ctx, ast.Load
+        ):
+            use = parents.get(id(node))
+            call = parents.get(id(use)) if use is not None else None
+            permitted = (
+                isinstance(use, ast.Attribute)
+                and use.attr in {OPENFIGI_EXEMPT_VERB, "aclose"}
+                and isinstance(call, ast.Call)
+                and call.func is use
+                and (use.attr == "aclose" or _is_mapping_post_shape(call))
+            )
+            if not permitted:
+                shown = ast.unparse(use) if use is not None else "._client"
+                offenders.append(
+                    f"line {node.lineno}: ._client used as {shown[:60]!r}, "
+                    "not the exempt post or .aclose()"
+                )
         if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__setattr__"}:
             offenders.append(f"line {node.lineno}: .{node.attr}")
         if isinstance(node, ast.Attribute) and node.attr == "_client":
@@ -1800,6 +2057,56 @@ def test_the_client_shape_check_refuses_every_other_construction(source: str) ->
 @pytest.mark.risk
 def test_the_client_shape_check_passes_the_bare_client() -> None:
     assert _openfigi_client_offenders(_BARE_CLIENT) == []
+
+
+#: The bare client plus the two uses the exempted file is allowed: the one
+#: exempt post, and ``aclose``.
+_BARE_CLIENT_IN_USE = (
+    _BARE_CLIENT
+    + "    async def map(self, jobs):\n"
+    f"        return await self._client.post({_URL}, {_KW})\n"
+    "    async def aclose(self):\n"
+    "        await self._client.aclose()\n"
+)
+
+
+@pytest.mark.risk
+def test_the_client_shape_check_passes_the_exempt_post_and_aclose() -> None:
+    assert _openfigi_client_offenders(_BARE_CLIENT_IN_USE) == []
+
+
+#: OF-U1b finding 3: the client mutated, aliased or used after construction.
+#: An event hook or an ``Auth.auth_flow`` sees the exempt request before it is
+#: sent and can rewrite its URL or headers, so the pinned call site is only
+#: the whole story if nothing else touches the client.
+CLIENT_USES_REFUSED = {
+    "event_hooks_assigned": "    def hook(self, h):\n"
+    "        self._client.event_hooks = {'request': [h]}\n",
+    "auth_assigned": "    def auth(self, a):\n        self._client.auth = a\n",
+    "transport_assigned": "    def swap(self, t):\n        self._client._transport = t\n",
+    "headers_updated": "    def key(self):\n        self._client.headers.update({'a': 'b'})\n",
+    "headers_item_assigned": "    def key(self):\n        self._client.headers['a'] = 'b'\n",
+    "attribute_deleted": "    def strip(self):\n        del self._client.timeout\n",
+    "base_url_read": "    def where(self):\n        return self._client.base_url\n",
+    "aliased": "    def alias(self):\n        c = self._client\n        return c\n",
+    "passed_out": "    def leak(self, f):\n        return f(self._client)\n",
+    "context_managed": "    async def use(self):\n        async with self._client:\n"
+    "            pass\n",
+    "get_call": "    async def read(self):\n        return await self._client.get('u')\n",
+    "post_off_the_exempt_shape": "    async def other(self):\n"
+    "        return await self._client.post('https://x', json=1)\n",
+    "aclose_uncalled": "    def later(self):\n        return self._client.aclose\n",
+}
+
+
+@pytest.mark.risk
+@pytest.mark.parametrize(
+    "addition", list(CLIENT_USES_REFUSED.values()), ids=list(CLIENT_USES_REFUSED)
+)
+def test_the_exempted_client_is_used_only_by_the_exempt_post_and_aclose(
+    addition: str,
+) -> None:
+    assert _openfigi_client_offenders(_BARE_CLIENT_IN_USE + addition) != []
 
 
 @pytest.mark.risk
