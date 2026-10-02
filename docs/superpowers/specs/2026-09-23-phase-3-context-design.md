@@ -830,7 +830,10 @@ constraints below are recorded in *SEC N-PORT* under Constraints.
   refused**: the running system has no sector leaders, and says so. How to
   resolve an ISIN is the owner's call. The hook is a pluggable
   `IsinResolver`, whose default resolves nothing. *(Answered by Q17,
-  2026-09-30: OpenFIGI — blocked on rule 1's GET-only guard.)*
+  2026-09-30: OpenFIGI — blocked on rule 1's GET-only guard.)* *(History:
+  the 73.36 above is the no-resolver figure and still what `NoIsinResolver`
+  gives. **Superseded 2026-10-01** by Q17's rebuild through OpenFIGI: XLB
+  resolves to **99.837786585047** and the 2026-06-30 snapshot is accepted.)*
 
 **Q15 — Finnhub's IPO calendar joins step 7 (2026-09-26).** The owner wants the
 upcoming IPOs on the calendar. Finnhub `/calendar/ipo` is marked
@@ -881,8 +884,19 @@ recording is in (`tests/fixtures/record_openfigi.py`, keyless, 3 requests of
 10/10/9 on 2026-10-01 ET (`recorded_at` 2026-10-02T01:03:45Z): all 29 matched, every record Equity / Common Stock, one
 ticker per ISIN across every US exchange code, no class share among them);
 the resolver, the cache (migration 0012) and the job wiring are in (unit
-U3a, `corollary/data/seeds/isin.py`); the real snapshot rebuild is next.* The
-owner chose **OpenFIGI** as Q14's `IsinResolver`.
+U3a, `corollary/data/seeds/isin.py`); **done 2026-10-01 (unit U3b): the real
+2026-06-30 snapshot is accepted.** Rebuilt from recorded inputs only — the SEC
+filings, the CUSIP survey, the real `OpenFigiIsinResolver` over the OpenFIGI
+recording batch by batch, and Alpaca's live active-equity rows for the 29
+tickers (`tests/fixtures/record_alpaca_isin_assets.py`, one GET on
+2026-10-01 ET, `recorded_at` 2026-10-02T02:11:38Z: 14,395 active rows, all 29
+present, active, tradable and `has_options`). All 29 ISINs resolve, none is
+skipped, 503 holdings are stored, and **XLB's resolved weight is
+99.837786585047** (was 73.36 with no resolver). The DB seed loader serves all
+11 funds; `tests/data/seeds/test_spdr_real_rebuild.py` pins the sum and every
+fund's five leaders with their filed weights, and proves (risk-marked) that a
+ticker Alpaca does not list comes out `not_listed` and refuses the snapshot.*
+The owner chose **OpenFIGI** as Q14's `IsinResolver`.
 
 - *Parent-session specifics the owner can override:*
   - **Probe first.** Terms and limits are read from OpenFIGI's official pages
@@ -960,7 +974,9 @@ owner chose **OpenFIGI** as Q14's `IsinResolver`.
   pinning the request body's shape, or (b) another route. The guard is not
   weakened, and not evaded by a POST spelled some other way, in the meantime.
   Until then **the sector snapshot stays refused** (XLB **73.36**), and step
-  4's sector leaders and sector column wait.
+  4's sector leaders and sector column wait. *(History. **Superseded
+  2026-10-01**: Q21 unblocked it, and the rebuild below accepts the snapshot
+  at XLB **99.837786585047**.)*
 - **The 29 ISIN-only lines** (2026-06-30 filings, `tests/fixtures/sec/`),
   issuer name for the record only:
 
@@ -2631,13 +2647,28 @@ human read of StockTwits' and Massive's terms for automated access.
 
 **4. News ingestion, both tiers: watch and discovery, deduplicated, served;
 tradeability and the watch list.**
-- *Status:* **done 2026-09-30, except the sector leaders and the feed's
-  sector column**, which both wait on **Q17's guard decision** — the source
-  is chosen (OpenFIGI), but its mapping endpoint is POST-only and rule 1's
-  GET-only guard forbids it until the owner rules on an exemption or another
-  route. Meanwhile the snapshot job runs, and records the refusal of the real
-  2026-06-30 snapshot, so the running system has no leaders, files every
-  ticker under `Other` with `sectorsAvailable: false`, and says so. Q18's
+- *Status:* **done 2026-10-01**, the sector leaders and the feed's sector
+  column included. Those two waited on Q17's ISIN-only lines; Q21's exemption
+  unblocked OpenFIGI, and the real 2026-06-30 snapshot now builds and is
+  accepted (XLB **99.837786585047**, all 29 ISINs resolved, 503 holdings, all
+  11 funds served by the DB seed loader — see Q17). Commits: 5ea4064 the
+  OpenFIGI recording, 30ec897 the recorder follow-ups, 62fd7a8 the resolver,
+  cache and wiring, and <U3b> the Alpaca asset recording and the rebuild test.
+  **This unit built from recorded inputs and did not touch the app
+  database**, so the running system picks the snapshot up at its next weekly
+  `spdr_holdings` slot (Monday 09:00 ET, with the day's asset directory
+  already held), and until then still serves whatever its database last
+  recorded. **The startup catch-up will not do it:** it builds only when the
+  latest attempt is over 7 days old, and the 2026-09-30 refusal counts; and
+  when it does run it reads the asset directory before that day's fetch has
+  landed, so every ISIN fails closed (`no_directory`), XLB is refused at
+  73.36 again, and that refusal suppresses the next week of catch-ups. Fail
+  closed, nothing wrong stored — but leaders can stay absent a week. Carried
+  to the owner (the catch-up should wait for the directory, or skip with a
+  reason while it is absent).
+  *(History: done 2026-09-30 except the sector leaders and sector column,
+  which waited on Q17's guard decision while the snapshot job recorded the
+  real snapshot's refusal at XLB 73.36 — superseded as above.)* Q18's
   amendment handling landed as a follow-up (commit: 05b652b).
   Commits: 6ac3746 tradeability and watch universe (pure), d72d912 schema
   0008, a8bf4f3 Alpaca's reads, c87d40a Finnhub and Massive news, e7c473c the
@@ -2679,6 +2710,9 @@ tradeability and the watch list.**
     validated whole) — replacing the committed `spdr_holdings.csv` and its
     State Street builder, `scripts/build_spdr_seed.py`, which is removed (Q14)
   - `tests/fixtures/record_sec.py` and `tests/fixtures/sec/`
+  - `tests/fixtures/record_alpaca_isin_assets.py` and
+    `tests/fixtures/alpaca/p4_assets_active_isin_tickers.json` (Q17's directory
+    evidence), and `tests/data/seeds/test_spdr_real_rebuild.py` (the rebuild)
   - migrations **0008** (`news_article*` with `feed`, `watch_symbol`,
     `ticker_tradeability`, the `watchlist` audit category and the
     `watchlist_changed` route), **0009** (`ticker_ipo_date`, Q12) and
