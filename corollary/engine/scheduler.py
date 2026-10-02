@@ -174,8 +174,10 @@ from corollary.data.news.pollers import (
 )
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
 from corollary.data.seeds import SpdrSeed
+from corollary.data.seeds.isin import IsinMappingSource, OpenFigiIsinResolver
 from corollary.data.seeds.nport import (
     CusipResolver,
+    IsinResolver,
     NoIsinResolver,
     NportSource,
     SnapshotRule,
@@ -1414,6 +1416,12 @@ class ContextServices:
     #: ``/v2/assets/{cusip}``) -- or ``None``, and the ``spdr_holdings`` job
     #: skips. A reference-data read, never the broker.
     cusips: CusipResolver | None = None
+    #: OpenFIGI, for the ``spdr_holdings`` job's ISIN-only lines (spec Q17)
+    #: -- or ``None``, and the job resolves none of them (``NoIsinResolver``,
+    #: said at INFO). Optional like SEC; ``OPENFIGI_API_KEY`` unset is still
+    #: a provider (keyless), so ``None`` means the app was built without one.
+    #: A reference-data lookup, never the broker.
+    openfigi: IsinMappingSource | None = None
     #: Where a job puts a notification (:class:`ContextNotices`). The lifespan
     #: passes the one it drains into the runtime's notification path; a
     #: private default is an outbox nobody delivers, which is what a test's
@@ -1759,21 +1767,38 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
       under its own event, because SEC refusing the declared User-Agent is an
       operator problem no retry fixes.
 
-    The ISIN seam is :class:`NoIsinResolver` -- fail closed until the owner
-    chooses an ISIN source -- and the directory is the shared day's asset
-    directory (``None`` before its first fetch: then only the ticker shape
-    of an ISIN answer is checked, and ``NoIsinResolver`` answers none).
+    The ISIN seam is :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver`
+    over :attr:`ContextServices.openfigi` (spec Q17), checked against the
+    shared day's asset directory -- the same directory the builder is given.
+    Before the directory's first fetch it is ``None`` and the resolver
+    refuses every ISIN (fail closed) without asking OpenFIGI. With no
+    OpenFIGI provider the seam is :class:`NoIsinResolver`, said at INFO, and
+    the real quarter is refused on XLB's weight band.
     """
     unavailable = _spdr_unavailable(services)
     if unavailable is not None:
         return unavailable
     assert services.sec is not None and services.cusips is not None
+    directory = services.assets.current()
+    isin_resolver: IsinResolver
+    if services.openfigi is not None:
+        isin_resolver = OpenFigiIsinResolver(
+            services.openfigi, services.session_factory, directory=directory, clock=clock
+        )
+    else:
+        logger.info(
+            "no OpenFIGI provider is configured; the N-PORT lines identified by "
+            "ISIN alone are not resolved this run, and a fund they weigh on may "
+            "be refused on its weight band",
+            extra={"event": "spdr_isin_source_unavailable", "at": clock().isoformat()},
+        )
+        isin_resolver = NoIsinResolver()
     outcome = await build_spdr_snapshot(
         services.sec,
         services.cusips,
         services.session_factory,
-        isin_resolver=NoIsinResolver(),
-        directory=services.assets.current(),
+        isin_resolver=isin_resolver,
+        directory=directory,
         clock=clock,
     )
     if outcome.status == "unchanged":

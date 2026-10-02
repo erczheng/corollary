@@ -880,8 +880,9 @@ provider exists (`corollary/data/providers/openfigi.py`); the live
 recording is in (`tests/fixtures/record_openfigi.py`, keyless, 3 requests of
 10/10/9 on 2026-10-01 ET (`recorded_at` 2026-10-02T01:03:45Z): all 29 matched, every record Equity / Common Stock, one
 ticker per ISIN across every US exchange code, no class share among them);
-the resolver, cache and snapshot rebuild are next.* The owner chose **OpenFIGI** as Q14's
-`IsinResolver`.
+the resolver, the cache (migration 0012) and the job wiring are in (unit
+U3a, `corollary/data/seeds/isin.py`); the real snapshot rebuild is next.* The
+owner chose **OpenFIGI** as Q14's `IsinResolver`.
 
 - *Parent-session specifics the owner can override:*
   - **Probe first.** Terms and limits are read from OpenFIGI's official pages
@@ -901,6 +902,38 @@ the resolver, cache and snapshot rebuild are next.* The owner chose **OpenFIGI**
   - **ISIN → ticker is cached in the database**, so each ISIN costs one
     lookup, ever. An unresolved result is not an answer and is retried on the
     next run.
+- **The acceptance rule as implemented (unit U3a, the orchestrator's concrete
+  reading of the owner's rule; `OpenFigiIsinResolver` /
+  `accept_mapping` in `corollary/data/seeds/isin.py`).** Of an ISIN's OpenFIGI
+  result, take the records with `exchCode == "US"` (Bloomberg's US composite)
+  **and** `marketSector == "Equity"`. The ISIN resolves only if those records
+  all carry a ticker and carry **exactly one distinct ticker** after
+  normalising class-share separators to the dot form
+  (`corollary.data.seeds.normalize_symbol`, `BRK/B` → `BRK.B`), **and** that
+  ticker is in the day's `AssetDirectory` (every active US equity Alpaca
+  lists). Otherwise it is unresolved, logged (`isin_unresolved`, structured,
+  with the ISIN, the fund and a reason code — `openfigi_warning`,
+  `openfigi_error`, `no_us_composite_equity`, `missing_ticker`,
+  `ambiguous_ticker`, `not_listed`, `cached_not_listed`, `no_directory`) and
+  the builder skips the line as `unresolved_isin` with fund, name, ISIN and
+  weight. **No directory means unresolved** (fail closed): the builder only
+  shape-checks an ISIN answer without one, so the resolver refuses on its own
+  and asks OpenFIGI nothing. `securityType` is logged, never filtered on. The
+  name never crosses the seam.
+  - *Batching:* the builder calls the resolver's optional `prefetch` hook once
+    with every ISIN-only ISIN of the build; every uncached one is mapped in
+    batches of the provider's `jobs_per_request` (29 keyless = 3 requests).
+    Any OpenFIGI `ProviderError`, `RateLimitedError` included, aborts the build
+    (`isin_lookup_failed`) with nothing stored.
+  - *Cache (`isin_ticker`, migration 0012):* `isin` (PK), `ticker`,
+    `composite_figi`, `source` (`openfigi`), `resolved_at` (aware UTC). Only
+    accepted answers are written. A cached ticker is re-checked against the
+    directory on every use; one the directory no longer lists is unresolved
+    for that run and its row deleted, so the next run asks OpenFIGI afresh.
+  - *Wiring:* `ContextServices.openfigi` (optional, like SEC), built by the
+    registry from `OpenFigiProvider.from_env` (keyless when
+    `OPENFIGI_API_KEY` is unset) and closed with it. Without a provider the
+    `spdr_holdings` job uses `NoIsinResolver` and says so at INFO.
 - **Probe result (2026-09-30): the terms do not restrict this use.** The
   [terms of service](https://www.openfigi.com/docs/terms-of-service) (updated
   2018-11-27) §1 dedicates FIGI identifiers to the public domain — they *"may

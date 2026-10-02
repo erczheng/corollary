@@ -11,13 +11,15 @@ members (Linde, CRH, Amcor, Smurfit Westrock, LyondellBasell in XLB; Chubb, Aon,
 Eaton, Medtronic, Accenture, ...), not cash lines. The owner's rule skips an
 unresolved line and never guesses, so XLB's resolved weight is 73.36 and the
 90-110 band refuses the whole snapshot. That is the state of the running
-system until the owner picks an ISIN source: the default ``NoIsinResolver``
-resolves nothing.
+system whenever no ISIN source is configured: ``NoIsinResolver`` resolves
+nothing. The owner's source is OpenFIGI (spec Q17); the tests at the end of
+this file drive :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver`
+over the live OpenFIGI recording.
 
 Tests that need the accept path drop a fake :class:`IsinResolver` into the
 seam, mapping XLB's five real ISINs to SYNTHETIC symbols (``SYNA``..``SYNE``)
 -- deliberately not real tickers, so no test here asserts an ISIN->ticker
-fact nobody has sourced. Every byte SEC serves is the recording.
+fact nobody has sourced (the OpenFIGI tests take theirs from the recording). Every byte SEC serves is the recording.
 """
 
 from __future__ import annotations
@@ -1102,3 +1104,110 @@ async def test_an_sec_outage_on_an_amendment_aborts_rather_than_refusing(
     assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.SEC_UNAVAILABLE)
     seed = load_spdr_seed_from_db(sessions)
     assert seed is not None and seed.as_of == date(2026, 3, 31)
+
+
+# ------------------------------------------------- the OpenFIGI resolver (Q17)
+#
+# Unit U3a. The resolver itself is tested in ``test_isin_resolver.py``; these
+# drive it through the builder, against the real SEC recording and the live
+# OpenFIGI recording, so the batching hook and the abort path are exercised
+# where the job uses them.
+
+
+class PrefetchingIsinResolver(FakeIsinResolver):
+    """A :class:`FakeIsinResolver` with the optional ``prefetch`` hook, recording order."""
+
+    def __init__(self, *, broken_prefetch: bool = False) -> None:
+        super().__init__()
+        self.events: list[tuple[str, tuple[str, ...]]] = []
+        self.broken_prefetch = broken_prefetch
+
+    async def prefetch(self, isins: Sequence[str]) -> None:
+        self.events.append(("prefetch", tuple(isins)))
+        if self.broken_prefetch:
+            raise ProviderError("POST /v3/mapping returned 429")  # SYNTHETIC
+
+    async def resolve(self, isin: str, *, fund: str) -> str | None:
+        self.events.append(("resolve", (isin,)))
+        return await super().resolve(isin, fund=fund)
+
+
+@pytest.mark.asyncio
+async def test_a_prefetching_resolver_is_told_every_isin_once_before_any_resolve(
+    sessions: Callable[[], Session],
+) -> None:
+    isins = PrefetchingIsinResolver()
+    outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=isins)
+    assert outcome.status == "accepted", outcome.reason
+    prefetches = [e for e in isins.events if e[0] == "prefetch"]
+    assert prefetches == [("prefetch", tuple(isin for _, isin, _, _ in ISIN_ONLY_LINES))]
+    assert isins.events[0][0] == "prefetch"
+    assert sum(1 for e in isins.events if e[0] == "resolve") == 29
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_prefetch_provider_error_aborts_and_stores_nothing(
+    sessions: Callable[[], Session],
+) -> None:
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    before = snapshot_rows(sessions)
+    isins = PrefetchingIsinResolver(broken_prefetch=True)
+    outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=isins)
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.ISIN_LOOKUP_FAILED)
+    assert [e[0] for e in isins.events] == ["prefetch"]  # no resolve after the failure
+    assert [r.id for r in snapshot_rows(sessions)] == [r.id for r in before]
+    assert holding_count(sessions) == 55
+
+
+def _openfigi_resolver(
+    sessions: Callable[[], Session], directory: AssetDirectory | None
+) -> tuple[Any, Any, Any]:
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
+
+    from corollary.data.seeds.isin import OpenFigiIsinResolver
+
+    fake = LiveOpenFigi()
+    provider = provider_for(fake)
+    return fake, provider, OpenFigiIsinResolver(provider, sessions, directory=directory, clock=lambda: NOW)
+
+
+@pytest.mark.asyncio
+async def test_the_real_quarter_is_accepted_through_openfigi_in_three_requests(
+    sessions: Callable[[], Session],
+) -> None:
+    from tests.data.seeds.test_isin_resolver import LIVE_TICKERS
+
+    directory = directory_of(set(SURVEY.values()) | set(LIVE_TICKERS.values()))
+    fake, provider, resolver = _openfigi_resolver(sessions, directory)
+    try:
+        outcome = await build(
+            sessions, FakeSec(), FakeResolver(), isin_resolver=resolver, directory=directory
+        )
+    finally:
+        await provider.aclose()
+    assert outcome.status == "accepted", outcome.reason
+    assert [len(r) for r in fake.requests] == [10, 10, 9]
+    assert outcome.skipped == ()
+    xlb = {h.symbol: h for h in outcome.holdings["XLB"]}
+    assert xlb["LIN"].isin == "IE000S9YS762" and xlb["LIN"].cusip is None
+    assert sum((h.weight for h in outcome.holdings["XLB"]), Decimal(0)) >= WEIGHT_BAND_LOW
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.sector_of("LIN") == "Materials"
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_through_openfigi_with_no_directory_the_real_quarter_is_still_refused(
+    sessions: Callable[[], Session],
+) -> None:
+    """Fail closed: the builder only shape-checks without a directory, so the resolver refuses."""
+    fake, provider, resolver = _openfigi_resolver(sessions, None)
+    try:
+        outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=resolver)
+    finally:
+        await provider.aclose()
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    assert fake.requests == []
+    assert len(outcome.skipped) == 29
+    assert {s.rule for s in outcome.skipped} == {SnapshotRule.UNRESOLVED_ISIN}

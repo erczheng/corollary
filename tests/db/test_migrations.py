@@ -65,7 +65,12 @@ EXPECTED_TABLES = {
     # 0010 -- step 4: the SPDR sector seed, built from SEC N-PORT
     "spdr_holdings_snapshot",
     "spdr_holding",
+    # 0012 -- Q17: the OpenFIGI ISIN -> ticker cache
+    "isin_ticker",
 }
+
+#: Everything 0012 created.
+_0012_TABLES = {"isin_ticker"}
 
 #: Everything 0010 created.
 _0010_TABLES = {"spdr_holdings_snapshot", "spdr_holding"}
@@ -121,7 +126,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES - _0010_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES - _0012_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -148,7 +153,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0011"]
+    assert script.get_heads() == ["0012"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -161,7 +166,7 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES <= tables
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -189,7 +194,7 @@ def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert EXPECTED_TABLES <= tables  # 0011 dropped nothing
+    assert EXPECTED_TABLES - _0012_TABLES <= tables  # 0011 dropped nothing
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
@@ -212,6 +217,93 @@ def test_0011_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
     assert routes[("spdr_seed_amended", "bell")] is False
 
 
+def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
+    """``isin_ticker`` comes and goes alone; 0011's routes and 0010's tables stay."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0011")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert tables & _0012_TABLES == set()
+    assert EXPECTED_TABLES - _0012_TABLES <= tables
+    assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
+
+
+# Autogenerate does not compare CHECK constraints; run the same rows against
+# both the migrated schema and the models'.
+_ISIN_TICKER_CASES = [
+    # (isin, ticker, composite_figi, source, accepted)
+    ("IE000S9YS762", "LIN", "BBG01FND0CC1", "openfigi", True),
+    ("US0846707026", "BRK.B", None, "openfigi", True),
+    ("IE000S9YS76", "LIN", None, "openfigi", False),  # ck_isin_ticker_isin: eleven
+    ("ie000s9ys762", "LIN", None, "openfigi", False),  # ck_isin_ticker_isin: lower case
+    ("IE000S9YS762", "", None, "openfigi", False),  # ck_isin_ticker_ticker: empty
+    ("IE000S9YS762", "lin", None, "openfigi", False),  # ck_isin_ticker_ticker: lower
+    ("IE000S9YS762", "LIN", "BBG01FND0CC", "openfigi", False),  # composite: eleven
+    ("IE000S9YS762", "LIN", None, "name", False),  # ck_isin_ticker_source
+]
+
+
+@pytest.mark.parametrize("built_by", ["alembic", "models"])
+@pytest.mark.parametrize(
+    ("isin", "ticker", "composite_figi", "source", "accepted"), _ISIN_TICKER_CASES
+)
+def test_0012_isin_ticker_checks(
+    db_path: Path,
+    built_by: str,
+    isin: str,
+    ticker: str,
+    composite_figi: str | None,
+    source: str,
+    accepted: bool,
+) -> None:
+    from datetime import datetime, timezone
+
+    from sqlalchemy.exc import IntegrityError
+
+    from corollary.db.models import IsinTicker
+
+    url = sqlite_url(db_path)
+    if built_by == "alembic":
+        command.upgrade(_config(url), "head")
+        eng = create_db_engine(url)
+    else:
+        eng = create_db_engine(url)
+        Base.metadata.create_all(eng)
+    row = IsinTicker(
+        isin=isin,
+        ticker=ticker,
+        composite_figi=composite_figi,
+        source=source,
+        resolved_at=datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc),
+    )
+    try:
+        if not accepted:
+            with Session(eng) as sess:
+                sess.add(row)
+                with pytest.raises(IntegrityError):
+                    sess.commit()
+            return
+        with Session(eng) as sess:
+            sess.add(row)
+            sess.commit()
+        with Session(eng) as sess:
+            stored = sess.get(IsinTicker, isin)
+            assert stored is not None
+            assert stored.resolved_at == datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc)
+            assert stored.resolved_at.tzinfo is not None
+    finally:
+        eng.dispose()
+
+
 def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     """The two snapshot tables come and go together; 0009's are untouched."""
     url = sqlite_url(db_path)
@@ -222,7 +314,7 @@ def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0010_TABLES == set()
-    assert EXPECTED_TABLES - _0010_TABLES <= tables
+    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -302,7 +394,11 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
     eng.dispose()
     assert "fred_observation" not in tables
     assert (
-        EXPECTED_TABLES - {"fred_observation", "ticker_ipo_date"} - _0008_TABLES - _0010_TABLES
+        EXPECTED_TABLES
+        - {"fred_observation", "ticker_ipo_date"}
+        - _0008_TABLES
+        - _0010_TABLES
+        - _0012_TABLES
         <= tables
     )
 

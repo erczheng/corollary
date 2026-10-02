@@ -22,10 +22,16 @@ The owner's rules, as implemented
   are 29 foreign-domiciled members identified only by ISIN -- Linde is 14.06%
   of XLB) goes to the :class:`IsinResolver` seam instead. The default,
   :class:`NoIsinResolver`, resolves nothing, so each such line is logged
-  with its fund, name, ISIN and weight and skipped: **fail closed until the
-  owner picks an ISIN source**. On the real 2026-06-30 quarter that leaves
-  XLB at 73.36 and the whole snapshot is refused on the weight band -- the
-  band is not lowered to let it through. Class shares are in the dot form
+  with its fund, name, ISIN and weight and skipped. The owner's ISIN source
+  is OpenFIGI (spec Q17): the ``spdr_holdings`` job passes
+  :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver`, which states and
+  applies Q17's acceptance rule and caches accepted answers (migration
+  0012), and falls back to :class:`NoIsinResolver` when no OpenFIGI provider
+  is configured -- then, on the real 2026-06-30 quarter, XLB sits at 73.36
+  and the whole snapshot is refused on the weight band; the band is not
+  lowered to let it through. A resolver with the optional
+  :class:`BatchIsinResolver` ``prefetch`` hook is told every ISIN-only ISIN
+  of the build first, so its lookups can be batched. Class shares are in the dot form
   (``BRK.B``) via :func:`~corollary.data.seeds.normalize_symbol`.
 * **A resolved ISIN is still checked.** Its ticker must have the equity
   shape (:data:`~corollary.data.seeds.EQUITY_SYMBOL_RE`), and when the
@@ -88,7 +94,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final, Literal, Protocol
+from typing import Final, Literal, Protocol, runtime_checkable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -201,10 +207,32 @@ class IsinResolver(Protocol):
     async def resolve(self, isin: str, *, fund: str) -> str | None: ...
 
 
-class NoIsinResolver:
-    """The default :class:`IsinResolver`: resolves nothing, so every ISIN-only line is skipped.
+@runtime_checkable
+class BatchIsinResolver(IsinResolver, Protocol):
+    """An :class:`IsinResolver` that can be told every ISIN of a build up front.
 
-    This is the fail-closed state until the owner chooses an ISIN source.
+    The builder still asks :meth:`IsinResolver.resolve` once per ISIN; when
+    the resolver also has ``prefetch``, the builder first calls it **once**
+    with every ISIN-only ISIN it is about to ask (fund order, first seen,
+    deduplicated), so a resolver over a batched source --
+    :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver` -- makes a few
+    batched requests instead of one per ISIN. Optional: a resolver without it
+    (:class:`NoIsinResolver`, a test's fake) is simply asked per ISIN.
+    ``prefetch`` raising
+    :class:`~corollary.data.providers.interface.ProviderError` aborts the
+    build exactly as ``resolve`` raising one does: nothing stored.
+    """
+
+    async def prefetch(self, isins: Sequence[str]) -> None: ...
+
+
+class NoIsinResolver:
+    """The fallback :class:`IsinResolver`: resolves nothing, so every ISIN-only line is skipped.
+
+    Used when no ISIN source is configured -- the ``spdr_holdings`` job falls
+    back to it, with an INFO log, when the app holds no OpenFIGI provider.
+    On the real 2026-06-30 quarter that leaves XLB at 73.36 and the snapshot
+    is refused on the weight band: fail closed.
     """
 
     async def resolve(self, isin: str, *, fund: str) -> str | None:
@@ -657,6 +685,16 @@ async def _resolve(
     skipped. Every skip is logged with fund, name, CUSIP, ISIN, weight and
     rule. Nothing is ever resolved by name.
     """
+    if isinstance(isin_resolver, BatchIsinResolver):
+        wanted = _isin_only_isins(funds)
+        if wanted:
+            try:
+                await isin_resolver.prefetch(wanted)
+            except ProviderError as exc:
+                raise _Abort(
+                    SnapshotRule.ISIN_LOOKUP_FAILED,
+                    f"prefetching {len(wanted)} ISIN-only lines: {exc}",
+                ) from None
     cusip_answers: dict[str, EquityAsset | None] = {}
     isin_answers: dict[str, str | None] = {}
     resolved: dict[str, tuple[ResolvedHolding, ...]] = {}
@@ -726,6 +764,25 @@ async def _resolve(
             ))
         resolved[etf] = tuple(kept)
     return resolved, tuple(skipped)
+
+
+def _isin_only_isins(funds: Mapping[str, SectorFund]) -> list[str]:
+    """Every ISIN :func:`_resolve` will ask the ISIN resolver, in the order it asks.
+
+    The same selection as the loop: a positive weight, no CUSIP, and a
+    well-formed ISIN. Fund order, first seen, deduplicated.
+    """
+    wanted: dict[str, None] = {}
+    for etf in SPDR_FUNDS:
+        fund = funds.get(etf)
+        if fund is None:
+            continue
+        for line in fund.document.equity:
+            if line.pct_val <= 0 or line.cusip is not None:
+                continue
+            if line.isin is not None and ISIN_RE.fullmatch(line.isin):
+                wanted.setdefault(line.isin, None)
+    return list(wanted)
 
 
 def _refuse(

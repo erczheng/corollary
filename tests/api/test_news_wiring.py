@@ -459,6 +459,8 @@ async def test_the_jobs_are_handed_the_app_state_the_routes_read(
         # No SEC factory in a test registry, and no CUSIP lookup: the
         # ``spdr_holdings`` job skips. The seed is the database's snapshot.
         assert services.sec is None and services.cusips is None
+        # No OpenFIGI factory either: the job would fall back to NoIsinResolver.
+        assert services.openfigi is None
         assert isinstance(app.state.spdr_seed_loader, DatabaseSeedLoader)
         assert app.state.spdr_seed_loader.bound
 
@@ -606,6 +608,70 @@ def test_a_massive_that_cannot_be_built_is_unavailable_not_a_crash(
     assert len(said) == 1
     assert "PKSECRETSECRET" not in repr(said[0].__dict__)
     assert ServiceRegistry.from_env({}).massive_provider() is None
+
+
+class ClosableOpenFigi:
+    """Stands in for :class:`OpenFigiProvider` in the registry's build-once tests."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_the_registry_builds_openfigi_once_and_closes_it(
+    paper_broker: RecordedBroker,
+) -> None:
+    built: list[ClosableOpenFigi] = []
+
+    def openfigi() -> ClosableOpenFigi:
+        built.append(ClosableOpenFigi())
+        return built[-1]
+
+    registry = ServiceRegistry(
+        brokers={AccountMode.PAPER: lambda: paper_broker},
+        provider=FakeProvider,  # type: ignore[arg-type]
+        openfigi=openfigi,  # type: ignore[arg-type]
+    )
+    first = registry.openfigi_provider()
+    assert first is registry.openfigi_provider()
+    assert len(built) == 1
+    await registry.aclose()
+    assert built[0].closed
+
+
+def test_an_openfigi_that_cannot_be_built_is_unavailable_not_a_crash(
+    paper_broker: RecordedBroker, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken() -> ClosableOpenFigi:
+        raise RuntimeError("bad key PKSECRETSECRET")
+
+    registry = ServiceRegistry(
+        brokers={AccountMode.PAPER: lambda: paper_broker},
+        provider=FakeProvider,  # type: ignore[arg-type]
+        openfigi=broken,  # type: ignore[arg-type]
+    )
+    with caplog.at_level(logging.ERROR):
+        assert registry.openfigi_provider() is None
+        assert registry.openfigi_provider() is None
+    said = [r for r in caplog.records if getattr(r, "event", None) == "openfigi_unavailable"]
+    assert len(said) == 1
+    assert "PKSECRETSECRET" not in repr(said[0].__dict__)
+
+
+@pytest.mark.asyncio
+async def test_the_registry_from_env_builds_openfigi_keyless_when_the_key_is_unset() -> None:
+    from corollary.data.providers.openfigi import KEYLESS_JOBS_PER_REQUEST, OpenFigiProvider
+
+    registry = ServiceRegistry.from_env({})
+    provider = registry.openfigi_provider()
+    try:
+        assert isinstance(provider, OpenFigiProvider)
+        assert provider.jobs_per_request == KEYLESS_JOBS_PER_REQUEST
+    finally:
+        await registry.aclose()
 
 
 # --------------------------------------------------------------------------
@@ -1044,6 +1110,8 @@ async def test_nothing_the_lifespan_hands_the_jobs_can_reach_a_broker_or_the_run
             # and the CUSIP lookup -- the very market-data provider, not a broker.
             assert services.sec is not None and id(services.sec) in reached
             assert services.cusips is services.alpaca
+            # OpenFIGI (spec Q17) is walked too, and reaches no broker.
+            assert services.openfigi is not None and id(services.openfigi) in reached
 
         # The import half: every module an object in the services comes from
         # is corollary code the scan may walk, and none of it -- transitively

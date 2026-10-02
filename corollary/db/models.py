@@ -72,6 +72,8 @@ __all__ = [
     "FILL_SIDES",
     "Fill",
     "FredObservationRecord",
+    "ISIN_TICKER_SOURCES",
+    "IsinTicker",
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
@@ -1615,3 +1617,48 @@ class SpdrHoldingRow(Base):
     isin: Mapped[str | None] = mapped_column(String(12), nullable=True)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     weight: Mapped[Decimal] = mapped_column(Money, nullable=False)
+
+
+#: The ISIN sources :class:`IsinTicker` may record. One, for now.
+ISIN_TICKER_SOURCES: tuple[str, ...] = ("openfigi",)
+
+
+class IsinTicker(Base):
+    """One **accepted** ISIN -> ticker answer, cached for the SPDR seed (migration 0012).
+
+    Phase 3 spec Q17: the N-PORT equity lines filed with an ISIN and no
+    CUSIP are resolved through OpenFIGI by
+    :class:`corollary.data.seeds.isin.OpenFigiIsinResolver`, under the
+    acceptance rule stated there. Only an answer that rule accepted is
+    written; a refused ISIN is never stored and is asked again next run.
+
+    A cached ``ticker`` is re-checked against the day's asset directory on
+    every use, and a row whose ticker the broker no longer lists is deleted
+    (that run leaves the line unresolved; the next asks OpenFIGI afresh).
+
+    ``ticker`` is in the dot form (``BRK.B``). ``composite_figi`` is the
+    accepted US composite record's ``compositeFIGI`` when the accepted
+    records agree on one, else ``None``. ``resolved_at`` is aware UTC. No
+    money columns.
+    """
+
+    __tablename__ = "isin_ticker"
+    __table_args__ = (
+        CheckConstraint(
+            "length(isin) = 12 AND isin = upper(isin)", name="ck_isin_ticker_isin"
+        ),
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)", name="ck_isin_ticker_ticker"
+        ),
+        CheckConstraint(
+            "composite_figi IS NULL OR length(composite_figi) = 12",
+            name="ck_isin_ticker_composite_figi",
+        ),
+        CheckConstraint("source IN ('openfigi')", name="ck_isin_ticker_source"),
+    )
+
+    isin: Mapped[str] = mapped_column(String(12), primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    composite_figi: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    resolved_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

@@ -61,6 +61,7 @@ from corollary.data.providers.massive import MASSIVE_API_KEY_ENV, MassiveProvide
 from corollary.data.news.pollers import MassiveNewsSource
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import MarketDataProvider
+from corollary.data.providers.openfigi import OPENFIGI_API_KEY_ENV, OpenFigiProvider
 from corollary.data.providers.sec import SEC_USER_AGENT_ENV, SecProvider
 from corollary.data.seeds import SeedError, SpdrSeed
 from corollary.engine.execution.alpaca import AlpacaBroker
@@ -169,6 +170,9 @@ MassiveFactory = Callable[[], MassiveNewsSource | None]
 #: How the registry builds SEC EDGAR. ``None`` is a stated absence:
 #: ``SecProvider.from_env`` logs an unset ``SEC_USER_AGENT`` once, by name.
 SecFactory = Callable[[], SecProvider | None]
+#: How the registry builds OpenFIGI (spec Q17). Never absent for want of a
+#: key: ``OPENFIGI_API_KEY`` unset is the keyless limits, not an error.
+OpenFigiFactory = Callable[[], OpenFigiProvider]
 
 
 def _fundamentals_from_env(env: Mapping[str, str]) -> FundamentalsProvider:
@@ -223,6 +227,7 @@ class ServiceRegistry:
         missing_live_credentials: Sequence[str] = (),
         massive: MassiveFactory | None = None,
         sec: SecFactory | None = None,
+        openfigi: OpenFigiFactory | None = None,
     ) -> None:
         self._factories: dict[AccountMode, BrokerFactory] = dict(brokers)
         #: The process's one risk-free rate (Phase 3 decision 19): the
@@ -251,6 +256,12 @@ class ServiceRegistry:
         self._sec_factory: SecFactory | None = sec
         self._sec: SecProvider | None = None
         self._sec_resolved = False
+        #: Optional, like SEC: OpenFIGI for the ``spdr_holdings`` job's
+        #: ISIN-only lines (spec Q17). One client per process, so the
+        #: ``api.openfigi.com`` bucket is counted by one limiter.
+        self._openfigi_factory: OpenFigiFactory | None = openfigi
+        self._openfigi: OpenFigiProvider | None = None
+        self._openfigi_resolved = False
         self._provider_factory = provider
         #: Optional because it is the one service whose absence is a designed
         #: state rather than a failure -- see :func:`_fundamentals_from_env`.
@@ -304,6 +315,7 @@ class ServiceRegistry:
             missing_live_credentials=missing,
             massive=lambda: MassiveProvider.available_from_env(source),
             sec=lambda: SecProvider.from_env(source),
+            openfigi=lambda: OpenFigiProvider.from_env(source),
         )
 
     def broker(self, mode: AccountMode) -> BrokerAccount:
@@ -504,6 +516,33 @@ class ServiceRegistry:
             )
         return self._sec
 
+    def openfigi_provider(self) -> OpenFigiProvider | None:
+        """The one OpenFIGI client, built on first call -- or ``None``, said once.
+
+        **Never raises**, for :meth:`sec_provider`'s reason. An unset
+        ``OPENFIGI_API_KEY`` is keyless, not an absence. Anything a factory
+        raises is logged by class name only, since its message could quote
+        the key (rule 6).
+        """
+        if self._openfigi_resolved:
+            return self._openfigi
+        self._openfigi_resolved = True
+        if self._openfigi_factory is None:
+            return None
+        try:
+            self._openfigi = self._openfigi_factory()
+        except Exception as exc:
+            logger.error(
+                "the OpenFIGI provider could not be built; the SPDR seed's ISIN-only "
+                "lines are not resolved",
+                extra={
+                    "event": "openfigi_unavailable",
+                    "variable": OPENFIGI_API_KEY_ENV,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        return self._openfigi
+
     async def aclose(self) -> None:
         """Close whatever was actually built. Called from the lifespan.
 
@@ -522,6 +561,8 @@ class ServiceRegistry:
             built.append(self._massive)
         if self._sec is not None:
             built.append(self._sec)
+        if self._openfigi is not None:
+            built.append(self._openfigi)
         self._brokers.clear()
         self._provider = None
         self._fundamentals = None
@@ -531,6 +572,8 @@ class ServiceRegistry:
         self._massive_resolved = False
         self._sec = None
         self._sec_resolved = False
+        self._openfigi = None
+        self._openfigi_resolved = False
         for service in built:
             close = getattr(service, "aclose", None)
             if close is None:

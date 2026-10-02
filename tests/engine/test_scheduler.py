@@ -2110,6 +2110,116 @@ async def test_the_spdr_catch_up_runs_only_when_no_recent_attempt_exists(db_engi
         assert len(_attempts(db_engine)) == 2
 
 
+class _FixedAssets:
+    """An :class:`AssetSource` answering one fixed directory."""
+
+    def __init__(self, directory: object) -> None:
+        self.directory = directory
+
+    async def active_equities(self) -> object:
+        return self.directory
+
+
+@pytest.mark.asyncio
+async def test_without_openfigi_the_spdr_job_uses_no_isin_resolver_and_says_so(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    async with _recorded_sec() as sec:
+        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert services.openfigi is None
+        assert await job.run() is None
+    [attempt] = _attempts(db_engine)
+    assert (attempt.status, attempt.rule) == ("refused", "weight_band")
+    said = [r for r in caplog.records if getattr(r, "event", "") == "spdr_isin_source_unavailable"]
+    assert len(said) == 1 and said[0].levelno == logging.INFO
+
+
+@pytest.mark.asyncio
+async def test_with_openfigi_the_spdr_job_resolves_the_isin_lines_against_the_shared_directory(
+    db_engine: Engine,
+) -> None:
+    """The live OpenFIGI recording, three batched requests, and the day's directory."""
+    from tests.data.seeds.test_isin_resolver import (
+        LIVE_TICKERS,
+        LiveOpenFigi,
+        directory_of,
+        provider_for,
+    )
+    from tests.data.seeds.test_nport_snapshot import SURVEY
+
+    from corollary.db.models import IsinTicker
+
+    fake = LiveOpenFigi()
+    openfigi = provider_for(fake)
+    try:
+        async with _recorded_sec() as sec:
+            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
+            await services.assets.refresh(
+                _FixedAssets(directory_of(set(SURVEY.values()) | set(LIVE_TICKERS.values())))  # type: ignore[arg-type]
+            )
+            assert await job.run() is None
+    finally:
+        await openfigi.aclose()
+    [attempt] = _attempts(db_engine)
+    assert attempt.status == "accepted", attempt.reason
+    assert [len(r) for r in fake.requests] == [10, 10, 9]
+    with Session(db_engine) as session:
+        cached = {row.isin: row.ticker for row in session.query(IsinTicker)}
+    assert cached == LIVE_TICKERS
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_with_openfigi_but_no_directory_yet_the_spdr_job_resolves_nothing(
+    db_engine: Engine,
+) -> None:
+    """Fail closed before the asset directory's first fetch: nothing asked, XLB refused."""
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
+
+    fake = LiveOpenFigi()
+    openfigi = provider_for(fake)
+    try:
+        async with _recorded_sec() as sec:
+            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
+            assert services.assets.current() is None
+            assert await job.run() is None
+    finally:
+        await openfigi.aclose()
+    [attempt] = _attempts(db_engine)
+    assert (attempt.status, attempt.rule) == ("refused", "weight_band")
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_an_openfigi_rate_limit_aborts_the_spdr_job_and_stores_nothing(
+    db_engine: Engine,
+) -> None:
+    from tests.data.seeds.test_isin_resolver import (
+        LIVE_TICKERS,
+        LiveOpenFigi,
+        directory_of,
+        provider_for,
+    )
+    from tests.data.seeds.test_nport_snapshot import SURVEY
+
+    fake = LiveOpenFigi()
+    fake.status = 429
+    openfigi = provider_for(fake)
+    try:
+        async with _recorded_sec() as sec:
+            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
+            await services.assets.refresh(
+                _FixedAssets(directory_of(set(SURVEY.values()) | set(LIVE_TICKERS.values())))  # type: ignore[arg-type]
+            )
+            with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
+                await job.run()
+    finally:
+        await openfigi.aclose()
+    assert raised.value.rule is nport.SnapshotRule.ISIN_LOOKUP_FAILED
+    assert _attempts(db_engine) == []
+
+
 def test_the_services_default_seed_loader_reads_the_database(db_engine: Engine) -> None:
     services = ContextServices(session_factory=lambda: Session(db_engine))
     assert services.seed_loader is not None
@@ -2124,8 +2234,8 @@ def test_the_services_default_seed_loader_reads_the_database(db_engine: Engine) 
 def _with_isin_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """The job's builder, with XLB's ISIN seam filled so the real quarter can accept.
 
-    The job itself passes ``NoIsinResolver`` (fail closed until the owner picks
-    an ISIN source), under which the recorded quarter is always refused on
+    A test's services carry no OpenFIGI provider, so the job passes
+    ``NoIsinResolver``, under which the recorded quarter is always refused on
     XLB; the notice path needs an accept to be reachable at all.
     """
     from tests.data.seeds.test_nport_snapshot import FakeIsinResolver

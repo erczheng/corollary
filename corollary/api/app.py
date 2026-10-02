@@ -672,6 +672,9 @@ def _context_services(
         # the ``spdr_holdings`` job skips.
         sec=registry.sec_provider(),
         cusips=_cusip_source(alpaca),
+        # OpenFIGI for the ISIN-only N-PORT lines (spec Q17); keyless when
+        # OPENFIGI_API_KEY is unset. Closed by ``registry.aclose()``.
+        openfigi=registry.openfigi_provider(),
         # The outbox the lifespan drains into the runtime's notification
         # path; the jobs hold only this, never the runtime (decision 1).
         notices=notices,
