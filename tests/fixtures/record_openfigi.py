@@ -33,8 +33,12 @@ What it enforces, in order, before anything is written:
 * **All or nothing, and no overwrite.** All three files are rendered and
   checked before the first is written; an existing fixture refuses the run.
 * **No number is re-serialised.** A mapping reply carries only text, so a
-  JSON number (decoded as a ``Decimal``) is a shape change; abort rather than
-  round it.
+  JSON number is a shape change; abort rather than round it. The decoded
+  reply is walked before rendering and every leaf must be a string, a
+  boolean or null -- a ``Decimal`` (a JSON fraction), an ``int`` (a JSON
+  integer) and a ``float`` (``NaN`` / ``Infinity``, which Python's decoder
+  accepts) are all refused, and the render itself runs with
+  ``allow_nan=False`` as a backstop.
 
 The issuer names in each file are the N-PORT names, carried for the record
 only. **They are never sent** -- the provider takes identifiers alone.
@@ -181,12 +185,40 @@ def environment_secrets(env: Mapping[str, str]) -> tuple[str, ...]:
     )
 
 
-def _refuse_non_json(value: object) -> Any:
-    """``json.dumps`` default hook: a mapping reply carries text, never a number."""
-    raise SystemExit(
+def _refuse_number(value: object) -> SystemExit:
+    return SystemExit(
         f"ABORTED: an OpenFIGI reply carries a {type(value).__name__}, which a "
         "mapping reply should not; nothing was written"
     )
+
+
+def _refuse_non_json(value: object) -> Any:
+    """``json.dumps`` default hook: a mapping reply carries text, never a number."""
+    raise _refuse_number(value)
+
+
+def check_text_only(value: object) -> None:
+    """Refuse unless every leaf of a decoded reply is a string, a boolean or null.
+
+    Walked before rendering, because the ``default`` hook alone sees only
+    types ``json`` cannot already serialise: an ``int`` and a ``float`` --
+    including ``NaN`` and ``Infinity``, which the decoder accepts -- would
+    otherwise be written back out unremarked. ``bool`` is tested before
+    anything numeric because it is a subclass of ``int``.
+    """
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _refuse_number(key)
+            check_text_only(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            check_text_only(item)
+        return
+    if value is None or isinstance(value, (bool, str)):
+        return
+    raise _refuse_number(value)
 
 
 def render(
@@ -196,7 +228,8 @@ def render(
     holdings: Mapping[str, IsinOnlyHolding],
     recorded_at: str,
 ) -> str:
-    """One batch's fixture text."""
+    """One batch's fixture text. Refuses any reply leaf that is not text."""
+    check_text_only(batch.payload)
     envelope: dict[str, Any] = {
         "recorded_at": recorded_at,
         "recorder": RECORDER,
@@ -210,7 +243,9 @@ def render(
         ],
         "response": batch.payload,
     }
-    return json.dumps(envelope, indent=2, ensure_ascii=False, default=_refuse_non_json) + "\n"
+    return json.dumps(
+        envelope, indent=2, ensure_ascii=False, allow_nan=False, default=_refuse_non_json
+    ) + "\n"
 
 
 def scrub_check(name: str, text: str, secrets: Sequence[str]) -> None:

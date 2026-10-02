@@ -126,6 +126,7 @@ def test_the_recorder_builds_its_provider_keyless_even_with_a_key_set(
     """Rule 6: a key in the environment cannot reach a request or a fixture."""
     monkeypatch.setenv(OPENFIGI_API_KEY_ENV, PLANTED)
     provider = build_provider()
+    assert provider._credentials.api_key is None
     assert provider.jobs_per_request == KEYLESS_JOBS_PER_REQUEST == 10
     assert OPENFIGI_KEY_HEADER not in provider._headers()
     assert PLANTED not in repr(provider._credentials)
@@ -211,16 +212,66 @@ async def test_a_fixture_carrying_a_secret_is_refused_and_nothing_written(
     assert not out.exists() or list(out.iterdir()) == []
 
 
+@pytest.mark.risk
 @pytest.mark.asyncio
-async def test_a_numeric_value_in_a_reply_is_refused_rather_than_rounded(tmp_path: Path) -> None:
+async def test_the_scrub_is_all_or_nothing_across_batches(tmp_path: Path) -> None:
+    """Rule 6: a secret in the *last* batch stops batches 1 and 2 reaching disk too.
+
+    Only batch 3's reply -- the one asking about LR0008862868 -- echoes the
+    planted value, so the earlier two render clean and would be written by a
+    recorder that wrote as it went.
+    """
+
     def reply(request: httpx.Request) -> httpx.Response:
         jobs = json.loads(request.content)
-        return httpx.Response(200, content=json.dumps([{"warning": "x", "n": 1.5} for _ in jobs]))
+        isins = [job["idValue"] for job in jobs]
+        text = f"echo {PLANTED}" if "LR0008862868" in isins else "No identifier found."
+        return httpx.Response(200, json=[{"warning": text} for _ in jobs])
 
     seen: list[httpx.Request] = []
-    with pytest.raises(SystemExit, match="Decimal"):
+    out = tmp_path / "openfigi"
+    with pytest.raises(SystemExit, match="Nothing was written") as raised:
+        await record(mock_provider(reply, seen), holdings(), out, secrets=(PLANTED,))
+    assert len(seen) == 3
+    assert "LR0008862868" in [j["idValue"] for j in json.loads(seen[2].content)]
+    assert "mapping_batch_3.json" in str(raised.value)
+    assert PLANTED not in str(raised.value)
+    assert not (out / "mapping_batch_1.json").exists()
+    assert not (out / "mapping_batch_2.json").exists()
+    assert not (out / "mapping_batch_3.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("literal", "kind"),
+    [("1.5", "Decimal"), ("1", "int"), ("NaN", "float"), ("Infinity", "float"), ("-Infinity", "float")],
+    ids=["fraction", "integer", "nan", "infinity", "negative-infinity"],
+)
+async def test_a_numeric_value_in_a_reply_is_refused_rather_than_rounded(
+    tmp_path: Path, literal: str, kind: str
+) -> None:
+    def reply(request: httpx.Request) -> httpx.Response:
+        jobs = json.loads(request.content)
+        body = "[" + ", ".join(f'{{"warning": "x", "n": {literal}}}' for _ in jobs) + "]"
+        return httpx.Response(200, content=body)
+
+    seen: list[httpx.Request] = []
+    with pytest.raises(SystemExit, match=rf"carries a {kind}, "):
         await record(mock_provider(reply, seen), holdings(), tmp_path, secrets=())
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_boolean_or_null_in_a_reply_is_text_enough_to_record(tmp_path: Path) -> None:
+    """``bool`` subclasses ``int``; the walk must not refuse it as a number."""
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        jobs = json.loads(request.content)
+        return httpx.Response(200, json=[{"warning": "x", "b": True, "z": None} for _ in jobs])
+
+    seen: list[httpx.Request] = []
+    written = await record(mock_provider(reply, seen), holdings(), tmp_path, secrets=(), now=NOW)
+    assert len(written) == 3
 
 
 def test_environment_secrets_selects_by_name_and_length() -> None:
