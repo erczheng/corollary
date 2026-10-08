@@ -41,7 +41,12 @@ from corollary.data.seeds.isin import (
     OpenFigiIsinResolver,
     accept_mapping,
 )
-from corollary.data.seeds.nport import BatchIsinResolver, IsinResolver, NoIsinResolver
+from corollary.data.seeds.nport import (
+    BatchIsinResolver,
+    IsinResolver,
+    IsinSourceUnavailable,
+    NoIsinResolver,
+)
 from corollary.db.models import Base, IsinTicker
 from corollary.db.session import create_db_engine, sqlite_url
 from corollary.ratelimit import HostRateLimiter
@@ -357,23 +362,42 @@ async def test_an_openfigi_failure_propagates_and_caches_nothing(
 
 @pytest.mark.risk
 @pytest.mark.asyncio
-async def test_with_no_directory_nothing_is_asked_and_nothing_resolves(
-    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+async def test_with_no_directory_the_resolver_cannot_answer_and_asks_nothing(
+    sessions: Callable[[], Session],
 ) -> None:
-    caplog.set_level(logging.INFO)
+    """No directory is a missing precondition, so the resolver raises rather than answering.
+
+    Answering ``None`` would let the builder store a refusal that is not a
+    fact about the filing (2026-10-07); ``IsinSourceUnavailable`` aborts the
+    build instead. Fail closed either way: nothing asked, nothing cached.
+    """
     fake = LiveOpenFigi()
     provider = provider_for(fake)
     try:
         resolver = OpenFigiIsinResolver(provider, sessions, directory=None)
-        answers = await resolve_all(resolver)
+        with pytest.raises(IsinSourceUnavailable, match="asset directory"):
+            await resolver.prefetch(list(LIVE_TICKERS))
+        with pytest.raises(IsinSourceUnavailable, match="asset directory"):
+            await resolver.resolve("IE000S9YS762", fund="XLB")
     finally:
         await provider.aclose()
     assert fake.requests == []
-    assert set(answers.values()) == {None}
     assert cache_rows(sessions) == {}
-    refusals = [r for r in caplog.records if getattr(r, "event", "") == "isin_unresolved"]
-    assert len(refusals) == 29
-    assert {getattr(r, "reason") for r in refusals} == {"no_directory"}
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_with_no_directory_an_empty_prefetch_is_still_nothing_to_do(
+    sessions: Callable[[], Session],
+) -> None:
+    """``prefetch([])`` asks nothing whether or not a directory is held."""
+    fake = LiveOpenFigi()
+    provider = provider_for(fake)
+    try:
+        await OpenFigiIsinResolver(provider, sessions, directory=None).prefetch([])
+    finally:
+        await provider.aclose()
+    assert fake.requests == []
 
 
 # --------------------------------------------------------------------- cache

@@ -22,7 +22,12 @@ take the records with ``exchCode == "US"`` (Bloomberg's US composite) **and**
 
 1. a directory is available -- **fail closed**: the builder only
    shape-checks an ISIN answer when it has no directory, so this resolver
-   refuses everything without one, and asks OpenFIGI nothing;
+   answers nothing without one and asks OpenFIGI nothing. It raises
+   :class:`~corollary.data.seeds.nport.IsinSourceUnavailable` rather than
+   answering ``None`` (2026-10-07): a missing directory is not a fact about
+   the ISIN, and the builder aborts on it, storing no refusal.
+   (:func:`accept_mapping`, which is pure, still reports
+   :attr:`IsinRefusal.NO_DIRECTORY` for a ``None`` directory);
 2. OpenFIGI answered ``data`` (a ``warning`` or ``error`` refuses);
 3. at least one record is a US composite equity record;
 4. every such record carries a ticker (a blank or missing one refuses --
@@ -91,6 +96,7 @@ from sqlalchemy.orm import Session
 from corollary.data.providers.interface import AssetDirectory
 from corollary.data.providers.openfigi import MappingResult, validate_isin
 from corollary.data.seeds import normalize_symbol
+from corollary.data.seeds.nport import IsinSourceUnavailable
 from corollary.db.models import IsinTicker
 
 __all__ = [
@@ -117,6 +123,12 @@ SOURCE_OPENFIGI: Final = "openfigi"
 
 #: A FIGI is twelve characters; anything else is not stored as one.
 _FIGI_LENGTH: Final = 12
+
+#: Why a resolver built with no directory cannot answer.
+_NO_DIRECTORY: Final = (
+    "no asset directory is held yet, so no OpenFIGI answer could be checked "
+    "against the broker's listing; nothing was asked"
+)
 
 
 class IsinRefusal(StrEnum):
@@ -246,7 +258,9 @@ class OpenFigiIsinResolver:
     """An :class:`~corollary.data.seeds.nport.IsinResolver` over OpenFIGI, with a cache.
 
     Built once per snapshot build: ``directory`` is that day's asset
-    directory (``None`` refuses every ISIN -- fail closed). Implements the
+    directory (``None`` answers no ISIN: every ask raises
+    :class:`~corollary.data.seeds.nport.IsinSourceUnavailable` -- fail closed,
+    and nothing stored). Implements the
     builder's optional ``prefetch`` hook so a build is a handful of batched
     requests, never one per ISIN.
     """
@@ -350,25 +364,32 @@ class OpenFigiIsinResolver:
     async def prefetch(self, isins: Sequence[str]) -> None:
         """Map every uncached ISIN of the build in batched requests.
 
-        Without a directory nothing could be accepted, so nothing is asked.
-        A ``ProviderError`` propagates (the builder aborts, nothing stored).
+        Without a directory nothing could be accepted, so nothing is asked
+        and :class:`~corollary.data.seeds.nport.IsinSourceUnavailable` is
+        raised -- the builder aborts before a single CUSIP is looked up. A
+        ``ProviderError`` propagates (the builder aborts, nothing stored).
         """
         if isinstance(isins, str):
             raise TypeError("prefetch takes a sequence of ISINs, not one string")
         unique = list(dict.fromkeys(validate_isin(isin) for isin in isins))
-        if self._directory is None or not unique:
+        if not unique:
             return
+        if self._directory is None:
+            raise IsinSourceUnavailable(_NO_DIRECTORY)
         self._load_cache(unique)
         ask = [isin for isin in unique if isin not in self._cached and isin not in self._mapped]
         if ask:
             self._mapped.update(await self._source.map_isins(ask))
 
     async def resolve(self, isin: str, *, fund: str) -> str | None:
-        """The accepted ticker for ``isin`` (dot form), or ``None`` -- logged with its reason."""
+        """The accepted ticker for ``isin`` (dot form), or ``None`` -- logged with its reason.
+
+        Raises :class:`~corollary.data.seeds.nport.IsinSourceUnavailable`
+        without a directory: that is not an answer about ``isin``.
+        """
         validate_isin(isin)
         if self._directory is None:
-            self._refused(isin, fund, IsinVerdict(None, IsinRefusal.NO_DIRECTORY), "none")
-            return None
+            raise IsinSourceUnavailable(_NO_DIRECTORY)
 
         self._load_cache([isin])
         cached = self._cached.get(isin)

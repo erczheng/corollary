@@ -61,6 +61,7 @@ from corollary.engine.scheduler import (
     PositionUnderlyings,
     ScheduledJob,
     Scheduler,
+    Sleeper,
     TwoRate,
     WatchTierCadence,
     build_context_scheduler,
@@ -1637,8 +1638,13 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
 
     # FRED configured, served from the recorded fixture: the FRED job's real
     # body -- HTTP, parse, upsert through the writable session, adopt -- runs
-    # here rather than its no-key no-op.
+    # here rather than its no-key no-op. OpenFIGI too, from its recording, so
+    # the SPDR body builds rather than skipping for want of an ISIN source.
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
+
+    openfigi_fake = LiveOpenFigi()
     async with _recorded_fred() as fred, _recorded_sec() as sec:
+        openfigi = provider_for(openfigi_fake)
         rates = RiskFreeRateSource()
         alpaca = FailingAlpacaNews() if mode == "alpaca_news_fails" else FakeAlpacaContext()
         finnhub, massive = FakeFinnhubNews(), FakeMassive()
@@ -1652,9 +1658,12 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             rates=rates,
             sec=sec,
             cusips=cusips,
+            openfigi=openfigi,
         )
         assert isinstance(services.position_underlyings, HeldPositionUnderlyings)
-        shipped = context_jobs(services, clock=clock)
+        # The scheduler's own sleeper: the SPDR catch-up waits on the fake
+        # clock for the asset_directory catch-up, never on the wall clock.
+        shipped = context_jobs(services, clock=clock, sleep=clock.sleep)
         assert shipped, "no shipped jobs: this test would prove nothing"
 
         def raising(job: ScheduledJob) -> ScheduledJob:
@@ -1677,7 +1686,10 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
 
         jobs = [raising(job) for job in shipped] if mode == "each_raises" else shipped
         scheduler = Scheduler(jobs, secrets=no_secrets, clock=clock, sleep=clock.sleep)
-        await run_until_parked(scheduler, clock, timeout=60)
+        try:
+            await run_until_parked(scheduler, clock, timeout=60)
+        finally:
+            await openfigi.aclose()
 
     status = scheduler.status()
     for job in shipped:
@@ -1703,11 +1715,13 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     # The FRED body really ran: the recorded 2026-09-22 close is in use.
     assert rates.current().provenance is RateProvenance.FRED_DGS3MO
     assert rates.current().observation_date == date(2026, 9, 22)
-    # The SPDR body really ran: SEC and the CUSIP lookup were asked, and the
-    # real quarter's refusal (XLB below the band) was recorded.
-    assert cusips.calls
+    # The SPDR body really ran: it waited for the directory, SEC, OpenFIGI and
+    # the CUSIP lookup were asked, and a refusal was recorded -- a genuine one:
+    # the test directory lists none of the real holdings' tickers, so the
+    # ISIN answers are not listed and XLB falls below the band.
+    assert cusips.calls and openfigi_fake.requests
     attempt = nport.latest_snapshot_attempt(lambda: Session(db_engine))
-    assert attempt is not None and attempt.status == "refused"
+    assert attempt is not None and (attempt.status, attempt.rule) == ("refused", "weight_band")
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
@@ -1992,9 +2006,47 @@ async def _recorded_sec(fake: FakeSec | None = None) -> AsyncIterator[object]:
 SPDR_NOW = datetime(2026, 9, 29, 13, 0, tzinfo=UTC)
 
 
-def _spdr_jobs(db_engine: Engine, **extra: object) -> tuple[ContextServices, ScheduledJob]:
+class _FixedAssets:
+    """An :class:`AssetSource` answering one fixed directory."""
+
+    def __init__(self, directory: object) -> None:
+        self.directory = directory
+
+    async def active_equities(self) -> object:
+        return self.directory
+
+
+def _spdr_directory(*, without: frozenset[str] = frozenset()) -> AssetDirectory:
+    """Every ticker a test build can resolve to: the CUSIP survey, the seam's, OpenFIGI's."""
+    from tests.data.seeds.test_isin_resolver import LIVE_TICKERS, directory_of
+    from tests.data.seeds.test_nport_snapshot import SURVEY, XLB_ISINS
+
+    return directory_of(
+        (set(SURVEY.values()) | set(XLB_ISINS.values()) | set(LIVE_TICKERS.values())) - without
+    )
+
+
+async def _never_sleeps(seconds: float) -> None:
+    raise AssertionError(f"the SPDR job slept {seconds}s; this test gave it no sleeper")
+
+
+_FULL = object()
+
+
+async def _spdr_jobs(
+    db_engine: Engine,
+    *,
+    directory: object = _FULL,
+    sleep: Sleeper = _never_sleeps,
+    **extra: object,
+) -> tuple[ContextServices, ScheduledJob]:
+    """The SPDR job over fresh services, with the day's directory held unless ``directory=None``."""
     services = _news_services(db_engine, **extra)
-    return services, _jobs_by_name(services, lambda: SPDR_NOW)["spdr_holdings"]
+    held = _spdr_directory() if directory is _FULL else directory
+    if held is not None:
+        await services.assets.refresh(_FixedAssets(held))  # type: ignore[arg-type]
+    jobs = {job.name: job for job in context_jobs(services, clock=lambda: SPDR_NOW, sleep=sleep)}
+    return services, jobs["spdr_holdings"]
 
 
 def _attempts(db_engine: Engine) -> list[SpdrHoldingsSnapshot]:
@@ -2004,7 +2056,7 @@ def _attempts(db_engine: Engine) -> list[SpdrHoldingsSnapshot]:
 
 @pytest.mark.asyncio
 async def test_without_sec_user_agent_the_spdr_job_skips_and_never_succeeds(db_engine: Engine) -> None:
-    _, job = _spdr_jobs(db_engine, sec=None, cusips=FakeResolver())
+    _, job = await _spdr_jobs(db_engine, sec=None, cusips=FakeResolver())
     assert job.catch_up is not None
     for body in (job.run, job.catch_up):
         outcome = await body()
@@ -2016,20 +2068,52 @@ async def test_without_sec_user_agent_the_spdr_job_skips_and_never_succeeds(db_e
 @pytest.mark.asyncio
 async def test_without_a_cusip_lookup_the_spdr_job_skips(db_engine: Engine) -> None:
     async with _recorded_sec() as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=None)
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=None)
         outcome = await job.run()
     assert isinstance(outcome, JobSkipped)
     assert _attempts(db_engine) == []
 
 
+@pytest.mark.risk
 @pytest.mark.asyncio
-async def test_a_refused_snapshot_is_the_job_doing_its_work_and_is_recorded(
+async def test_with_no_asset_directory_the_scheduled_spdr_run_skips_and_stores_nothing(
+    db_engine: Engine,
+) -> None:
+    """A missing precondition is not a refusal (2026-10-07): nothing fetched, nothing stored.
+
+    The weekly slot does not wait -- the directory job runs at 07:30 ET, so a
+    09:00 run without one is a directory problem with its own failure record.
+    """
+    fake = FakeSec()
+    cusips = FakeResolver()
+    async with _recorded_sec(fake) as sec:
+        _, job = await _spdr_jobs(db_engine, directory=None, sec=sec, cusips=cusips)
+        outcome = await job.run()
+    assert isinstance(outcome, JobSkipped)
+    assert "asset directory" in outcome.reason
+    assert _attempts(db_engine) == []
+    assert fake.archive_requests == [] and cusips.calls == []
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_genuinely_refused_snapshot_is_the_job_doing_its_work_and_is_recorded(
     db_engine: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The real quarter, the default ``NoIsinResolver``: refused on XLB, and a success of the job."""
-    async with _recorded_sec() as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
-        outcome = await job.run()
+    """Directory held, OpenFIGI answering, LIN not listed: XLB below 90, a stored refusal."""
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
+
+    openfigi = provider_for(LiveOpenFigi())
+    try:
+        async with _recorded_sec() as sec:
+            _, job = await _spdr_jobs(
+                db_engine,
+                directory=_spdr_directory(without=frozenset({"LIN"})),
+                sec=sec, cusips=FakeResolver(), openfigi=openfigi,
+            )
+            outcome = await job.run()
+    finally:
+        await openfigi.aclose()
     assert outcome is None
     [attempt] = _attempts(db_engine)
     assert (attempt.status, attempt.rule) == ("refused", "weight_band")
@@ -2046,7 +2130,7 @@ async def test_an_already_loaded_quarter_is_a_skip_not_a_success(db_engine: Engi
             sec, FakeResolver(), lambda: Session(db_engine), isin_resolver=FakeIsinResolver()
         )
         assert accepted.status == "accepted"
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         outcome = await job.run()
     assert isinstance(outcome, JobSkipped)
     assert "2026-06-30" in outcome.reason
@@ -2060,7 +2144,7 @@ async def test_sec_refusing_access_is_a_failure_logged_at_error(
     fake = FakeSec()
     fake.status = 403
     async with _recorded_sec(fake) as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
             await job.run()
     assert raised.value.rule is nport.SnapshotRule.SEC_ACCESS_REFUSED
@@ -2079,6 +2163,7 @@ async def test_an_aborted_build_is_a_failure_under_the_scheduler_not_a_retry_sto
     fake.status = 403
     async with _recorded_sec(fake) as sec:
         services = _news_services(db_engine, sec=sec, cusips=FakeResolver())
+        await services.assets.refresh(_FixedAssets(_spdr_directory()))  # type: ignore[arg-type]
         clock = FakeClock(SPDR_NOW, stop_at=SPDR_NOW + timedelta(days=2))
         job = _jobs_by_name(services, clock)["spdr_holdings"]
         scheduler = Scheduler([job], secrets=no_secrets, clock=clock, sleep=clock.sleep)
@@ -2089,48 +2174,201 @@ async def test_an_aborted_build_is_a_failure_under_the_scheduler_not_a_retry_sto
     assert status.last_error_type == "SpdrSnapshotAborted"
 
 
+@pytest.mark.risk
 @pytest.mark.asyncio
-async def test_the_spdr_catch_up_runs_only_when_no_recent_attempt_exists(db_engine: Engine) -> None:
+async def test_a_cusip_lookup_outage_aborts_the_spdr_job_and_stores_nothing(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_isin_seam(monkeypatch)
     async with _recorded_sec() as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        _, job = await _spdr_jobs(
+            db_engine, sec=sec, cusips=FakeResolver(broken=frozenset({"037833100"}))
+        )
+        with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
+            await job.run()
+    assert raised.value.rule is nport.SnapshotRule.CUSIP_LOOKUP_FAILED
+    assert _attempts(db_engine) == []
+
+
+# -- the start-up catch-up: a seven-day gate on facts, a bounded wait on the directory
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_spdr_catch_up_is_suppressed_for_seven_days_by_a_stored_genuine_refusal(
+    db_engine: Engine,
+) -> None:
+    """A real data problem must not cost ~474 CUSIP lookups on every ``--reload`` start."""
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
+
+    fake = FakeSec()
+    openfigi = provider_for(LiveOpenFigi())
+    try:
+        async with _recorded_sec(fake) as sec:
+            _, job = await _spdr_jobs(
+                db_engine,
+                directory=_spdr_directory(without=frozenset({"LIN"})),
+                sec=sec, cusips=FakeResolver(), openfigi=openfigi,
+            )
+            assert job.catch_up is not None
+            assert await job.catch_up() is None  # nothing ever attempted: builds, refused
+            assert [(a.status, a.rule) for a in _attempts(db_engine)] == [("refused", "weight_band")]
+            fetched = len(fake.archive_requests)
+            # Stamped on the job's clock; moved explicitly to either side of 7 days.
+            with Session(db_engine) as session, session.begin():
+                session.query(SpdrHoldingsSnapshot).one().built_at = (
+                    SPDR_NOW - timedelta(days=6, hours=23)
+                )
+            skipped = await job.catch_up()
+            assert isinstance(skipped, JobSkipped) and "refused" in skipped.reason
+            assert len(fake.archive_requests) == fetched  # SEC not asked again
+            assert len(_attempts(db_engine)) == 1
+            with Session(db_engine) as session, session.begin():
+                session.query(SpdrHoldingsSnapshot).one().built_at = (
+                    SPDR_NOW - timedelta(days=7, seconds=1)
+                )
+            assert await job.catch_up() is None  # older than seven days: builds again
+            assert len(_attempts(db_engine)) == 2
+    finally:
+        await openfigi.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_spdr_catch_up_is_suppressed_for_seven_days_by_an_accepted_snapshot(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_isin_seam(monkeypatch)
+    fake = FakeSec()
+    async with _recorded_sec(fake) as sec:
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert job.catch_up is not None
-        assert await job.catch_up() is None  # nothing ever attempted: builds (refused)
-        assert len(_attempts(db_engine)) == 1
-        # Stamped on the job's clock; moved explicitly to either side of 7 days.
-        with Session(db_engine) as session, session.begin():
-            row = session.query(SpdrHoldingsSnapshot).one()
-            row.built_at = SPDR_NOW - timedelta(days=6, hours=23)
+        assert await job.catch_up() is None
+        assert [a.status for a in _attempts(db_engine)] == ["accepted"]
+        fetched = len(fake.archive_requests)
         skipped = await job.catch_up()
-        assert isinstance(skipped, JobSkipped)
-        assert len(_attempts(db_engine)) == 1
-        with Session(db_engine) as session, session.begin():
-            row = session.query(SpdrHoldingsSnapshot).one()
-            row.built_at = SPDR_NOW - timedelta(days=7, seconds=1)
-        assert await job.catch_up() is None  # older than seven days: builds again
-        assert len(_attempts(db_engine)) == 2
+        assert isinstance(skipped, JobSkipped) and "accepted" in skipped.reason
+        assert len(fake.archive_requests) == fetched
+    assert len(_attempts(db_engine)) == 1
 
 
-class _FixedAssets:
-    """An :class:`AssetSource` answering one fixed directory."""
+class _DirectoryArrives:
+    """A :data:`Sleeper` that records every wait and loads the directory on call ``on_call``."""
 
-    def __init__(self, directory: object) -> None:
-        self.directory = directory
+    def __init__(self, holder: AssetDirectoryHolder, on_call: int | None) -> None:
+        self.holder = holder
+        self.on_call = on_call
+        self.slept: list[float] = []
 
-    async def active_equities(self) -> object:
-        return self.directory
+    async def __call__(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        if self.on_call is not None and len(self.slept) == self.on_call:
+            await self.holder.refresh(_FixedAssets(_spdr_directory()))  # type: ignore[arg-type]
+
+
+def _catch_up_waiting_on(
+    db_engine: Engine, sec: object, on_call: int | None
+) -> tuple[ContextServices, ScheduledJob, _DirectoryArrives]:
+    services = _news_services(db_engine, sec=sec, cusips=FakeResolver())
+    sleeper = _DirectoryArrives(services.assets, on_call)
+    jobs = {job.name: job for job in context_jobs(services, clock=lambda: SPDR_NOW, sleep=sleeper)}
+    return services, jobs["spdr_holdings"], sleeper
+
+
+def test_the_spdr_directory_wait_is_bounded_and_polls_well_inside_it() -> None:
+    assert scheduler_module.SPDR_DIRECTORY_WAIT == timedelta(minutes=5)
+    assert scheduler_module.SPDR_DIRECTORY_POLL == timedelta(seconds=5)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_spdr_catch_up_waits_for_the_asset_directory_then_builds(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catch-ups start together; the directory lands a few polls after SPDR's starts waiting."""
+    _with_isin_seam(monkeypatch)
+    async with _recorded_sec() as sec:
+        _, job, sleeper = _catch_up_waiting_on(db_engine, sec, on_call=3)
+        assert job.catch_up is not None
+        assert await job.catch_up() is None
+    poll = scheduler_module.SPDR_DIRECTORY_POLL.total_seconds()
+    assert sleeper.slept == [poll, poll, poll]
+    assert [a.status for a in _attempts(db_engine)] == ["accepted"]
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_spdr_catch_up_gives_up_at_the_bound_stores_nothing_and_the_next_start_retries(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_isin_seam(monkeypatch)
+    fake = FakeSec()
+    async with _recorded_sec(fake) as sec:
+        services, job, sleeper = _catch_up_waiting_on(db_engine, sec, on_call=None)
+        assert job.catch_up is not None
+        outcome = await job.catch_up()
+        assert isinstance(outcome, JobSkipped)
+        assert "asset directory" in outcome.reason and "5 minutes" in outcome.reason
+        assert sum(sleeper.slept) == scheduler_module.SPDR_DIRECTORY_WAIT.total_seconds()
+        assert _attempts(db_engine) == []
+        assert fake.archive_requests == []
+        # Nothing was stored, so nothing suppresses the next start's catch-up.
+        await services.assets.refresh(_FixedAssets(_spdr_directory()))  # type: ignore[arg-type]
+        assert await job.catch_up() is None
+    assert [a.status for a in _attempts(db_engine)] == ["accepted"]
 
 
 @pytest.mark.asyncio
-async def test_without_openfigi_the_spdr_job_uses_no_isin_resolver_and_says_so(
+async def test_with_a_directory_held_the_spdr_catch_up_does_not_wait(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_isin_seam(monkeypatch)
+    async with _recorded_sec() as sec:
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())  # _never_sleeps
+        assert job.catch_up is not None
+        assert await job.catch_up() is None
+    assert [a.status for a in _attempts(db_engine)] == ["accepted"]
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_spdr_catch_up_does_not_wait_for_the_directory(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seven-day gate is a database read, so it is asked before any waiting."""
+    _with_isin_seam(monkeypatch)
+    async with _recorded_sec() as sec:
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        assert job.catch_up is not None
+        assert await job.catch_up() is None
+        _, job = await _spdr_jobs(db_engine, directory=None, sec=sec, cusips=FakeResolver())
+        assert job.catch_up is not None
+        assert isinstance(await job.catch_up(), JobSkipped)  # _never_sleeps was not called
+
+
+# -- the ISIN seam
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_without_openfigi_the_spdr_job_skips_stores_nothing_and_says_so(
     db_engine: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """No ISIN source is configuration, not a fact about the filing: a skip, nothing stored.
+
+    It used to fall back to ``NoIsinResolver`` and store a ``weight_band``
+    refusal for the real quarter, which suppressed the catch-up for a week.
+    The prefetch fails before any CUSIP is looked up.
+    """
     caplog.set_level(logging.INFO)
+    cusips = FakeResolver()
     async with _recorded_sec() as sec:
-        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        services, job = await _spdr_jobs(db_engine, sec=sec, cusips=cusips)
         assert services.openfigi is None
-        assert await job.run() is None
-    [attempt] = _attempts(db_engine)
-    assert (attempt.status, attempt.rule) == ("refused", "weight_band")
+        outcome = await job.run()
+    assert isinstance(outcome, JobSkipped)
+    assert "OpenFIGI" in outcome.reason
+    assert _attempts(db_engine) == []
+    assert cusips.calls == []
     said = [r for r in caplog.records if getattr(r, "event", "") == "spdr_isin_source_unavailable"]
     assert len(said) == 1 and said[0].levelno == logging.INFO
 
@@ -2140,13 +2378,7 @@ async def test_with_openfigi_the_spdr_job_resolves_the_isin_lines_against_the_sh
     db_engine: Engine,
 ) -> None:
     """The live OpenFIGI recording, three batched requests, and the day's directory."""
-    from tests.data.seeds.test_isin_resolver import (
-        LIVE_TICKERS,
-        LiveOpenFigi,
-        directory_of,
-        provider_for,
-    )
-    from tests.data.seeds.test_nport_snapshot import SURVEY
+    from tests.data.seeds.test_isin_resolver import LIVE_TICKERS, LiveOpenFigi, provider_for
 
     from corollary.db.models import IsinTicker
 
@@ -2154,10 +2386,7 @@ async def test_with_openfigi_the_spdr_job_resolves_the_isin_lines_against_the_sh
     openfigi = provider_for(fake)
     try:
         async with _recorded_sec() as sec:
-            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
-            await services.assets.refresh(
-                _FixedAssets(directory_of(set(SURVEY.values()) | set(LIVE_TICKERS.values())))  # type: ignore[arg-type]
-            )
+            _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
             assert await job.run() is None
     finally:
         await openfigi.aclose()
@@ -2171,47 +2400,42 @@ async def test_with_openfigi_the_spdr_job_resolves_the_isin_lines_against_the_sh
 
 @pytest.mark.risk
 @pytest.mark.asyncio
-async def test_with_openfigi_but_no_directory_yet_the_spdr_job_resolves_nothing(
+async def test_with_openfigi_but_no_directory_yet_the_spdr_job_skips_and_asks_nothing(
     db_engine: Engine,
 ) -> None:
-    """Fail closed before the asset directory's first fetch: nothing asked, XLB refused."""
+    """Fail closed before the asset directory's first fetch: nothing asked, nothing stored."""
     from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
 
     fake = LiveOpenFigi()
     openfigi = provider_for(fake)
     try:
         async with _recorded_sec() as sec:
-            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
+            services, job = await _spdr_jobs(
+                db_engine, directory=None, sec=sec, cusips=FakeResolver(), openfigi=openfigi
+            )
             assert services.assets.current() is None
-            assert await job.run() is None
+            outcome = await job.run()
     finally:
         await openfigi.aclose()
-    [attempt] = _attempts(db_engine)
-    assert (attempt.status, attempt.rule) == ("refused", "weight_band")
+    assert isinstance(outcome, JobSkipped)
+    assert _attempts(db_engine) == []
     assert fake.requests == []
 
 
+@pytest.mark.risk
+@pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.asyncio
-async def test_an_openfigi_rate_limit_aborts_the_spdr_job_and_stores_nothing(
-    db_engine: Engine,
+async def test_an_openfigi_outage_aborts_the_spdr_job_and_stores_nothing(
+    db_engine: Engine, status: int
 ) -> None:
-    from tests.data.seeds.test_isin_resolver import (
-        LIVE_TICKERS,
-        LiveOpenFigi,
-        directory_of,
-        provider_for,
-    )
-    from tests.data.seeds.test_nport_snapshot import SURVEY
+    from tests.data.seeds.test_isin_resolver import LiveOpenFigi, provider_for
 
     fake = LiveOpenFigi()
-    fake.status = 429
+    fake.status = status
     openfigi = provider_for(fake)
     try:
         async with _recorded_sec() as sec:
-            services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
-            await services.assets.refresh(
-                _FixedAssets(directory_of(set(SURVEY.values()) | set(LIVE_TICKERS.values())))  # type: ignore[arg-type]
-            )
+            _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver(), openfigi=openfigi)
             with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
                 await job.run()
     finally:
@@ -2235,8 +2459,9 @@ def _with_isin_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """The job's builder, with XLB's ISIN seam filled so the real quarter can accept.
 
     A test's services carry no OpenFIGI provider, so the job passes
-    ``NoIsinResolver``, under which the recorded quarter is always refused on
-    XLB; the notice path needs an accept to be reachable at all.
+    ``UnavailableIsinResolver``, under which the recorded quarter (29
+    ISIN-only lines) aborts and stores nothing; the notice path needs an
+    accept to be reachable at all.
     """
     from tests.data.seeds.test_nport_snapshot import FakeIsinResolver
 
@@ -2265,14 +2490,14 @@ async def test_an_adopted_amendment_notifies_once_and_a_rerun_notifies_nothing(
 
     _with_isin_seam(monkeypatch)
     async with _recorded_sec() as sec:
-        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        services, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None
     # A normal quarter accepted from its originals announces nothing new.
     assert [a.status for a in _attempts(db_engine)] == ["accepted"]
     assert services.notices.drain() == []
 
     async with _recorded_sec(_amended_fake()) as sec:
-        services2, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        services2, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None
         [notice] = services2.notices.drain()
         assert (notice.event, notice.severity, notice.account) == ("spdr_seed_amended", "info", None)
@@ -2295,11 +2520,11 @@ async def test_a_refused_amendment_notifies_nothing_and_keeps_the_previous(
 ) -> None:
     _with_isin_seam(monkeypatch)
     async with _recorded_sec() as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None
     bad = _amended_fake(pct_from="5.277342107815", pct_to="25.277342107815")
     async with _recorded_sec(bad) as sec:
-        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        services, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None  # a refusal is the job doing its work
     assert services.notices.drain() == []
     assert [(a.status, a.rule) for a in _attempts(db_engine)] == [
@@ -2321,10 +2546,10 @@ async def test_a_notice_that_cannot_be_built_never_fails_the_job(
 
     monkeypatch.setattr(scheduler_module, "spdr_amended_notice", broken)
     async with _recorded_sec() as sec:
-        _, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None
     async with _recorded_sec(_amended_fake()) as sec:
-        services, job = _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
+        services, job = await _spdr_jobs(db_engine, sec=sec, cusips=FakeResolver())
         assert await job.run() is None
     assert services.notices.drain() == []
     assert [a.status for a in _attempts(db_engine)] == ["accepted", "accepted"]

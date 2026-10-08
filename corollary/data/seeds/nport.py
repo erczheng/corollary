@@ -26,10 +26,14 @@ The owner's rules, as implemented
   is OpenFIGI (spec Q17): the ``spdr_holdings`` job passes
   :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver`, which states and
   applies Q17's acceptance rule and caches accepted answers (migration
-  0012), and falls back to :class:`NoIsinResolver` when no OpenFIGI provider
-  is configured -- then, on the real 2026-06-30 quarter, XLB sits at 73.36
-  and the whole snapshot is refused on the weight band; the band is not
-  lowered to let it through. A resolver with the optional
+  0012). With no OpenFIGI provider, or no asset directory to judge answers
+  against, the job's resolver raises :class:`IsinSourceUnavailable` and the
+  build **aborts, storing nothing** (2026-10-07): a missing precondition is
+  not a fact about the filing, and a stored refusal would suppress the
+  start-up catch-up for a week. A refusal is stored only when the source
+  answered -- with every ISIN answered and a fund still outside 90-110, the
+  whole snapshot is refused on the weight band; the band is never lowered to
+  let it through. A resolver with the optional
   :class:`BatchIsinResolver` ``prefetch`` hook is told every ISIN-only ISIN
   of the build first, so its lookups can be batched. Class shares are in the dot form
   (``BRK.B``) via :func:`~corollary.data.seeds.normalize_symbol`.
@@ -165,6 +169,10 @@ class SnapshotRule(StrEnum):
     SEC_UNAVAILABLE = "sec_unavailable"
     CUSIP_LOOKUP_FAILED = "cusip_lookup_failed"
     ISIN_LOOKUP_FAILED = "isin_lookup_failed"
+    # The ISIN source cannot answer at all -- none configured, or its
+    # precondition (the day's asset directory) not held yet. A fact about this
+    # process, never about the filing, so it is never stored (2026-10-07).
+    ISIN_SOURCE_UNAVAILABLE = "isin_source_unavailable"
     # Skipped lines -- logged, never guessed.
     NO_CUSIP = "no_cusip"  # no CUSIP and no well-formed ISIN: nothing to resolve by
     UNRESOLVED_CUSIP = "unresolved_cusip"
@@ -185,6 +193,20 @@ class CusipResolver(Protocol):
 ISIN_RE: Final = re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
 
 
+class IsinSourceUnavailable(Exception):
+    """The ISIN source cannot answer anything this build: a precondition, not a fact.
+
+    Raised by an :class:`IsinResolver` (``resolve`` or ``prefetch``) when it
+    has no source to ask -- none configured (:class:`UnavailableIsinResolver`)
+    -- or lacks what it needs to judge an answer, the day's asset directory.
+    The builder aborts under :attr:`SnapshotRule.ISIN_SOURCE_UNAVAILABLE` and
+    stores nothing (2026-10-07). Answering ``None`` instead would skip every
+    ISIN-only line, push XLB below the band, and store a refusal that says
+    something about the filing that is not true -- and a stored refusal
+    suppresses the start-up catch-up for a week.
+    """
+
+
 class IsinResolver(Protocol):
     """The seam for EC lines N-PORT filed with no CUSIP, only an ISIN.
 
@@ -192,7 +214,10 @@ class IsinResolver(Protocol):
     (the line is then logged and skipped, never guessed), or raises
     :class:`~corollary.data.providers.interface.ProviderError` when its
     source failed (the build aborts and stores nothing; the next run
-    retries). ``fund`` is the first fund carrying that ISIN in fund order,
+    retries). It raises :class:`IsinSourceUnavailable` when it cannot answer
+    at all -- also an abort, nothing stored. ``None`` must only ever mean the
+    source *answered* and the answer was not acceptable: a stored refusal is
+    a fact about the filing. ``fund`` is the first fund carrying that ISIN in fund order,
     passed for the resolver's own logging and checks.
 
     **The holding's name is deliberately not a parameter** (unit 4SEC-B2,
@@ -227,16 +252,38 @@ class BatchIsinResolver(IsinResolver, Protocol):
 
 
 class NoIsinResolver:
-    """The fallback :class:`IsinResolver`: resolves nothing, so every ISIN-only line is skipped.
+    """An :class:`IsinResolver` that answers "cannot say" for every ISIN.
 
-    Used when no ISIN source is configured -- the ``spdr_holdings`` job falls
-    back to it, with an INFO log, when the app holds no OpenFIGI provider.
-    On the real 2026-06-30 quarter that leaves XLB at 73.36 and the snapshot
-    is refused on the weight band: fail closed.
+    Every ISIN-only line is then skipped: on the real 2026-06-30 quarter XLB
+    sits at 73.36 and the snapshot is refused on the weight band. The
+    builder's default when no resolver is passed, and the tests' way to
+    exercise the band. **Not used by the ``spdr_holdings`` job** (2026-10-07):
+    a missing ISIN source is not a fact about the filing, so the job passes
+    :class:`UnavailableIsinResolver` and the build aborts instead of storing a
+    refusal.
     """
 
     async def resolve(self, isin: str, *, fund: str) -> str | None:
         return None
+
+
+class UnavailableIsinResolver:
+    """An :class:`IsinResolver` with no source behind it: every ask raises.
+
+    The ``spdr_holdings`` job's seam when the app holds no OpenFIGI provider.
+    ``prefetch`` raises too, so a quarter with ISIN-only lines aborts before
+    a single CUSIP is looked up; a quarter with none never asks and builds
+    normally. ``reason`` is carried into the abort's reason.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    async def prefetch(self, isins: Sequence[str]) -> None:
+        raise IsinSourceUnavailable(self.reason)
+
+    async def resolve(self, isin: str, *, fund: str) -> str | None:
+        raise IsinSourceUnavailable(self.reason)
 
 
 class NportSource(Protocol):
@@ -690,6 +737,11 @@ async def _resolve(
         if wanted:
             try:
                 await isin_resolver.prefetch(wanted)
+            except IsinSourceUnavailable as exc:
+                raise _Abort(
+                    SnapshotRule.ISIN_SOURCE_UNAVAILABLE,
+                    f"{len(wanted)} ISIN-only lines cannot be asked: {exc}",
+                ) from None
             except ProviderError as exc:
                 raise _Abort(
                     SnapshotRule.ISIN_LOOKUP_FAILED,
@@ -731,6 +783,11 @@ async def _resolve(
                 if isin not in isin_answers:
                     try:
                         isin_answers[isin] = await isin_resolver.resolve(isin, fund=etf)
+                    except IsinSourceUnavailable as exc:
+                        raise _Abort(
+                            SnapshotRule.ISIN_SOURCE_UNAVAILABLE,
+                            f"{etf} {line.name[:80]} ISIN {isin} cannot be asked: {exc}",
+                        ) from None
                     except ProviderError as exc:
                         raise _Abort(
                             SnapshotRule.ISIN_LOOKUP_FAILED,

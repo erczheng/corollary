@@ -178,9 +178,9 @@ from corollary.data.seeds.isin import IsinMappingSource, OpenFigiIsinResolver
 from corollary.data.seeds.nport import (
     CusipResolver,
     IsinResolver,
-    NoIsinResolver,
     NportSource,
     SnapshotRule,
+    UnavailableIsinResolver,
     build_spdr_snapshot,
     latest_snapshot_attempt,
     load_spdr_seed_from_db,
@@ -1417,8 +1417,10 @@ class ContextServices:
     #: skips. A reference-data read, never the broker.
     cusips: CusipResolver | None = None
     #: OpenFIGI, for the ``spdr_holdings`` job's ISIN-only lines (spec Q17)
-    #: -- or ``None``, and the job resolves none of them (``NoIsinResolver``,
-    #: said at INFO). Optional like SEC; ``OPENFIGI_API_KEY`` unset is still
+    #: -- or ``None``, and the job passes ``UnavailableIsinResolver``: a
+    #: quarter with ISIN-only lines aborts before any CUSIP lookup, stores
+    #: nothing, and the job reports a skip (said at INFO), never a refusal.
+    #: Optional like SEC; ``OPENFIGI_API_KEY`` unset is still
     #: a provider (keyless), so ``None`` means the app was built without one.
     #: A reference-data lookup, never the broker.
     openfigi: IsinMappingSource | None = None
@@ -1716,12 +1718,30 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
 SPDR_HOLDINGS_AT = time(9, 0)
 SPDR_HOLDINGS_DAYS: DayRule = on_weekdays(0)
 #: The start-up catch-up builds only when no attempt was ever recorded, or the
-#: latest recorded attempt (accepted or refused) is older than this. An
-#: "unchanged" run records nothing, so while the loaded quarter stays current
-#: a start past this age asks SEC's index once (a few requests on SEC's own
-#: bucket) and skips; an abort records nothing either, so the next start
-#: retries it.
+#: latest recorded attempt is older than this. Only two things are ever
+#: recorded: an accepted snapshot, and a refusal that is a *fact about the
+#: filing* (a fund outside 90-110 with every line answered, an unreadable or
+#: ambiguous amendment, a missing fund, ...) -- so this gate is what stops a
+#: real data problem costing ~474 CUSIP lookups on every ``--reload`` start.
+#: Nothing else is recorded, so nothing else suppresses it: an "unchanged"
+#: run (a start past this age asks SEC's index once and skips), an abort (a
+#: vendor outage: SEC, the CUSIP lookup, OpenFIGI), and a skip for a missing
+#: precondition (no asset directory, no ISIN source -- 2026-10-07) all leave
+#: the table as it was, so the next start retries.
 SPDR_HOLDINGS_CATCH_UP_AFTER = timedelta(days=7)
+#: How long the start-up catch-up waits for the day's asset directory before
+#: skipping. Every job's catch-up starts at once in its own task, so the SPDR
+#: catch-up can reach its build before the ``asset_directory`` catch-up has
+#: filled the holder (one ``paper-api.`` request, normally a second or two).
+#: Without the directory no ISIN answer can be checked, so the job would skip;
+#: this waits instead, bounded. A directory that has not arrived by then is a
+#: directory problem with its own failure record -- the catch-up skips,
+#: stores nothing, and the next start retries.
+SPDR_DIRECTORY_WAIT = timedelta(minutes=5)
+#: How often that wait looks at the holder, which has no event to await. The
+#: wait is counted in polls slept, not on the wall clock, so it is exact under
+#: a test's sleeper and never shorter than the bound in production.
+SPDR_DIRECTORY_POLL = timedelta(seconds=5)
 
 
 class SpdrSnapshotAborted(Exception):
@@ -1737,6 +1757,14 @@ class SpdrSnapshotAborted(Exception):
         super().__init__(f"{rule.value}: {reason}")
         self.rule = rule
         self.reason = reason
+
+
+#: Why the SPDR job does nothing without the day's asset directory.
+_SPDR_NO_DIRECTORY = (
+    "no asset directory is held yet, so an N-PORT line identified by ISIN alone "
+    "cannot be checked against the broker's listing; a missing precondition is "
+    "not a refusal, so nothing is stored and the loaded SPDR snapshot, if any, stays"
+)
 
 
 def _spdr_unavailable(services: ContextServices) -> JobSkipped | None:
@@ -1770,16 +1798,26 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
     The ISIN seam is :class:`~corollary.data.seeds.isin.OpenFigiIsinResolver`
     over :attr:`ContextServices.openfigi` (spec Q17), checked against the
     shared day's asset directory -- the same directory the builder is given.
-    Before the directory's first fetch it is ``None`` and the resolver
-    refuses every ISIN (fail closed) without asking OpenFIGI. With no
-    OpenFIGI provider the seam is :class:`NoIsinResolver`, said at INFO, and
-    the real quarter is refused on XLB's weight band.
+
+    **A missing precondition is a skip, never a stored refusal** (2026-10-07).
+    A stored refusal is a fact about the filing and suppresses the start-up
+    catch-up for :data:`SPDR_HOLDINGS_CATCH_UP_AFTER`; "the directory had not
+    loaded yet" is not one. So before the directory's first fetch the job
+    skips without asking SEC anything, and with no OpenFIGI provider (said at
+    INFO) the seam is :class:`UnavailableIsinResolver`: a quarter with
+    ISIN-only lines aborts under
+    :attr:`SnapshotRule.ISIN_SOURCE_UNAVAILABLE` before any CUSIP lookup, and
+    that abort is returned as a skip -- configuration, like an unset
+    ``SEC_USER_AGENT``, not a vendor failing. Either way nothing is stored
+    and the band is never lowered.
     """
     unavailable = _spdr_unavailable(services)
     if unavailable is not None:
         return unavailable
     assert services.sec is not None and services.cusips is not None
     directory = services.assets.current()
+    if directory is None:
+        return JobSkipped(_SPDR_NO_DIRECTORY)
     isin_resolver: IsinResolver
     if services.openfigi is not None:
         isin_resolver = OpenFigiIsinResolver(
@@ -1787,12 +1825,11 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
         )
     else:
         logger.info(
-            "no OpenFIGI provider is configured; the N-PORT lines identified by "
-            "ISIN alone are not resolved this run, and a fund they weigh on may "
-            "be refused on its weight band",
+            "no OpenFIGI provider is configured; a quarter with N-PORT lines "
+            "identified by ISIN alone cannot be built, and nothing is stored",
             extra={"event": "spdr_isin_source_unavailable", "at": clock().isoformat()},
         )
-        isin_resolver = NoIsinResolver()
+        isin_resolver = UnavailableIsinResolver("no OpenFIGI provider is configured")
     outcome = await build_spdr_snapshot(
         services.sec,
         services.cusips,
@@ -1809,6 +1846,15 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
     if outcome.status == "aborted":
         rule = outcome.rule if outcome.rule is not None else SnapshotRule.SEC_UNAVAILABLE
         reason = outcome.reason or ""
+        if rule is SnapshotRule.ISIN_SOURCE_UNAVAILABLE:
+            # Configuration, not a vendor failing: a skip, as an unset
+            # SEC_USER_AGENT is. The directory was checked above, so in the
+            # job this is "no OpenFIGI provider". Nothing was stored.
+            return JobSkipped(
+                f"the N-PORT lines identified by ISIN alone cannot be resolved "
+                f"({reason}); OpenFIGI is the ISIN source (spec Q17). Nothing is "
+                f"stored and the loaded SPDR snapshot, if any, stays"
+            )
         if rule is SnapshotRule.SEC_ACCESS_REFUSED:
             logger.error(
                 "SEC refused access to the N-PORT source; check the declared "
@@ -1860,10 +1906,40 @@ def _notify_spdr_amended(
         )
 
 
+async def _await_asset_directory(
+    holder: AssetDirectoryHolder,
+    sleep: Sleeper,
+    *,
+    bound: timedelta = SPDR_DIRECTORY_WAIT,
+    poll: timedelta = SPDR_DIRECTORY_POLL,
+) -> bool:
+    """Wait, bounded, until ``holder`` holds a directory. True once it does.
+
+    Polls, because the holder has no event and growing one is a change to the
+    news side for one caller. The bound is counted in polls slept rather than
+    read off a clock, so a test's sleeper makes it exact and a real
+    ``asyncio.sleep`` can only make it longer, never shorter.
+    """
+    waited = timedelta(0)
+    while holder.current() is None:
+        if waited >= bound:
+            return False
+        await sleep(poll.total_seconds())
+        waited += poll
+    return True
+
+
 async def _spdr_holdings_catch_up(
-    services: ContextServices, clock: UtcClock
+    services: ContextServices, clock: UtcClock, sleep: Sleeper
 ) -> JobSkipped | None:
-    """At start: build only when nothing was ever attempted, or the last attempt is old."""
+    """At start: build only when nothing was ever recorded, or the last record is old.
+
+    The seven-day gate is asked first -- a database read -- so a suppressed
+    catch-up never waits. Then, because every catch-up starts at once, it
+    waits up to :data:`SPDR_DIRECTORY_WAIT` for the ``asset_directory``
+    catch-up to fill the shared holder. If it does not, this skips and stores
+    nothing, so the next start tries again.
+    """
     unavailable = _spdr_unavailable(services)
     if unavailable is not None:
         return unavailable
@@ -1875,21 +1951,38 @@ async def _spdr_holdings_catch_up(
             f"{attempt.built_at.isoformat()}, within "
             f"{SPDR_HOLDINGS_CATCH_UP_AFTER.days} days; the weekly slot will look"
         )
+    if services.assets.current() is None:
+        bound_seconds = int(SPDR_DIRECTORY_WAIT.total_seconds())
+        logger.info(
+            "the SPDR catch-up is waiting up to %d s for the asset directory",
+            bound_seconds,
+            extra={
+                "event": "spdr_catch_up_awaiting_directory",
+                "bound_seconds": bound_seconds,
+                "at": clock().isoformat(),
+            },
+        )
+        if not await _await_asset_directory(services.assets, sleep):
+            return JobSkipped(
+                f"no asset directory arrived within {bound_seconds // 60} minutes of "
+                f"start; {_SPDR_NO_DIRECTORY}. The next start retries"
+            )
     return await _spdr_holdings(services, clock)
 
 
-def _spdr_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
+def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> ScheduledJob:
     return ScheduledJob(
         name="spdr_holdings",
         schedule=AtTime(SPDR_HOLDINGS_AT, SPDR_HOLDINGS_DAYS),
         run=functools.partial(_spdr_holdings, services, clock),
-        catch_up=functools.partial(_spdr_holdings_catch_up, services, clock),
+        catch_up=functools.partial(_spdr_holdings_catch_up, services, clock, sleep),
         rule=(
             "the SPDR sector seed (ticker -> sector, the sector leaders) from "
             "the Select Sector SPDRs' NPORT-P, CUSIPs resolved by the asset "
-            "lookup; a refused snapshot is recorded with its rule and the "
-            "previous accepted one stays current; when this fails nothing is "
-            "stored and the loaded seed stays in use, with its dates"
+            "lookup; a refused snapshot (a fact about the filing) is recorded "
+            "with its rule and the previous accepted one stays current; when "
+            "this fails, or the asset directory or ISIN source is missing, "
+            "nothing is stored and the loaded seed stays in use, with its dates"
         ),
         inputs={
             "host": SEC_DATA_HOST,
@@ -1904,14 +1997,19 @@ def _spdr_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
 
 
 def context_jobs(
-    services: ContextServices, *, clock: UtcClock = _utc_now
+    services: ContextServices,
+    *,
+    clock: UtcClock = _utc_now,
+    sleep: Sleeper = asyncio.sleep,
 ) -> list[ScheduledJob]:
     """The Phase 3 job set. Each feed's step adds its own.
 
     Every job ships whatever the configuration, so the rule 9 isolation
     tests always run all of them; a job whose vendor is not configured
     returns :class:`JobSkipped` from its body. ``clock`` is the scheduler's,
-    so a catch-up judges "stale" on the same clock the slots run on.
+    so a catch-up judges "stale" on the same clock the slots run on, and
+    ``sleep`` is too, so the SPDR catch-up's bounded wait for the asset
+    directory never sleeps on the wall clock under a test.
     """
     return [
         ScheduledJob(
@@ -1940,7 +2038,7 @@ def context_jobs(
             },
         ),
         *_news_jobs(services, clock),
-        _spdr_job(services, clock),
+        _spdr_job(services, clock, sleep),
     ]
 
 
@@ -1961,7 +2059,10 @@ def build_context_scheduler(
 ) -> Scheduler:
     """The shipped scheduler: :func:`context_jobs` on the real clock."""
     return Scheduler(
-        context_jobs(services, clock=clock), secrets=secrets, clock=clock, sleep=sleep
+        context_jobs(services, clock=clock, sleep=sleep),
+        secrets=secrets,
+        clock=clock,
+        sleep=sleep,
     )
 
 

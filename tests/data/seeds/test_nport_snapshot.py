@@ -55,6 +55,7 @@ from corollary.data.seeds.nport import (
     NoIsinResolver,
     ResolvedHolding,
     SnapshotRule,
+    UnavailableIsinResolver,
     build_spdr_snapshot,
     latest_snapshot_attempt,
     load_spdr_seed_from_db,
@@ -848,6 +849,7 @@ async def test_another_series_amendment_is_attributed_away_and_changes_nothing(
 # ------------------------------------------------------------------ aborts store nothing
 
 
+@pytest.mark.risk
 @pytest.mark.asyncio
 async def test_an_alpaca_failure_aborts_without_storing(
     sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
@@ -1198,16 +1200,100 @@ async def test_the_real_quarter_is_accepted_through_openfigi_in_three_requests(
 
 @pytest.mark.risk
 @pytest.mark.asyncio
-async def test_through_openfigi_with_no_directory_the_real_quarter_is_still_refused(
+async def test_through_openfigi_with_no_directory_the_build_aborts_and_stores_nothing(
     sessions: Callable[[], Session],
 ) -> None:
-    """Fail closed: the builder only shape-checks without a directory, so the resolver refuses."""
+    """No directory is a missing precondition, not a fact about the filing (2026-10-07).
+
+    It used to resolve nothing and store a ``weight_band`` refusal, which then
+    suppressed the start-up catch-up for seven days. Now the resolver says it
+    cannot answer at all: an abort, nothing stored, OpenFIGI never asked, and
+    not one CUSIP looked up either -- the prefetch fails first.
+    """
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    before = [r.id for r in snapshot_rows(sessions)]
+    cusips = FakeResolver()
     fake, provider, resolver = _openfigi_resolver(sessions, None)
     try:
-        outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=resolver)
+        outcome = await build(sessions, FakeSec(), cusips, isin_resolver=resolver)
+    finally:
+        await provider.aclose()
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.ISIN_SOURCE_UNAVAILABLE)
+    assert fake.requests == []
+    assert cusips.calls == []
+    assert [r.id for r in snapshot_rows(sessions)] == before
+    assert holding_count(sessions) == 55
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_an_unavailable_isin_source_aborts_before_any_cusip_lookup_and_stores_nothing(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """No ISIN source configured: the real quarter's 29 ISIN-only lines cannot be answered.
+
+    That is a fact about this process, so nothing is stored and the next run
+    retries; the 474 CUSIP lookups are never spent on a build that cannot finish.
+    """
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    before = [r.id for r in snapshot_rows(sessions)]
+    cusips = FakeResolver()
+    outcome = await build(
+        sessions, FakeSec(), cusips,
+        isin_resolver=UnavailableIsinResolver("no OpenFIGI provider is configured"),
+    )
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.ISIN_SOURCE_UNAVAILABLE)
+    assert outcome.reason is not None and "no OpenFIGI provider is configured" in outcome.reason
+    assert cusips.calls == []
+    assert [r.id for r in snapshot_rows(sessions)] == before
+    assert holding_count(sessions) == 55
+    assert any(getattr(r, "event", "") == "spdr_snapshot_aborted" for r in caplog.records)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_an_isin_source_unavailable_mid_build_still_aborts(
+    sessions: Callable[[], Session],
+) -> None:
+    """A resolver with no ``prefetch`` that raises from ``resolve`` aborts the same way."""
+
+    class _GoneMidway:
+        async def resolve(self, isin: str, *, fund: str) -> str | None:
+            raise nport.IsinSourceUnavailable("the asset directory went away")
+
+    outcome = await build(sessions, FakeSec(), FakeResolver(), isin_resolver=_GoneMidway())
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.ISIN_SOURCE_UNAVAILABLE)
+    assert snapshot_rows(sessions) == []
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_through_openfigi_a_ticker_the_directory_does_not_list_still_refuses_and_is_stored(
+    sessions: Callable[[], Session],
+) -> None:
+    """A genuine answer is still a fact about the filing: refused, recorded, previous kept.
+
+    The directory is held and OpenFIGI answers every ISIN; LIN is simply not
+    listed. XLB loses Linde's 14.06% and falls below the band -- a stored
+    refusal, exactly as before the 2026-10-07 change.
+    """
+    from tests.data.seeds.test_isin_resolver import LIVE_TICKERS
+
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    directory = directory_of((set(SURVEY.values()) | set(LIVE_TICKERS.values())) - {"LIN"})
+    fake, provider, resolver = _openfigi_resolver(sessions, directory)
+    try:
+        outcome = await build(
+            sessions, FakeSec(), FakeResolver(), isin_resolver=resolver, directory=directory
+        )
     finally:
         await provider.aclose()
     assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
-    assert fake.requests == []
-    assert len(outcome.skipped) == 29
-    assert {s.rule for s in outcome.skipped} == {SnapshotRule.UNRESOLVED_ISIN}
+    assert [len(r) for r in fake.requests] == [10, 10, 9]
+    assert [(s.etf, s.isin, s.rule) for s in outcome.skipped] == [
+        ("XLB", "IE000S9YS762", SnapshotRule.UNRESOLVED_ISIN)
+    ]
+    rows = snapshot_rows(sessions)
+    assert [(r.status, r.rule) for r in rows] == [("accepted", None), ("refused", "weight_band")]
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.as_of == date(2026, 3, 31)  # the previous stays current

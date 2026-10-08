@@ -2665,7 +2665,16 @@ tradeability and the watch list.**
   73.36 again, and that refusal suppresses the next week of catch-ups. Fail
   closed, nothing wrong stored — but leaders can stay absent a week. Carried
   to the owner (the catch-up should wait for the directory, or skip with a
-  reason while it is absent).
+  reason while it is absent). **Resolved 2026-10-07:** a missing
+  precondition is never stored. With no asset directory the job skips
+  (`JobSkipped`, nothing fetched). With no ISIN source the build aborts under
+  `isin_source_unavailable` before any CUSIP lookup, and the job returns that
+  as a skip. An OpenFIGI or CUSIP outage aborts, as it already did. The
+  catch-up asks the 7-day gate first, then waits up to `SPDR_DIRECTORY_WAIT`
+  (5 min, polled every 5 s on the scheduler's sleeper) for the directory. If
+  none arrives it skips with nothing stored. Only accepted snapshots and
+  refusals that are facts about the filing are recorded, so only those
+  suppress the catch-up.
   *(History: done 2026-09-30 except the sector leaders and sector column,
   which waited on Q17's guard decision while the snapshot job recorded the
   real snapshot's refusal at XLB 73.36 — superseded as above.)* Q18's
