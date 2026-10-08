@@ -2653,7 +2653,7 @@ tradeability and the watch list.**
   accepted (XLB **99.837786585047**, all 29 ISINs resolved, 503 holdings, all
   11 funds served by the DB seed loader — see Q17). Commits: 5ea4064 the
   OpenFIGI recording, 30ec897 the recorder follow-ups, 62fd7a8 the resolver,
-  cache and wiring, and <U3b> the Alpaca asset recording and the rebuild test.
+  cache and wiring, and `9f0809b` the Alpaca asset recording and the rebuild test.
   **This unit built from recorded inputs and did not touch the app
   database**, so the running system picks the snapshot up at its next weekly
   `spdr_holdings` slot (Monday 09:00 ET, with the day's asset directory
