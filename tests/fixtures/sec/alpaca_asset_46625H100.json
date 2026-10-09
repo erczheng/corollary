@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/46625H100",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "JPMorgan Chase & Co",
+  "status_code": 200,
+  "body": {"id":"e3047683-637a-4fb2-b71d-805cd6fec95d","class":"us_equity","exchange":"NYSE","symbol":"JPM","name":"JPMorgan Chase \u0026 Co.","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

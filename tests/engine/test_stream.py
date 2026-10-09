@@ -970,8 +970,8 @@ def test_the_plan_says_which_socket_it_is_for() -> None:
     options = plan_for(singles(1), stream=Stream.OPTION)
     equities = plan_for([underlying_unit("AAA")], stream=Stream.EQUITY)
 
-    assert options.stream is Stream.OPTION
-    assert equities.stream is Stream.EQUITY
+    assert options.stream_kind is Stream.OPTION
+    assert equities.stream_kind is Stream.EQUITY
 
 
 def test_option_units_filed_under_the_equity_stream_are_refused() -> None:

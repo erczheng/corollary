@@ -13,6 +13,8 @@ news covers the whole watch universe, and a market-wide discovery tier surfaces
 off-watch-list names in the news. Decision 21 carries it; decisions 3, 4, 12,
 13 and 20 are amended in place, and every detail the owner did not state is
 labelled a parent-session assumption.
+**Paused 2026-09-30 (Q20)** after step 4's follow-ups: step 5 and beyond wait
+on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -103,7 +105,8 @@ Consequences, in order of cost:
    economic calendar's *"consensus, prior, actual"* is the premium half. See Q3.
 2. **Sector leaders cannot come from an endpoint.** `/etf/holdings` is premium,
    and so is `/index/constituents`, which would have been the fallback for the
-   breadth universe. Decision 6 uses a committed seed.
+   breadth universe. Decision 6 uses a seed — since Q14, built from the
+   trust's SEC N-PORT filings.
 3. **Dividends need a different vendor.** Alpaca's corporate actions endpoint is
    the candidate; whether it returns *announced* future ex-dates is unverified.
 4. What is free is exactly what Phase 3 needs from Finnhub apart from the above:
@@ -325,6 +328,43 @@ the default `python-httpx/0.28.1` user agent:
   FRED URL carries the key, and nothing may log one unredacted, exception
   messages included (`httpx` errors quote the request URL).
 
+### SEC N-PORT
+
+Added with Q14. **Researched 2026-09-26; recorded live 2026-09-28** (ce8696a,
+`tests/fixtures/sec/`).
+
+- **The filer is the Select Sector SPDR Trust, CIK 0001064641.** CIK 1100949
+  carries a similar name and is dead. The filing index is
+  `https://data.sec.gov/submissions/CIK0001064641.json`; each filing's holdings
+  are its `primary_doc.xml` under `https://www.sec.gov/Archives/edgar/data/`.
+- **22 NPORT-P filings per quarter**, one per series: the 11 sector funds and
+  11 Premium Income funds, series **S000093831–S000093841**, which are
+  excluded. A filing is selected by `seriesId`, never by name:
+
+  | Fund | Series | Fund | Series |
+  |---|---|---|---|
+  | XLB | S000006414 | XLP | S000006409 |
+  | XLC | S000062095 | XLRE | S000051152 |
+  | XLE | S000006410 | XLU | S000006416 |
+  | XLF | S000006411 | XLV | S000006412 |
+  | XLI | S000006413 | XLY | S000006408 |
+  | XLK | S000006415 | | |
+
+- **Latency: ~58 days.** The recorded filings report **2026-06-30** and were
+  filed **2026-08-28**.
+- **Holdings are the `assetCat=EC` lines, weighted by `pctVal`.** Per fund, EC
+  `pctVal` sums to **99.45–99.93** across the eleven.
+- **29 EC lines carry only an ISIN** — foreign-domiciled S&P 500 members, Linde
+  among them at 14.06% of XLB — written as `<cusip>000000000</cusip>`. They do
+  not resolve through a CUSIP lookup (Q14's open question; OpenFIGI since
+  Q17).
+- **CUSIP → ticker is Alpaca `GET /v2/assets/{cusip}`, one call per CUSIP.**
+  **474 of 474** real CUSIPs resolved, Berkshire as `BRK.B` in the dot form. No
+  live 404 was observed. The bulk `/v2/assets` list carries **no `cusip`
+  field**, so the per-CUSIP call is the only route.
+- **SEC fair access: ≤10 requests per second, with a declared User-Agent**
+  (`SEC_USER_AGENT`, never logged).
+
 ### Not verified
 
 Carried forward as implementation-time checks, most of them step 0. Step 0 ran
@@ -381,8 +421,13 @@ still open.
 **Added with Q9 (decision 21), 2026-09-24 — spec-read, not probed.** The
 planning session cannot read `.env`, so none of these ran against a key.
 
-- **Whether Alpaca `/v1beta1/news` with no `symbols` returns every Benzinga
-  article, and how many a day.** The reference marks `symbols` optional and says
+*Step 4 measured these on 2026-09-25 (`scripts/measure_phase3_news.py`,
+651191c); what it resolved is struck through, with the result stated inline.*
+
+- ~~**How many a day Alpaca `/v1beta1/news` with no `symbols` returns.**~~
+  Measured: **639** untickered articles on Fri 2026-09-25 and **741** on Wed
+  2026-09-23 — above decision 21's 200–500 assumption. **Still open: whether
+  that is every Benzinga article**, which a count cannot show. The reference marks `symbols` optional and says
   the endpoint *"returns the latest news articles across stocks and crypto"*;
   it does not say that omitting `symbols` means the whole feed. Step 0 probed
   only the symbol-filtered form. Its 1,564 watch-universe articles over 14
@@ -391,7 +436,10 @@ planning session cannot read `.env`, so none of these ran against a key.
   therefore probably larger than 130 a day, and the storage estimate in
   decision 21 assumes 200–500. Crypto tags (`BTCUSD` and the like) will arrive
   too and are dropped at ingest. Step 4 measures the volume.
-- **Finnhub `/news?category=general` mostly carries no ticker.** Finnhub's
+- ~~**Finnhub `/news?category=general` mostly carries no ticker.**~~
+  Confirmed: **0 of 100** market-news rows carried a non-empty `related`, so
+  Finnhub market news contributes `MARKET` items and no discovery candidates.
+  Finnhub's
   OpenAPI sample response has `"related": ""` on a single-company headline
   (*"Square surges after reporting 64% jump in revenue…"*). If that is typical,
   market news is almost entirely `MARKET` items and **contributes almost no
@@ -399,8 +447,10 @@ planning session cannot read `.env`, so none of these ran against a key.
   takes `category=merger`, which this spec does not add, since those rows are
   likely untagged as well. Step 4 records the share of rows with a non-empty
   `related`.
-- **Finnhub `/company-news` is *"only available for North American
-  companies"*** (OpenAPI description). ARM (Arm Holdings, a UK issuer with a US
+- ~~**Finnhub `/company-news` is *"only available for North American
+  companies"*** (OpenAPI description).~~ Resolved: **ARM returns rows**, and no
+  watch symbol went 30 days without Finnhub rows (among the thinnest over 30
+  days: AEP 25, RBRK 42 and TTWO 61 rows). ARM (Arm Holdings, a UK issuer with a US
   listing) is in the Markets universe and may return nothing. Step 4 checks
   each watch symbol returns rows at least once, and logs the ones that never do.
 - **Finnhub's 30-calls-per-second ceiling** (OpenAPI *Rate Limits*: *"On top of
@@ -415,8 +465,16 @@ planning session cannot read `.env`, so none of these ran against a key.
   only chains are adjusted. Hence decision 21's second check: a contract with
   `root_symbol` equal to the ticker. That `underlying_symbols` and
   `root_symbol` combine as a filter on one request is **not verified**, and
-  step 4's fixture establishes it.
-- **Every article-volume and storage figure in decision 21 is an estimate.**
+  step 4's fixture establishes it. ~~Not verified~~ **Resolved in step 4:**
+  they combine (the `GME1` fixture). `has_options` comes from one
+  `/v2/assets` request's `attributes`. The contracts endpoint defaults
+  `expiration_date_lte` to *this week* when it is not given. The
+  only optionable name found whose chains are adjusted-only was **AIFU**.
+- ~~**Every article-volume and storage figure in decision 21 is an
+  estimate.**~~ Measured in step 4: **2,201 articles a day** (Fri 2026-09-25,
+  W = 67) against the ~1,500–2,000 estimate — above it but under twice it, so
+  **retention stands at 90 days**. The per-feed figures are in step 4's
+  status.
   Step 0's per-symbol Finnhub counts were not retained (only the per-session
   label figures were). Step 4 measures the real daily volume per feed, and the
   retention window is revisited if the measurement is more than twice the
@@ -573,6 +631,476 @@ the owner can override**, and each is labelled where it appears in decision 21:
 the tradeability thresholds, the manual-watch cap, the retention window, the
 audit's discovery cap, and the panel's ranking.
 
+**Q10 — Recent IPOs reach discovery (2026-09-26, asked during step 4).** The
+owner wants recent IPOs to reach the discovery panel, *"because of the upcoming
+big ones."* Decision 21's *"at least 20 sessions of history"* check is dropped.
+The owner also gave one rule for the specifics, verbatim: *"Distinguish
+'listed recently' (first bar inside the window) from 'bars missing'. If the
+provider cannot tell them apart, fail closed and report it to me."* That
+fail-closed sentence is **the owner's**. The owner stated the goal and that
+rule; the specifics below were chosen by the parent session and are
+**parent-session assumptions the owner can override**:
+
+- A ticker needs **at least one completed session** — a real close and a real
+  volume. Zero completed sessions still fails, under its own name
+  (`no_completed_session`), with no average and never a division by zero.
+- **ADV is the mean over the completed sessions that exist in the 20-session
+  window**, 1 to 20 of them. A name with a bar *before* the window is
+  **established** and is averaged over all 20, exactly as before. A name whose
+  first bar is *inside* the window is a **recent listing** and is averaged over
+  the window sessions from that first bar on — **since Q12, only when its real
+  IPO date says so**. Either way a session with no bar
+  counts as zero volume, and the average is floored.
+- The ≥1,000,000 ADV, ≥$5 close, `has_options` and standard-root checks are
+  unchanged. `has_options` is what gates a fresh IPO until its options list.
+- **A partial window is not stale bars.** The staleness check (newest bar must
+  be the previous session) holds for both kinds, and an established name with
+  missing bars fails exactly as it did. To see which kind a name is, the bars
+  request reaches back **252 sessions — one year — before the window** (272 in
+  all): a bar in that lookback proves the name was listed before the window,
+  so its missing window sessions are zeros in a 20-session average rather than
+  a short, kinder one. (The first cut used 40 sessions; an audit showed a
+  long-listed name suspended for more than 40 sessions and resumed five
+  sessions before the check passing as a five-session listing, so the
+  lookback was raised to a year.) The cost: at the refresh's 100-ticker bound
+  a 272-session batch is **27,200 points, three 10,000-point pages** — two
+  more requests per refresh run than the 20-session design; the provider's
+  200-symbol ceiling would be 54,400 points, six pages.
+- `ticker_tradeability.sessions_available` is kept and now means **the divisor
+  the average was taken over**: 20 for an established name, 1–20 for a recent
+  listing, 0 when nothing could be averaged. `/api/news/movers` (step 5) carries
+  it, so the panel can say "ADV over N sessions" for a partial window. The
+  `insufficient_history` failure token is retired rather than redefined, so a
+  stored row never reads under the wrong meaning; rows are per session date,
+  and old ones age out.
+
+**Resolved by Q12 (2026-09-26).** What follows was the open owner question
+as it was put; the owner answered it with Q12 below — check the real IPO date —
+rather than any of (a)–(c). Kept as the record of what was asked.
+
+**Formerly open owner question — the residual case departed from the
+fail-closed rule.** The owner's rule was *"If the provider cannot tell them apart, fail
+closed and report it to me."* This is that report. Bars alone **cannot**
+distinguish a long-listed name that has been silent for longer than the
+lookback — no bar anywhere in the 252 sessions before the window, then resumed
+inside it — from an IPO whose first bar is inside the window. Nothing else
+Alpaca serves separates the two: the asset record carries no listing or
+first-trade date among its fields, and its `ipo` attribute marks a name that
+is accepting limit orders *before* secondary trading begins, not one that has
+since listed. **As built, that residual case is treated as a recent listing**
+and judged on the sessions since it resumed, **so it can pass** — which
+departs from the literal fail-closed rule. Staleness, `has_options` and the
+standard-root check still apply to it, and a test pins the behaviour. The
+one-year lookback shrinks the case to a silence of more than a year: any
+shorter suspension leaves a bar in the lookback and is judged as established.
+**Put to the owner**, with the alternatives:
+
+- **(a) Keep as built.** The residual is a name silent for more than a year
+  and then resumed — rarer than any IPO — and it still has to clear
+  `has_options`, the standard root, the $5 close, the 1,000,000 ADV over its
+  resumed sessions and the staleness check.
+- **(b) Fail closed on first-bar-in-window** unless the symbol was first seen
+  in a stored asset-list snapshot dated inside the window. That needs
+  asset-list history — a migration and a daily snapshot — and **no IPO passes
+  until that history spans the window**.
+- **(c) Drop IPOs again**: restore decision 21's 20-sessions-of-history check.
+
+**Q11 — Class shares stay excluded (2026-09-26, asked during step 4).** The
+owner's answer, verbatim: *"Class shares stay excluded, as built."* OCC writes
+a class-share root without the dot — `BRKB` for `BRK.B` — so no contract's
+`root_symbol` ever equals the ticker and the standard-root check fails closed.
+That exclusion is now a **decided behaviour, not an open carry**. Treating
+`BRKB` as `BRK.B`'s standard root remains a mapping to add explicitly, with a
+test, if the owner ever reverses this.
+
+**Q12 — The real IPO date settles a partial window (2026-09-26, the answer to
+Q10's open question).** The owner's decision: a partial history window — fewer
+than 20 completed sessions in the ADV window — **no longer counts as a recent
+listing by itself**. For those tickers only, fetch Finnhub `/stock/profile2`'s
+`ipo` field, through `data/providers/finnhub.py` on the shared `finnhub.io`
+bucket (the endpoint is already used for market cap, and the swagger shows it
+free: `premium` null). Missing, empty, malformed or unfetchable `ipo` — a 403,
+a timeout — **fails closed with a stated reason, `ipo_date_unavailable`**;
+never assume an IPO, and log each case with its rule. The looked-up date is
+cached per ticker, since it does not change, so each partial-window ticker
+costs at most one Finnhub call ever. Those rules are **the owner's**. The
+specifics below were chosen by the parent session and are **parent-session
+assumptions the owner can override**:
+
+- **"Recent" means the ADV window.** A ticker is a recent listing, averaged
+  over the sessions it has, only if its `ipo` date falls **on or after the
+  window's first session** *(assumption)*. An older date means the gap is
+  missing bars: the ticker is judged as an **established** name — 20-session
+  divisor, missing sessions zero volume — and fails as it did before Q10
+  (low volume, and stale bars where the tape stops early).
+- **Which tickers are asked.** Only a partial window: first completed bar
+  *after* the window's first session, and no bar in the 252-session lookback.
+  The lookback stays — it keeps the question rare, since any name with a bar in
+  the past year is established without a Finnhub call. A first bar *on* the
+  window's first session is a full window and is not asked about. Nor is a
+  ticker that would fail anyway: it is first judged on the kindest reading
+  (listed at its first bar), and only one passing that is asked. The IPO date
+  is settled before the standard-root check, so a ticker failing on it spends
+  no trading-host request.
+- **The divisor for a recent listing** runs from the earlier of the IPO date
+  and the first bar: a listed session with no bar is zero volume, as it is for
+  any listed name. An IPO date **later than the ticker's own first bar** is one
+  the tape contradicts, and fails closed as `ipo_date_unavailable`.
+- **What is cached.** A new table `ticker_ipo_date(ticker, ipo_date,
+  fetched_at)` (migration **0009**) holds **only successfully parsed dates**,
+  for good. A profile with no usable `ipo` is never stored there: the ticker's
+  `ticker_tradeability` row for that session records `ipo_date_unavailable`,
+  and it is asked again the next session. A transport failure, a 403 or a
+  timeout stores nothing anywhere — the ticker stays unchecked and is retried
+  next cycle, the same rule as any other vendor outage. `ipo_date_unavailable`
+  rows carry no average and a divisor of 0.
+- **The bound.** At most **20** IPO lookups per refresh run (a third of one
+  minute's `finnhub.io` bucket); the rest are deferred, unchecked, to a later
+  cycle.
+- **The wiring.** `refresh_tradeability` and the poller's
+  `refresh_tradeability_cache` take `ipo_dates: IpoDateSource | None = None`;
+  `None` fails every partial window closed. The scheduler passes the Finnhub
+  provider (the next unit).
+- **The fixture.** `tests/fixtures/finnhub/profile2_aapl.json`, recorded live
+  in Phase 2, already carries `"ipo":"1980-12-12"`, so no new recording was
+  needed; the tests replay it through the real provider.
+
+**Q13 — Manual watches are capped at 34, independent of the seed (2026-09-28,
+resolving the 4EG audit's question).** The audit's finding: decision 21's cap
+counted the watch universe *before position underlyings*, so with the SPDR seed
+not yet built the leaders were absent from that count, and manual watches added
+against the smaller universe could push it past 100 once the leaders arrived.
+The owner's decision: **replace that ceiling with a fixed cap on manual watches
+only**, independent of the seed, the Markets list and open positions.
+
+- **The cap is 34 active manual watches**, `MANUAL_WATCH_CAP` in
+  `data/news/watchlist.py` — the 100 − 66 that this spec's own arithmetic gave.
+  The owner set the rule; **the number 34 is a parent-session assumption the
+  owner can override**, and changing it is a one-constant change.
+- **The 34th add is permitted; the 35th is refused** with a 409,
+  `watch_cap_reached`, whose message names the ticker and the cap. The refusal
+  writes no `watch_symbol` row and no audit row, emits nothing, and is logged
+  with the rule, the inputs and the time (rule 8, decision 20).
+- **Removing a manual watch frees a slot. Nothing is ever removed
+  automatically** — not when the seed arrives, not when it grows.
+- **What counts:** active manual watches, whatever else they are. A ticker that
+  is only a position underlying and is then added as a manual watch counts (it
+  is a manual watch). Position underlyings on their own never count, and never
+  block or free a slot. The other add refusals are unchanged and come first: a
+  Markets or leader member, an existing manual watch, `MARKET` and a malformed
+  symbol are refused as before, whatever the count.
+- **`GET /api/news/watch`** reports `manualCount`, `cap` and `remaining`
+  (`cap − manualCount`). The old `countBeforePositions` is gone, since nothing
+  is capped on it any more; `seedMissing` now qualifies `symbols` only.
+- **The watch tier's W is no longer capped as a whole.** It floats with the
+  seed's leader count; *Feeds and budgets* carries the arithmetic at the
+  ceiling.
+
+**Q14 — The SPDR seed comes from SEC N-PORT, automated (2026-09-26); decision 6
+is replaced.** The owner will not download State Street's files, so decision
+6's hand-refreshed CSV, built by a script from files the owner downloaded, has
+no one to run it. The owner's decision: **build the seed automatically from the
+funds' own regulatory filings.** The source is what the owner chose; the
+constraints below are recorded in *SEC N-PORT* under Constraints.
+
+- **The source.** The Select Sector SPDR Trust, CIK **0001064641** (CIK
+  1100949 is a dead namesake, not the trust). It files **NPORT-P quarterly**,
+  public ~58 days after quarter end: **22 filings per quarter** — the 11
+  sector funds and 11 Premium Income funds, the sector funds selected by
+  `seriesId`. Holdings are the `assetCat=EC` lines, weighted by `pctVal`.
+- **Tickers.** N-PORT carries CUSIPs, not tickers. Each CUSIP is resolved
+  through Alpaca `GET /v2/assets/{cusip}`, one call per CUSIP.
+- **Identity.** SEC requires a declared User-Agent: `SEC_USER_AGENT`,
+  `"Name email"`, quoted in `.env` because it contains a space, and **never
+  logged**.
+- *Parent-session assumptions the owner can override:* snapshots are stored in
+  the database and checked **weekly**. A snapshot is **validated whole** — all
+  11 funds present, each with at least 5 equities, and each fund's resolved
+  weights summing to 90–110 — and one that fails is **refused whole, and the
+  previous snapshot is kept**. An amended filing is refused *(replaced by Q18,
+  2026-09-30: an amendment is adopted under the same validation)*. **Staleness** is a
+  newer filing that has not been loaded, or a report date more than ~200 days
+  old; this replaces decision 6's 100-day warning, which was sized to a
+  quarterly hand refresh and not to a filing published ~58 days late.
+- **Open owner question: the ISIN-only lines.** 29 equity lines carry only an
+  ISIN — foreign-domiciled S&P 500 members, such as Linde at 14.06% of XLB.
+  N-PORT writes them as `<cusip>000000000</cusip>`, which resolves to nothing.
+  With no ISIN resolution, the default, XLB's resolved weights sum to
+  **73.36**, below the 90 floor, so **the real 2026-06-30 snapshot is
+  refused**: the running system has no sector leaders, and says so. How to
+  resolve an ISIN is the owner's call. The hook is a pluggable
+  `IsinResolver`, whose default resolves nothing. *(Answered by Q17,
+  2026-09-30: OpenFIGI — blocked on rule 1's GET-only guard.)* *(History:
+  the 73.36 above is the no-resolver figure and still what `NoIsinResolver`
+  gives. **Superseded 2026-10-01** by Q17's rebuild through OpenFIGI: XLB
+  resolves to **99.837786585047** and the 2026-06-30 snapshot is accepted.)*
+
+**Q15 — Finnhub's IPO calendar joins step 7 (2026-09-26).** The owner wants the
+upcoming IPOs on the calendar. Finnhub `/calendar/ipo` is marked
+`premium`/`freeTier` **null** in the swagger document — neither free nor
+premium — and is **unverified on this project's key**, so step 7 probes it
+first. A premium 403 goes back to the owner rather than being worked around.
+
+- Upcoming IPOs — date, symbol, name, exchange, price range, shares, status —
+  land as `calendar_event` rows of a new kind, **`ipo`**, refreshed daily, and
+  show as a row in the calendar panel.
+- The calendar does not bypass discovery: a listed IPO reaches *Movers in the
+  news* only once it clears Q10 and Q12's checks — at least one completed
+  session, the real IPO date, and `has_options`.
+
+**Q16 — The risk-free rate is converted to continuous compounding (2026-09-26).**
+*Status: done (unit FRED-CC, after step 4).* `DGS3MO` is a bond-equivalent
+yield, and the pricing model wants a continuously compounded rate. The owner's
+decision: convert it, **`r = ln(1 + y·t) / t` with t = 91/365**, in exact
+`Decimal` where the math allows, and correct decision 19's as-built note, whose
+"about 8bp at 4%" was worked with annual compounding.
+
+*As built.* `pricing/rates.py` gains `DGS3MO_TERM_YEARS = 91/365` (a 13-week
+bill on a 365-day year: FRED titles the series *"… Quoted on an Investment
+Basis"* and the Treasury's yield-curve methodology says *"The inputs for the
+bills are bid discount rates corresponding to their bond equivalent yields"*,
+but neither states a day count, so the owner's t stands) and
+`continuous_rate_from_bill_yield`, which `rate_from_dgs3mo` now applies. `ln`
+is `Decimal.ln` under an explicit 40-digit context, never a float and never the
+caller's ambient context, and the result is rounded to `RATE_QUANTUM = 1E-10`.
+At 4.00% the continuous rate is **3.98019%, 1.98bp lower**; FRED's 2026-09-22
+print of 4.16% becomes 0.0413857528. `fred_observation` still stores FRED's
+quoted percent: the conversion happens where the rate source produces the
+pricing rate. **The fallback is read as a quoted yield** — 0.0425 stood in for
+the same quantity FRED publishes — and converted by the same rule, so
+`FALLBACK_DGS3MO_PERCENT = 4.25` becomes 0.0422764153 and a FRED observation of
+4.25% prices identically to the default. **The chain's `riskFreeRate` reports
+the continuous rate pricing used**, not the quoted yield; the field set is
+unchanged, the convention is stated on `schemas.OptionContract`, and
+`tests/api/test_chain_risk_free_rate.py` pins it. Tests hand-compute the
+conversion by Taylor series at 60 digits (4%, 0%, 20%, 4.16%, 1%), pin the
+greeks to the converted rate rather than the quoted one, and pin the
+fallback's convention.
+
+**Q17 — The ISIN-only holdings resolve through OpenFIGI (2026-09-30); Q14's
+open question is answered.** *Status: unblocked by Q21 (2026-09-30) — the
+provider exists (`corollary/data/providers/openfigi.py`); the live
+recording is in (`tests/fixtures/record_openfigi.py`, keyless, 3 requests of
+10/10/9 on 2026-10-01 ET (`recorded_at` 2026-10-02T01:03:45Z): all 29 matched, every record Equity / Common Stock, one
+ticker per ISIN across every US exchange code, no class share among them);
+the resolver, the cache (migration 0012) and the job wiring are in (unit
+U3a, `corollary/data/seeds/isin.py`); **done 2026-10-01 (unit U3b): the real
+2026-06-30 snapshot is accepted.** Rebuilt from recorded inputs only — the SEC
+filings, the CUSIP survey, the real `OpenFigiIsinResolver` over the OpenFIGI
+recording batch by batch, and Alpaca's live active-equity rows for the 29
+tickers (`tests/fixtures/record_alpaca_isin_assets.py`, one GET on
+2026-10-01 ET, `recorded_at` 2026-10-02T02:11:38Z: 14,395 active rows, all 29
+present, active, tradable and `has_options`). All 29 ISINs resolve, none is
+skipped, 503 holdings are stored, and **XLB's resolved weight is
+99.837786585047** (was 73.36 with no resolver). The DB seed loader serves all
+11 funds; `tests/data/seeds/test_spdr_real_rebuild.py` pins the sum and every
+fund's five leaders with their filed weights, and proves (risk-marked) that a
+ticker Alpaca does not list comes out `not_listed` and refuses the snapshot.*
+The owner chose **OpenFIGI** as Q14's `IsinResolver`.
+
+- *Parent-session specifics the owner can override:*
+  - **Probe first.** Terms and limits are read from OpenFIGI's official pages
+    only, and a restrictive term stops the work and goes back to the owner.
+  - **A new provider on the shared limiter, with its own bucket**
+    (decision 15). `OPENFIGI_API_KEY` is **optional**: unset means the keyless
+    limits, not an error.
+  - **Acceptance is fail-closed.** A result counts only if it is a US-listed
+    equity, it gives **exactly one** ticker, and that ticker is an **active US
+    equity in Alpaca's asset list**. Several candidates, no match, or a ticker
+    Alpaca does not list leaves the line **unresolved**, logged with fund,
+    name, ISIN and weight — never guessed. The resolver is given the ISIN and
+    **never the name**: the name is carried for the log line only.
+  - Class shares in the dot form, as Q14's CUSIP path already returns
+    (`BRK.B`). **The 90–110 band is unchanged** — resolution can lift a fund
+    into it; nothing about it moves the floor.
+  - **ISIN → ticker is cached in the database**, so each ISIN costs one
+    lookup, ever. An unresolved result is not an answer and is retried on the
+    next run.
+- **The acceptance rule as implemented (unit U3a, the orchestrator's concrete
+  reading of the owner's rule; `OpenFigiIsinResolver` /
+  `accept_mapping` in `corollary/data/seeds/isin.py`).** Of an ISIN's OpenFIGI
+  result, take the records with `exchCode == "US"` (Bloomberg's US composite)
+  **and** `marketSector == "Equity"`. The ISIN resolves only if those records
+  all carry a ticker and carry **exactly one distinct ticker** after
+  normalising class-share separators to the dot form
+  (`corollary.data.seeds.normalize_symbol`, `BRK/B` → `BRK.B`), **and** that
+  ticker is in the day's `AssetDirectory` (every active US equity Alpaca
+  lists). Otherwise it is unresolved, logged (`isin_unresolved`, structured,
+  with the ISIN, the fund and a reason code — `openfigi_warning`,
+  `openfigi_error`, `no_us_composite_equity`, `missing_ticker`,
+  `ambiguous_ticker`, `not_listed`, `cached_not_listed`, `no_directory`) and
+  the builder skips the line as `unresolved_isin` with fund, name, ISIN and
+  weight. **No directory means unresolved** (fail closed): the builder only
+  shape-checks an ISIN answer without one, so the resolver refuses on its own
+  and asks OpenFIGI nothing. `securityType` is logged, never filtered on. The
+  name never crosses the seam.
+  - *Batching:* the builder calls the resolver's optional `prefetch` hook once
+    with every ISIN-only ISIN of the build; every uncached one is mapped in
+    batches of the provider's `jobs_per_request` (29 keyless = 3 requests).
+    Any OpenFIGI `ProviderError`, `RateLimitedError` included, aborts the build
+    (`isin_lookup_failed`) with nothing stored.
+  - *Cache (`isin_ticker`, migration 0012):* `isin` (PK), `ticker`,
+    `composite_figi`, `source` (`openfigi`), `resolved_at` (aware UTC). Only
+    accepted answers are written. A cached ticker is re-checked against the
+    directory on every use; one the directory no longer lists is unresolved
+    for that run and its row deleted, so the next run asks OpenFIGI afresh.
+  - *Wiring:* `ContextServices.openfigi` (optional, like SEC), built by the
+    registry from `OpenFigiProvider.from_env` (keyless when
+    `OPENFIGI_API_KEY` is unset) and closed with it. Without a provider the
+    `spdr_holdings` job uses `NoIsinResolver` and says so at INFO.
+- **Probe result (2026-09-30): the terms do not restrict this use.** The
+  [terms of service](https://www.openfigi.com/docs/terms-of-service) (updated
+  2018-11-27) §1 dedicates FIGI identifiers to the public domain — they *"may
+  be freely reproduced, distributed … by anyone for any purpose, commercial or
+  non-commercial"*. The related descriptions — ticker, name, `exchCode` — are
+  provided *"AS IS"* (§3, liability capped at $50) and are **not** expressly
+  public-domain, but no use restriction is stated; committing tickers as
+  fixtures redistributes those descriptions, which the text does not forbid.
+  [The API page](https://www.openfigi.com/api): *"free to use without daily,
+  weekly or monthly limitations"*. Limits, per the
+  [documentation](https://www.openfigi.com/api/documentation): keyless **25
+  requests/minute × 10 jobs**, keyed **25 requests/6 s × 100 jobs**, the key
+  in header `X-OPENFIGI-APIKEY`, and a **429** carrying `ratelimit-*` headers.
+  The endpoint is **`POST https://api.openfigi.com/v3/mapping`**, one job per
+  ISIN (`idType: "ID_ISIN"`). The 29 lines are three keyless requests
+  (10/10/9) or one keyed.
+- **Blocked (resolved by Q21): the mapping endpoint is POST-only.**
+  `tests/test_hard_rules.py::test_nothing_on_the_vendor_surface_issues_a_non_get_request`
+  — rule 1's structural guard — forbids a non-GET call in
+  `tests/fixtures/record_*.py`, `scripts/*.py`, `corollary/data/providers`,
+  `corollary/engine/execution` and `corollary/sockets.py`. So **neither the
+  recorder nor the provider can exist** without an owner decision: (a) a
+  narrow, named exemption keyed on the file *and* the exact URL, with a test
+  pinning the request body's shape, or (b) another route. The guard is not
+  weakened, and not evaded by a POST spelled some other way, in the meantime.
+  Until then **the sector snapshot stays refused** (XLB **73.36**), and step
+  4's sector leaders and sector column wait. *(History. **Superseded
+  2026-10-01**: Q21 unblocked it, and the rebuild below accepts the snapshot
+  at XLB **99.837786585047**.)*
+- **The 29 ISIN-only lines** (2026-06-30 filings, `tests/fixtures/sec/`),
+  issuer name for the record only:
+
+  | Fund | ISIN-only lines |
+  |---|---|
+  | XLB | Amcor JE00BV7DQ550, CRH IE0001827041, Linde IE000S9YS762, Smurfit Westrock IE00028FXN24, LyondellBasell NL0009434992 — together **~26.5%** of XLB |
+  | XLF (6) | Aon IE00BLP1HW54, Arch Capital BMG0450A1053, Everest BMG3223R1088, Invesco BMG491BT1088, Willis Towers Watson IE00BDB6Q211, Chubb CH0044328745 |
+  | XLI (5) | Allegion IE00BFRT3W74, Eaton IE00B8KQN827, Johnson Controls IE00BY7QL619, Pentair IE00BLS09M33, Trane IE00BK9ZQ967 |
+  | XLK (5) | Accenture IE00B4BNMY34, Seagate IE00BKVD2N49, TE Connectivity IE000IVNQZ81, NXP NL0009538784, Flex SG9999000020 |
+  | XLP (1) | Bunge CH1300646267 |
+  | XLV (2) | Medtronic IE00BTN1Y115, STERIS IE00BFY8C754 |
+  | XLY (5) | Carnival BMG2004J1036, Aptiv JE00BTDN8H13, Norwegian Cruise Line BMG667211046, Garmin CH0114405324, Royal Caribbean LR0008862868 |
+  | XLC, XLE, XLRE, XLU | none |
+
+**Q18 — N-PORT amendments are adopted, and notified (2026-09-30); replaces
+Q14's "an amended filing is refused".** *Status: done (commit:
+05b652b).* When an **NPORT-P/A** arrives for a report period already loaded, it
+is loaded under the **same validation** as an original. If it passes, it
+becomes the current snapshot; if it fails, it is **refused whole and the
+current snapshot is kept**, the refusal recorded like any other. Adoption — and
+only adoption — emits a new **`info`** notification, **`spdr_seed_amended`**.
+*Parent-session assumption the owner can override:* it routes on decision 20's
+terms for info events, **bell off, Discord on**.
+
+**Q19 — Rule 9's data-freshness gap is a Phase 6 carry-forward (2026-09-30).**
+*Status: no code in Phase 3; recorded in PRD §11 under Phase 6.* Rule 9's
+connection clock counts a stream of **unusable** frames as alive: activity is
+recorded before a frame is decoded (`corollary/sockets.py`), so a socket that
+delivers nothing readable still reads as live. That happened on 2026-09-29,
+when ~25 minutes of rejected option quotes kept the option socket "live". The
+cause was fixed (68e607f, 2dbe9ea); the class of gap remains. It is harmless
+while nothing is marked or sized off stream quotes, and Phase 6 is where that
+stops being true — so Phase 6 adds a **data-freshness signal** (for example,
+zero readable quotes in N seconds) beside the connection clock.
+
+**Q20 — Scope pauses after step 4's follow-ups (2026-09-30).** Step 4's
+follow-ups finish; **step 5 and everything after it is not started until the
+owner says so.**
+
+**Q21 — OpenFIGI's mapping POST is exempted from rule 1's GET-only guard
+(2026-09-30); resolves Q17's blocker and the open part of Q14/Q20.** *Status:
+guard and provider done (synthetic tests; no live call yet).* The owner chose
+**option A** of Q17's blocker: a narrow exemption in the guard itself.
+
+- **Reasoning (the owner's).** The guard's stated purpose is *"nothing reaches
+  Alpaca with a verb that changes anything"*. OpenFIGI is not a broker host,
+  and the exemption keeps that purpose while changing its wording — from "no
+  write verb on the vendor surface" to "none except this one, which cannot
+  reach a broker". A mapping job is a lookup that happens to be spelled POST.
+- **Scope: one file, one URL, one call site.** The exemption lives in
+  `tests/test_hard_rules.py` as named constants (`OPENFIGI_EXEMPT_PATH`,
+  `OPENFIGI_EXEMPT_URL`, `OPENFIGI_EXEMPT_VERB`,
+  `OPENFIGI_EXEMPT_MAX_CALL_SITES`): in `corollary/data/providers/openfigi.py`
+  only, one `self._client.post(...)` whose URL argument is the **inline string
+  literal** `https://api.openfigi.com/v3/mapping` — never a name, since a
+  module global can be rebound at runtime (audit 2026-10-01) — and whose
+  keywords are **exactly** `json`, `headers` and `follow_redirects=False`
+  (the literal `False`), so a redirect can never carry the key header to
+  another host. No wildcard, no host-only match. A module constant, an
+  f-string, a concatenation, a `url=` keyword, a missing or extra keyword, a
+  `**kwargs` splat, any other receiver, or a second call site (even to the
+  same URL — which voids the exemption for both) still fails, as does any
+  reference to `globals`/`vars`/`setattr`/`exec`/`eval`/`locals` in that
+  file. The provider builds its own `httpx.AsyncClient(timeout=…,
+  transport=…)` exactly once and accepts only a test `transport=`, never a
+  client, so no injected `base_url`, default headers, hooks or auth can ride
+  along; a guard test pins that construction, and pins every later use of
+  `*._client` in that file to the exempt post and a called `.aclose()` — no
+  attribute store or `del` on it (`event_hooks`, `auth`, `_transport`), no
+  alias, no passing it out, no other method (audit OF-U1b). The transport
+  itself must be `None` or a plain `httpx.MockTransport` (not a subclass);
+  anything else is a `TypeError` at construction, through `from_env` too.
+  Rule 1's write-verb set also gained `stream` (httpx's method-taking
+  `client.stream("POST", …)`), the transport layer's `handle_async_request`
+  / `handle_request`, and httpx 0.28's private `_send_single_request` /
+  `_send_handling_auth` / `_send_handling_redirects`. Across the whole vendor
+  surface the guard refuses: a write verb *referenced* without a direct call
+  (`f = client.post`, `functools.partial(client.post, …)`); any by-name
+  lookup (`getattr`/`inspect.getattr_static`/`attrgetter`/`methodcaller`/
+  `__getattribute__`) any of whose names is non-literal or has a write verb
+  as a dotted segment (every `attrgetter` argument is checked); any
+  `from httpx import …`, any `from m import <write verb>` and any
+  `import *`, plus every use of a name so imported; any reference to
+  `__dict__`, `vars`, `getmembers`/`getmembers_static`, `exec`, `eval` or
+  the bare builtin `compile`; any `httpx.Request(…)`/`build_request(…)`
+  whose method is not the inline literal `"GET"`; and any store to a
+  `.method`. The positive guard (`self._client` calls are `get`/`aclose`
+  only) subtracts the same one site by the same predicate. **Stated
+  limits** (written out in `_write_verb_offenders`' docstring): it is a
+  per-file static check, so it does not see a write verb arriving as a value
+  from a caller off the surface, `setattr`/`object.__setattr__` on a
+  request's `method` outside the OpenFIGI file, or an HTTP stack other than
+  httpx's spellings (`urlopen(url, data=…)` imported by name, a raw socket,
+  a private sender a later httpx adds under a new name). The surface uses
+  none of these today.
+- **Proven on synthetic source**, through the same pure checker the real-tree
+  gate calls: the guard still trips on (a) a POST to an Alpaca host from that
+  same file, (b) a POST to any other OpenFIGI path (`/v3/search`,
+  `/v3/mapping/`, `http://…`, built at runtime), (c) a POST to the exact
+  mapping URL from any other file (`finnhub.py`, a `record_openfigi.py`,
+  `scripts/`, path near-misses), plus `.request("POST", …)`, `.send(…)` and
+  `.put(…)` in the exempted file. A further test pins that the real tree uses
+  the exemption at exactly one site.
+- **The exempted file cannot reach the broker.** A guard test parses
+  `openfigi.py` and the transitive closure of its `corollary.*` imports
+  (parent packages included) and refuses any import of
+  `corollary.engine.execution*`, the `alpaca` SDK, or
+  `corollary.data.providers.alpaca`, including relative imports and
+  `importlib.import_module`/`__import__` (a non-literal argument is refused
+  outright); and refuses any string literal or identifier in the file
+  containing `alpaca` in any case — which makes an `ALPACA_*` environment
+  read or a broker host unspellable there. Stated limit: a name assembled at
+  runtime from fragments is a deliberate evasion this does not catch.
+- **The body is pinned:** a JSON list of `{"idType": "ID_ISIN", "idValue": …}`
+  and nothing else — no `exchCode`; acceptance filters to US listings on the
+  response side (Q17), and a request-side filter would hide the
+  multi-listing evidence that refusal depends on. The recorder (next unit)
+  calls the provider's `map_isins` rather than POSTing itself, so no second
+  file needs an exemption.
+- **Bucket:** `api.openfigi.com` at **12 per 60 s** in the shared limiter —
+  worst rolling minute `C + r·T` = 24 against the keyless 25; worst 6 s 13.2
+  against the keyed 25. One bucket under whichever ceiling applies; the key
+  buys batch size (100 jobs, not 10), not rate.
+
 ---
 
 ## Decisions
@@ -725,6 +1253,13 @@ Rejected: storing the composite (drifts from its breakdown); a fixed z clip at
 renormalising weights silently when a component is missing.
 
 ### 6. Sector membership and leaders come from a committed seed of SPDR holdings
+
+*(Replaced by Q14, 2026-09-26, as to the source.)* The seed is built
+automatically from the trust's SEC N-PORT filings and stored as database
+snapshots, not a committed CSV refreshed by hand; the 100-day warning becomes
+Q14's staleness rule. What the seed is *for* — sector, the ~500-name universe,
+the top-five consensus — is unchanged. The text below is the original
+decision, kept so the reasoning is not re-run.
 
 `/etf/holdings` and `/index/constituents` are premium. State Street publishes
 each Select Sector SPDR's full holdings, with weights, as a downloadable file.
@@ -1140,6 +1675,19 @@ placeholder only when FRED is unreachable, and the chain's derived greeks
 record which one they used — the same *measured versus derived* discipline
 decision 10 of the Phase 2 spec set for IV.
 
+*As built (step 3):* "unreachable" is read as **no observation ever stored**.
+During a FRED outage the latest stored observation keeps being used, and its
+date travels with the rate, so staleness is visible rather than replaced by
+the placeholder. The placeholder is no longer a default argument anywhere in
+`pricing/`: it exists once, as `pricing/rates.py`'s `FALLBACK_RISK_FREE_RATE`,
+labelled `default`, and every pricing entry point requires a rate. `DGS3MO` is
+a bond-equivalent yield, and since owner decision Q16 it is converted to
+continuous compounding before Black-Scholes sees it:
+`r = ln(1 + y·91/365) / (91/365)`, which at 4% is 3.98019% — **1.98bp lower**,
+not the "about 8bp" this note first stated (that figure used annual
+compounding and was wrong). The fallback is converted by the same rule, and
+the chain's `riskFreeRate` serves the converted, continuous rate. See Q16.
+
 ### 20. Every operator action notifies; the engine controls reach the bell too
 
 Owner decision Q8. Five new events, emitted through decision 14's one path
@@ -1290,13 +1838,27 @@ candidate, over the page's lookback, when all three hold:
      alone is not enough here: an underlying whose only listed chains are
      adjusted after a reverse split is exactly the kind of name
      secondary-offering headlines produce, and CLAUDE.md's `AAPL1` warning
-     applies.
+     applies. **Class shares fail this check by decision (Q11):** OCC writes
+     `BRKB` for `BRK.B`, so the root never equals the ticker, and class shares
+     stay out of discovery.
    - **Average daily volume ≥ 1,000,000 shares** over the trailing 20
-     completed sessions *(assumption)*.
+     completed sessions *(assumption)* — or, for a recent listing, over the
+     completed sessions it has in that window, 1 to 20 *(Q10;
+     parent-session assumption)*. A name with a bar in the 252 sessions before
+     the window is established and is averaged over all 20; a window session
+     with no bar counts as zero volume in either case. **A partial window is a
+     recent listing only on a real IPO date (Q12):** Finnhub's
+     `/stock/profile2` `ipo` on or after the window's first session; an older
+     date is missing bars, judged over all 20; no usable date fails closed as
+     `ipo_date_unavailable`.
    - **Last close ≥ $5** *(assumption: it keeps the panel from filling with
      sub-dollar offering news; drop it and only the ADV gate remains)*.
-   - **At least 20 sessions of history** *(assumption: a recent IPO fails
-     rather than being judged on a partial average)*.
+   - **At least one completed session** — a real close and a real volume
+     *(Q10, 2026-09-26: this replaced "at least 20 sessions of history" so
+     recent IPOs reach discovery; the floor of one is a parent-session
+     assumption)*. `has_options` gates a fresh IPO until its options list.
+     The newest bar must still be the previous session's, for a recent
+     listing as for any other name.
 
    Volume and close come from **daily bars on the historical feed**
    (`ALPACA_STOCK_FEED_HISTORICAL`, `sip` on this plan), never the realtime
@@ -1315,6 +1877,9 @@ panel at once, and there is no candidate table to drift from its inputs.
 - The standard-root check and the ADV run once per ticker per session date.
 - A failure is cached for the session too, so a failing ticker is not
   re-checked every cycle.
+- A partial window's IPO date (Q12) is cached **per ticker, for good**, in
+  `ticker_ipo_date` — only a parsed date is stored, so an empty answer is
+  re-asked next session and a failed request next cycle.
 
 **The panel: "Movers in the news"** on the News page. Each row carries:
 
@@ -1322,7 +1887,9 @@ panel at once, and there is no candidate table to drift from its inputs.
 - each reason as a named rule family or a Massive direction with its
   `sentiment_reasoning`, and each reason's direction. **Conflicting directions
   are shown side by side, never netted.**
-- the article count, the latest article's time, the ADV
+- the article count, the latest article's time, the ADV and the number of
+  sessions it was taken over (`sessions_available`, so a recent listing reads
+  "ADV over N sessions" — Q10)
 - links to the articles
 - a **Watch** button
 
@@ -1353,10 +1920,14 @@ market-wide stream the discovery panel already summarises.
   `DELETE` removes one. Only manual watches are removable: seed, Markets and
   position members are not. The ticker must be an active US equity in the
   asset list.
-- **The cap.** Manual watches may bring the watch universe to **at most 100
-  symbols before position underlyings** *(assumption)*. That is 34 manual
-  watches at the measured 66. One past the ceiling is refused with a 409 that
-  names it.
+- **The cap.** *(Amended by Q13, 2026-09-28.)* At most **34 active manual
+  watches** (`MANUAL_WATCH_CAP`; the number is a parent-session assumption the
+  owner can override), counted on manual watches alone — independent of the
+  seed, the Markets list and positions. One past the cap is refused with a 409
+  that names the ticker and the cap. Removing a watch frees a slot; nothing is
+  ever auto-removed. This replaced the draft's "at most 100 symbols before
+  position underlyings", which a missing seed could let manual watches
+  overrun once the leaders arrived.
 - **Audit-logged**, under a new `watchlist` category in the configuration
   audit log. Decision 9 kept calendar notes out of that log because they govern
   nothing. A watch is different: it changes what is polled and graded, grading
@@ -1402,16 +1973,21 @@ If the owner later wants a source the feeds miss, that is a **vendor
 decision** (Benzinga Pro, or Marketaux from PRD §7's deferred list), made and
 paid for deliberately, not a scraper.
 
-**Storage and retention.** Estimates, until step 4 measures the real volume
-(*Not verified*):
+**Storage and retention.** The planning estimates, with step 4's measurement
+beside them (Fri 2026-09-25, W = 67, `scripts/measure_phase3_news.py`):
 
-| Feed | Articles a day | Basis |
-|---|---|---|
-| Finnhub watch tier | ~1,000 | NVDA ran ~90 a day and five names reached the 250 cap in 14 days (step 0). Per-symbol counts were not retained. |
-| Alpaca, whole feed | 200–500 | The watch-filtered slice alone was ~112 a day. |
-| Massive | ~190 | Measured. |
-| Finnhub market news | ~100 | Estimate. |
-| **Total** | **~1,500–2,000** | About three times decision 3's first-draft 500. |
+| Feed | Articles a day (estimate) | Measured | Basis |
+|---|---|---|---|
+| Finnhub watch tier | ~1,000 | **1,399** rows summed over symbols (858 distinct articles) | NVDA ran ~90 a day and five names reached the 250 cap in 14 days (step 0). Per-symbol counts were not retained. Measured max: NVDA 169/day; no symbol hit the cap. |
+| Alpaca, whole feed | 200–500 | **639** (741 on Wed 2026-09-23) | The watch-filtered slice alone was ~112 a day. |
+| Massive | ~190 | **131** | Measured. |
+| Finnhub market news | ~100 | **~32**, extrapolated (~45–50 on a weekday, from partial data) | Estimate. |
+| **Total** | **~1,500–2,000** | **2,201** | About three times decision 3's first-draft 500. |
+
+The measured total is above the estimate but under twice it, which is the
+threshold *Not verified* set for revisiting retention, so **the 90-day rule
+below stands**. The storage figures that follow are the estimate's and were
+not re-derived.
 
 Around that, ~3 ticker rows per article, and ~1,000–1,200 labels a day
 (Massive's ~780 insights a session market-wide, from step 0's 7,843 over ten
@@ -1470,7 +2046,7 @@ Rejected:
 corollary/
 ├── data/
 │   ├── seeds/
-│   │   ├── spdr_holdings.csv     # decision 6, as-of in header
+│   │   ├── nport.py              # decision 6 / Q14: N-PORT snapshots, validated whole
 │   │   ├── central_banks_2026.csv
 │   │   ├── central_banks_2027.csv
 │   │   └── econ_release_times.csv  # Q3: per-release ET times, human-kept
@@ -1513,13 +2089,14 @@ the protocol stays where it is so the halt path's imports do not move. No
 
 | Feed | Source | Cadence | Host bucket | Spend |
 |---|---|---|---|---|
-| Company news — **watch tier** (Q9) | Finnhub `/company-news`, per symbol, previous day → today | every symbol every 15 min, 06:00 ET → close + 1h on trading days; hourly otherwise; round-robin, one request every 900/W s | `finnhub.io` 60/min (and 30/s, unenforced) | **4.4/min** at W = 66; **≤7.2/min** at the W = 108 ceiling; 1.1–1.8/min overnight |
+| Company news — **watch tier** (Q9) | Finnhub `/company-news`, per symbol, previous day → today | every symbol every 15 min, 06:00 ET → close + 1h on trading days; hourly otherwise; round-robin, one request every 900/W s | `finnhub.io` 60/min (and 30/s, unenforced) | **4.4/min** at W = 66; **7.2/min** at W = 108 (66 + 34 manual + 8 positions); **≤8.2/min** at the W = 123 ceiling (Q13); 1.1–1.8/min overnight |
 | Benzinga headlines — **discovery tier** | Alpaca `/v1beta1/news`, untickered | 60s in session, 5 min otherwise | `data.alpaca.markets` 200/min | ≤1/min, a few pages after a burst |
 | Market news — **discovery tier** | Finnhub `/news?category=general`, `minId` cursor | 5 min | `finnhub.io` | 0.2/min |
 | Vendor-scored news — **discovery tier** | Massive `/v2/reference/news`, untickered, `limit=1000`, from the last `published_utc` seen | 15 min | `api.massive.com` 5/min | 4/hr = 0.07/min (1.3% of the bucket) |
 | Tradeability: optionable list (decision 21) | Alpaca `GET /v2/assets?status=active&attributes=has_options` | daily 07:30 ET | `paper-api.alpaca.markets` 200/min | 1/day |
 | Tradeability: standard root | Alpaca `/v2/options/contracts`, `underlying_symbols` = `root_symbol` = ticker, `limit=1` | once per newly signalled off-watch ticker per session | `paper-api.alpaca.markets` | est. ≤100/day, paced by the limiter |
-| Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 20 sessions, multi-symbol, ≤200 symbols a request (4,000 points, under the 10,000-point page) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.07/min |
+| Tradeability: ADV and last close | Alpaca daily bars, `ALPACA_STOCK_FEED_HISTORICAL` (`sip`), 272 sessions — the 20-session window plus Q10's 252-session (one-year) listing lookback — multi-symbol, ≤200 symbols a request (≤100 per refresh run: 27,200 points, three 10,000-point pages; 54,400 and six pages at the 200 ceiling) | every 15 min, for tickers not yet checked this session | `data.alpaca.markets` | ≤0.2/min (3 pages per 15-min run) |
+| Tradeability: IPO date (Q12) | Finnhub `/stock/profile2`, the `ipo` field — only for a partial ADV window that would otherwise pass, and only when no date is cached | with the tradeability refresh, ≤20 a run | `finnhub.io` | **≤ once per partial-window ticker, ever**, once a date comes back; an empty answer re-asks once a session, a failure once a cycle |
 | Social | StockTwits symbol streams — social watch set only (decision 10) | budgeted round-robin | `api.stocktwits.com` 200/hr | 180/hr |
 | Earnings | Finnhub `/calendar/earnings`, 3-week window | daily 07:00 ET | `finnhub.io` | 1/day |
 | Consensus | Finnhub `/stock/recommendation` — sector leaders only (decision 11) | weekly, off-hours, spread across the minute | `finnhub.io` | 55/week |
@@ -1539,23 +2116,33 @@ publishers write about watch-universe tickers, which step 0 measures.
 
 **The data bucket is the one that matters.** Decision 18 of the Phase 2 spec
 spends 150/min of it on the Markets poll at 400ms, leaving ~49/min. Phase 3
-adds ≤~1.1/min in session: news plus the ADV batch. The EOD composite pages and
+adds ≤~1.2/min in session: news plus the ADV batch. The EOD composite pages and
 the Saturday audit run outside the session, when the Markets poll is
 backgrounded or stopped, and wait on the bucket rather than refusing, which is
 how `HostRateLimiter` already behaves. Nothing here reprices a Phase 2 cadence.
 
 **Q9's arithmetic, one line per bucket** (decision 21):
 
-- **`finnhub.io`, 60/min.** Watch tier 66/15 = **4.4/min** (≤108/15 = 7.2/min
-  at the ceiling of 100 watch symbols plus ≤8 position underlyings) + market
-  news 0.2/min = **4.6/min sustained in the window, ≤7.4/min at the ceiling
-  (8–12% of the bucket)**. On top of that sit profile2's 26 a day (Phase 2's
-  daily cache, a sub-30 burst on the first Markets load), earnings at 1 a day,
+- **`finnhub.io`, 60/min.** Watch tier 66/15 = **4.4/min** + market news
+  0.2/min = **4.6/min sustained in the window** (8% of the bucket). Since Q13
+  the manual watches are capped at 34 on their own, so W = |Markets ∪
+  leaders| + ≤34 manual + ≤8 position underlyings, and **W floats with the
+  seed's leader count** rather than being held to a total. At the measured 66
+  that is W ≤ 108: 108/15 = 7.2/min, **7.4/min with market news (12%)**, one
+  request every 8.3 s — the same figure the old 100-before-positions ceiling
+  gave. The seed can hold at most 11 funds × 5 = 55 leaders, so |Markets ∪
+  leaders| ≤ 26 + 55 = 81 even if none overlapped, and the ceiling is W ≤ 81
+  + 34 + 8 = **123: 8.2/min, 8.4/min with market news (14% of the bucket)**,
+  one request every 7.3 s — still far under both the 60/min bucket and the
+  30-per-second ceiling. On top of that sit profile2's 26 a day (Phase 2's
+  daily cache, a sub-30 burst on the first Markets load), Q12's IPO lookups —
+  at most 20 a refresh run, at most once per partial-window ticker ever once a
+  date is cached, so near zero in steady state — earnings at 1 a day,
   and consensus at 55 a week, spread and off-hours. Overnight the watch tier
   drops to 1.1–1.8/min. The 30-per-second ceiling is met by spreading
   requests, not by the limiter (*Not verified*).
 - **`data.alpaca.markets`, 200/min (~49 left after the Markets poll).**
-  In session: untickered news ≤1/min + ADV ≤0.07/min. Saturday: the audit's
+  In session: untickered news ≤1/min + ADV ≤0.2/min. Saturday: the audit's
   ~0.6 pages per symbol-week of 1Min bars (Phase 2's ~40 pages ÷ 66 symbols)
   × (66 watch + ≤250 discovery) ≈ **≤190 pages**. That is ~4 minutes against
   the 49/min remainder, or ~1 minute against the whole bucket with the market
@@ -1597,6 +2184,9 @@ comparison refused); every timestamp is `UtcDateTime`.
   avg_volume_20d, last_close, sessions_available, passes, checked_at)`,
   UNIQUE `(ticker, session_date)`. `last_close` is `Money`. `avg_volume_20d`
   is an integer share count.
+- `ticker_ipo_date(ticker, ipo_date, fetched_at)`, `ticker` the primary key,
+  `ipo_date` `NOT NULL` — migration **0009** (Q12). The vendor's IPO date for a
+  partial-window ticker, cached for good; only a parsed date is ever written.
 - `sentiment_label(id, article_id, ticker, source, tier, direction, reasoning,
   rule_id, labeled_at)`, UNIQUE `(article_id, ticker, source)`. `direction` ∈
   `bullish | bearish | neutral`; `tier` ∈ `rules | vendor`, CHECK-constrained.
@@ -1740,9 +2330,27 @@ and the audit's transitions — get the careful coverage.
     - a ticker whose only signal is a Massive `neutral` or `mixed`
     - a ticker failing any one tradeability check: no `has_options`, an
       adjusted root, no standard-root contract, ADV at 999,999, a close at
-      $4.99, or 19 sessions of history
+      $4.99, or **zero completed sessions** (Q10)
+    - an established ticker with missing bars: stale bars still fail, and
+      missing window sessions count as zeros over 20 — a lookback bar keeps
+      it from being read as a recent listing
   - **The boundaries pass:** ADV at exactly 1,000,000, a close at exactly $5,
-    and 20 sessions.
+    and **one completed session** when every other check holds. **19
+    sessions — the old boundary — passes** on a 19-session average (Q10).
+  - **The residual ambiguity is settled by the IPO date (Q12):** a name with
+    no bar in the 252-session lookback and bars inside the window fails closed
+    with no IPO date, fails on volume with an old one, and is a recent listing
+    only with one inside the window. A name suspended 120 sessions and resumed
+    five sessions before the check is established and fails on volume, with no
+    IPO lookup.
+  - **Q12's five, the owner's:** a recent `ipo` passes with one session; an old
+    `ipo` plus a partial window fails as missing bars; a missing or malformed
+    `ipo` fails closed (`ipo_date_unavailable`, for the session only); a
+    Finnhub failure (403, timeout) fails closed and is **not** cached as a
+    permanent answer; the cache prevents a second call. Plus the boundaries —
+    an `ipo` on the window's first session permits, one the session before
+    rejects — and a ticker failing on anything else is never asked.
+  - **Class shares:** `BRK.B` has no standard-root contract (Q11).
   - **Ranking:** a rules event outranks a Massive-only row regardless of
     recency; within a group, newest first. The same inputs give the same order.
   - **Attribution:** a single-tag Alpaca or Massive article attributes to its
@@ -1751,8 +2359,12 @@ and the audit's transitions — get the careful coverage.
   `ALPACA_STOCK_FEED_HISTORICAL`'s value, and fails if it ever carries the
   realtime feed's.
 - **Watch routes:**
-  - add, remove, the 409 one past the 100-symbol ceiling, and refusal to
-    remove a non-manual member
+  - add, remove, and refusal to remove a non-manual member
+  - the manual-watch cap (Q13): the 34th add succeeds and the 35th is a 409
+    naming the cap; a refused add writes no `watch_symbol` row and no audit
+    row, and emits nothing; removing a watch frees a slot (the next add
+    succeeds); the cap is the same with and without the seed, and position
+    underlyings neither block nor free a slot
   - exactly one `audit_log` row and one `watchlist_changed` emit per change
   - nothing emitted on a refused request
 - **Retention:**
@@ -1827,7 +2439,8 @@ by this spec; these are the amendments it owes.
     Finnhub.
   - Sector leaders become plural: *"the top five holdings of each SPDR sector
     ETF, weighted by fund weight, from a committed seed of the funds' published
-    holdings"*.
+    holdings"*. *(Since Q14 the seed is built from the funds' SEC N-PORT
+    filings; step 10 words the PRD line to match.)*
   - A note that Finnhub's economic calendar, ETF holdings, both dividends
     endpoints, index constituents and `/news-sentiment` are premium, verified
     from Finnhub's own OpenAPI document (`premium` field) on 2026-09-23, and
@@ -1886,10 +2499,11 @@ by this spec; these are the amendments it owes.
   warning), `Engine resumed by operator` (bell ✓ Discord ✓, info), `Risk limits
   changed`, `Data feeds changed` and `Notification routing changed` (each bell
   off, Discord ✓, info). Add the note that bell reads and dismissals never
-  notify.
+  notify. And from Q18: `SPDR seed amended` (bell off, Discord ✓, info).
 - **PRD §11** — Phase 3's done-criterion (below). And under Phase 4: the LLM
   sentiment tier (decision 18), and the scanner reading the demotion flag once
-  per scan (decision 13).
+  per scan (decision 13). Under Phase 6, rule 9's data-freshness signal
+  (Q19) — *applied 2026-09-30*, with the owner decision.
 - **CLAUDE.md, Working with market data** — one sentence beside the
   `min_avg_volume` warning: decision 21's discovery ADV filter is the first
   consumer of that rule, and it reads `ALPACA_STOCK_FEED_HISTORICAL`.
@@ -1923,6 +2537,9 @@ step 0 could send back — the rules tier's volume against the demotion window
 (decision 13's second known risk) — was put to the owner as Q9 and answered:
 company news covers the whole watch universe, and a discovery tier is added
 (decision 21). Step 5's re-measurement can still reopen it.
+*Since 2026-09-30 two things wait on the owner again:* step 4's sector leaders
+and sector column wait on Q17's guard decision, and Q20 pauses step 5 and
+everything after it until the owner says to go on.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -1946,10 +2563,12 @@ human read of StockTwits' and Massive's terms for automated access.
   was checked and is **not triggered as measured**: the strict rules estimate
   is 4.2 labels per session, of which Finnhub `/company-news` supplies 3.7 —
   measured across the whole 66-name watch universe. It therefore holds only if
-  step 4 ingests Finnhub company news for that whole universe; *Feeds and
-  budgets* still budgets company news for ~30 symbols, and at that scope the
-  figure was not measured and may not clear 1.5. An Alpaca-only rules tier, at
-  1.2, would trigger it. Either case goes back to the owner.
+  step 4 ingests Finnhub company news for that whole universe — which, after
+  Q9, it does: *Feeds and budgets* budgets the watch tier over the whole watch
+  universe (W = 66 at 4.4/min, ≤7.2/min at W = 108, and after Q13 W ≤ 123 in
+  the worst case), not the ~30 symbols an earlier draft budgeted. An
+  Alpaca-only rules tier, at 1.2, would trigger it, and would go back to the
+  owner.
   *Depends on:* nothing.
 - *Files:* `scripts/probe_phase3.py`, `tests/fixtures/{finnhub,alpaca,massive,stocktwits,fred}/`.
 - *Done when:* every *Not verified* item above is struck through or moved to
@@ -1958,17 +2577,42 @@ human read of StockTwits' and Massive's terms for automated access.
   labels per session — decision 13's second risk has gone back to the owner.
 
 **1. Notifications land; rule 9's halt alert is delivered.**
-- *Status:* **done 2026-09-24** (45171a1 backend, 787fe80 bell).
+- *Status:* **done 2026-09-30** (45171a1 backend, 787fe80 bell; the code was
+  done 2026-09-24, and the forced watchdog halt was the last live check).
   Hung-webhook-does-not-delay-halt, failed-delivery recording and webhook
   redaction are pinned in `risk` tests. **Live checks on `:app`, 2026-09-24,
   against a scratch database, at the owner's request:** a test embed through
   `DiscordNotifier` was delivered (`HTTP 204`); a manual halt and resume
   (decision 20) each landed on the bell and in Discord (`HTTP 204`).
-  **Still outstanding: the forced *watchdog* halt.** Attempted overnight by
-  freezing the process for 120 s — correctly, nothing fired: outside a session
-  the sockets are closed and the connection condition is unarmed (the session
-  gate in `engine/sockets.py`). It can only be forced during regular trading
-  hours. *Depends on:* nothing.
+  **The forced watchdog halt, done in session, twice.** A first attempt,
+  overnight, froze the process for 120 s and correctly fired nothing: outside
+  a session the sockets are closed and the connection condition is unarmed
+  (the session gate in `engine/sockets.py`). So both live runs were in
+  regular trading hours:
+  - **2026-09-29:** `:app` from this worktree, port 8765, a scratch database
+    at 0010. Cold start came up halted; `POST /api/engine/resume` at
+    18:48:10Z landed an `operator_resume` bell entry. The process was
+    suspended (`NtSuspendProcess`) at 18:48:29Z; the host then slept and lost
+    its network, and the process was released at 19:13:36Z — ~25 minutes
+    rather than the planned 120 s. At 19:13:41Z the engine halted itself,
+    rule `stream_closed` (`equity_quotes` could not connect, `getaddrinfo`
+    failed), and a `critical` `engine_error` bell entry landed. **Discord was
+    not delivered** (`ConnectError`, the network being down); the failure was
+    recorded and the halt was not delayed by it. It never auto-resumed.
+  - **2026-09-30:** `:app` from a clean detached worktree at ce8696a, port
+    8765, a fresh scratch database at 0009. Cold start halted; resume at
+    19:03:44Z landed on the bell and in Discord (`HTTP 204`).
+    `NtSuspendProcess` on the server PID from 19:03:49Z to 19:05:49Z —
+    exactly 120 s. At 19:05:54.50Z the engine halted itself, rule
+    `stream_closed` (*"The equity_quotes stream closed (no close frame
+    received or sent) and has since reconnected… the halt does not clear
+    without an explicit resume"*). The bell entry was delivered at
+    19:05:54.503Z and **Discord at 19:05:54.788Z (`HTTP 204`)**. The socket
+    reconnected and the engine stayed halted; it was stopped still halted.
+
+  Both live halts came from the **connection** condition (`stream_closed`),
+  not `HEARTBEAT_STALE`. The heartbeat path is covered by `risk` tests only;
+  no live run has exercised it. *Depends on:* nothing.
 - *Files:* `corollary/engine/notify.py`, `corollary/engine/runtime.py` (wire
   the notifier), `corollary/db/models.py`, migration 0005,
   `corollary/api/routes/notifications.py`, `web/src/components/NotificationBell.tsx`,
@@ -1989,7 +2633,13 @@ human read of StockTwits' and Massive's terms for automated access.
   passes.
 
 **3. FRED client; risk-free rate from `DGS3MO`.**
-- *Status:* not started. *Depends on:* 2.
+- *Status:* **done 2026-09-24.** Derived chain analytics carry
+  `riskFreeRate` / `riskFreeRateSource` (`fred_dgs3mo` | `default`) /
+  `riskFreeRateDate`, and use the latest stored `DGS3MO` observation whenever
+  one exists; `fred_observation` is migration 0007. A refresh that fetches
+  nothing (no `FRED_API_KEY`, gaps only, table current) is recorded by the
+  scheduler as a skip, never a success. The FRED job and its startup catch-up
+  run inside the `risk`-marked rule 9 isolation test. *Depends on:* 2.
 - *Files:* `corollary/data/providers/fred.py`, `corollary/data/providers/alpaca.py`,
   `corollary/pricing/blackscholes.py`, migration for `fred_observation`.
 - *Done when:* the chain's derived greeks state which rate they used and use
@@ -1997,18 +2647,89 @@ human read of StockTwits' and Massive's terms for automated access.
 
 **4. News ingestion, both tiers: watch and discovery, deduplicated, served;
 tradeability and the watch list.**
-- *Status:* not started. *Depends on:* 0, 2.
+- *Status:* **done 2026-10-01**, the sector leaders and the feed's sector
+  column included. Those two waited on Q17's ISIN-only lines; Q21's exemption
+  unblocked OpenFIGI, and the real 2026-06-30 snapshot now builds and is
+  accepted (XLB **99.837786585047**, all 29 ISINs resolved, 503 holdings, all
+  11 funds served by the DB seed loader — see Q17). Commits: 5ea4064 the
+  OpenFIGI recording, 30ec897 the recorder follow-ups, 62fd7a8 the resolver,
+  cache and wiring, and `9f0809b` the Alpaca asset recording and the rebuild test.
+  **This unit built from recorded inputs and did not touch the app
+  database**, so the running system picks the snapshot up at its next weekly
+  `spdr_holdings` slot (Monday 09:00 ET, with the day's asset directory
+  already held), and until then still serves whatever its database last
+  recorded. **The startup catch-up will not do it:** it builds only when the
+  latest attempt is over 7 days old, and the 2026-09-30 refusal counts; and
+  when it does run it reads the asset directory before that day's fetch has
+  landed, so every ISIN fails closed (`no_directory`), XLB is refused at
+  73.36 again, and that refusal suppresses the next week of catch-ups. Fail
+  closed, nothing wrong stored — but leaders can stay absent a week. Carried
+  to the owner (the catch-up should wait for the directory, or skip with a
+  reason while it is absent). **Resolved 2026-10-07:** a missing
+  precondition is never stored. With no asset directory the job skips
+  (`JobSkipped`, nothing fetched). With no ISIN source the build aborts under
+  `isin_source_unavailable` before any CUSIP lookup, and the job returns that
+  as a skip. An OpenFIGI or CUSIP outage aborts, as it already did. The
+  catch-up asks the 7-day gate first, then waits up to `SPDR_DIRECTORY_WAIT`
+  (5 min, polled every 5 s on the scheduler's sleeper) for the directory. If
+  none arrives it skips with nothing stored. Only accepted snapshots and
+  refusals that are facts about the filing are recorded, so only those
+  suppress the catch-up.
+  *(History: done 2026-09-30 except the sector leaders and sector column,
+  which waited on Q17's guard decision while the snapshot job recorded the
+  real snapshot's refusal at XLB 73.36 — superseded as above.)* Q18's
+  amendment handling landed as a follow-up (commit: 05b652b).
+  Commits: 6ac3746 tradeability and watch universe (pure), d72d912 schema
+  0008, a8bf4f3 Alpaca's reads, c87d40a Finnhub and Massive news, e7c473c the
+  article store, 616cab7 retention, e7a90ce the tradeability cache, 95cb4b6
+  and 41e58c0 recent IPOs (Q10, Q12), 87505c0 routes, 9527a98 pollers, 068a0c5
+  the feed panel, 8247852 the manual-watch cap (Q13), c9c772a scheduler
+  wiring, 696b1ec the SEC provider, ce8696a the SEC fixtures, 35500d6 N-PORT
+  snapshots (Q14), 651191c the measurement, and `c3887e9` the snapshot
+  job's wiring. *Depends on:* 0, 2.
+
+  **The measurements** (`scripts/measure_phase3_news.py`, Fri 2026-09-25,
+  W = 67):
+  - Finnhub watch tier **1,399** rows summed over symbols (**858** distinct
+    articles); Alpaca untickered **639** (**741** on Wed 2026-09-23); Massive
+    **131**; Finnhub market news **~32**, extrapolated (~45–50 on a weekday,
+    from partial data). **Total 2,201 a day** — above the ~1,500–2,000
+    estimate but under twice it, so **retention stands at 90 days**.
+  - **0 of 100** Finnhub market-news rows carry a `related` ticker.
+  - **No watch symbol went 30 days without Finnhub rows** (AEP 25, RBRK 42,
+    TTWO 61 over 30 days); ARM returns rows.
+  - **No symbol hit the cap**; the maximum was NVDA at 169 a day.
+
+  **Established by fixture:** Alpaca's `underlying_symbols` and `root_symbol`
+  combine on one contracts request (`GME1`); `has_options` comes from one
+  `/v2/assets` request's `attributes`; the contracts endpoint defaults
+  `expiration_date_lte` to *this week*; and the only adjusted-only optionable
+  name found was **AIFU**.
+
+  **A live bug found and fixed on the way** (68e607f, follow-up 2dbe9ea): option-stream msgpack
+  timestamps were being rejected, so **no live option quote had ever been
+  applied from the stream**. They decode now.
 - *Files:*
-  - `corollary/data/news/{ingest,watchlist,tradeability,retention}.py`
+  - `corollary/data/news/{article,assets,ingest,pollers,watchlist,tradeability,retention}.py`
   - `corollary/data/providers/{alpaca,finnhub,massive}.py`: Massive moves here
-    from step 5 for article ingestion, and its insights stay step 5's
-  - `corollary/data/seeds/spdr_holdings.csv` (for sector and the watch
-    universe)
-  - migrations for `news_article*` (with `feed`), `watch_symbol`,
+    from step 5 for article ingestion, and its insights stay step 5's;
+    `alpaca.py` also gains the per-CUSIP asset lookup (Q14)
+  - `corollary/data/providers/sec.py` (N-PORT, on a shared SEC bucket in
+    `corollary/ratelimit.py`) and `corollary/data/seeds/nport.py` (snapshots,
+    validated whole) — replacing the committed `spdr_holdings.csv` and its
+    State Street builder, `scripts/build_spdr_seed.py`, which is removed (Q14)
+  - `tests/fixtures/record_sec.py` and `tests/fixtures/sec/`
+  - `tests/fixtures/record_alpaca_isin_assets.py` and
+    `tests/fixtures/alpaca/p4_assets_active_isin_tickers.json` (Q17's directory
+    evidence), and `tests/data/seeds/test_spdr_real_rebuild.py` (the rebuild)
+  - migrations **0008** (`news_article*` with `feed`, `watch_symbol`,
     `ticker_tradeability`, the `watchlist` audit category and the
-    `watchlist_changed` route
+    `watchlist_changed` route), **0009** (`ticker_ipo_date`, Q12) and
+    **0010** (the SPDR holdings snapshots, Q14)
+  - `scripts/measure_phase3_news.py` (counts only)
   - `corollary/api/routes/news.py` (feed with `scope`, and the watch routes),
-    `corollary/engine/scheduler.py` (the poll set and the nightly prune)
+    `corollary/engine/scheduler.py` (the poll set, the nightly prune and the
+    weekly N-PORT snapshot check)
   - News feed panel and the manual-watch list, `web/src/lib/notifications.ts`
     (the new event)
 - *Done when:*
@@ -2082,16 +2803,29 @@ discovery panel.**
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
 - *Status:* not started. *Depends on:* 0, 2, 3.
+- *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
+  project's key first**: its swagger flags are null, and a premium 403 goes
+  back to the owner before any of the IPO work is built.
 - *Files:* `corollary/data/calendar.py`, `corollary/data/seeds/` (including
   `econ_release_times.csv`), `corollary/api/routes/calendar.py`, migration for
-  `calendar_event`, the calendar panel.
+  `calendar_event` (including the `ipo` kind), `corollary/data/providers/finnhub.py`
+  (`/calendar/ipo`), a recorded `tests/fixtures/finnhub/` IPO-calendar fixture,
+  the calendar panel.
 - *Done when:* the next two weeks show real earnings (with sessions), the next
   FOMC with its time, economic releases on FRED's dates at the table's times
   with consensus shown unavailable and actuals filled after release, dividends
-  or a stated reason they are absent, and a manual entry round-trips.
+  or a stated reason they are absent, and a manual entry round-trips. **And
+  (Q15):** the probe's result is recorded; if the endpoint answers on the free
+  key, upcoming IPOs — date, symbol, name, exchange, price range, shares,
+  status — land daily as `ipo` `calendar_event` rows and show in the panel, and
+  a listed IPO reaches Movers only through Q10 and Q12's checks and
+  `has_options`, never from the calendar row; if it answers 403, it has gone
+  back to the owner.
 
 **8. Composite and Market Pulse.**
-- *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4.
+- *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4 —
+  which has no accepted snapshot until Q17's guard decision lands. Paused by
+  Q20.
 - *Files:* `corollary/data/macro/{components,composite}.py`, migration for
   `composite_component_value`, `/api/news/composite`, `/api/markets/pulse`,
   `SentimentGauge`, `web/src/pages/Research.tsx`,
@@ -2103,7 +2837,8 @@ geopolitical.**
 
 **9. Social attention and analyst consensus.**
 - *Status:* not started. *Depends on:* 0 (the StockTwits terms read can stop
-  the social half), 2, the holdings seed.
+  the social half), 2, the holdings seed (no accepted snapshot until Q17's
+  guard decision lands). Paused by Q20.
 - *Files:* `corollary/data/providers/stocktwits.py`,
   `corollary/data/news/social.py`, `corollary/data/providers/finnhub.py`,
   migrations, `/api/news/{social,consensus}`, the two panels,
@@ -2242,8 +2977,7 @@ From Q9 (decision 21):
   firehoses, and a missing source is a vendor decision. No Benzinga Pro or
   Marketaux purchase.
 - **No automatic promotion to the watch list.** Watching is one manual,
-  audit-logged click, capped at a 100-symbol watch universe before position
-  underlyings.
+  audit-logged click, capped at 34 manual watches (Q13).
 - **No discovery candidate is a trade trigger or a scanner input** in Phase 3,
   and none becomes one in Phase 4 without Phase 4 deciding it.
 - **Nothing extra for candidates:** no price-move column on the movers panel,

@@ -1,0 +1,147 @@
+{
+  "recorded_at": "2026-09-24T18:19:27+00:00",
+  "request": "https://finnhub.io/api/v1/news?category=general",
+  "status_code": 200,
+  "stats": {
+    "row_count": 100,
+    "rows_with_related": 0,
+    "max_id": 8537432
+  },
+  "truncated": {
+    ".": 100
+  },
+  "body": [
+    {
+      "category": "business",
+      "datetime": 1790270847,
+      "headline": "New US sanctions shut down Iranian flights - Reuters",
+      "id": 8537331,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "New US sanctions shut down Iranian flights  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMiygFBVV95cUxORXFRdU50SU1neUhFbzk2V2JmSXRiRDFJbm5BR1VFaWp6NXhaZ2hRcExwUjJNeHRwVlFNd0xKY2tBWnI4N0c3Tk0zWTFyUHNCSnZJRUw3Znp3bU1UREd5OHo5anJLY21GdkVTa2V1TnQ2ZTVxOGRXSHRfUmIxN0dCRzFSaXJFVWRJOHQzVWE4dTdjcXRZNk5nSVg0eFBEYWd4akJGNWVzbE5rNEhwSVowcUp5SXhHZzV3OVBsUkp3UkQ1RTZvWHNwWTdn?oc=5"
+    },
+    {
+      "category": "business",
+      "datetime": 1790270456,
+      "headline": "US and Iran discuss phased deal to reopen Hormuz and end US blockade, sources say - Reuters",
+      "id": 8537224,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "US and Iran discuss phased deal to reopen Hormuz and end US blockade, sources say  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMiwgFBVV95cUxNYXMwQlBmRVM4WXVFeXhQVkcyYnpaUzE3dk1wUWswS3pZWDBKTGNWVEpqdFNsWXZEYm5PQ3pSVmRhVFl1empQN3p6SFY0YTVHRmxxNWpxbXFNWVlCOEF5T0tBLVp0MzNyWVlyQnpkbUtyVzNTeGtxQXZVc3hhb0E4aVV6bU5QVEdHMFhCaXRhV3hxQVJ3MWRXNF9tNG5EeUVzcTdEOUhGSExiS3F2SUlkS2xzRk1mNlg4bkRhR0FoaE5QZw?oc=5"
+    },
+    {
+      "category": "top news",
+      "datetime": 1790269665,
+      "headline": "Meta nears first new high in a year as Muse success showcases winning AI strategy",
+      "id": 8537328,
+      "image": "https://image.cnbcfm.com/api/v1/image/108367420-1790256219071-gettyimages-2296215783-META_CONNECT.jpeg?v=1790256353&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "Meta is transforming into more than a social-media juggernaut in the AI era. Muse is the centerpiece of its strategy.",
+      "url": "https://www.cnbc.com/2026/09/24/meta-nears-first-new-high-in-a-year-as-muse-success-showcases-winning-ai-strategy.html"
+    },
+    {
+      "category": "business",
+      "datetime": 1790268784,
+      "headline": "US Democrats tee up pre-election war powers vote as some Republicans break with Trump on Iran - Reuters",
+      "id": 8536340,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "US Democrats tee up pre-election war powers vote as some Republicans break with Trump on Iran  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMivgFBVV95cUxNMU45a3FvODBzSXpndWg1QUVuQzlqUmVJWjZEWUFXNWltVUx0Sm4zbDE1X3lFSnFYd2hQeGotT1YtejB1NU9lZDJKcnJjeEZqNkJtZkQ0anhFUG92V3pWLXlyQzhIalFwTzRuVnVvd3BGQ2tfYTJ3RUxMRlhlWTdTUFE3MnAzMUxmallxcE9SZU5ldmxJeE1fYnhyT0c5eG9lVXVydVg2TFhnbnFJYUFsOE56U194eTltTnc2bGFR?oc=5"
+    },
+    {
+      "category": "top news",
+      "datetime": 1790267822,
+      "headline": "New York sues Polymarket U.S., two months after filing lawsuit against Kalshi",
+      "id": 8537222,
+      "image": "https://image.cnbcfm.com/api/v1/image/108214824-1761063419016-gettyimages-2242400164-mms28717_rvtf4mdp.jpeg?v=1761063455&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "State attorney general Letitia James claims Polymarket has violated the state's gambling laws.",
+      "url": "https://www.cnbc.com/2026/09/24/new-york-sues-polymarket-us-two-months-after-filing-suit-against-kalshi-.html"
+    },
+    {
+      "category": "business",
+      "datetime": 1790266132,
+      "headline": "UK stocks fall as lack of progress in US-Iran talks lifts oil prices - Reuters",
+      "id": 8536802,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "UK stocks fall as lack of progress in US-Iran talks lifts oil prices  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMipwFBVV95cUxORHdHT0VLakV1eGx5V2lEejBTV2hZdC02WXdYM3ctdVNtNXA1SURvX25YZjFQeUJfUFVocEFQZ1dUc3RjVnJnX1pTaUxPcEpHdUFkYVYxU01zTGp3bG5yRlRZNmxmcnI3V3JwSUE1VFBWTThOQzVqZHlhWE54bXhhZU85R1FaTkhJNEdTV3ExN1I1YjJqVzZlN0Y3V3dSczVWdE42a1hPVQ?oc=5"
+    },
+    {
+      "category": "business",
+      "datetime": 1790265488,
+      "headline": "Cat owners are spending more and boosting pet retailers",
+      "id": 8537114,
+      "image": "https://image.cnbcfm.com/api/v1/image/108180088-1753998328790-gettyimages-2227936760-bb1_5426_gu9nuyiv.jpeg?v=1753998357&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "Spending on cats remains strong despite softening dog sector and tightening consumer discretionary spending.",
+      "url": "https://www.cnbc.com/2026/09/24/cat-ownership-food-sales-dog-demand.html"
+    },
+    {
+      "category": "business",
+      "datetime": 1790264536,
+      "headline": "Saudi Arabia thwarts Houthi ballistic missiles, Yemen's Saudi-led coalition says - Reuters",
+      "id": 8536013,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "Saudi Arabia thwarts Houthi ballistic missiles, Yemen's Saudi-led coalition says  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMivAFBVV95cUxQLW1IRmRaem1xSHEwTjd1VldSMmNqZk55VmdmZkh4QnNhU21SM0ZtWGg4RDdxSkNOM1F6ZUJ4LUYybUlzcWx6S01zbzd5N3BRSWRTc0N6eExNa2RFQXVTYlM3RmtXOFlDUk1Yc2Q0LXNkTEFPQlpCNjgzZHNlbkZXWGtXT1NRNFZ3a2lvWWNxVkk1Rng0Q2ZtNUk4TzZ0YXpNdDFaRUZQa2lBVHpnV05pV1QtZVlJSjJpTFFPTA?oc=5"
+    },
+    {
+      "category": "business",
+      "datetime": 1790261946,
+      "headline": "MGM Resorts shares sink 9% after Barry Diller's People Inc. rescinds takeover offer",
+      "id": 8536903,
+      "image": "https://image.cnbcfm.com/api/v1/image/107409590-1714668698288-gettyimages-997078072-775159596.jpeg?v=1714668761&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "Barry Diller's People Inc. has rescinded its offer to buy the remaining public shares of MGM Resorts.",
+      "url": "https://www.cnbc.com/2026/09/24/barry-diller-people-mgm-resorts.html"
+    },
+    {
+      "category": "business",
+      "datetime": 1790260689,
+      "headline": "France says ICC warrant posed no obstacle to Netanyahu overflight - Reuters",
+      "id": 8537122,
+      "image": "https://static2.finnhub.io/file/finnhub/logo/reuters_logo.jpeg",
+      "related": "",
+      "source": "Reuters",
+      "summary": "France says ICC warrant posed no obstacle to Netanyahu overflight  Reuters",
+      "url": "https://news.google.com/rss/articles/CBMisAFBVV95cUxQd2k3Y1V3ZHVBLTh5T2VqZTE0TWFOT2J5UndDUkZhQmVaYTZEdjBvSVFxaUl4a1Q1eVBPV3NGQmw3RUtsOUJha1pTM3cyalVnWmxFcENwX0x5c1dvU19va2g4Ylg2TDdzMkpZdUpxOEN6ZjgtejN1TlU5SnFjWWF2dklxSVVxRW8wcnRzXzFFYmlOWVNXdmNSdTV1d3hvR1didF9obDJKeGRuMk8yVHMwTQ?oc=5"
+    },
+    {
+      "category": "top news",
+      "datetime": 1790259256,
+      "headline": "Philadelphia Fed's Anna Paulson says 'modest' rate moves likely ahead to tame inflation",
+      "id": 8536792,
+      "image": "https://image.cnbcfm.com/api/v1/image/108344635-1785860747884-anna4.jpg?v=1785861012&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "The policymaker said  she and her colleagues may need to raise interest rates further to bring inflation back to target.",
+      "url": "https://www.cnbc.com/2026/09/24/philadelphia-feds-anna-paulson-says-modest-rate-moves-likely-ahead-to-tame-inflation.html"
+    },
+    {
+      "category": "top news",
+      "datetime": 1790256284,
+      "headline": "Our top 10 things to watch in the stock market Thursday",
+      "id": 8536785,
+      "image": "https://image.cnbcfm.com/api/v1/image/108308121-1779079950697-gettyimages-2275750817-AFP_B2WN99E.jpeg?v=1779079966&w=1920&h=1080",
+      "related": "",
+      "source": "CNBC",
+      "summary": "The Trump-Xi summit kicks off today, and Meta delivers a big boost to its hardware lineup.",
+      "url": "https://www.cnbc.com/2026/09/24/our-top-10-things-to-watch-in-the-stock-market-thursday.html"
+    }
+  ]
+}

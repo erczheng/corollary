@@ -61,11 +61,14 @@ WAF or proxy in front of it that reflects request headers would write one
 into a body this layer quotes.
 """
 
+import asyncio
+import contextlib
+import functools
 import logging
 import os
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Final
+from typing import Final, cast
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -75,19 +78,32 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from corollary.api.deps import AccountMode, ApiError, ServiceRegistry
+from corollary.api.deps import (
+    AccountMode,
+    ApiError,
+    PaperPositionsRefresher,
+    PositionUnderlyings,
+    ServiceRegistry,
+)
 from corollary.api.fanout import Fanout, quote_sink, trade_update_sink
+from corollary.api.operator import deliver_notice
 from corollary.api.routes import (
     account_router,
     activity_router,
     engine_router,
     markets_router,
+    news_router,
     notifications_router,
     positions_router,
     settings_router,
     ws_router,
 )
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
+from corollary.api.routes.markets import UNIVERSE_SYMBOLS
+from corollary.data.news.assets import AssetDirectoryHolder
+from corollary.data.news.pollers import NewsStore
+from corollary.data.providers.sec import SEC_USER_AGENT_ENV
+from corollary.data.seeds.nport import CusipResolver, DatabaseSeedLoader
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
     ALPACA_LIVE_SECRET_ENV,
@@ -100,6 +116,7 @@ from corollary.data.providers.interface import (
     ProviderError,
     RateLimitedError,
 )
+from corollary.data.macro.risk_free import seed_rate_source
 from corollary.db.seed import seed
 from corollary.db.session import get_engine
 from corollary.engine.execution.interface import (
@@ -108,9 +125,19 @@ from corollary.engine.execution.interface import (
     BrokerRateLimitedError,
 )
 from corollary.engine.notify import DbNotifier, DiscordNotifier, FanoutNotifier
-from corollary.engine.runtime import DISCORD_WEBHOOK_ENV, EngineRuntime, LoggingNotifier
+from corollary.engine.runtime import (
+    DISCORD_WEBHOOK_ENV,
+    EngineRuntime,
+    LoggingNotifier,
+    OperatorNotice,
+)
 from corollary.engine.scheduler import (
+    AlpacaContextSource,
+    ContextNotices,
     ContextServices,
+    ContextSessions,
+    HeldPositionUnderlyings,
+    FinnhubNewsSource,
     Scheduler,
     SchedulerFactory,
     build_context_scheduler,
@@ -144,6 +171,10 @@ SECRET_ENV_VARS: Final[tuple[str, ...]] = (
     "FINNHUB_API_KEY",
     "FRED_API_KEY",
     "DISCORD_WEBHOOK_URL",
+    # Not a credential, but rule 6 treats it as one: it carries the owner's
+    # name and email, and SEC sees it on every request. sec.py scrubs it from
+    # its own errors; this scrubs it from any response body as well.
+    SEC_USER_AGENT_ENV,
 )
 
 #: ``(exception, status, code)``. Registered in this order, though order does
@@ -359,6 +390,40 @@ def _bootstrap_database(db_engine: Engine) -> None:
         )
 
 
+def _seed_risk_free_rate(app: FastAPI, db_engine: Engine) -> None:
+    """Adopt the stored ``DGS3MO`` rate at startup. **Never raises.**
+
+    The likely failure is the one ``_bootstrap_database`` names: a database
+    not yet migrated to 0007, so ``fred_observation`` does not exist. That is
+    not self-healing -- every daily FRED job would fetch and then fail at the
+    upsert -- so the log names the migration rather than promising a refresh,
+    and carries a scrubbed detail so "no such table" is visible in it.
+    """
+    try:
+        seed_rate_source(lambda: Session(db_engine), app.state.registry.rates)
+    except Exception as exc:
+        try:
+            detail = vendor_detail(str(exc), secrets=app.state.secret_values())
+        except Exception:
+            detail = "(the error could not be rendered)"
+        logger.error(
+            "the stored risk-free rate could not be read; derived greeks use the "
+            "quoted 4.25 percent default (0.0422764153 continuous), labelled, and FRED "
+            "refreshes cannot be stored until "
+            "this is fixed -- if the database is not migrated, run "
+            "`uv run alembic upgrade head`",
+            extra={
+                "event": "risk_free_rate_seed_failed",
+                "rule": (
+                    "an unreadable rate table degrades the greeks to the "
+                    "labelled default, it does not stop the process"
+                ),
+                "error_type": type(exc).__name__,
+                "detail": detail,
+            },
+        )
+
+
 #: How the lifespan gets its vendor sockets. A factory rather than an object,
 #: because the supervisor needs the :class:`EngineRuntime` the lifespan
 #: builds, and a factory rather than a boolean because a test has to be able
@@ -409,6 +474,225 @@ def no_socket_supervisor(
     suites take this; the composition root has its own suite.
     """
     return None
+
+
+
+# --------------------------------------------------------------------------
+# The context jobs' services (Phase 3 step 4 wiring)
+# --------------------------------------------------------------------------
+
+#: What the context jobs call on Alpaca and on Finnhub. Checked by name at
+#: boot, because the registry's provider is typed as ``MarketDataProvider``
+#: (which declares none of them) and a test registry's double may offer none.
+_ALPACA_CONTEXT_METHODS: Final = ("news", "active_equities", "has_standard_root", "adv_daily_bars")
+_FINNHUB_NEWS_METHODS: Final = ("company_news", "market_news", "ipo_date")
+
+
+def _offers(service: object, methods: Sequence[str]) -> bool:
+    return all(callable(getattr(service, name, None)) for name in methods)
+
+
+def _alpaca_context_source(registry: ServiceRegistry) -> AlpacaContextSource | None:
+    """The registry's one market-data provider, as the context jobs use it -- or ``None``.
+
+    The same instance the routes use, so the ``data.alpaca.markets`` budget is
+    counted once. **Never raises**: missing paper keys make the Alpaca news,
+    asset-directory and tradeability jobs skip, never stop the app. Logged by
+    class name only (rule 6).
+    """
+    try:
+        provider = registry.provider
+    except Exception as exc:
+        logger.warning(
+            "Alpaca market data is unavailable to the context jobs; the Alpaca "
+            "news, asset-directory and tradeability jobs will skip",
+            extra={
+                "event": "context_alpaca_unavailable",
+                "error_type": type(exc).__name__,
+                "variables": [ALPACA_PAPER_KEY_ENV, ALPACA_PAPER_SECRET_ENV],
+            },
+        )
+        return None
+    if not _offers(provider, _ALPACA_CONTEXT_METHODS):
+        logger.info(
+            "the market-data provider offers no news or asset list; the Alpaca "
+            "news, asset-directory and tradeability jobs will skip",
+            extra={
+                "event": "context_alpaca_unavailable",
+                "provider": type(provider).__name__,
+            },
+        )
+        return None
+    return cast(AlpacaContextSource, provider)
+
+
+def _finnhub_news_source(registry: ServiceRegistry) -> FinnhubNewsSource | None:
+    """The registry's one Finnhub client, as the news jobs use it -- or ``None``.
+
+    The same instance the market-cap column reads, so the Finnhub budget is
+    counted once. Without ``FINNHUB_API_KEY`` the registry holds an
+    ``UnavailableFundamentals`` instead, which offers no news: the watch tier
+    and market-news jobs skip, and tradeability fails a partial ADV window
+    closed (no IPO date source, owner decision Q12). Never raises.
+    """
+    try:
+        fundamentals = registry.fundamentals
+    except Exception as exc:
+        logger.warning(
+            "Finnhub is unavailable to the news jobs",
+            extra={"event": "context_finnhub_unavailable", "error_type": type(exc).__name__},
+        )
+        return None
+    if not _offers(fundamentals, _FINNHUB_NEWS_METHODS):
+        logger.warning(
+            "Finnhub is unavailable to the news jobs (is FINNHUB_API_KEY set?): "
+            "the watch tier and market news will skip, and a partial ADV "
+            "window fails closed with no IPO date",
+            extra={
+                "event": "context_finnhub_unavailable",
+                "provider": type(fundamentals).__name__,
+                "variable": "FINNHUB_API_KEY",
+            },
+        )
+        return None
+    return cast(FinnhubNewsSource, fundamentals)
+
+
+def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
+    """The market-data provider's CUSIP lookup, for the ``spdr_holdings`` job -- or ``None``.
+
+    The same provider object the other Alpaca jobs hold, so its budgets are
+    counted once. A reference-data read on ``paper-api.``; never the broker.
+    """
+    if provider is None or not _offers(provider, ("asset_by_cusip",)):
+        return None
+    return cast(CusipResolver, provider)
+
+
+#: How often the lifespan hands the context jobs' queued notices to the
+#: runtime. The only producer is the weekly ``spdr_holdings`` job, so a
+#: second's latency costs nothing, and polling keeps every awaitable out of
+#: the outbox a job holds (a waiting future would hang the drainer's task --
+#: and through it the runtime -- off an object the isolation walk follows).
+CONTEXT_NOTICE_INTERVAL_SECONDS: Final = 1.0
+
+
+def flush_context_notices(notices: ContextNotices, runtime: EngineRuntime | None) -> int:
+    """Hand every queued context notice to the one notification path. **Never raises.**
+
+    Each becomes an :class:`~corollary.engine.runtime.OperatorNotice` for
+    :func:`~corollary.api.operator.deliver_notice`, which calls
+    ``EngineRuntime.notify_operator_action`` -- the same ``_channels_for``
+    routing gate and the same fan-out (bell row and Discord) as every other
+    notice, decision 14's one path. A missing runtime is a log line there.
+    Returns how many were handed on.
+    """
+    handed = 0
+    for queued in notices.drain():
+        try:
+            deliver_notice(
+                runtime,
+                OperatorNotice(
+                    event=queued.event,
+                    severity=queued.severity,
+                    title=queued.title,
+                    body=queued.body,
+                    at=queued.at,
+                    correlation_id=queued.correlation_id,
+                    account=queued.account,
+                ),
+            )
+            handed += 1
+        except Exception as exc:
+            logger.error(
+                "a context notice could not be handed to the runtime",
+                extra={
+                    "event": "context_notice_not_delivered",
+                    "notification_event": queued.event,
+                    "correlation_id": queued.correlation_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+    return handed
+
+
+async def deliver_context_notices(
+    notices: ContextNotices,
+    runtime: EngineRuntime | None,
+    *,
+    interval: float = CONTEXT_NOTICE_INTERVAL_SECONDS,
+) -> None:
+    """The lifespan's loop over :func:`flush_context_notices`, until cancelled.
+
+    Owned by the lifespan and never handed to a job: it holds the runtime,
+    which is exactly what :class:`ContextServices` must not reach.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        flush_context_notices(notices, runtime)
+
+
+def _context_services(
+    app: FastAPI, sessions: ContextSessions, notices: ContextNotices
+) -> ContextServices:
+    """Everything the context jobs are built from, out of this app's own state.
+
+    **Shared, never copied:** the asset directory is ``app.state.asset_directory``
+    and the position underlyings are read from ``app.state.position_underlyings``,
+    so what a news route reports is what the jobs used. One ``NewsStore`` per
+    app -- its lock is what serialises every news write. ``sessions`` is the
+    lifespan's :class:`ContextSessions`, which shutdown drains.
+
+    **Nothing here can reach a broker or the registry** (rule 1 stays
+    structural, unit 4B2 audit): the watch universe's positions arrive as
+    :class:`HeldPositionUnderlyings`, an in-memory read of the holder. The
+    paper-account read that fills the holder is :func:`_position_refresher`'s,
+    which the lifespan owns and no job holds. The vendors handed over are the
+    registry's *providers*, never the registry. Every vendor that is not
+    configured is ``None``, and its jobs skip.
+    """
+    registry: ServiceRegistry = app.state.registry
+    holder: AssetDirectoryHolder = app.state.asset_directory
+    alpaca = _alpaca_context_source(registry)
+    return ContextServices(
+        session_factory=sessions,
+        # ``None`` when FRED_API_KEY is unset -- said once, inside.
+        fred=registry.fred_provider(),
+        rates=registry.rates,
+        assets=holder,
+        news_store=NewsStore(session_factory=sessions, assets=holder),
+        alpaca=alpaca,
+        finnhub=_finnhub_news_source(registry),
+        # ``None`` when MASSIVE_API_KEY is unset -- said once, inside.
+        massive=registry.massive_provider(),
+        markets=UNIVERSE_SYMBOLS,
+        position_underlyings=HeldPositionUnderlyings(app.state.position_underlyings),
+        seed_loader=app.state.spdr_seed_loader,
+        # ``None`` when SEC_USER_AGENT is unset -- said once, inside -- and
+        # the ``spdr_holdings`` job skips.
+        sec=registry.sec_provider(),
+        cusips=_cusip_source(alpaca),
+        # OpenFIGI for the ISIN-only N-PORT lines (spec Q17); keyless when
+        # OPENFIGI_API_KEY is unset. Closed by ``registry.aclose()``.
+        openfigi=registry.openfigi_provider(),
+        # The outbox the lifespan drains into the runtime's notification
+        # path; the jobs hold only this, never the runtime (decision 1).
+        notices=notices,
+    )
+
+
+def _position_refresher(app: FastAPI) -> PaperPositionsRefresher:
+    """The one reader of the paper positions, into ``app.state.position_underlyings``.
+
+    The lambda closes over the registry -- which is why this object is the
+    lifespan's and is never put in :class:`ContextServices`. ``PAPER`` is a
+    literal here on purpose: rule 5, and a news cycle never reads Cash.
+    """
+    registry: ServiceRegistry = app.state.registry
+    return PaperPositionsRefresher(
+        broker=lambda: registry.broker(AccountMode.PAPER),
+        holder=app.state.position_underlyings,
+    )
 
 
 def create_app(
@@ -488,6 +772,17 @@ def create_app(
         # evaluates and finds nothing. That is rule 9 with nothing to judge,
         # not rule 9 disarmed: the conditions are the same code either way.
         db_engine = app.state.db_engine
+        # The SPDR seed is the accepted N-PORT snapshot in *this* database
+        # (unit 4SEC-B2). An app built without an engine learns it here; a
+        # test's own loader (any other callable) is left alone.
+        seed_loader = app.state.spdr_seed_loader
+        if isinstance(seed_loader, DatabaseSeedLoader) and not seed_loader.bound:
+            seed_loader.bind(functools.partial(Session, db_engine))
+        # Decision 19: the risk-free rate derived greeks are solved at starts
+        # as the latest stored FRED DGS3MO observation, or the labelled
+        # default when none was ever stored. One indexed read. A failure here
+        # is stated and leaves the default in place; it never stops the app.
+        _seed_risk_free_rate(app, db_engine)
         # Rule 9's voice (Phase 3 decision 14): a log line, the bell's row,
         # and the Discord webhook, fanned out so no one sink can silence the
         # others. The URL is read from the process environment -- never from
@@ -593,13 +888,34 @@ def create_app(
         # handed. Stated-never-fatal like the sockets above -- and never a
         # halt either, since a feed that cannot be scheduled is a stale page,
         # not a lost connection.
+        #
+        # ``no_scheduler`` -- every route test's app -- needs no services, and
+        # building them would construct vendor clients for an app that runs
+        # no jobs, so it is handed none.
+        #
+        # The paper-positions refresher runs beside it, only when it does
+        # (nothing else reads the holder's positions but the watch route,
+        # which says "never read"): owned here, never handed to a job, and
+        # handed no runtime either -- it calls ``positions()`` and
+        # ``holder.replace`` and nothing else, and catches its own failures.
         context_scheduler: Scheduler | None = None
+        context_sessions = ContextSessions(db_engine)
+        context_notices = ContextNotices()
+        app.state.context_notices = context_notices
+        notice_task: asyncio.Task[None] | None = None
+        refresher: PaperPositionsRefresher | None = None
         try:
-            context_scheduler = scheduler(
-                ContextServices(session_factory=lambda: Session(db_engine)),
-                app.state.secret_values,
-            )
+            if scheduler is not no_scheduler:
+                context_scheduler = scheduler(
+                    _context_services(app, context_sessions, context_notices),
+                    app.state.secret_values,
+                )
             if context_scheduler is not None:
+                refresher = _position_refresher(app)
+                refresher.start()
+                notice_task = asyncio.create_task(
+                    deliver_context_notices(context_notices, runtime)
+                )
                 context_scheduler.start()
         except Exception as exc:
             logger.error(
@@ -616,6 +932,7 @@ def create_app(
             )
             context_scheduler = None
         app.state.scheduler = context_scheduler
+        app.state.position_refresher = refresher
         try:
             yield
         finally:
@@ -624,8 +941,27 @@ def create_app(
             # ``aclose`` never raises -- a job task that died was logged when
             # it died -- so it cannot skip the steps after it, and the rule 9
             # alerts still queued in the Discord sink keep their grace period.
+            if refresher is not None:
+                await refresher.aclose()
             if context_scheduler is not None:
                 await context_scheduler.aclose()
+                # A job task cancelled mid-``to_thread`` leaves its worker
+                # thread running; wait (bounded) for its session to close, so
+                # no commit lands after this lifespan has returned. Never
+                # raises, so the rule 9 alerts below keep their grace.
+                await context_sessions.drain()
+            # Then the notices those jobs queued: the loop stops, and one
+            # last flush hands on anything a job put before it finished --
+            # while the runtime and the Discord sink are still open.
+            if notice_task is not None:
+                notice_task.cancel()
+                # Suppress any exception, not only the cancellation: a drain
+                # task that had died would otherwise re-raise here and skip
+                # the final flush, the sockets and runtime.aclose() -- rule 9's
+                # shutdown order must not rest on the drain never failing.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await notice_task
+            flush_context_notices(context_notices, runtime)
             # Then the sockets, ahead of the runtime: they report into the
             # watchdog, and a socket
             # still reading while the supervisor it reports to is gone is a
@@ -682,6 +1018,20 @@ def create_app(
     app.state.secret_values = (
         _environment_secrets if secrets is None else (lambda: tuple(secrets))
     )
+    # Phase 3 step 4's news state. The news routes *read* these and never
+    # fetch: the asset list is refreshed daily by the scheduler (and is
+    # ``None`` until its first success, which the watch routes refuse on
+    # with a 503 rather than accept an unvalidated ticker), and the position
+    # underlyings are replaced by the news cycle after it reads positions --
+    # so no news route depends on a broker. The seed loader serves the latest
+    # accepted N-PORT snapshot from the database (bound in the lifespan when
+    # the engine is not known yet), and is a callable so a test can supply a
+    # seed directly.
+    app.state.asset_directory = AssetDirectoryHolder()
+    app.state.position_underlyings = PositionUnderlyings()
+    app.state.spdr_seed_loader = DatabaseSeedLoader(
+        None if db_engine is None else functools.partial(Session, db_engine)
+    )
 
     for exception, status_code, code in _VENDOR_FAILURES:
         app.add_exception_handler(exception, _vendor_handler(status_code, code))
@@ -706,6 +1056,7 @@ def create_app(
     app.include_router(activity_router)
     app.include_router(engine_router)
     app.include_router(markets_router)
+    app.include_router(news_router)
     app.include_router(notifications_router)
     app.include_router(positions_router)
     app.include_router(settings_router)

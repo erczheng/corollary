@@ -753,6 +753,9 @@ async def test_our_derived_greeks_match_alpacas_on_the_same_contracts(
             strike=occ.strike,
             years=years_to_expiry(occ.expiration, captured_at),
             is_call=occ.option_type is OptionType.CALL,
+            # The rate the agreement figures above were measured at. Explicit
+            # because the pricing functions supply no rate of their own.
+            rate=Decimal("0.0425"),
         )
         assert not isinstance(mine, AnalyticsUnavailable), symbol
         compared += 1

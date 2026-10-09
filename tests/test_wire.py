@@ -13,6 +13,7 @@ handler, every traceback holding the object that raised, and rule 9's watchdog
 path.
 """
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import msgpack
@@ -22,6 +23,7 @@ from corollary.wire import (
     ERROR_BODY_MAX,
     REDACTED,
     WireFormatError,
+    as_datetime,
     as_decimal,
     as_int,
     decode_json,
@@ -473,3 +475,96 @@ def test_operator_text_redacts_a_malformed_webhooks_token_on_its_own() -> None:
     )
     assert _MALFORMED_HOOK_TOKEN not in out
     assert "halting" in out
+
+
+# --------------------------------------------------------------------------
+# as_datetime: the msgpack Timestamp ext the option stream sends as ``t``
+# --------------------------------------------------------------------------
+#
+# Found live on 2026-09-29: every option-stream quote was refused with
+# *"expected an RFC-3339 timestamp, got Timestamp(seconds=1790707644,
+# nanoseconds=970813166)"*. The option stream is msgpack and stamps ``t`` as
+# the Timestamp extension (type -1), not a string; the test frames had packed
+# ``t`` as a string, so the suite never saw the shape the vendor sends.
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def test_a_msgpack_timestamp_is_the_exact_instant_truncated_to_microseconds() -> None:
+    stamp = msgpack.Timestamp(seconds=1790707644, nanoseconds=970813166)
+    got = as_datetime(stamp)
+    assert got == datetime(2026, 9, 29, 18, 47, 24, 970813, tzinfo=timezone.utc)
+    assert got.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    ("nanoseconds", "microseconds"),
+    [(0, 0), (999, 0), (1000, 1), (1999, 1), (999_999_999, 999_999)],
+)
+def test_the_nanosecond_tail_is_truncated_never_rounded(
+    nanoseconds: int, microseconds: int
+) -> None:
+    """Truncated, like the RFC-3339 path: 999ns is 0us, and 999_999_999ns
+    never rounds up into the next second."""
+    got = as_datetime(msgpack.Timestamp(seconds=0, nanoseconds=nanoseconds))
+    assert got == _EPOCH + timedelta(microseconds=microseconds)
+
+
+def test_a_timestamp_before_the_epoch_is_read_exactly() -> None:
+    got = as_datetime(msgpack.Timestamp(seconds=-1, nanoseconds=500_000_000))
+    assert got == datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        msgpack.Timestamp(seconds=1790707644, nanoseconds=970813166),  # ts64
+        msgpack.Timestamp(seconds=1790707644, nanoseconds=0),  # ts32
+        msgpack.Timestamp(seconds=2**34 + 5, nanoseconds=1000),  # ts96
+    ],
+    ids=["ts64", "ts32", "ts96"],
+)
+def test_every_timestamp_width_survives_the_msgpack_decoder(
+    stamp: msgpack.Timestamp,
+) -> None:
+    frame = msgpack.packb([{"T": "q", "t": stamp}], use_bin_type=True)
+    decoded = decode_msgpack(frame)
+    assert decoded[0]["t"] == stamp
+    assert as_datetime(decoded[0]["t"]) == _EPOCH + timedelta(
+        seconds=stamp.seconds, microseconds=stamp.nanoseconds // 1000
+    )
+
+
+def test_a_timestamp_past_the_datetime_range_is_a_wire_error() -> None:
+    with pytest.raises(WireFormatError):
+        as_datetime(msgpack.Timestamp(seconds=2**40, nanoseconds=0))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        1790707644,
+        1790707644.97,
+        Decimal("1790707644.970813166"),
+        True,
+        None,
+        b"2026-09-29T18:47:24Z",
+        msgpack.ExtType(5, bytes([0, 1])),
+        datetime(2026, 9, 29, 18, 47, 24, tzinfo=timezone.utc),
+    ],
+    ids=["int", "float", "decimal", "bool", "none", "bytes", "other-ext", "datetime"],
+)
+def test_anything_but_a_string_or_a_msgpack_timestamp_is_refused(value: object) -> None:
+    """An epoch number is refused rather than guessed at (seconds? ms? ns?),
+    and a ready-made ``datetime`` is not a wire value: nothing decoded
+    produces one, so accepting it would only widen the boundary."""
+    with pytest.raises(WireFormatError):
+        as_datetime(value)
+
+
+def test_the_rfc3339_path_is_unchanged() -> None:
+    assert as_datetime("2026-09-14T13:30:01.123456789Z") == datetime(
+        2026, 9, 14, 13, 30, 1, 123456, tzinfo=timezone.utc
+    )
+    with pytest.raises(WireFormatError):
+        as_datetime("not a timestamp")

@@ -1,0 +1,147 @@
+{
+  "recorded_at": "2026-09-24T18:19:03+00:00",
+  "request": "https://finnhub.io/api/v1/company-news?symbol=NVDA&from=2026-09-23&to=2026-09-24",
+  "status_code": 200,
+  "stats": {
+    "row_count": 248,
+    "rows_with_related": 248,
+    "max_id": 142384583
+  },
+  "truncated": {
+    ".": 248
+  },
+  "body": [
+    {
+      "category": "company",
+      "datetime": 1790272560,
+      "headline": "Tesla's Q3 Sales Report Comes Out Oct. 2. Here Are 2 Surprises It Might Reveal.",
+      "id": 142384570,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Tesla's quarterly production and delivery update could be exciting.",
+      "url": "https://finnhub.io/api/news?id=9a3b7a2bff57a27617343be1b133d573ed0038856c92e28876925a7c4ed3e86b"
+    },
+    {
+      "category": "company",
+      "datetime": 1790272500,
+      "headline": "The Smartest S&P 500 Dividend Stock to Buy With $1,000 Right Now",
+      "id": 142384577,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Realty Income is still an attractive dividend play in this messy market.",
+      "url": "https://finnhub.io/api/news?id=51e277ead94c4c1d99a96e8697bcde676f8430786faf1de8608f6b71b99c39e7"
+    },
+    {
+      "category": "company",
+      "datetime": 1790272200,
+      "headline": "An S&P 500 Index Fund Already Owns These Financial Stocks. Here's Whether to Own More.",
+      "id": 142384571,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Do you really need more financial stocks?",
+      "url": "https://finnhub.io/api/news?id=633805f7e568f1f0d5e108399e7582fc424f162b118438416e18eb7c6abae34e"
+    },
+    {
+      "category": "company",
+      "datetime": 1790271962,
+      "headline": "Super Micro Stock Slips as New NVIDIA AI Systems Enter the Market",
+      "id": 142384565,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Super Micro Rolls Out NVIDIA's Vera Rubin AI Racks as $72 Billion Revenue Target Looms",
+      "url": "https://finnhub.io/api/news?id=cd0056006ad115260ae2b6469c2bc2e0bd1aebf8f5d604f0520367c956ee4a8c"
+    },
+    {
+      "category": "company",
+      "datetime": 1790271955,
+      "headline": "Stock Market Today: Nasdaq Improves On U.S.-Iran News; MGM Resorts Plummets (Live Coverage)",
+      "id": 142384578,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Stock Market Today: The Dow Jones index drops Thursday on rising Treasury yields. Nvidia stock sold off in morning trading.",
+      "url": "https://finnhub.io/api/news?id=758d69890593e23c51baa595af92b4fee45ea853e3fef8e36a1897f50990699c"
+    },
+    {
+      "category": "company",
+      "datetime": 1790271780,
+      "headline": "Prediction: This Is What a $1,000 Investment in Apple Will Be Worth by 2030",
+      "id": 142384572,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Apple stock still looks like a long-term winner.",
+      "url": "https://finnhub.io/api/news?id=2f42a91f4f2418cec78a73ed269d7fcf008ea78b495fd98db50cfd382fd3c2fa"
+    },
+    {
+      "category": "company",
+      "datetime": 1790271300,
+      "headline": "Is Caterpillar the Best Industrials Stock to Buy Right Now?",
+      "id": 142384573,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "The demand from the AI build-out has helped diversify Caterpillar's business.",
+      "url": "https://finnhub.io/api/news?id=e9b43cffc5aa175fbb0a81780e7edf48c2bdfa9dcb6b96ea9feca15c8d3047aa"
+    },
+    {
+      "category": "company",
+      "datetime": 1790270079,
+      "headline": "I'm Buying More Nvidia Stock Right Now. Here's Why.",
+      "id": 142384566,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Nvidia stock is having a good year, but it hasn't been as strong as investors may have expected.",
+      "url": "https://finnhub.io/api/news?id=859e17d773ab942beabd9d65bd1266eb487cf4d965c560be436d9f048dd299b6"
+    },
+    {
+      "category": "company",
+      "datetime": 1790270078,
+      "headline": "IonQ Rises 4% as Post-Breakthrough Buying Continues; D-Wave Quantum Gains 3%, Rigetti Adds 2%",
+      "id": 142384574,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Quantum computing stocks are climbing again as a fresh wave of technical breakthroughs reshapes what investors think these companies can actually deliver, and the gap between hype and commercial reality has never mattered more.",
+      "url": "https://finnhub.io/api/news?id=d907bacef242c90f66ab08c9762c0f8e081aa404e81f42d0e95f2bd2737e81bc"
+    },
+    {
+      "category": "company",
+      "datetime": 1790269261,
+      "headline": "Billionaire Bill Ackman’s Pershing Square Capital Management Has 12.7% of Its Portfolio Invested in This Beaten-Down Stock",
+      "id": 142384579,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Is it a great long-term pick?",
+      "url": "https://finnhub.io/api/news?id=1ae1ba459c5434e7f5bd994215c626e1dd5fd324d1a1590b150724a00faab2f2"
+    },
+    {
+      "category": "company",
+      "datetime": 1790268901,
+      "headline": "Market Indexes Fall Again as the 30-Year Yield Hits a 2004 High",
+      "id": 142384580,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "Trump and Xi met on Thursday. China wanted three years of trade peace and got two months.",
+      "url": "https://finnhub.io/api/news?id=ffa8fc903953ebe7d9a8642c8a31eac1274f9dac9dd79666cdcd14253d1085af"
+    },
+    {
+      "category": "company",
+      "datetime": 1790268720,
+      "headline": "SpaceX Is Poised to Reclaim a $190 Share Price by the End of 2026",
+      "id": 142384575,
+      "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+      "related": "NVDA",
+      "source": "Yahoo",
+      "summary": "If 2027 revenue expectations keep rising, share price gains could follow.",
+      "url": "https://finnhub.io/api/news?id=1a15ba011f19152045612e098de69bf3158f08c5cc55284cb26b3c71cb86c165"
+    }
+  ]
+}

@@ -339,7 +339,7 @@ class Http:
             return Reply(
                 status=r.status_code,
                 content_type=ctype,
-                url=safe_url(str(r.request.url)),
+                url=safe_url(str(r.url)),
                 headers={k.lower(): v for k, v in r.headers.items()},
                 text=r.text,
                 body=body,

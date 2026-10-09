@@ -50,6 +50,9 @@ import type {
   DataSourceStatus,
   EngineStateResponse,
   FeedKey,
+  NewsFeed,
+  NewsLookback,
+  NewsScope,
   Notification,
   NotificationEvent,
   NotificationRoute,
@@ -61,6 +64,7 @@ import type {
   RiskLimitKey,
   StockQuote,
   UnderlyingQuote,
+  WatchList,
   WorkingOrder,
 } from './types'
 
@@ -214,7 +218,7 @@ export interface RequestOptions {
 }
 
 interface FetchInit extends RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   params?: QueryParams
   body?: unknown
 }
@@ -1291,4 +1295,65 @@ export function fetchAuditLog(
 /** What is live, and what is still a fixture. */
 export function fetchDataSources(options: RequestOptions = {}): Promise<DataSourceStatus[]> {
   return request<DataSourceStatus[]>('/settings/sources', options)
+}
+
+/* -------------------------------------------------------------------------
+ * News (Phase 3 step 4)
+ * ---------------------------------------------------------------------- */
+
+/** `GET /api/news`'s query. Every filter is applied **server-side** — the
+ * server is the one sort and the one filter, so the page never narrows or
+ * re-orders a fetched page. Omitted values fall back to the server's own
+ * defaults (scope `watch`, lookback `all`, newest first, 50 a page). */
+export interface NewsQuery {
+  lookback?: NewsLookback
+  scope?: NewsScope
+  ticker?: string | null
+  sector?: string | null
+  publisher?: string | null
+  sentiment?: string | null
+  sort?: 'newest' | 'oldest'
+  /** 1–200. */
+  limit?: number
+  offset?: number
+}
+
+export function fetchNews(query: NewsQuery = {}, options: RequestOptions = {}): Promise<NewsFeed> {
+  return request<NewsFeed>('/news', {
+    params: {
+      lookback: query.lookback,
+      scope: query.scope,
+      ticker: query.ticker,
+      sector: query.sector,
+      publisher: query.publisher,
+      sentiment: query.sentiment,
+      sort: query.sort,
+      limit: query.limit,
+      offset: query.offset,
+    },
+    ...options,
+  })
+}
+
+/** The manual watches and the universe they sit in. */
+export function fetchWatchList(options: RequestOptions = {}): Promise<WatchList> {
+  return request<WatchList>('/news/watch', options)
+}
+
+/** Add a manual watch. **The server validates** — shape, membership, the
+ * asset list and the cap (rule 4: never trust the client). A refusal is an
+ * `ApiError` whose message is the server's own sentence; show it. */
+export function addWatch(ticker: string, options: RequestOptions = {}): Promise<WatchList> {
+  return request<WatchList>(`/news/watch/${encodeURIComponent(ticker)}`, {
+    method: 'POST',
+    ...options,
+  })
+}
+
+/** Remove a manual watch. Nothing already stored is deleted server-side. */
+export function removeWatch(ticker: string, options: RequestOptions = {}): Promise<WatchList> {
+  return request<WatchList>(`/news/watch/${encodeURIComponent(ticker)}`, {
+    method: 'DELETE',
+    ...options,
+  })
 }

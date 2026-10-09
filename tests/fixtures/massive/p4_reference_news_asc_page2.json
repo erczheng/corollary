@@ -1,0 +1,142 @@
+{
+  "recorded_at": "2026-09-24T18:30:16+00:00",
+  "request": "https://api.massive.com/v2/reference/news?cursor=YXA9MjAyNi0wOS0yNFQxMiUzQTU1JTNBMDBaJmFzPWNiM2QwMGRlOTY1Yjg0YmMxNDA3M2I3NGI2ODZlMjlhYzgyZGYzOGJiMDYyMzc2MDRiMDQwOTIyNzZjMThlNDEmbGltaXQ9MyZvcmRlcj1hc2NlbmRpbmcmcHVibGlzaGVkX3V0Yy5ndD0yMDI2LTA5LTI0VDEyJTNBMzAlM0ExNVo",
+  "status_code": 200,
+  "body": {
+    "results": [
+      {
+        "id": "f1c9087a380e9571ac582c40a32d45208d42d08c069a46976ff44090f92f7809",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "Solera访问比亚迪全球总部",
+        "author": "Globe Newswire",
+        "published_utc": "2026-09-24T12:55:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3368320/0/zh-hans/solera%E8%AE%BF%E9%97%AE%E6%AF%94%E4%BA%9A%E8%BF%AA%E5%85%A8%E7%90%83%E6%80%BB%E9%83%A8.html",
+        "tickers": [
+          "BYDDY"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/205a1faf-bf28-45c8-993c-15f4e0115ae0",
+        "description": "Solera management visited BYD's global headquarters to discuss collaboration opportunities in supporting Chinese new energy vehicle companies' international expansion. The three parties—Solera, BYD, and China Intelligent Transportation Association—explored overseas service ecosystem development, including vehicle lifecycle management, after-sales service systems, repair capabilities, and international market compliance. Both sides emphasized the importance of building comprehensive global service networks and technical talent development to support Chinese EV brands' sustainable growth in overseas markets.",
+        "keywords": [
+          "new energy vehicles",
+          "international expansion",
+          "service ecosystem",
+          "vehicle lifecycle management",
+          "after-sales service",
+          "overseas markets",
+          "technical talent development",
+          "global partnership"
+        ],
+        "insights": [
+          {
+            "ticker": "BYDDY",
+            "sentiment": "positive",
+            "sentiment_reasoning": "BYD is actively building international service ecosystems and receiving support from global partners like Solera to strengthen its overseas operations. The company's engagement in strategic discussions about global expansion and service network development reflects confidence in its international growth trajectory."
+          }
+        ]
+      },
+      {
+        "id": "6896bbef8ad482c7b07005d5563c1d7944318b10dd65bc723d57d8044b74db0a",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "Quantum X Labs Files U.S. Patent Application for Quantum Authentication Security Technology",
+        "author": "Na",
+        "published_utc": "2026-09-24T12:58:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3368324/0/en/quantum-x-labs-files-u-s-patent-application-for-quantum-authentication-security-technology.html",
+        "tickers": [
+          "QXL"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/a0abc50a-ff3e-420e-9e21-807bbc6417cd",
+        "description": "Quantum X Labs announced that its QuantumQ Security division has submitted a U.S. patent application for a quantum circuit watermarking technology designed to protect proprietary quantum algorithms and intellectual property from unauthorized copying and redistribution. The technology uses Weyl coordinate decomposition to embed ownership information while minimizing computational overhead and fidelity degradation in quantum systems.",
+        "keywords": [
+          "quantum computing",
+          "quantum security",
+          "patent application",
+          "watermarking",
+          "intellectual property protection",
+          "quantum circuits",
+          "NISQ systems",
+          "cloud-based quantum computing"
+        ],
+        "insights": [
+          {
+            "ticker": "QXL",
+            "sentiment": "positive",
+            "sentiment_reasoning": "The company is advancing its quantum security capabilities through patent submission, expanding into defense and security markets with the appointment of a high-profile former Mossad chief, and developing innovative solutions to address emerging challenges in quantum computing commercialization. These developments demonstrate technological progress and strategic growth initiatives."
+          }
+        ]
+      },
+      {
+        "id": "e3b9cebe459c88dd00353475a1a18176cd4e1445c14af51447321058dae8f07c",
+        "publisher": {
+          "name": "The Motley Fool",
+          "homepage_url": "https://www.fool.com/",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/themotleyfool.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/themotleyfool.ico"
+        },
+        "title": "BigBear.ai vs. Nebius Group: Which Specialized AI Stock Is a Better Buy in 2026?",
+        "author": "Sara Appino",
+        "published_utc": "2026-09-24T13:01:14Z",
+        "article_url": "https://www.fool.com/coverage/better-buy/2026/09/24/bigbear-ai-vs-nebius-group-which-specialized-ai-stock-is-a-better-buy-in-2026/?source=iedfolrf0000001",
+        "tickers": [
+          "BBAI",
+          "BBAI.WS",
+          "NBIS",
+          "MSFT",
+          "AMZN"
+        ],
+        "image_url": "https://g.foolcdn.com/image/?url=https%3A%2F%2Fcdn.content.foolcdn.com%2Fimages%2F1umn9qeh%2Fproduction%2F8cd6be858db5e4ce4620efa120c8f078af15d22a-1200x800.png%3Fw%3D800%26q%3D75%26fit%3Dmax%26auto%3Dformat&w=1200&op=resize",
+        "description": "The article compares two AI-focused companies: BigBear.ai, which specializes in government-focused decision-intelligence software, and Nebius Group, which provides full-stack AI cloud infrastructure. While BigBear.ai has sticky government contracts and a defensible niche, Nebius Group demonstrates superior growth (350.9% revenue increase), positive net income, and operates in a larger global market. The author recommends Nebius for long-term investors due to its significantly larger addressable market and extraordinary growth trajectory, despite higher valuation multiples.",
+        "keywords": [
+          "artificial intelligence",
+          "cloud infrastructure",
+          "government contracts",
+          "AI training",
+          "revenue growth",
+          "valuation comparison",
+          "GPU clusters",
+          "data centers"
+        ],
+        "insights": [
+          {
+            "ticker": "BBAI",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Company has defensible government contracts and growing backlog, but faces revenue decline (-19.3% YoY), significant net losses ($293.9M), negative free cash flow, and limited growth ceiling due to focused government market niche. Positive sticky contracts offset by financial challenges and lawsuit risks."
+          },
+          {
+            "ticker": "BBAI.WS",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Company has defensible government contracts and growing backlog, but faces revenue decline (-19.3% YoY), significant net losses ($293.9M), negative free cash flow, and limited growth ceiling due to focused government market niche. Positive sticky contracts offset by financial challenges and lawsuit risks."
+          },
+          {
+            "ticker": "NBIS",
+            "sentiment": "positive",
+            "sentiment_reasoning": "Demonstrates exceptional revenue growth (350.9% YoY), positive net income ($101.7M), strong net margin (19.2%), and operates in massive global AI infrastructure market with high customer demand. Nvidia's significant stake and rapid GPU cluster provisioning indicate strong market position, though high valuation (P/S 45.8x) and capital intensity present risks."
+          },
+          {
+            "ticker": "MSFT",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a major competitor to Nebius Group in the capital-intensive AI infrastructure space. No specific performance data provided; neutral mention in competitive context."
+          },
+          {
+            "ticker": "AMZN",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a major hyperscaler competitor to Nebius Group. No specific performance data provided; neutral mention in competitive context."
+          }
+        ]
+      }
+    ],
+    "status": "OK",
+    "request_id": "f621380cd0b7619e196d53bc9e9721e6",
+    "count": 3,
+    "next_url": "https://api.massive.com/v2/reference/news?cursor=YXA9MjAyNi0wOS0yNFQxMyUzQTAxJTNBMTRaJmFzPWUzYjljZWJlNDU5Yzg4ZGQwMDM1MzQ3NWExYTE4MTc2Y2Q0ZTE0NDVjMTRhZjUxNDQ3MzIxMDU4ZGFlOGYwN2MmbGltaXQ9MyZvcmRlcj1hc2NlbmRpbmcmcHVibGlzaGVkX3V0Yy5ndD0yMDI2LTA5LTI0VDEyJTNBMzAlM0ExNVo"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "ticker": "XLB",
+  "series_id": "S000006414",
+  "series_name": "State Street(R) Materials Select Sector SPDR(R) ETF",
+  "class_id": "C000017600",
+  "accession": "0001410368-26-089261",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "rep_pd_end": "2026-09-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089261/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "complete": false,
+  "trimmed": "every <invstOrSec> whose assetCat is not EC is removed; all else as served",
+  "holdings_total": 31,
+  "equity_lines": 26,
+  "non_equity_removed": 5,
+  "equity_pct_val_sum": "99.837786585047",
+  "equity_lines_without_cusip": 5,
+  "bytes_original": 34488,
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

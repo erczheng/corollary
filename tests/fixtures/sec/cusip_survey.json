@@ -1,0 +1,6168 @@
+{
+  "recorded_at": "2026-09-28T20:17:45+00:00",
+  "note": "every assetCat=EC CUSIP across the eleven sector funds, looked up one by one at GET /v2/assets/{cusip}",
+  "rows": [
+    {
+      "cusip": "001055102",
+      "nport_name": "Aflac Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AFL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00130H105",
+      "nport_name": "AES Corp/The",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "AES",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00206R102",
+      "nport_name": "AT&T Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "T",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "002824100",
+      "nport_name": "Abbott Laboratories",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ABT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00287Y109",
+      "nport_name": "AbbVie Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ABBV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00724F101",
+      "nport_name": "Adobe Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ADBE",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "007903107",
+      "nport_name": "Advanced Micro Devices Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "AMD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00846U101",
+      "nport_name": "Agilent Technologies Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "A",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "009066101",
+      "nport_name": "Airbnb Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "ABNB",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "009158106",
+      "nport_name": "Air Products and Chemicals Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "APD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "00971T101",
+      "nport_name": "Akamai Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "AKAM",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "012653101",
+      "nport_name": "Albemarle Corp",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "ALB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "015271109",
+      "nport_name": "Alexandria Real Estate Equities Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "ARE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "016255101",
+      "nport_name": "Align Technology Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ALGN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "018802108",
+      "nport_name": "Alliant Energy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "LNT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "020002101",
+      "nport_name": "Allstate Corp/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "ALL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "02079K107",
+      "nport_name": "Alphabet Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "GOOG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "02079K305",
+      "nport_name": "Alphabet Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "GOOGL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "02209S103",
+      "nport_name": "Altria Group Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "MO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "023135106",
+      "nport_name": "Amazon.com Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "AMZN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "023608102",
+      "nport_name": "Ameren Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "AEE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "025537101",
+      "nport_name": "American Electric Power Co Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "AEP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "025816109",
+      "nport_name": "American Express Co",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AXP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "026874784",
+      "nport_name": "American International Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AIG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03027X100",
+      "nport_name": "American Tower Corp",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "AMT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "030420103",
+      "nport_name": "American Water Works Co Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "AWK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03073E105",
+      "nport_name": "Cencora Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "COR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03076C106",
+      "nport_name": "Ameriprise Financial Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AMP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "031100100",
+      "nport_name": "AMETEK Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "AME",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "031162100",
+      "nport_name": "Amgen Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "AMGN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "032095101",
+      "nport_name": "Amphenol Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "APH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "032654105",
+      "nport_name": "Analog Devices Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ADI",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "036752103",
+      "nport_name": "Elevance Health Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ELV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03743Q108",
+      "nport_name": "APA Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "APA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03769M106",
+      "nport_name": "Apollo Global Management Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "APO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "037833100",
+      "nport_name": "Apple Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "AAPL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "038222105",
+      "nport_name": "Applied Materials Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "AMAT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03831W108",
+      "nport_name": "AppLovin Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "APP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "039483102",
+      "nport_name": "Archer-Daniels-Midland Co",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "ADM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "03990B101",
+      "nport_name": "Ares Management Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "ARES",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "040413205",
+      "nport_name": "Arista Networks Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ANET",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "04621X108",
+      "nport_name": "Assurant Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AIZ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "049560105",
+      "nport_name": "Atmos Energy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "ATO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "052769106",
+      "nport_name": "Autodesk Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ADSK",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "053015103",
+      "nport_name": "Automatic Data Processing Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "ADP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "053332102",
+      "nport_name": "AutoZone Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "AZO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "053484101",
+      "nport_name": "AvalonBay Communities Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "AVB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "inactive",
+      "tradable": false
+    },
+    {
+      "cusip": "053611109",
+      "nport_name": "Avery Dennison Corp",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "AVY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "05464C101",
+      "nport_name": "Axon Enterprise Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "AXON",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "05722G100",
+      "nport_name": "Baker Hughes Co",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "BKR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "058498106",
+      "nport_name": "Ball Corp",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "BALL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "060505104",
+      "nport_name": "Bank of America Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BAC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "064058100",
+      "nport_name": "Bank of New York Mellon Corp/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BNY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "071813109",
+      "nport_name": "Baxter International Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "BAX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "075887109",
+      "nport_name": "Becton Dickinson & Co",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "BDX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "084423102",
+      "nport_name": "W R Berkley Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "WRB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "084670702",
+      "nport_name": "Berkshire Hathaway Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BRK.B",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "086516101",
+      "nport_name": "Best Buy Co Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "BBY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "09062X103",
+      "nport_name": "Biogen Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "BIIB",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "09073M104",
+      "nport_name": "Bio-Techne Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "TECH",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "09260D107",
+      "nport_name": "Blackstone Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "09290D101",
+      "nport_name": "Blackrock Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BLK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "097023105",
+      "nport_name": "Boeing Co/The",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "BA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "09857L108",
+      "nport_name": "Booking Holdings Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "BKNG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "101121101",
+      "nport_name": "BXP Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "BXP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "101137107",
+      "nport_name": "Boston Scientific Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "BSX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "110122108",
+      "nport_name": "Bristol-Myers Squibb Co",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "BMY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "11133T103",
+      "nport_name": "Broadridge Financial Solutions Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "BR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "11135F101",
+      "nport_name": "Broadcom Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "AVGO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "115236101",
+      "nport_name": "Brown & Brown Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BRO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "115637209",
+      "nport_name": "Brown-Forman Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "BF.B",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12008R107",
+      "nport_name": "Builders FirstSource Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "BLDR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12503M108",
+      "nport_name": "Cboe Global Markets Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "CBOE",
+      "class": "us_equity",
+      "exchange": "BATS",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12504L109",
+      "nport_name": "CBRE Group Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "CBRE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12514G108",
+      "nport_name": "CDW Corp/DE",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CDW",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "125269100",
+      "nport_name": "CF Industries Holdings Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "CF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12541W209",
+      "nport_name": "CH Robinson Worldwide Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CHRW",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "125523100",
+      "nport_name": "Cigna Group/The",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "CI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "12572Q105",
+      "nport_name": "CME Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "CME",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "125896100",
+      "nport_name": "CMS Energy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "CMS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "126408103",
+      "nport_name": "CSX Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CSX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "126650100",
+      "nport_name": "CVS Health Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "CVS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "127387108",
+      "nport_name": "Cadence Design Systems Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CDNS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "133131102",
+      "nport_name": "Camden Property Trust",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "CPT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "14040H105",
+      "nport_name": "Capital One Financial Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "COF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "14149Y108",
+      "nport_name": "Cardinal Health Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "CAH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "14448C104",
+      "nport_name": "Carrier Global Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CARR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "146869102",
+      "nport_name": "Carvana Co",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "CVNA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "147528103",
+      "nport_name": "Casey's General Stores Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "CASY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "149123101",
+      "nport_name": "Caterpillar Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CAT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "15135B101",
+      "nport_name": "Centene Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "CNC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "15189T107",
+      "nport_name": "CenterPoint Energy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "CNP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "159864107",
+      "nport_name": "Charles River Laboratories International Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "CRL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "16119P108",
+      "nport_name": "Charter Communications Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "CHTR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "165167735",
+      "nport_name": "Expand Energy Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "EXE",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "166764100",
+      "nport_name": "Chevron Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "CVX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "169656105",
+      "nport_name": "Chipotle Mexican Grill Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "CMG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "171340102",
+      "nport_name": "Church & Dwight Co Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "CHD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "171779309",
+      "nport_name": "Ciena Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CIEN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "172062101",
+      "nport_name": "Cincinnati Financial Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "CINF",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "17275R102",
+      "nport_name": "Cisco Systems Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CSCO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "172908105",
+      "nport_name": "Cintas Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CTAS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "172967424",
+      "nport_name": "Citigroup Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "C",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "174610105",
+      "nport_name": "Citizens Financial Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "CFG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "189054109",
+      "nport_name": "Clorox Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "CLX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "191216100",
+      "nport_name": "Coca-Cola Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "192446102",
+      "nport_name": "Cognizant Technology Solutions Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CTSH",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "19247G107",
+      "nport_name": "Coherent Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "COHR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "19260Q107",
+      "nport_name": "Coinbase Global Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "COIN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "194162103",
+      "nport_name": "Colgate-Palmolive Co",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "CL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "199908104",
+      "nport_name": "Comfort Systems USA Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "FIX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "20030N101",
+      "nport_name": "Comcast Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "CMCSA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "20825C104",
+      "nport_name": "ConocoPhillips",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "COP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "209115104",
+      "nport_name": "Consolidated Edison Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "ED",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "21036P108",
+      "nport_name": "Constellation Brands Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "STZ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "21037T109",
+      "nport_name": "Constellation Energy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "CEG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "216648501",
+      "nport_name": "Cooper Cos Inc/The",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "COO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "217204106",
+      "nport_name": "Copart Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CPRT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "219350105",
+      "nport_name": "Corning Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "GLW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "219948106",
+      "nport_name": "Corpay Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "CPAY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "22052L104",
+      "nport_name": "Corteva Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "CTVA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "22160K105",
+      "nport_name": "Costco Wholesale Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "COST",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "22160N109",
+      "nport_name": "CoStar Group Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "CSGP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "22788C105",
+      "nport_name": "Crowdstrike Holdings Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CRWD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "22822V101",
+      "nport_name": "Crown Castle Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "CCI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "231021106",
+      "nport_name": "Cummins Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "CMI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "23331A109",
+      "nport_name": "DR Horton Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "DHI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "233331107",
+      "nport_name": "DTE Energy Co",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "DTE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "235851102",
+      "nport_name": "Danaher Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "DHR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "237194105",
+      "nport_name": "Darden Restaurants Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "DRI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "23804L103",
+      "nport_name": "Datadog Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "DDOG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "23918K108",
+      "nport_name": "DaVita Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "DVA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "243537107",
+      "nport_name": "Deckers Outdoor Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "DECK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "244199105",
+      "nport_name": "Deere & Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "DE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "24703L202",
+      "nport_name": "Dell Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "DELL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "247361702",
+      "nport_name": "Delta Air Lines Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "DAL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "25179M103",
+      "nport_name": "Devon Energy Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "DVN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "252131107",
+      "nport_name": "Dexcom Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "DXCM",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "25278X109",
+      "nport_name": "Diamondback Energy Inc",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "FANG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "253868103",
+      "nport_name": "Digital Realty Trust Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "DLR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "254687106",
+      "nport_name": "Walt Disney Co/The",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "DIS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "256677105",
+      "nport_name": "Dollar General Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "DG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "256746108",
+      "nport_name": "Dollar Tree Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "DLTR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "25746U109",
+      "nport_name": "Dominion Energy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "D",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "25754A201",
+      "nport_name": "Domino's Pizza Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "DPZ",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "25809K105",
+      "nport_name": "DoorDash Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "DASH",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "260003108",
+      "nport_name": "Dover Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "DOV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "260557103",
+      "nport_name": "Dow Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "DOW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "26441C204",
+      "nport_name": "Duke Energy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "DUK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "26614N201",
+      "nport_name": "DuPont de Nemours Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "DD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "26875P101",
+      "nport_name": "EOG Resources Inc",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "EOG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "26884L109",
+      "nport_name": "EQT Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "EQT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "278642103",
+      "nport_name": "eBay Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "EBAY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "278768106",
+      "nport_name": "EchoStar Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "ECHO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "278865100",
+      "nport_name": "Ecolab Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "ECL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "281020107",
+      "nport_name": "Edison International",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "EIX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "28176E108",
+      "nport_name": "Edwards Lifesciences Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "EW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "285512109",
+      "nport_name": "Electronic Arts Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "EA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "inactive",
+      "tradable": false
+    },
+    {
+      "cusip": "29084Q100",
+      "nport_name": "EMCOR Group Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "EME",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "291011104",
+      "nport_name": "Emerson Electric Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "EMR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "29364G103",
+      "nport_name": "Entergy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "ETR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "294429105",
+      "nport_name": "Equifax Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "EFX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "29444U700",
+      "nport_name": "Equinix Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "EQIX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "29476L107",
+      "nport_name": "Equity Residential",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "VMRK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "29530P102",
+      "nport_name": "Erie Indemnity Co",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "ERIE",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "297178105",
+      "nport_name": "Essex Property Trust Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "ESS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30034W106",
+      "nport_name": "Evergy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "EVRG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30040W108",
+      "nport_name": "Eversource Energy",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "ES",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30161N101",
+      "nport_name": "Exelon Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "EXC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30212P303",
+      "nport_name": "Expedia Group Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "EXPE",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "302130109",
+      "nport_name": "Expeditors International of Washington Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "EXPD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30225T102",
+      "nport_name": "Extra Space Storage Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "EXR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "30231G102",
+      "nport_name": "Exxon Mobil Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "XOM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "inactive",
+      "tradable": false
+    },
+    {
+      "cusip": "30303M102",
+      "nport_name": "Meta Platforms Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "META",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "303075105",
+      "nport_name": "FactSet Research Systems Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "FDS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "303250104",
+      "nport_name": "Fair Isaac Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "FICO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "311900104",
+      "nport_name": "Fastenal Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "FAST",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "313745101",
+      "nport_name": "Federal Realty Investment Trust",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "FRT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "31428X106",
+      "nport_name": "FedEx Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "FDX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "314352105",
+      "nport_name": "Fedex Freight Holding Co Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "FDXF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "315616102",
+      "nport_name": "F5 Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "FFIV",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "31620M106",
+      "nport_name": "Fidelity National Information Services Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "FIS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "316773100",
+      "nport_name": "Fifth Third Bancorp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "FITB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "336433107",
+      "nport_name": "First Solar Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "FSLR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "337738108",
+      "nport_name": "Fiserv Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "FISV",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "337932107",
+      "nport_name": "FirstEnergy Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "FE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "345370860",
+      "nport_name": "Ford Motor Co",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "F",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "34959E109",
+      "nport_name": "Fortinet Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "FTNT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "34959J108",
+      "nport_name": "Fortive Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "FTV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "35137L105",
+      "nport_name": "Fox Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "FOXA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "35137L204",
+      "nport_name": "Fox Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "FOX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "354613101",
+      "nport_name": "Franklin Resources Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "BEN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "35671D857",
+      "nport_name": "Freeport-McMoRan Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "FCX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "36266G107",
+      "nport_name": "GE HealthCare Technologies Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "GEHC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "363576109",
+      "nport_name": "Arthur J Gallagher & Co",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "AJG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "366651107",
+      "nport_name": "Gartner Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "IT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "36828A101",
+      "nport_name": "GE Vernova Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "GEV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "368736104",
+      "nport_name": "Generac Holdings Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "GNRC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "369550108",
+      "nport_name": "General Dynamics Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "GD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "369604301",
+      "nport_name": "General Electric Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "GE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "370334104",
+      "nport_name": "General Mills Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "GIS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "37045V100",
+      "nport_name": "General Motors Co",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "GM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "372460105",
+      "nport_name": "Genuine Parts Co",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "GPC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "375558103",
+      "nport_name": "Gilead Sciences Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "GILD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "37940X102",
+      "nport_name": "Global Payments Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "GPN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "37959E102",
+      "nport_name": "Globe Life Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "GL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "380237107",
+      "nport_name": "GoDaddy Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "GDDY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "38141G104",
+      "nport_name": "Goldman Sachs Group Inc/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "GS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "384802104",
+      "nport_name": "WW Grainger Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "GWW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "40412C101",
+      "nport_name": "HCA Healthcare Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "HCA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "40434L105",
+      "nport_name": "HP Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "HPQ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "406216101",
+      "nport_name": "Halliburton Co",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "HAL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "416515104",
+      "nport_name": "Hartford Insurance Group Inc/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "HIG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "418056107",
+      "nport_name": "Hasbro Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "HAS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "42250P103",
+      "nport_name": "Healthpeak Properties Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "DOC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "426281101",
+      "nport_name": "Jack Henry & Associates Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "JKHY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "427866108",
+      "nport_name": "Hershey Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "HSY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "42824C109",
+      "nport_name": "Hewlett Packard Enterprise Co",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "HPE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "43300A203",
+      "nport_name": "Hilton Worldwide Holdings Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "HLT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "437076102",
+      "nport_name": "Home Depot Inc/The",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "HD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "43849R105",
+      "nport_name": "Honeywell Aerospace Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "HONA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "438516205",
+      "nport_name": "Honeywell International Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "HON",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "440452100",
+      "nport_name": "Hormel Foods Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "HRL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "44107P104",
+      "nport_name": "Host Hotels & Resorts Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "HST",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "443201108",
+      "nport_name": "Howmet Aerospace Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "HWM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "443510607",
+      "nport_name": "Hubbell Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "HUBB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "444859102",
+      "nport_name": "Humana Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "HUM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "445658107",
+      "nport_name": "JB Hunt Transport Services Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "JBHT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "446150104",
+      "nport_name": "Huntington Bancshares Inc/OH",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "HBAN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "446413106",
+      "nport_name": "Huntington Ingalls Industries Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "HII",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45167R104",
+      "nport_name": "IDEX Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "IEX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45168D104",
+      "nport_name": "IDEXX Laboratories Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "IDXX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "452308109",
+      "nport_name": "Illinois Tool Works Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "ITW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45337C102",
+      "nport_name": "Incyte Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "INCY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45687V106",
+      "nport_name": "Ingersoll Rand Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "IR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45784P101",
+      "nport_name": "Insulet Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "PODD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "458140100",
+      "nport_name": "Intel Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "INTC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45841N107",
+      "nport_name": "Interactive Brokers Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "IBKR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "45866F104",
+      "nport_name": "Intercontinental Exchange Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "ICE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "459200101",
+      "nport_name": "International Business Machines Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "IBM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "459506101",
+      "nport_name": "International Flavors & Fragrances Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "IFF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "460146103",
+      "nport_name": "International Paper Co",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "IP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "461202103",
+      "nport_name": "Intuit Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "INTU",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46120E602",
+      "nport_name": "Intuitive Surgical Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ISRG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46187W107",
+      "nport_name": "Invitation Homes Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "INVH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46266C105",
+      "nport_name": "IQVIA Holdings Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "IQV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46284V101",
+      "nport_name": "Iron Mountain Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "IRM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46625H100",
+      "nport_name": "JPMorgan Chase & Co",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "JPM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "466313103",
+      "nport_name": "Jabil Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "JBL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "46982L108",
+      "nport_name": "Jacobs Solutions Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "J",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "478160104",
+      "nport_name": "Johnson & Johnson",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "JNJ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "482480100",
+      "nport_name": "KLA Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "KLAC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "48251W104",
+      "nport_name": "KKR & Co Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "KKR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "49177J102",
+      "nport_name": "Kenvue Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KVUE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "49271V100",
+      "nport_name": "Keurig Dr Pepper Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KDP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "493267108",
+      "nport_name": "KeyCorp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "KEY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "49338L103",
+      "nport_name": "Keysight Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "KEYS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "494368103",
+      "nport_name": "Kimberly-Clark Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KMB",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "49446R109",
+      "nport_name": "Kimco Realty Corp",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "KIM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "49456B101",
+      "nport_name": "Kinder Morgan Inc",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "KMI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "500754106",
+      "nport_name": "Kraft Heinz Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KHC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "501044101",
+      "nport_name": "Kroger Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "KR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "502431109",
+      "nport_name": "L3Harris Technologies Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "LHX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "504922105",
+      "nport_name": "Labcorp Holdings Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "LH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "512807306",
+      "nport_name": "Lam Research Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "LRCX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "517834107",
+      "nport_name": "Las Vegas Sands Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "LVS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "518439104",
+      "nport_name": "Estee Lauder Cos Inc/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "EL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "525327102",
+      "nport_name": "Leidos Holdings Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "LDOS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "526057104",
+      "nport_name": "Lennar Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "LEN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "526107107",
+      "nport_name": "Lennox International Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "LII",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "532457108",
+      "nport_name": "Eli Lilly & Co",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "LLY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "538034109",
+      "nport_name": "Live Nation Entertainment Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "LYV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "539830109",
+      "nport_name": "Lockheed Martin Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "LMT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "540424108",
+      "nport_name": "Loews Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "L",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "548661107",
+      "nport_name": "Lowe's Cos Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "LOW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "550021109",
+      "nport_name": "Lululemon Athletica Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "LULU",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "55024U109",
+      "nport_name": "Lumentum Holdings Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "LITE",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "55261F104",
+      "nport_name": "M&T Bank Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MTB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "552953101",
+      "nport_name": "MGM Resorts International",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "MGM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "55354G100",
+      "nport_name": "MSCI Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MSCI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "56585A102",
+      "nport_name": "Marathon Petroleum Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "MPC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "571748102",
+      "nport_name": "Marsh & McLennan Cos Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MRSH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "571903202",
+      "nport_name": "Marriott International Inc/MD",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "MAR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "573284106",
+      "nport_name": "Martin Marietta Materials Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "MLM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "573874104",
+      "nport_name": "Marvell Technology Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MRVL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "574599106",
+      "nport_name": "Masco Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "MAS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "57636Q104",
+      "nport_name": "Mastercard Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "579780206",
+      "nport_name": "McCormick & Co Inc/MD",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "MKC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "580135101",
+      "nport_name": "McDonald's Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "MCD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "58155Q103",
+      "nport_name": "McKesson Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "MCK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "58933Y105",
+      "nport_name": "Merck & Co Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "MRK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "59156R108",
+      "nport_name": "MetLife Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MET",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "592688105",
+      "nport_name": "Mettler-Toledo International Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "MTD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "594918104",
+      "nport_name": "Microsoft Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MSFT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "595017104",
+      "nport_name": "Microchip Technology Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MCHP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "595112103",
+      "nport_name": "Micron Technology Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MU",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "59522J103",
+      "nport_name": "Mid-America Apartment Communities Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "MAA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "60770K107",
+      "nport_name": "Moderna Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "MRNA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "60871R209",
+      "nport_name": "Molson Coors Beverage Co",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "TAP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "609207105",
+      "nport_name": "Mondelez International Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "MDLZ",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "609839105",
+      "nport_name": "Monolithic Power Systems Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MPWR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "61174X109",
+      "nport_name": "Monster Beverage Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "MNST",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "615369105",
+      "nport_name": "Moody's Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MCO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "617446448",
+      "nport_name": "Morgan Stanley",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "MS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "61945C103",
+      "nport_name": "Mosaic Co/The",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "MOS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "620076307",
+      "nport_name": "Motorola Solutions Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "MSI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "629377508",
+      "nport_name": "NRG Energy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "NRG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "62944T105",
+      "nport_name": "NVR Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "NVR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "631103108",
+      "nport_name": "Nasdaq Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "NDAQ",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "64110D104",
+      "nport_name": "NetApp Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "NTAP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "64110L106",
+      "nport_name": "Netflix Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "NFLX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "651639106",
+      "nport_name": "Newmont Corp",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "NEM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "65249B109",
+      "nport_name": "News Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "NWSA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "65249B208",
+      "nport_name": "News Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "NWS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "65339F101",
+      "nport_name": "NextEra Energy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "NEE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "654106103",
+      "nport_name": "NIKE Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "NKE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "65473P105",
+      "nport_name": "NiSource Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "NI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "655663102",
+      "nport_name": "Nordson Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "NDSN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "655844108",
+      "nport_name": "Norfolk Southern Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "NSC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "665859104",
+      "nport_name": "Northern Trust Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "NTRS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "666807102",
+      "nport_name": "Northrop Grumman Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "NOC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "668771108",
+      "nport_name": "Gen Digital Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "GEN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "670346105",
+      "nport_name": "Nucor Corp",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "NUE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "67066G104",
+      "nport_name": "NVIDIA Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "NVDA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "67103H107",
+      "nport_name": "O'Reilly Automotive Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "ORLY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "674599105",
+      "nport_name": "Occidental Petroleum Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "OXY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "679580100",
+      "nport_name": "Old Dominion Freight Line Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "ODFL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "681919106",
+      "nport_name": "Omnicom Group Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "OMC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "682189105",
+      "nport_name": "ON Semiconductor Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ON",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "682680103",
+      "nport_name": "ONEOK Inc",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "OKE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "inactive",
+      "tradable": false
+    },
+    {
+      "cusip": "68389X105",
+      "nport_name": "Oracle Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ORCL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "68902V107",
+      "nport_name": "Otis Worldwide Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "OTIS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "69331C108",
+      "nport_name": "PG&E Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "PCG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "693475105",
+      "nport_name": "PNC Financial Services Group Inc/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "PNC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "693506107",
+      "nport_name": "PPG Industries Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "PPG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "69351T106",
+      "nport_name": "PPL Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "PPL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "69370C100",
+      "nport_name": "PTC Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "PTC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "693718108",
+      "nport_name": "PACCAR Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "PCAR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "695156109",
+      "nport_name": "Packaging Corp of America",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "PKG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "69608A108",
+      "nport_name": "Palantir Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "PLTR",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "697435105",
+      "nport_name": "Palo Alto Networks Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "PANW",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "69932A204",
+      "nport_name": "Paramount Skydance Corp",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "PSKY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "701094104",
+      "nport_name": "Parker-Hannifin Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "PH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "704326107",
+      "nport_name": "Paychex Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "PAYX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "70450Y103",
+      "nport_name": "PayPal Holdings Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "PYPL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "713448108",
+      "nport_name": "PepsiCo Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "PEP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "714046109",
+      "nport_name": "Revvity Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "RVTY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "717081103",
+      "nport_name": "Pfizer Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "PFE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "718172109",
+      "nport_name": "Philip Morris International Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "PM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "718546104",
+      "nport_name": "Phillips 66",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "PSX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "723484101",
+      "nport_name": "Pinnacle West Capital Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "PNW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74144T108",
+      "nport_name": "T Rowe Price Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "TROW",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74251V102",
+      "nport_name": "Principal Financial Group Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "PFG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "742718109",
+      "nport_name": "Procter & Gamble Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "PG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "743315103",
+      "nport_name": "Progressive Corp/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "PGR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74340W103",
+      "nport_name": "Prologis Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "PLD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "744320102",
+      "nport_name": "Prudential Financial Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "PRU",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "744573106",
+      "nport_name": "Public Service Enterprise Group Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "PEG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74460D109",
+      "nport_name": "Public Storage",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "PSA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "745867101",
+      "nport_name": "PulteGroup Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "PHM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74743L100",
+      "nport_name": "Qnity Electronics Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "Q",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "747525103",
+      "nport_name": "QUALCOMM Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "QCOM",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74762E102",
+      "nport_name": "Quanta Services Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "PWR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "74834L100",
+      "nport_name": "Quest Diagnostics Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "DGX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "751212101",
+      "nport_name": "Ralph Lauren Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "RL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "754730109",
+      "nport_name": "Raymond James Financial Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "RJF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "75513E101",
+      "nport_name": "RTX Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "RTX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "756109104",
+      "nport_name": "Realty Income Corp",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "O",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "758849103",
+      "nport_name": "Regency Centers Corp",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "REG",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "75886F107",
+      "nport_name": "Regeneron Pharmaceuticals Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "REGN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "7591EP100",
+      "nport_name": "Regions Financial Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "RF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "760759100",
+      "nport_name": "Republic Services Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "RSG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "761152107",
+      "nport_name": "ResMed Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "RMD",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "770700102",
+      "nport_name": "Robinhood Markets Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "HOOD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "773903109",
+      "nport_name": "Rockwell Automation Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "ROK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "775711104",
+      "nport_name": "Rollins Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "ROL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "776696106",
+      "nport_name": "Roper Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ROP",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "778296103",
+      "nport_name": "Ross Stores Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "ROST",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "78409V104",
+      "nport_name": "S&P Global Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "SPGI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "78410G104",
+      "nport_name": "SBA Communications Corp",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "SBAC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "79466L302",
+      "nport_name": "Salesforce Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "CRM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "80004C200",
+      "nport_name": "Sandisk Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "SNDK",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "806407102",
+      "nport_name": "Henry Schein Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "HSIC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "806857108",
+      "nport_name": "SLB Ltd",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "SLB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "808513105",
+      "nport_name": "Charles Schwab Corp/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "SCHW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "816851109",
+      "nport_name": "Sempra",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "SRE",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "81762P102",
+      "nport_name": "ServiceNow Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "NOW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "824348106",
+      "nport_name": "Sherwin-Williams Co/The",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "SHW",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "828806109",
+      "nport_name": "Simon Property Group Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "SPG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "83088M102",
+      "nport_name": "Skyworks Solutions Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "SWKS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "831865209",
+      "nport_name": "A O Smith Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "AOS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "832696405",
+      "nport_name": "J M Smucker Co/The",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "SJM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "833034101",
+      "nport_name": "Snap-on Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "SNA",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "83444M101",
+      "nport_name": "Solventum Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "SOLV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "842587107",
+      "nport_name": "Southern Co/The",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "SO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "844741108",
+      "nport_name": "Southwest Airlines Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "LUV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "852234103",
+      "nport_name": "Block Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "XYZ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "854502101",
+      "nport_name": "Stanley Black & Decker Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "SWK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "855244109",
+      "nport_name": "Starbucks Corp",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "SBUX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "857477103",
+      "nport_name": "State Street Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "STT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "858119100",
+      "nport_name": "Steel Dynamics Inc",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "STLD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "863667101",
+      "nport_name": "Stryker Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "SYK",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "86800U302",
+      "nport_name": "Super Micro Computer Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "SMCI",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "871607107",
+      "nport_name": "Synopsys Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "SNPS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "87165B103",
+      "nport_name": "Synchrony Financial",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "SYF",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "871829107",
+      "nport_name": "Sysco Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "SYY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "872540109",
+      "nport_name": "TJX Cos Inc/The",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "TJX",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "87256C101",
+      "nport_name": "TKO Group Holdings Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "TKO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "872590104",
+      "nport_name": "T-Mobile US Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "TMUS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "874054109",
+      "nport_name": "Take-Two Interactive Software Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "TTWO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "876030107",
+      "nport_name": "Tapestry Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "TPR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "87612E106",
+      "nport_name": "Target Corp",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "TGT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "87612G101",
+      "nport_name": "Targa Resources Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "TRGP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "879360105",
+      "nport_name": "Teledyne Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "TDY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "880770102",
+      "nport_name": "Teradyne Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "TER",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "88160R101",
+      "nport_name": "Tesla Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "TSLA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "882508104",
+      "nport_name": "Texas Instruments Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "TXN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "88262P102",
+      "nport_name": "Texas Pacific Land Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "TPL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "883203101",
+      "nport_name": "Textron Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "TXT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "88339J105",
+      "nport_name": "Trade Desk Inc/The",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "TTD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "883556102",
+      "nport_name": "Thermo Fisher Scientific Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "TMO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "88579Y101",
+      "nport_name": "3M Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "MMM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "892356106",
+      "nport_name": "Tractor Supply Co",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "TSCO",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "893641100",
+      "nport_name": "TransDigm Group Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "TDG",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "89417E109",
+      "nport_name": "Travelers Cos Inc/The",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "TRV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "896239100",
+      "nport_name": "Trimble Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "TRMB",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "89832Q109",
+      "nport_name": "Truist Financial Corp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "TFC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "902252105",
+      "nport_name": "Tyler Technologies Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "TYL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "902494103",
+      "nport_name": "Tyson Foods Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "TSN",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "902653104",
+      "nport_name": "UDR Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "UDR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "902973304",
+      "nport_name": "US Bancorp",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "USB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "90353T100",
+      "nport_name": "Uber Technologies Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "UBER",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "90384S303",
+      "nport_name": "Ulta Beauty Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "ULTA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "907818108",
+      "nport_name": "Union Pacific Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "UNP",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "910047109",
+      "nport_name": "United Airlines Holdings Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "UAL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "911312106",
+      "nport_name": "United Parcel Service Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "UPS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "911363109",
+      "nport_name": "United Rentals Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "URI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "91324P102",
+      "nport_name": "UnitedHealth Group Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "UNH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "913903100",
+      "nport_name": "Universal Health Services Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "UHS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "91913Y100",
+      "nport_name": "Valero Energy Corp",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "VLO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "922475108",
+      "nport_name": "Veeva Systems Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "VEEV",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92276F100",
+      "nport_name": "Ventas Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "VTR",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92338C103",
+      "nport_name": "Veralto Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "VLTO",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92343E102",
+      "nport_name": "VeriSign Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "VRSN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92343V104",
+      "nport_name": "Verizon Communications Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "VZ",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92345Y106",
+      "nport_name": "Verisk Analytics Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "VRSK",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92532F100",
+      "nport_name": "Vertex Pharmaceuticals Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "VRTX",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92537N108",
+      "nport_name": "Vertiv Holdings Co",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "VRT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92556V106",
+      "nport_name": "Viatris Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "VTRS",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "925652109",
+      "nport_name": "VICI Properties Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "VICI",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92826C839",
+      "nport_name": "Visa Inc",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "V",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92840M102",
+      "nport_name": "Vistra Corp",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "VST",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "929160109",
+      "nport_name": "Vulcan Materials Co",
+      "funds": [
+        "XLB"
+      ],
+      "status_code": 200,
+      "symbol": "VMC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "92939U106",
+      "nport_name": "WEC Energy Group Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "WEC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "929740108",
+      "nport_name": "Westinghouse Air Brake Technologies Corp",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "WAB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "931142103",
+      "nport_name": "Walmart Inc",
+      "funds": [
+        "XLP"
+      ],
+      "status_code": 200,
+      "symbol": "WMT",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "934423104",
+      "nport_name": "Warner Bros Discovery Inc",
+      "funds": [
+        "XLC"
+      ],
+      "status_code": 200,
+      "symbol": "WBD",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "94106L109",
+      "nport_name": "Waste Management Inc",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "WM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "941848103",
+      "nport_name": "Waters Corp",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "WAT",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "949746101",
+      "nport_name": "Wells Fargo & Co",
+      "funds": [
+        "XLF"
+      ],
+      "status_code": 200,
+      "symbol": "WFC",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "95040Q104",
+      "nport_name": "Welltower Inc",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "WELL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "955306105",
+      "nport_name": "West Pharmaceutical Services Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "WST",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "958102105",
+      "nport_name": "Western Digital Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "WDC",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "962166104",
+      "nport_name": "Weyerhaeuser Co",
+      "funds": [
+        "XLRE"
+      ],
+      "status_code": 200,
+      "symbol": "WY",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "969457100",
+      "nport_name": "Williams Cos Inc/The",
+      "funds": [
+        "XLE"
+      ],
+      "status_code": 200,
+      "symbol": "WMB",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "969904101",
+      "nport_name": "Williams-Sonoma Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "WSM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "98138H101",
+      "nport_name": "Workday Inc",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "WDAY",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "983134107",
+      "nport_name": "Wynn Resorts Ltd",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "WYNN",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "98389B100",
+      "nport_name": "Xcel Energy Inc",
+      "funds": [
+        "XLU"
+      ],
+      "status_code": 200,
+      "symbol": "XEL",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "98419M100",
+      "nport_name": "Xylem Inc/NY",
+      "funds": [
+        "XLI"
+      ],
+      "status_code": 200,
+      "symbol": "XYL",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "988498101",
+      "nport_name": "Yum! Brands Inc",
+      "funds": [
+        "XLY"
+      ],
+      "status_code": 200,
+      "symbol": "YUM",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "989207105",
+      "nport_name": "Zebra Technologies Corp",
+      "funds": [
+        "XLK"
+      ],
+      "status_code": 200,
+      "symbol": "ZBRA",
+      "class": "us_equity",
+      "exchange": "NASDAQ",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "98956P102",
+      "nport_name": "Zimmer Biomet Holdings Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ZBH",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    },
+    {
+      "cusip": "98978V103",
+      "nport_name": "Zoetis Inc",
+      "funds": [
+        "XLV"
+      ],
+      "status_code": 200,
+      "symbol": "ZTS",
+      "class": "us_equity",
+      "exchange": "NYSE",
+      "status": "active",
+      "tradable": true
+    }
+  ]
+}

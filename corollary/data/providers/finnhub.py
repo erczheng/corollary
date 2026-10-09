@@ -95,18 +95,55 @@ At 26 symbols in the universe and one request per symbol per trading date, a
 cold start costs 26 requests once a day, inside a bucket that starts full at
 60. The caller's daily cache is what keeps it to once -- see
 ``api/routes/markets.py``.
+
+News (Phase 3, step 4)
+----------------------
+
+Two more reads, returning the vendor-neutral
+:class:`~corollary.data.news.article.NewsArticle`:
+:meth:`FinnhubProvider.company_news` (``/company-news``, the watch tier, feed
+``finnhub_company``) and :meth:`FinnhubProvider.market_news`
+(``/news?category=general``, the discovery tier, feed ``finnhub_market``).
+Measured against this project's key on 2026-09-24 and recorded under
+``tests/fixtures/finnhub/p4_*``:
+
+* **``from``/``to`` are UTC dates.** Every single-day NVDA response spanned
+  00:0x -> 23:5x UTC. A caller computing "today" in New York asks for the
+  previous UTC day for the four evening hours after 20:00 ET.
+* **The cap truncates the oldest rows.** Rows come back newest first; NVDA
+  over 2026-09-23 -> 24 returned 248 rows (123 + 125), where 2026-09-23 alone
+  holds 200. So a capped two-day window still carries all of today up to the
+  cap, and what it drops is the older day's tail.
+* **One article, one id, across symbols.** An article matched to NVDA and to
+  TSLA comes back under the same ``id`` and URL in both responses, so the
+  store's ``(vendor, vendor_id)`` key collides across watch symbols by
+  design -- the ingest must add the second symbol's tag, not skip the row.
+* **Market news ids are a different space** (~8.5 million against company
+  news's ~142 million), so they are namespaced with
+  :data:`MARKET_NEWS_ID_PREFIX` rather than trusted never to meet.
+* **``minId`` is exclusive** -- ``minId=N`` returned only ids above ``N`` --
+  and the general page is ordered by time, not id, so the next cursor is the
+  maximum id over the whole page.
 """
 
 import asyncio
 import logging
 import math
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Final
 
 import httpx
 
+from corollary.data.news.article import (
+    NewsAccessDenied,
+    NewsArticle,
+    NewsFeed,
+    NewsProviderError,
+)
 from corollary.data.providers.fundamentals import (
     FundamentalsError,
     FundamentalsProvider,
@@ -114,6 +151,7 @@ from corollary.data.providers.fundamentals import (
 )
 from corollary.ratelimit import FINNHUB_HOST, HostRateLimiter, default_limiter
 from corollary.wire import (
+    WireFormatError,
     as_decimal,
     clean_params,
     decode_json,
@@ -122,13 +160,20 @@ from corollary.wire import (
 )
 
 __all__ = [
+    "COMPANY_NEWS_CAP",
+    "COMPANY_NEWS_CAP_THRESHOLD",
+    "CompanyNews",
     "FINNHUB_API_KEY_ENV",
     "FINNHUB_BASE_URL",
     "FINNHUB_TOKEN_HEADER",
     "FinnhubCredentials",
     "FinnhubCredentialsError",
     "FinnhubProvider",
+    "MARKET_NEWS_ID_PREFIX",
+    "MARKET_NEWS_PAGE_SIZE",
     "MILLION",
+    "MarketNews",
+    "ipo_date_from_profile",
 ]
 
 logger = logging.getLogger(__name__)
@@ -159,6 +204,69 @@ _USD: Final = "USD"
 
 _decode = translating(FundamentalsError, decode_json)
 _as_decimal = translating(FundamentalsError, as_decimal)
+
+#: The row count at which ``/company-news`` truncates a response. Step 0 saw
+#: 248-250 for five names over 14 days; step 4 saw 248 and 250 on two-day
+#: NVDA windows -- never exactly 250 every time, hence the threshold below.
+COMPANY_NEWS_CAP: Final = 250
+
+#: A response with at least this many rows is **treated as capped**.
+#:
+#: Deliberately under :data:`COMPANY_NEWS_CAP`, because the two errors cost
+#: different amounts. Reading an uncapped 240-row answer as capped costs one
+#: extra request for today alone, out of a 60/min bucket. Reading a truncated
+#: 248-row answer as complete loses rows silently -- the one outcome the rule
+#: exists to prevent -- and 248 has been observed at the cap.
+COMPANY_NEWS_CAP_THRESHOLD: Final = 240
+
+#: Prefix on a market-news ``vendor_id``. ``/news`` and ``/company-news``
+#: number their rows from different sequences (~8.5M against ~142M on
+#: 2026-09-24) that share the ``finnhub`` vendor key, and nothing promises
+#: they never meet. A collision would be an idempotent-insert *skip* of a
+#: different article -- silent -- so the spaces are kept apart by name.
+MARKET_NEWS_ID_PREFIX: Final = "general:"
+
+#: Rows on a full ``/news?category=general`` page. Recorded on 2026-09-24:
+#: the cold-start page (no ``minId``) held exactly 100. A page this full
+#: *after* a ``minId`` may have left rows between the cursor and its oldest
+#: row unread, and the endpoint has no second page to ask for.
+MARKET_NEWS_PAGE_SIZE: Final = 100
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyNews:
+    """One symbol's ``/company-news`` answer, after the cap rule ran.
+
+    ``retried_today``: the ``from``/``to`` window came back at the cap, so
+    ``to`` was re-requested alone and the two answers merged.
+    ``overflow_date``: that day, alone, was *still* at or above
+    :data:`COMPANY_NEWS_CAP_THRESHOLD` -- a *possible* overflow, since the
+    threshold sits under the cap -- and was logged as
+    ``finnhub_company_news_overflow`` with the symbol, date and row count.
+    Finnhub's dates cannot be split finer than a day, so it is not retried.
+    """
+
+    symbol: str
+    from_date: date
+    to_date: date
+    #: Newest first, then by ``vendor_id``; unique by ``vendor_id``.
+    articles: tuple[NewsArticle, ...]
+    retried_today: bool
+    overflow_date: date | None
+    #: Rows refused as malformed, each logged as ``finnhub_news_row_skipped``.
+    skipped: int
+
+
+@dataclass(frozen=True, slots=True)
+class MarketNews:
+    """One ``/news?category=general`` page and the cursor for the next."""
+
+    #: Newest first, then by ``vendor_id``.
+    articles: tuple[NewsArticle, ...]
+    #: The next ``minId``: the largest raw id seen, or the one passed in when
+    #: the page was empty. ``None`` only if both were.
+    min_id: int | None
+    skipped: int
 
 
 class FinnhubCredentialsError(RuntimeError):
@@ -293,16 +401,22 @@ class FinnhubProvider(FundamentalsProvider):
             symbol, exc, detail=self._scrub(f"unexpected {type(exc).__name__}: {exc}")
         )
 
-    async def _get(self, path: str, params: Mapping[str, Any]) -> Any:
-        """One GET, metered against the ``finnhub.io`` bucket.
+    async def _send(
+        self,
+        path: str,
+        params: Mapping[str, Any],
+        *,
+        error: type[Exception],
+    ) -> httpx.Response:
+        """One GET, metered against the ``finnhub.io`` bucket, any status.
 
-        Raises :class:`FundamentalsError` on anything that is not a 2xx.
-        Per-symbol callers catch it and turn it into an ``UNAVAILABLE``
-        entry, so one failure never costs another symbol its answer.
+        A transport failure raises ``error`` with a scrubbed message. Status
+        handling is the caller's, because the market-cap path and the news
+        path report failures as different types.
         """
         await self._limiter.acquire(FINNHUB_HOST)
         try:
-            response = await self._client.get(
+            return await self._client.get(
                 f"{self._base_url}{path}",
                 params=clean_params(params),
                 headers=self._credentials.headers(),
@@ -312,9 +426,16 @@ class FinnhubProvider(FundamentalsProvider):
             # this message out of the request it could not send, so a header
             # it rejected can land inside it, and the message becomes one
             # symbol's ``note`` and a log line.
-            raise FundamentalsError(
-                f"GET {path} failed: {self._scrub(str(exc))}"
-            ) from exc
+            raise error(f"GET {path} failed: {self._scrub(str(exc))}") from exc
+
+    async def _get(self, path: str, params: Mapping[str, Any]) -> Any:
+        """One GET, metered against the ``finnhub.io`` bucket.
+
+        Raises :class:`FundamentalsError` on anything that is not a 2xx.
+        Per-symbol callers catch it and turn it into an ``UNAVAILABLE``
+        entry, so one failure never costs another symbol its answer.
+        """
+        response = await self._send(path, params, error=FundamentalsError)
 
         if response.status_code in (401, 403):
             raise FundamentalsError(
@@ -402,6 +523,360 @@ class FinnhubProvider(FundamentalsProvider):
             return _log_unavailable(symbol, str(exc))
         except Exception as exc:  # noqa: BLE001 - see _log_internal_fault
             return self._fault(symbol, exc)
+
+    # ------------------------------------------------------------ IPO date
+
+    async def ipo_date(self, symbol: str) -> date | None:
+        """The ``ipo`` field of ``/stock/profile2`` -- owner decision Q12.
+
+        Asked only by the tradeability refresh, for a ticker whose history
+        starts inside the ADV window, and at most once per ticker ever once
+        a date comes back (the caller caches it). The same endpoint and the
+        same shared ``finnhub.io`` bucket as :meth:`market_caps`; one request.
+
+        Two outcomes that must never be confused:
+
+        * ``None`` -- **the vendor answered, with no usable date**: no
+          ``ipo`` field (a fund, an unknown symbol -- both recorded as
+          ``{}``), an empty string, or anything that is not an ISO
+          ``YYYY-MM-DD`` calendar date. Logged at WARNING with its rule.
+        * :class:`FundamentalsError` -- **the vendor could not be asked**: a
+          transport failure or timeout, any non-2xx (a 403 included), a body
+          that does not decode, or one that is not a JSON object. Scrubbed
+          like every other message from this module.
+
+        Neither is ever read as an IPO. Raises ``ValueError`` for a blank
+        symbol, before any request.
+        """
+        wanted = symbol.strip().upper()
+        if not wanted:
+            raise ValueError("an IPO date needs a symbol; got a blank one")
+        payload = await self._get("/stock/profile2", {"symbol": wanted})
+        if not isinstance(payload, Mapping):
+            raise FundamentalsError(
+                f"/stock/profile2 for {wanted} answered with a "
+                f"{type(payload).__name__}, not an object"
+            )
+        return ipo_date_from_profile(wanted, payload)
+
+
+    # ----------------------------------------------------------------- news
+
+    async def _get_news(self, path: str, params: Mapping[str, Any]) -> list[Any]:
+        """One news GET: a JSON list, or a :class:`NewsProviderError`.
+
+        401 and 403 are :class:`NewsAccessDenied`. On Finnhub a 403 is also
+        the premium answer -- a JSON ``{"error": "You don't have access to
+        this resource."}`` (step 0) -- so the message names both causes. Both
+        news endpoints are free-tier today; a 403 here means that changed, or
+        the key did.
+        """
+        response = await self._send(path, params, error=NewsProviderError)
+        if response.status_code in (401, 403):
+            raise NewsAccessDenied(
+                f"GET {path} returned {response.status_code}: "
+                f"{self._detail(response)}. Either the key was refused -- check "
+                f"{FINNHUB_API_KEY_ENV} -- or the endpoint is not on this plan "
+                "(Finnhub answers a premium endpoint with a JSON 403)."
+            )
+        if response.status_code == 429:
+            raise NewsProviderError(
+                f"GET {path} returned 429 despite the local budget of 60/min. "
+                "Another process may be sharing this key."
+            )
+        if response.status_code >= 400:
+            raise NewsProviderError(
+                f"GET {path} returned {response.status_code}: "
+                f"{self._detail(response)}"
+            )
+        try:
+            payload = decode_json(response.text)
+        except WireFormatError as exc:
+            raise NewsProviderError(f"GET {path}: {self._scrub(str(exc))}") from exc
+        if not isinstance(payload, list):
+            raise NewsProviderError(
+                f"GET {path} answered with a {type(payload).__name__}, not a "
+                f"list: {self._detail(response)}"
+            )
+        return payload
+
+    async def company_news(
+        self, symbol: str, from_date: date, to_date: date
+    ) -> CompanyNews:
+        """One watch symbol's articles over ``from_date`` -> ``to_date``, inclusive.
+
+        The dates are **UTC** days (see the module docstring). Every article
+        is tagged with ``symbol`` itself -- decision 21: the tag of a
+        ``finnhub_company`` row *"is the queried symbol, not the vendor's
+        reading of the article"*.
+
+        The cap rule, from decision 21: *"A response at the ~250-row cap is
+        re-requested for today alone. If today alone is still at the cap, the
+        overflow is lost for that symbol and day ... logged with the symbol
+        and date rather than retried."* "Today" is ``to_date``. When the
+        window is already one day there is nothing finer to ask for, so a
+        capped answer is logged without a second request.
+
+        Raises :class:`NewsProviderError` if a request fails -- including the
+        today-alone re-request, rather than returning the capped window as if
+        it were whole. ``ValueError`` for a blank symbol or a window that runs
+        backwards, before any request is made.
+        """
+        wanted = symbol.strip().upper()
+        if not wanted:
+            raise ValueError("company_news needs a symbol")
+        if from_date > to_date:
+            raise ValueError(
+                f"company_news window runs backwards: {from_date} > {to_date}"
+            )
+
+        rows = await self._company_rows(wanted, from_date, to_date)
+        batches = [rows]
+        retried = False
+        overflow: date | None = None
+        overflow_rows = 0
+        if len(rows) >= COMPANY_NEWS_CAP_THRESHOLD:
+            if from_date < to_date:
+                retried = True
+                today_rows = await self._company_rows(wanted, to_date, to_date)
+                batches.append(today_rows)
+                if len(today_rows) >= COMPANY_NEWS_CAP_THRESHOLD:
+                    overflow, overflow_rows = to_date, len(today_rows)
+            else:
+                overflow, overflow_rows = to_date, len(rows)
+        if overflow is not None:
+            _log_company_overflow(wanted, overflow, retried, overflow_rows)
+
+        articles: dict[str, NewsArticle] = {}
+        skipped = 0
+        for batch in batches:
+            for row in batch:
+                article = _news_article(
+                    row,
+                    feed=NewsFeed.FINNHUB_COMPANY,
+                    tickers=(wanted,),
+                    id_prefix="",
+                    scrub=self._scrub,
+                )
+                if article is None:
+                    skipped += 1
+                    continue
+                articles.setdefault(article.vendor_id, article)
+        return CompanyNews(
+            symbol=wanted,
+            from_date=from_date,
+            to_date=to_date,
+            articles=_newest_first(articles.values()),
+            retried_today=retried,
+            overflow_date=overflow,
+            skipped=skipped,
+        )
+
+    async def _company_rows(
+        self, symbol: str, from_date: date, to_date: date
+    ) -> list[Any]:
+        return await self._get_news(
+            "/company-news",
+            {"symbol": symbol, "from": from_date, "to": to_date},
+        )
+
+    async def market_news(self, min_id: int | None) -> MarketNews:
+        """One ``/news?category=general`` page, after ``min_id`` (exclusive).
+
+        Tags come from ``related``, comma-separated and usually empty -- 0 of
+        100 rows on the recorded page -- so most rows are ``MARKET`` items.
+        Tags pass through untouched apart from case; dropping crypto and other
+        non-equity tags is the ingest's job (decision 21).
+
+        The returned ``min_id`` counts every row with an integer id, including
+        a row that was then skipped as malformed: re-reading a row that can
+        never be decoded would not make it decodable.
+
+        A full page (:data:`MARKET_NEWS_PAGE_SIZE` rows) is logged as
+        ``finnhub_market_news_full_page``: a **warning** after a ``min_id``,
+        because rows between the cursor and the page's oldest row may never
+        have been served; **info** on a cold start, whose page is always full
+        and which has no cursor to have skipped past.
+        """
+        if min_id is not None and (
+            isinstance(min_id, bool) or not isinstance(min_id, int) or min_id < 0
+        ):
+            raise ValueError(f"minId must be a non-negative int, got {min_id!r}")
+        rows = await self._get_news("/news", {"category": "general", "minId": min_id})
+        if len(rows) >= MARKET_NEWS_PAGE_SIZE:
+            _log_market_full_page(len(rows), min_id)
+        articles: dict[str, NewsArticle] = {}
+        skipped = 0
+        cursor = min_id
+        for row in rows:
+            related: Any = None
+            if isinstance(row, Mapping):
+                raw_id = row.get("id")
+                if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+                    cursor = raw_id if cursor is None else max(cursor, raw_id)
+                related = row.get("related")
+            tickers = tuple(related.split(",")) if isinstance(related, str) else ()
+            article = _news_article(
+                row,
+                feed=NewsFeed.FINNHUB_MARKET,
+                tickers=tickers,
+                id_prefix=MARKET_NEWS_ID_PREFIX,
+                scrub=self._scrub,
+            )
+            if article is None:
+                skipped += 1
+                continue
+            articles.setdefault(article.vendor_id, article)
+        return MarketNews(
+            articles=_newest_first(articles.values()),
+            min_id=cursor,
+            skipped=skipped,
+        )
+
+
+def _newest_first(articles: Iterable[NewsArticle]) -> tuple[NewsArticle, ...]:
+    """Newest first, ties by ``vendor_id``: the same body, the same order."""
+    return tuple(sorted(articles, key=lambda a: (-a.published_at.timestamp(), a.vendor_id)))
+
+
+def _news_article(
+    row: Any,
+    *,
+    feed: NewsFeed,
+    tickers: tuple[str, ...],
+    id_prefix: str,
+    scrub: Callable[[str], str],
+) -> NewsArticle | None:
+    """One Finnhub news row as a :class:`NewsArticle`, or ``None`` if malformed.
+
+    A malformed row is logged and skipped, so one bad row never costs the
+    batch and a row the pipeline never saw still says why. The log quotes
+    vendor text -- the row's id, and a bad value inside the cause -- so both
+    go through ``scrub``, the provider's redactor: bounded, token blanked.
+    """
+    raw_id = row.get("id") if isinstance(row, Mapping) else None
+    try:
+        if not isinstance(row, Mapping):
+            raise ValueError(f"row is a {type(row).__name__}, not an object")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+            raise ValueError(f"id is {raw_id!r}, not an integer")
+        stamp = row.get("datetime")
+        if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
+            raise ValueError(f"datetime is {stamp!r}, not a positive epoch second")
+        headline = row.get("headline")
+        url = row.get("url")
+        if not isinstance(headline, str):
+            raise ValueError(f"headline is a {type(headline).__name__}, not a string")
+        if not isinstance(url, str):
+            raise ValueError(f"url is a {type(url).__name__}, not a string")
+        summary = _optional_text(row, "summary")
+        source = _optional_text(row, "source")
+        return NewsArticle(
+            vendor="finnhub",
+            vendor_id=f"{id_prefix}{raw_id}",
+            feed=feed,
+            url=url,
+            headline=headline,
+            summary=summary,
+            publisher=source,
+            published_at=datetime.fromtimestamp(stamp, timezone.utc),
+            tickers=tickers,
+        )
+    except (ValueError, OverflowError, OSError) as exc:
+        quoted_id = scrub(repr(raw_id))
+        cause = scrub(str(exc))
+        logger.warning(
+            "finnhub news row skipped (%s, id %s): %s",
+            feed.value,
+            quoted_id,
+            cause,
+            extra={
+                "event": "finnhub_news_row_skipped",
+                "rule": (
+                    "a news row that cannot be read is skipped and logged, "
+                    "never stored half-read"
+                ),
+                "feed": feed.value,
+                "vendor_id": quoted_id,
+                "cause": cause,
+                "vendor": FINNHUB_HOST,
+            },
+        )
+        return None
+
+
+def _optional_text(row: Mapping[str, Any], name: str) -> str | None:
+    value = row.get(name)
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"{name} is a {type(value).__name__}, not a string")
+
+
+def _log_company_overflow(symbol: str, day: date, retried: bool, rows: int) -> None:
+    """Decision 21's overflow: logged with the symbol and date, not retried.
+
+    Worded as *possible*, with the row count: the threshold sits under the
+    cap on purpose (see :data:`COMPANY_NEWS_CAP_THRESHOLD`), so 240-249 rows
+    may be a whole day, while 250 is certainly truncated. The count is what
+    lets a reader tell the two apart.
+    """
+    logger.warning(
+        "finnhub company news for %s on %s returned %d rows, at or above the "
+        "%d-row threshold under the ~%d-row cap; a possible overflow for that "
+        "day, not retried",
+        symbol,
+        day.isoformat(),
+        rows,
+        COMPANY_NEWS_CAP_THRESHOLD,
+        COMPANY_NEWS_CAP,
+        extra={
+            "event": "finnhub_company_news_overflow",
+            "rule": (
+                "a response at the ~250-row cap is re-requested for today "
+                "alone; if today alone is still at the cap the overflow is "
+                "lost for that symbol and day, logged rather than retried"
+            ),
+            "symbol": symbol,
+            "date": day.isoformat(),
+            "rows": rows,
+            "retried_today_alone": retried,
+            "threshold": COMPANY_NEWS_CAP_THRESHOLD,
+            "vendor": FINNHUB_HOST,
+        },
+    )
+
+
+def _log_market_full_page(rows: int, min_id: int | None) -> None:
+    """A full general-news page: a possible gap after a cursor, expected without one."""
+    if min_id is None:
+        level = logging.INFO
+        message = (
+            "finnhub market news cold start returned a full page of %d rows; "
+            "expected with no minId"
+        )
+    else:
+        level = logging.WARNING
+        message = (
+            "finnhub market news returned a full page of %d rows after minId "
+            "%s; rows between the cursor and the page's oldest row may be lost"
+        )
+    logger.log(
+        level,
+        message,
+        rows,
+        *(() if min_id is None else (min_id,)),
+        extra={
+            "event": "finnhub_market_news_full_page",
+            "rule": (
+                "a full /news page after a minId may have skipped rows the "
+                "endpoint has no second page for; logged, never silent"
+            ),
+            "rows": rows,
+            "min_id": min_id,
+            "page_size": MARKET_NEWS_PAGE_SIZE,
+            "vendor": FINNHUB_HOST,
+        },
+    )
 
 
 def market_cap_from_profile(symbol: str, payload: Mapping[str, Any]) -> MarketCap:
@@ -526,6 +1001,73 @@ def _vendor_number(field: str, raw: object) -> Any:
     raise FundamentalsError(
         f"{field} is a {type(raw).__name__}, not a number. The vendor changed "
         "a field's type, or something in front of it rewrote the body."
+    )
+
+
+#: The one shape an ``ipo`` value is read in: ``YYYY-MM-DD``, as recorded
+#: (``"1980-12-12"`` for AAPL). Checked before ``date.fromisoformat``, which
+#: since Python 3.11 also accepts ``19801212`` and ISO week dates -- shapes the
+#: vendor has never been seen to send, so one arriving is a change to report,
+#: not a date to trust.
+_IPO_DATE_RE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")  # ASCII only: \d matches any Unicode digit
+
+
+def ipo_date_from_profile(symbol: str, payload: Mapping[str, Any]) -> date | None:
+    """Read one ``/stock/profile2`` body's ``ipo`` field -- or ``None``, logged.
+
+    ``None`` for a missing field, a non-string, an empty string, or text that
+    is not a real ``YYYY-MM-DD`` calendar date (``2026-02-30`` is refused).
+    Each is logged at WARNING with the rule, because the refresh fails that
+    ticker closed on it. Never raises for a body that merely lacks a date:
+    that is the vendor's answer, not a fault.
+    """
+    cause = _ipo_problem(payload)
+    if cause is not None:
+        _log_no_ipo_date(symbol, cause)
+        return None
+    return date.fromisoformat(str(payload["ipo"]).strip())
+
+
+def _ipo_problem(payload: Mapping[str, Any]) -> str | None:
+    """Why ``payload`` has no usable ``ipo`` date, or ``None`` when it has one."""
+    if "ipo" not in payload:
+        return "/stock/profile2 carries no ipo field"
+    raw = payload["ipo"]
+    if not isinstance(raw, str):
+        return f"/stock/profile2's ipo is a {type(raw).__name__}, not a date string"
+    text = raw.strip()
+    if not text:
+        return "/stock/profile2's ipo is empty"
+    if not _IPO_DATE_RE.fullmatch(text):
+        # Not quoted: it is vendor text that failed the only shape this module
+        # trusts, so it is described rather than echoed into a log.
+        return f"/stock/profile2's ipo is not YYYY-MM-DD ({len(text)} characters)"
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        # ASCII digits and dashes only (the regex above), so quoting it cannot
+        # carry anything else.
+        return f"/stock/profile2's ipo {text!r} is not a calendar date"
+    return None
+
+
+def _log_no_ipo_date(symbol: str, cause: str) -> None:
+    """Rule 8 for Q12: the vendor answered without a usable IPO date."""
+    logger.warning(
+        "no usable IPO date for %s: %s",
+        symbol,
+        cause,
+        extra={
+            "event": "ipo_date_unavailable",
+            "rule": (
+                "owner decision Q12: a partial ADV window is a recent listing "
+                "only on a real IPO date; an IPO is never assumed, so this "
+                "ticker fails closed this session and is asked again next session"
+            ),
+            "symbol": symbol,
+            "cause": cause,
+            "vendor": FINNHUB_HOST,
+        },
     )
 
 

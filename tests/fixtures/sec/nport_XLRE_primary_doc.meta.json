@@ -1,0 +1,21 @@
+{
+  "ticker": "XLRE",
+  "series_id": "S000051152",
+  "series_name": "State Street(R) Real Estate Select Sector SPDR(R) ETF",
+  "class_id": "C000161049",
+  "accession": "0001410368-26-089191",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "rep_pd_end": "2026-09-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089191/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "complete": false,
+  "trimmed": "every <invstOrSec> whose assetCat is not EC is removed; all else as served",
+  "holdings_total": 34,
+  "equity_lines": 31,
+  "non_equity_removed": 3,
+  "equity_pct_val_sum": "99.452092626935",
+  "equity_lines_without_cusip": 0,
+  "bytes_original": 36477,
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

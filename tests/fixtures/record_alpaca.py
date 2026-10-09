@@ -2,18 +2,18 @@
 
 Run by hand, never by the test suite::
 
-    uv run python tests/fixtures/record_alpaca.py
+    uv run --env-file .env python tests/fixtures/record_alpaca.py
 
 **The suite itself makes no live calls.** It replays what this script
 captured, through an ``httpx.MockTransport``. That split is the point: real
 shapes, deterministic tests, no rate budget spent and no dependence on market
 hours.
 
-Run one half or both::
+Run one half or both (``--env-file`` supplies the keys; see below)::
 
-    uv run python tests/fixtures/record_alpaca.py            # everything
-    uv run python tests/fixtures/record_alpaca.py trading    # the trading host
-    uv run python tests/fixtures/record_alpaca.py market     # data.alpaca.markets
+    uv run --env-file .env python tests/fixtures/record_alpaca.py            # everything
+    uv run --env-file .env python tests/fixtures/record_alpaca.py trading    # the trading host
+    uv run --env-file .env python tests/fixtures/record_alpaca.py market     # data.alpaca.markets
 
 Three safety properties, enforced below rather than merely intended:
 
@@ -29,8 +29,15 @@ Three safety properties, enforced below rather than merely intended:
 * **Nothing is placed, cancelled or modified.** GET only, and
   ``test_record_alpaca.py`` asserts this file contains no other verb.
 
-``python-dotenv`` loads ``.env`` at runtime. This script reads it; nothing
-under ``corollary/`` does -- the process environment is the engine's input.
+**Nothing here loads ``.env``.** Keys and feeds come from the process
+environment only, supplied by the launcher -- the same way they reach
+``corollary/`` (rule 6)::
+
+    uv run --env-file <path-to>/.env python tests/fixtures/record_alpaca.py
+
+It used to call ``load_dotenv`` itself, which read the real file on the
+script's own authority; ``tests/data/news/test_recorders_read_no_env_file.py``
+pins its absence now.
 """
 
 import asyncio
@@ -611,10 +618,6 @@ async def record_trading(
 
 
 async def main() -> None:
-    from dotenv import load_dotenv
-
-    load_dotenv(REPO_ROOT / ".env")
-
     # Feeds come from the environment, through the same code path the engine
     # uses, and a missing one stops the run.
     #
@@ -631,7 +634,8 @@ async def main() -> None:
     except FeedConfigError as exc:
         raise SystemExit(
             f"ABORTED before any request: {exc}\n\n"
-            "Set the three feed variables in .env (the names are in "
+            "Set the three feed variables in the environment the launcher "
+            "passes (`uv run --env-file <path> ...`; the names are in "
             ".env.example) and run again."
         ) from exc
     print(f"recording with: {feeds}")

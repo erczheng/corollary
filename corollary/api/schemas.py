@@ -60,6 +60,7 @@ __all__ = [
     "ActivityStatus",
     "ActivityStats",
     "AnalyticsSource",
+    "RateProvenance",
     "ApiErrorBody",
     "ApiErrorResponse",
     "ApiKeyPresence",
@@ -83,8 +84,16 @@ __all__ = [
     "LedgerRefusalGroup",
     "LedgerRefusals",
     "ManagedExit",
+    "ManualWatch",
     "MarginClassName",
     "MarginSummary",
+    "NewsFeed",
+    "NewsItem",
+    "NewsLookback",
+    "NewsScope",
+    "NewsSentiment",
+    "NewsSentimentTier",
+    "NewsSort",
     "NotificationEvent",
     "NotificationItem",
     "NotificationRoute",
@@ -105,6 +114,7 @@ __all__ = [
     "TimeInForce",
     "Trend",
     "UnderlyingQuote",
+    "WatchList",
     "WorkingOrder",
     "WorkingOrderType",
     "WsClientFrame",
@@ -266,8 +276,16 @@ RiskLimitKey: TypeAlias = Literal[
     "max_net_directional_pct",
 ]
 RiskLimitUnit: TypeAlias = Literal["%", "count"]
-AuditCategory: TypeAlias = Literal["risk", "feed", "notification"]
+#: ``db.models.AUDIT_CATEGORIES`` value for value -- every category
+#: ``ck_audit_log_category`` admits, or the first row of a new one fails
+#: validation and 500s every audit page holding it. ``watchlist`` is Phase 3
+#: decision 21's (migration 0008). ``test_settings_routes.py`` pins the two.
+AuditCategory: TypeAlias = Literal["risk", "feed", "notification", "watchlist"]
 
+#: Exactly the events ``db.seed.NOTIFICATION_ROUTE_DEFAULTS`` routes. An event
+#: seeded there but missing here is dropped from the Settings matrix with a
+#: warning, so the owner cannot see or toggle a route that is live;
+#: ``test_settings_routes.py`` pins the two sets equal.
 NotificationEvent: TypeAlias = Literal[
     "order_filled",
     "order_rejected",
@@ -284,6 +302,11 @@ NotificationEvent: TypeAlias = Literal[
     "risk_limits_changed",
     "data_feeds_changed",
     "notification_routes_changed",
+    # A manual watch added or removed (Phase 3 decision 20, migration 0008).
+    "watchlist_changed",
+    # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
+    # 2026-09-30, migration 0011), emitted by the ``spdr_holdings`` job.
+    "spdr_seed_amended",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]
@@ -1245,6 +1268,17 @@ class StockQuote(ApiModel):
     is_fund: bool
 
 
+RateProvenance: TypeAlias = Literal["fred_dgs3mo", "default"]
+"""Where the risk-free rate behind a derived IV came from.
+
+Phase 3 decision 19: ``fred_dgs3mo`` is the latest stored FRED ``DGS3MO``
+observation (its date travels beside it); ``default`` is the stated 4.25%
+fallback, used only while no observation has ever been obtained. Either way
+the rate served is continuous, converted from the quoted yield (Q16). Mirrors
+:class:`corollary.pricing.rates.RateProvenance`.
+"""
+
+
 class OptionContract(ApiModel):
     """One row of a chain.
 
@@ -1302,6 +1336,21 @@ class OptionContract(ApiModel):
     #: silently mixing vendor and derived analytics is worse than either
     #: alone. ``None`` where :attr:`iv` is.
     iv_source: AnalyticsSource | None = None
+    #: **Not in ``types.ts``.** The annual risk-free rate a ``derived``
+    #: :attr:`iv` was solved at, as a fraction, and **continuously
+    #: compounded** -- the ``r`` pricing actually used, not FRED's quoted
+    #: yield (owner decision Q16). A quoted ``DGS3MO`` of 4.16% is served as
+    #: ``0.0413857528``, ``ln(1 + 0.0416 * 91/365) / (91/365)``; the
+    #: fallback's 4.25% as ``0.0422764153``. See
+    #: :mod:`corollary.pricing.rates`. Decision 19: derived greeks state which
+    #: rate they used. ``None`` unless :attr:`iv_source` is ``derived`` -- a
+    #: vendor IV used no rate of ours.
+    risk_free_rate: JsonMoney | None = None
+    #: Where :attr:`risk_free_rate` came from. ``None`` exactly when it is.
+    risk_free_rate_source: RateProvenance | None = None
+    #: The FRED observation's date -- the session it records, not when it was
+    #: fetched -- so a stale rate reads as stale. ``None`` for ``default``.
+    risk_free_rate_date: CalendarDate | None = None
 
 
 class ChainSpec(ApiModel):
@@ -1359,7 +1408,8 @@ class RiskLimit(ApiModel):
 
 
 class AuditLogEntry(ApiModel):
-    """One row of PRD §8.7's single log across risk, feed and notification.
+    """One row of PRD §8.7's single log across risk, feed, notification and
+    (Phase 3) watch-list changes.
 
     One log rather than three, because on a bad day the question is whether
     *anything* changed first.
@@ -1452,6 +1502,125 @@ class ApiKeyPresence(ApiModel):
     #: The live keys are *meant* to be absent until Phase 7, so their absence
     #: renders as a fact rather than a warning.
     optional: bool
+
+
+# --------------------------------------------------------------------------
+# News (Phase 3 step 4)
+# --------------------------------------------------------------------------
+
+#: ``Sentiment`` in ``types.ts``, value for value -- lower case on the wire;
+#: ``SENTIMENT_LABEL`` is where the client capitalises it.
+NewsSentiment: TypeAlias = Literal["bullish", "bearish", "neutral", "unclassified"]
+#: ``SentimentTier`` in ``types.ts``.
+NewsSentimentTier: TypeAlias = Literal["provider", "rules", "llm"]
+#: ``Lookback`` in ``web/src/lib/news.ts`` (``LOOKBACKS``).
+NewsLookback: TypeAlias = Literal["today", "3d", "1w", "2w", "all"]
+#: ``watch`` (the default): watch-universe tickers plus ``MARKET``. ``all``:
+#: everything retained (decision 21's narrowed default scope).
+NewsScope: TypeAlias = Literal["watch", "all"]
+#: ``NewsSort`` in ``web/src/lib/news.ts`` (``NEWS_SORT_LABEL``'s keys).
+NewsSort: TypeAlias = Literal["newest", "oldest"]
+
+
+class NewsItem(ApiModel):
+    """One (canonical article, ticker) row -- ``NewsItem`` in ``types.ts``.
+
+    The canonical row of a cross-vendor duplicate group is served once per
+    ticker the group is tagged to, naming the canonical row's publisher
+    (decision 3). Three fields beyond the TS shape, per the spec's *API*
+    section -- *"the tier and source that produced it, and whether that
+    source is demoted"* -- plus ``url``.
+
+    **Step 4 labels nothing.** ``sentiment`` is ``unclassified``, ``tier`` and
+    ``source`` are ``None`` and ``demoted`` is ``False`` on every item until
+    step 5's labelling lands. That is the honest answer, not a placeholder:
+    no source has produced a label, so none is named.
+    """
+
+    #: ``"{canonical article id}:{ticker}"`` -- unique per row served.
+    id: str
+    #: The canonical row's publication time, aware UTC.
+    time: datetime
+    #: A ticker, or ``MARKET`` for a story tagged to no single name.
+    ticker: str
+    headline: str
+    sentiment: NewsSentiment
+    #: The canonical row's publisher. ``None`` when the vendor named none:
+    #: the vendor is provenance, not a publisher, and is not substituted.
+    publisher: str | None
+    #: From the SPDR seed; ``Other`` outside it or with no seed; ``MARKET``
+    #: files under ``Macro``.
+    sector: str
+    tier: NewsSentimentTier | None
+    url: str
+    #: The labelling source that produced ``sentiment``; ``None`` in step 4.
+    source: str | None
+    #: Whether that source is demoted (decision 4/9). ``False`` with no source.
+    demoted: bool
+
+
+class NewsFeed(ApiModel):
+    """One page of ``GET /api/news``. Offset pagination.
+
+    Offset rather than a cursor: the feed is newest-first and grows at the
+    top, so a row arriving between two page requests shifts the second page
+    by one -- a repeated row, never a lost one, and never a wrong one. That is
+    cosmetic on a news feed, and the ``Page`` convention the activity table
+    already uses is offset-shaped too.
+    """
+
+    items: list[NewsItem]
+    #: Rows matching the query, not rows on this page.
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+    lookback: NewsLookback
+    scope: NewsScope
+    sort: NewsSort
+    #: The lookback's lower bound -- the start of an ET calendar date, as an
+    #: aware UTC instant -- or ``None`` for ``all``.
+    since: datetime | None
+    #: ``False`` when the SPDR seed has not been built: every ticker files
+    #: under ``Other`` (``MARKET`` still under ``Macro``), and the UI says why.
+    sectors_available: bool
+    seed_as_of: date | None
+
+
+class ManualWatch(ApiModel):
+    """One active manual watch (``watch_symbol`` with no ``removed_at``)."""
+
+    ticker: str
+    added_at: datetime
+
+
+class WatchList(ApiModel):
+    """``GET /api/news/watch``: the manual watches and the universe they sit in."""
+
+    #: Sorted by ticker.
+    manual: list[ManualWatch]
+    #: Every symbol the watch tier polls -- the universe less ``MARKET``.
+    symbols: int
+    #: What the cap counts (Q13): active manual watches, and nothing else --
+    #: never the seed's leaders, the Markets list or positions.
+    manual_count: int
+    #: The manual-watch cap. Inclusive: the ``cap``-th manual watch is
+    #: permitted, one more is a 409.
+    cap: int
+    #: Manual watches still addable: ``cap - manualCount``, floored at zero.
+    remaining: int
+    #: The last-known open-position underlyings, as the scheduler last set
+    #: them; zero (and ``positionsAsOf`` null) before it ever has.
+    position_underlyings: int
+    positions_as_of: datetime | None
+    #: True when the SPDR seed has not been built: no sector leaders are in
+    #: the universe, so ``symbols`` is smaller than it will be. The cap and
+    #: ``remaining`` are unaffected (Q13).
+    seed_missing: bool
+    #: False until the daily asset list has been fetched once; until then an
+    #: add is refused with a 503 rather than accepted unvalidated.
+    asset_list_available: bool
+    asset_list_fetched_at: datetime | None
 
 
 # --------------------------------------------------------------------------

@@ -87,7 +87,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Final, TypeVar
 from urllib.parse import urlsplit
@@ -613,14 +613,65 @@ def as_int(value: Any) -> int | None:
     raise TypeError(f"cannot read {type(value).__name__} ({value!r}) as a count")
 
 
+#: The msgpack Timestamp extension counts from here. Aware, so every result of
+#: :func:`_from_msgpack_timestamp` is aware UTC by construction.
+_UNIX_EPOCH: Final = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _from_msgpack_timestamp(stamp: msgpack.Timestamp) -> datetime:
+    """A msgpack Timestamp ext as an aware UTC ``datetime``, exactly.
+
+    **The conversion rule:** ``epoch + timedelta(seconds=stamp.seconds,
+    microseconds=stamp.nanoseconds // 1000)`` -- integer arithmetic only, no
+    float anywhere (``Timestamp.to_unix()`` would be one). The nanosecond
+    tail is **truncated** (floor) to microseconds, never rounded: 999ns is
+    0us and 999,999,999ns is 999,999us, never the next second. That is the
+    same truncation the RFC-3339 path applies to Alpaca's nine digits, so one
+    instant reads the same whichever encoding carried it.
+
+    ``nanoseconds`` is always in ``[0, 10**9)`` -- ``msgpack.Timestamp``
+    enforces that on construction -- so for an instant before the epoch the
+    floor is still toward the past, which is what truncation of a positive
+    fraction means. An instant outside ``datetime``'s range is the vendor's
+    fault, not ours, and is refused as one.
+    """
+    try:
+        return _UNIX_EPOCH + timedelta(
+            seconds=stamp.seconds, microseconds=stamp.nanoseconds // 1000
+        )
+    except OverflowError as exc:
+        raise WireFormatError(
+            f"{stamp!r} is outside the representable datetime range"
+        ) from exc
+
+
 def as_datetime(value: Any) -> datetime:
-    """An RFC-3339 timestamp as an aware UTC ``datetime``.
+    """An RFC-3339 timestamp, or a msgpack Timestamp ext, as an aware UTC ``datetime``.
 
     Alpaca stamps to nanoseconds; Python resolves to microseconds, so the tail
     is truncated rather than rounded. That is lossless for every use here --
     nothing sequences trades by sub-microsecond ties -- and stated so nobody
     later assumes the value round-trips exactly.
+
+    **Two shapes, and only two.** JSON carries a stamp as an RFC-3339 string.
+    The **option stream** is msgpack, and it carries ``t`` as the msgpack
+    Timestamp extension (type -1), which :func:`decode_msgpack` hands back as
+    a ``msgpack.Timestamp``. That second shape went unhandled until
+    2026-09-29, when every live option quote was refused with *"expected an
+    RFC-3339 timestamp, got Timestamp(...)"*: the test frames had packed
+    ``t`` as a string, so nothing had ever shown the decoder the real shape.
+
+    Accepting the ext here is scoped to msgpack **structurally**, not by a
+    flag: nothing but ``msgpack.unpackb`` constructs a ``Timestamp``, and
+    :func:`decode_json` cannot, so a JSON path can no more reach this branch
+    than it could before. Everything else is still refused: an epoch number
+    (``int``/``float``/``Decimal`` -- seconds? milliseconds? nanoseconds?),
+    any other ext type, bytes, and a ready-made ``datetime``, which is not a
+    wire value at all and would only widen the boundary. See
+    :func:`_from_msgpack_timestamp` for the exact conversion.
     """
+    if isinstance(value, msgpack.Timestamp):
+        return _from_msgpack_timestamp(value)
     if not isinstance(value, str):
         raise WireFormatError(f"expected an RFC-3339 timestamp, got {value!r}")
     text = value.strip()

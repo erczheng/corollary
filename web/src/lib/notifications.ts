@@ -42,7 +42,11 @@ export type { NotificationSeverity }
  * stop new entries is not a fault. It is worth noticing — nothing will open
  * until someone resumes — which is what separates it from `info`. Resuming
  * and the three configuration changes are records of a deliberate act, so
- * `info`. */
+ * `info` — as is `watchlist_changed` (Phase 3 decision 21), a manual watch
+ * added or removed, which belongs to no book (`account: null`, so it shows
+ * in both bells). `spdr_seed_amended` (owner decision 2026-09-30) is `info`
+ * too: an NPORT-P/A adopted into the sector seed after passing the same
+ * validation as an original — a record, also `account: null`. */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -57,6 +61,8 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   risk_limits_changed: 'info',
   data_feeds_changed: 'info',
   notification_routes_changed: 'info',
+  watchlist_changed: 'info',
+  spdr_seed_amended: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

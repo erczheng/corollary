@@ -19,6 +19,10 @@ from corollary.ratelimit import (
     FINNHUB_REQUESTS_PER_MINUTE,
     FRED_HOST,
     MASSIVE_HOST,
+    SEC_BUCKET,
+    SEC_DATA_HOST,
+    SEC_REQUESTS_PER_SECOND,
+    SEC_WWW_HOST,
     STOCKTWITS_HOST,
     ALPACA_DATA_HOST,
     ALPACA_PAPER_TRADING_HOST,
@@ -345,3 +349,83 @@ def test_a_nonsense_host_budget_is_refused(requests: int, window: float) -> None
 def test_the_default_table_is_read_only() -> None:
     with pytest.raises(TypeError):
         DEFAULT_PER_HOST_BUDGETS[STOCKTWITS_HOST] = HostBudget(10_000)  # type: ignore[index]
+
+
+# --------------------------------------------------------------------------
+# SEC EDGAR (Phase 3 step 4): two hosts, one fair-access ceiling
+# --------------------------------------------------------------------------
+
+
+def test_the_two_sec_hosts_share_one_bucket(clock: FakeClock) -> None:
+    """SEC's 10/s fair-access ceiling is per *requester*, across its hosts.
+
+    ``data.sec.gov`` (submissions) and ``www.sec.gov`` (the ticker map and
+    the archive) are one budget. Two buckets would admit twice the rate the
+    policy allows -- the over-spending mirror of Alpaca's two-bucket split.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    assert (SEC_DATA_HOST, SEC_WWW_HOST) == ("data.sec.gov", "www.sec.gov")
+    shared = limiter.bucket_for(SEC_DATA_HOST)
+    assert limiter.bucket_for(SEC_WWW_HOST) is shared
+    assert limiter.bucket_for("WWW.SEC.GOV") is shared
+    assert limiter.bucket_for(SEC_BUCKET) is shared
+    assert limiter.bucket_for(ALPACA_DATA_HOST) is not shared
+
+
+def test_the_sec_bucket_is_four_per_second() -> None:
+    assert SEC_REQUESTS_PER_SECOND == 4
+    budget = DEFAULT_PER_HOST_BUDGETS[SEC_BUCKET]
+    assert (budget.requests, budget.window_seconds) == (4, 1.0)
+    bucket = default_limiter().bucket_for(SEC_WWW_HOST)
+    assert (bucket.capacity, bucket.window_seconds) == (4.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_sec_requests_on_either_host_draw_down_the_same_tokens(
+    clock: FakeClock,
+) -> None:
+    """Four immediately, split across the hosts; the fifth waits a quarter second."""
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    for host in (SEC_DATA_HOST, SEC_WWW_HOST, SEC_DATA_HOST, SEC_WWW_HOST):
+        await limiter.acquire(host)
+    assert clock.slept == []
+    await limiter.acquire(SEC_WWW_HOST)
+    assert clock.slept == [pytest.approx(0.25)]
+
+
+@pytest.mark.asyncio
+async def test_no_one_second_window_ever_sees_more_than_eight_sec_requests(
+    clock: FakeClock,
+) -> None:
+    """The ceiling SEC states is 10/s; a token bucket's worst case is C + r*T.
+
+    With C=4 and r=4/s, any window of T=1s admits at most 8 -- a full bucket
+    spent at once plus a second's refill. Measured here over a burst from a
+    full bucket (the worst start), alternating hosts, with every window
+    closed at both ends so a request exactly one second later is counted.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    stamps: list[float] = []
+    for i in range(60):
+        await limiter.acquire(SEC_DATA_HOST if i % 2 else SEC_WWW_HOST)
+        stamps.append(clock.now)
+    worst = max(
+        sum(1 for s in stamps if start <= s <= start + 1.0 + 1e-9) for start in stamps
+    )
+    assert worst == 8
+    assert worst <= 10
+    # Steady state is the stated rate: 60 requests take (60 - 4) / 4 seconds.
+    assert clock.now == pytest.approx(14.0)
+
+
+def test_a_per_host_budget_for_one_shared_sec_host_is_refused(clock: FakeClock) -> None:
+    """A budget for ``www.sec.gov`` alone would be silently ignored -- the
+    bucket is keyed on the shared name -- so it is refused, not dropped."""
+    with pytest.raises(ValueError, match="www.sec.gov"):
+        HostRateLimiter(
+            per_host={SEC_WWW_HOST: HostBudget(100, 1.0)}, clock=clock, sleep=clock.sleep
+        )
+    limiter = HostRateLimiter(
+        per_host={SEC_BUCKET: HostBudget(2, 1.0)}, clock=clock, sleep=clock.sleep
+    )
+    assert limiter.bucket_for(SEC_DATA_HOST).capacity == 2.0

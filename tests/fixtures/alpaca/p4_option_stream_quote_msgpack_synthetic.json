@@ -1,0 +1,15 @@
+{
+  "description": "SYNTHETIC -- not recorded from the vendor. One option-stream frame (an array of one 'q' message) as msgpack, with 't' as a msgpack Timestamp ext (type -1), which is the shape the live indicative option stream sent on 2026-09-29 (log: 'got Timestamp(seconds=1790707644, nanoseconds=970813166)'). Built with msgpack.packb(..., use_bin_type=True) from those observed seconds/nanoseconds; symbol, prices and sizes are invented. Not captured live because a second option-data connection during market hours could collide with the running engine's option socket.",
+  "synthetic": true,
+  "stream": "option",
+  "codec": "msgpack",
+  "frame_hex": "918aa154a171a153b2535059323631303136433030363530303030a26278a143a26270cb401099999999999aa262730ca26178a158a26170cb4011333333333333a2617307a163a120a174d7ffe775bbb86abc07bc",
+  "expected": {
+    "symbol": "SPY261016C00650000",
+    "bid": "4.15",
+    "ask": "4.3",
+    "bid_size": 12,
+    "ask_size": 7,
+    "at": "2026-09-29T18:47:24.970813+00:00"
+  }
+}

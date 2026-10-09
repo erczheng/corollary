@@ -17,6 +17,7 @@ arithmetic is checked against something external, so the tests here use:
 """
 
 import math
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -25,7 +26,6 @@ import pytest
 from corollary.pricing.blackscholes import (
     ANALYTICS_PRECISION,
     DEFAULT_DIVIDEND_YIELD,
-    DEFAULT_RISK_FREE_RATE,
     IMPLIED_VOL_CEILING,
     Analytics,
     AnalyticsUnavailable,
@@ -323,11 +323,15 @@ def test_years_to_expiry_refuses_a_naive_now() -> None:
 # The Decimal boundary
 # --------------------------------------------------------------------------
 
+#: An ordinary 3-month bill rate. Explicit on every call: the pricing module
+#: supplies no rate of its own (see the entry-point tests below).
+_RATE = Decimal("0.0425")
+
 
 def test_derive_analytics_returns_decimals_not_floats() -> None:
     result = derive_analytics(
         mid=Decimal("7.25"), spot=Decimal("166.26"), strike=Decimal("162.5"),
-        years=0.25, is_call=True,
+        years=0.25, is_call=True, rate=_RATE,
     )
     assert not isinstance(result, AnalyticsUnavailable)
     assert isinstance(result.implied_volatility, Decimal)
@@ -338,10 +342,10 @@ def test_derive_analytics_returns_decimals_not_floats() -> None:
 
 def test_derive_analytics_round_trips_a_known_volatility() -> None:
     mid = Decimal(str(price(spot=100.0, strike=105.0, years=0.3, vol=0.42,
-                            rate=DEFAULT_RISK_FREE_RATE,
+                            rate=float(_RATE),
                             dividend_yield=DEFAULT_DIVIDEND_YIELD, is_call=True)))
     result = derive_analytics(mid=mid, spot=Decimal("100"), strike=Decimal("105"),
-                              years=0.3, is_call=True)
+                              years=0.3, is_call=True, rate=_RATE)
     assert not isinstance(result, AnalyticsUnavailable)
     assert result.implied_volatility == pytest.approx(Decimal("0.42"), abs=Decimal("1e-5"))
 
@@ -349,7 +353,7 @@ def test_derive_analytics_round_trips_a_known_volatility() -> None:
 def test_derive_analytics_reports_absence_rather_than_inventing() -> None:
     unavailable = derive_analytics(
         mid=Decimal("0.01"), spot=Decimal("150"), strike=Decimal("100"),
-        years=0.5, is_call=True,
+        years=0.5, is_call=True, rate=_RATE,
     )
     assert isinstance(unavailable, AnalyticsUnavailable)
     assert unavailable.reason
@@ -357,14 +361,53 @@ def test_derive_analytics_reports_absence_rather_than_inventing() -> None:
 
 def test_derive_analytics_refuses_a_nonpositive_spot() -> None:
     result = derive_analytics(mid=Decimal("1"), spot=Decimal("0"),
-                              strike=Decimal("100"), years=0.5, is_call=True)
+                              strike=Decimal("100"), years=0.5, is_call=True,
+                              rate=_RATE)
     assert isinstance(result, AnalyticsUnavailable)
 
 
 def test_the_defaults_are_stated_and_documented() -> None:
     """The dividend assumption is zero, and that is a decision, not an oversight."""
     assert DEFAULT_DIVIDEND_YIELD == 0.0
-    assert 0.0 <= DEFAULT_RISK_FREE_RATE < 0.20
+
+
+_ENTRY_POINTS_WITHOUT_RATE: dict[str, Callable[[], object]] = {
+    "price": lambda: price(  # type: ignore[call-arg]
+        spot=100.0, strike=100.0, years=0.25, vol=0.3, is_call=True
+    ),
+    "greeks": lambda: greeks(  # type: ignore[call-arg]
+        spot=100.0, strike=100.0, years=0.25, vol=0.3, is_call=True
+    ),
+    "implied_volatility": lambda: implied_volatility(  # type: ignore[call-arg]
+        target_price=5.0, spot=100.0, strike=100.0, years=0.25, is_call=True
+    ),
+    "derive_analytics": lambda: derive_analytics(  # type: ignore[call-arg]
+        mid=Decimal("5"), spot=Decimal("100"), strike=Decimal("100"),
+        years=0.25, is_call=True,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_ENTRY_POINTS_WITHOUT_RATE))
+def test_no_pricing_entry_point_supplies_a_rate_of_its_own(name: str) -> None:
+    """Omitting ``rate`` is a TypeError, never a silent solve at 0.0425.
+
+    The fallback rate is chosen in exactly one place,
+    :class:`~corollary.pricing.rates.RiskFreeRateSource`, which labels it
+    ``default``. A keyword default here would let a later caller -- the
+    Phase 4 +/-2 sigma stress loss behind rule 4, say -- solve at the
+    fallback with no provenance anywhere, and nothing would look wrong.
+    """
+    with pytest.raises(TypeError, match="rate"):
+        _ENTRY_POINTS_WITHOUT_RATE[name]()
+
+
+def test_the_pricing_module_carries_no_fallback_rate() -> None:
+    """The number lives beside its label in ``rates.py``, and only there."""
+    import corollary.pricing.blackscholes as blackscholes_module
+
+    assert not hasattr(blackscholes_module, "DEFAULT_RISK_FREE_RATE")
+    assert "DEFAULT_RISK_FREE_RATE" not in blackscholes_module.__all__
 
 
 # --------------------------------------------------------------------------
@@ -405,7 +448,7 @@ def test_a_resolver_that_moves_the_close_moves_theta_with_it() -> None:
     """The three hours are not cosmetic -- they are priced."""
     now = datetime(2025, 11, 27, 18, 0, tzinfo=timezone.utc)
     expiry = date(2025, 11, 28)
-    common = dict(spot=100.0, strike=100.0, vol=0.30, is_call=True)
+    common = dict(spot=100.0, strike=100.0, vol=0.30, is_call=True, rate=0.04)
     full = price(years=years_to_expiry(expiry, now), **common)
     early = price(
         years=years_to_expiry(
@@ -453,6 +496,7 @@ def test_the_sixth_place_is_load_bearing_on_an_ordinary_contract() -> None:
             date(2026, 9, 11), datetime(2026, 9, 10, 19, 10, tzinfo=timezone.utc)
         ),
         is_call=True,
+        rate=_RATE,
     )
     assert isinstance(analytics, Analytics)
     greeks_ = analytics.greeks

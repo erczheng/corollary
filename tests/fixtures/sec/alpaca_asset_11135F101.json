@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/11135F101",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Broadcom Inc",
+  "status_code": 200,
+  "body": {"id":"7a8b4fcf-0622-47ef-8541-de7f70ffc0c4","class":"us_equity","exchange":"NASDAQ","symbol":"AVGO","name":"Broadcom Inc. Common Stock","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

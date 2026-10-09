@@ -1,0 +1,21 @@
+{
+  "ticker": "XLI",
+  "series_id": "S000006413",
+  "series_name": "State Street(R) Industrial Select Sector SPDR(R) ETF",
+  "class_id": "C000017599",
+  "accession": "0001410368-26-089138",
+  "filing_date": "2026-08-28",
+  "report_date": "2026-06-30",
+  "rep_pd_end": "2026-09-30",
+  "url": "https://www.sec.gov/Archives/edgar/data/1064641/000141036826089138/primary_doc.xml",
+  "recorded_at": "2026-09-28T20:14:23+00:00",
+  "complete": false,
+  "trimmed": "every <invstOrSec> whose assetCat is not EC is removed; all else as served",
+  "holdings_total": 86,
+  "equity_lines": 81,
+  "non_equity_removed": 5,
+  "equity_pct_val_sum": "99.908347658143",
+  "equity_lines_without_cusip": 5,
+  "bytes_original": 83545,
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials"
+}

@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/060505104",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Bank of America Corp",
+  "status_code": 200,
+  "body": {"id":"061588a3-d70b-4b9c-a3f6-636aaa16acc4","class":"us_equity","exchange":"NYSE","symbol":"BAC","name":"Bank of America Corporation","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

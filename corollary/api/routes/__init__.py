@@ -1,8 +1,8 @@
 """HTTP routes, one module per surface.
 
 Phase 2 step 7 splits into sub-steps, and this package fills in with them.
-Present now: ``account``, ``activity``, ``engine``, ``markets``, ``positions``,
-``settings`` and ``ws`` -- each with its own module and its own
+Present now: ``account``, ``activity``, ``engine``, ``markets``, ``news``,
+``notifications``, ``positions``, ``settings`` and ``ws`` -- each with its own module and its own
 ``include_router`` line in ``api/app.py``.
 
 ``ws`` is the odd one: a websocket rather than a set of HTTP verbs, carrying
@@ -24,6 +24,7 @@ from corollary.api.routes.account import router as account_router
 from corollary.api.routes.activity import router as activity_router
 from corollary.api.routes.engine import router as engine_router
 from corollary.api.routes.markets import router as markets_router
+from corollary.api.routes.news import router as news_router
 from corollary.api.routes.notifications import router as notifications_router
 from corollary.api.routes.positions import router as positions_router
 from corollary.api.routes.settings import router as settings_router
@@ -34,6 +35,7 @@ __all__ = [
     "activity_router",
     "engine_router",
     "markets_router",
+    "news_router",
     "notifications_router",
     "positions_router",
     "settings_router",

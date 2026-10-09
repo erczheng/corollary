@@ -1,0 +1,8 @@
+{
+  "request": "GET /v2/assets/037833100",
+  "host": "paper trading host",
+  "request_headers": "request headers are not recorded: the User-Agent is the owner's declared identity and the Alpaca headers are credentials",
+  "nport_name": "Apple Inc",
+  "status_code": 200,
+  "body": {"id":"b0b6dd9d-8b9b-48a9-ba46-b9d54906e415","class":"us_equity","exchange":"NASDAQ","symbol":"AAPL","name":"Apple Inc. Common Stock","status":"active","tradable":true,"marginable":true,"maintenance_margin_requirement":30,"margin_requirement_long":"30","margin_requirement_short":"30","shortable":true,"easy_to_borrow":true,"borrow_status":"easy_to_borrow","fractionable":true,"attributes":["fractional_eh_enabled","has_options","overnight_tradable"]}
+}

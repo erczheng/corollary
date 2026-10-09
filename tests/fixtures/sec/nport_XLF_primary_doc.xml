@@ -1,0 +1,2108 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/nport" xmlns:com="http://www.sec.gov/edgar/common" xmlns:ncom="http://www.sec.gov/edgar/nportcommon" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.sec.gov/edgar/nport eis_NPORT_Filer.xsd">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <isConfidential>false</isConfidential>
+    <filerInfo>
+
+      <filer>
+        <issuerCredentials>
+          <cik>0001064641</cik>
+          <ccc>XXXXXXXX</ccc>
+        </issuerCredentials>
+      </filer>
+
+
+      <seriesClassInfo>
+        <seriesId>S000006411</seriesId>
+        <classId>C000017597</classId>
+      </seriesClassInfo>
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>SELECT SECTOR SPDR TRUST</regName>
+      <regFileNumber>811-08837</regFileNumber>
+      <regCik>0001064641</regCik>
+      <regLei>5493008JJKIPMEX3CO91</regLei>
+      <regStreet1>One Congress Street</regStreet1>
+      <regCity>Boston</regCity>
+      <regStateConditional regCountry="US" regState="US-MA"/>
+      <regZipOrPostalCode>02114</regZipOrPostalCode>
+      <regPhone>1-866-787-2257</regPhone>
+      <seriesName>State Street(R) Financial Select Sector SPDR(R) ETF</seriesName>
+      <seriesId>S000006411</seriesId>
+      <seriesLei>549300Y12KQ6ZG08NY28</seriesLei>
+      <repPdEnd>2026-09-30</repPdEnd>
+      <repPdDate>2026-06-30</repPdDate>
+      <isFinalFiling>N</isFinalFiling>
+    </genInfo>
+    <fundInfo>
+      <totAssets>51418773477.99</totAssets>
+      <totLiabs>64950416.67</totLiabs>
+      <netAssets>51353823061.32</netAssets>
+      <assetsAttrMiscSec>0.00000000</assetsAttrMiscSec>
+      <assetsInvested>0.00000000</assetsInvested>
+      <amtPayOneYrBanksBorr>0.00000000</amtPayOneYrBanksBorr>
+      <amtPayOneYrCtrldComp>0.00000000</amtPayOneYrCtrldComp>
+      <amtPayOneYrOthAffil>0.00000000</amtPayOneYrOthAffil>
+      <amtPayOneYrOther>0.00000000</amtPayOneYrOther>
+      <amtPayAftOneYrBanksBorr>0.00000000</amtPayAftOneYrBanksBorr>
+      <amtPayAftOneYrCtrldComp>0.00000000</amtPayAftOneYrCtrldComp>
+      <amtPayAftOneYrOthAffil>0.00000000</amtPayAftOneYrOthAffil>
+      <amtPayAftOneYrOther>0.00000000</amtPayAftOneYrOther>
+      <delayDeliv>0.00000000</delayDeliv>
+      <standByCommit>0.00000000</standByCommit>
+      <liquidPref>0.00000000</liquidPref>
+      <cshNotRptdInCorD>3428771.59000000</cshNotRptdInCorD>
+      <borrowers>
+        <borrower aggrVal="119875.00000000" lei="RUC0QBLBRPRCU4W1NE59" name="BMO Capital Markets Corp."/>
+        <borrower aggrVal="630788190.00000000" lei="G5GSEF7VJP5I7OUK5573" name="Barclays Bank PLC"/>
+        <borrower aggrVal="50213145.58000000" lei="549300HN4UKV1E2R3U73" name="BofA Securities, Inc."/>
+        <borrower aggrVal="2331446.71000000" lei="ZBUT11V806EZRVTWT807" name="J.P. Morgan Securities LLC"/>
+        <borrower aggrVal="47950.00000000" lei="58PU97L1C0WSRCWADL48" name="Jefferies LLC"/>
+        <borrower aggrVal="2008856.90000000" lei="9R7GPTSO7KV3UQJZQ078" name="Morgan Stanley &amp; Co. LLC"/>
+        <borrower aggrVal="4795.00000000" lei="549300JRHF1MHHWUAW04" name="National Financial Services LLC"/>
+        <borrower aggrVal="263725.00000000" lei="OXTKY6Q8X53C9ILVV871" name="Nomura Securities International, Inc."/>
+        <borrower aggrVal="3068800.00000000" lei="SUVUFHICNZMP2WKHG940" name="TD Securities (USA) LLC"/>
+      </borrowers>
+      <aggregateCondition isNonCashCollateral="Y">
+        <aggregateInfos>
+          <aggregateInfo amt="5674342.68000000" collatrl="5740820.49000000">
+            <invstCat>ACMBS</invstCat>
+          </aggregateInfo>
+          <aggregateInfo amt="648727447.04000000" collatrl="609771593.86000000">
+            <invstCat>UST</invstCat>
+          </aggregateInfo>
+          <aggregateInfo amt="30581272.92000000" collatrl="30393804.02000000">
+            <invstCatConditional invstCat="other instrument" otherDesc="non-U.S. sovereign"/>
+          </aggregateInfo>
+        </aggregateInfos>
+      </aggregateCondition>
+      <returnInfo>
+        <monthlyTotReturns>
+          <monthlyTotReturn classId="C000017597" rtn1="5.55000000" rtn2="-1.07000000" rtn3="4.36000000"/>
+        </monthlyTotReturns>
+        <monthlyReturnCats>
+          <equityContracts>
+            <mon1 netRealizedGain="0.00000000" netUnrealizedAppr="3335423.22000000"/>
+            <mon2 netRealizedGain="1514825.97000000" netUnrealizedAppr="-3155278.70000000"/>
+            <mon3 netRealizedGain="3071635.72000000" netUnrealizedAppr="-497803.32000000"/>
+            <futureCategory>
+              <instrMon1 netRealizedGain="0.00000000" netUnrealizedAppr="3335423.22000000"/>
+              <instrMon2 netRealizedGain="1514825.97000000" netUnrealizedAppr="-3155278.70000000"/>
+              <instrMon3 netRealizedGain="3071635.72000000" netUnrealizedAppr="-497803.32000000"/>
+            </futureCategory>
+          </equityContracts>
+        </monthlyReturnCats>
+        <othMon1 netRealizedGain="446583929.88000000" netUnrealizedAppr="2179274459.90000000"/>
+        <othMon2 netRealizedGain="392482327.04000000" netUnrealizedAppr="-1017591972.03000000"/>
+        <othMon3 netRealizedGain="442216893.67000000" netUnrealizedAppr="1599865329.80000000"/>
+      </returnInfo>
+      <mon1Flow redemption="5728357898.50000000" reinvestment="0.00000000" sales="6712484560.05000000"/>
+      <mon2Flow redemption="6488208878.50000000" reinvestment="0.00000000" sales="5015064784.50000000"/>
+      <mon3Flow redemption="7346056009.60000000" reinvestment="0.00000000" sales="7344443727.30000000"/>
+
+
+
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>Aflac Inc</name>
+        <lei>549300N0B7DOGLXWPP39</lei>
+        <title>Aflac Inc</title>
+        <cusip>001055102</cusip>
+        <identifiers>
+          <isin value="US0010551028"/>
+        </identifiers>
+        <balance>3098245.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>363269226.25000000</valUSD>
+        <pctVal>0.707384970766</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Allstate Corp/The</name>
+        <lei>OBT0W1ED8G0NWVOLOJ77</lei>
+        <title>Allstate Corp/The</title>
+        <cusip>020002101</cusip>
+        <identifiers>
+          <isin value="US0200021014"/>
+        </identifiers>
+        <balance>1741252.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>414313500.88000000</valUSD>
+        <pctVal>0.806782194940</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>American Express Co</name>
+        <lei>R4PP93JZOLY261QX3811</lei>
+        <title>American Express Co</title>
+        <cusip>025816109</cusip>
+        <identifiers>
+          <isin value="US0258161092"/>
+        </identifiers>
+        <balance>3599680.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1217591760.00000000</valUSD>
+        <pctVal>2.370985619797</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>American International Group Inc</name>
+        <lei>ODVCVCQG2BP6VHV36M30</lei>
+        <title>American International Group Inc</title>
+        <cusip>026874784</cusip>
+        <identifiers>
+          <isin value="US0268747849"/>
+        </identifiers>
+        <balance>3586433.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>267296851.49000000</valUSD>
+        <pctVal>0.520500394237</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Ameriprise Financial Inc</name>
+        <lei>6ZLKQF7QB6JAEKQS5388</lei>
+        <title>Ameriprise Financial Inc</title>
+        <cusip>03076C106</cusip>
+        <identifiers>
+          <isin value="US03076C1062"/>
+        </identifiers>
+        <balance>608082.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>278963698.32000000</valUSD>
+        <pctVal>0.543218949808</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Apollo Global Management Inc</name>
+        <lei>254900LMFT1CY9IYB476</lei>
+        <title>Apollo Global Management Inc</title>
+        <cusip>03769M106</cusip>
+        <identifiers>
+          <isin value="US03769M1062"/>
+        </identifiers>
+        <balance>3119424.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>369059053.44000000</valUSD>
+        <pctVal>0.718659354726</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="248878063.63000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Ares Management Corp</name>
+        <lei>529900JUV61FH7B8VW38</lei>
+        <title>Ares Management Corp</title>
+        <cusip>03990B101</cusip>
+        <identifiers>
+          <isin value="US03990B1017"/>
+        </identifiers>
+        <balance>1426679.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>158803639.49000000</valUSD>
+        <pctVal>0.309234308223</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="119322159.20000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Assurant Inc</name>
+        <lei>H3F39CAXWQRVWURFXL38</lei>
+        <title>Assurant Inc</title>
+        <cusip>04621X108</cusip>
+        <identifiers>
+          <isin value="US04621X1081"/>
+        </identifiers>
+        <balance>335140.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>89995144.20000000</valUSD>
+        <pctVal>0.175245266730</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Bank of America Corp</name>
+        <lei>9DJT3UXIJIZJI4WXO774</lei>
+        <title>Bank of America Corp</title>
+        <cusip>060505104</cusip>
+        <identifiers>
+          <isin value="US0605051046"/>
+        </identifiers>
+        <balance>44159959.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>2516234463.82000000</valUSD>
+        <pctVal>4.899799691281</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Bank of New York Mellon Corp/The</name>
+        <lei>WFLLPEPC7FZXENRZV188</lei>
+        <title>Bank of New York Mellon Corp/The</title>
+        <cusip>064058100</cusip>
+        <identifiers>
+          <isin value="US0640581007"/>
+        </identifiers>
+        <balance>4642495.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>671351201.95000000</valUSD>
+        <pctVal>1.307305205200</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>W R Berkley Corp</name>
+        <lei>SQOAGCLKBDWNVYV1OV80</lei>
+        <title>W R Berkley Corp</title>
+        <cusip>084423102</cusip>
+        <identifiers>
+          <isin value="US0844231029"/>
+        </identifiers>
+        <balance>1989377.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>140310759.81000000</valUSD>
+        <pctVal>0.273223591634</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Berkshire Hathaway Inc</name>
+        <lei>5493000C01ZX7D35SD85</lei>
+        <title>Berkshire Hathaway Inc</title>
+        <cusip>084670702</cusip>
+        <identifiers>
+          <isin value="US0846707026"/>
+        </identifiers>
+        <balance>12400311.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>6204991621.29000000</valUSD>
+        <pctVal>12.08282315005</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Blackstone Inc</name>
+        <lei>5299004LW4QWGZUB8Y96</lei>
+        <title>Blackstone Inc</title>
+        <cusip>09260D107</cusip>
+        <identifiers>
+          <isin value="US09260D1072"/>
+        </identifiers>
+        <balance>5024679.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>591253977.93000000</valUSD>
+        <pctVal>1.151333907942</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Blackrock Inc</name>
+        <lei>529900VBK42Y5HHRMD23</lei>
+        <title>Blackrock Inc</title>
+        <cusip>09290D101</cusip>
+        <identifiers>
+          <isin value="US09290D1019"/>
+        </identifiers>
+        <balance>976537.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>938998917.72000000</valUSD>
+        <pctVal>1.828488828570</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Brown &amp; Brown Inc</name>
+        <lei>549300PC8KTJ71XKFY89</lei>
+        <title>Brown &amp; Brown Inc</title>
+        <cusip>115236101</cusip>
+        <identifiers>
+          <isin value="US1152361010"/>
+        </identifiers>
+        <balance>1971728.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>126486351.20000000</valUSD>
+        <pctVal>0.246303670612</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="50079017.04000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Cboe Global Markets Inc</name>
+        <lei>529900RLNSGA90UPEH54</lei>
+        <title>Cboe Global Markets Inc</title>
+        <cusip>12503M108</cusip>
+        <identifiers>
+          <isin value="US12503M1080"/>
+        </identifiers>
+        <balance>707888.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>171783180.96000000</valUSD>
+        <pctVal>0.334509040845</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>CME Group Inc</name>
+        <lei>LCZ7XYGSLJUHFXXNXD88</lei>
+        <title>CME Group Inc</title>
+        <cusip>12572Q105</cusip>
+        <identifiers>
+          <isin value="US12572Q1058"/>
+        </identifiers>
+        <balance>2450724.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>541193380.92000000</valUSD>
+        <pctVal>1.053852174304</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Capital One Financial Corp</name>
+        <lei>ZUE8T73ROZOF6FLBAR73</lei>
+        <title>Capital One Financial Corp</title>
+        <cusip>14040H105</cusip>
+        <identifiers>
+          <isin value="US14040H1059"/>
+        </identifiers>
+        <balance>4208993.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>844408175.66000000</valUSD>
+        <pctVal>1.644294670431</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Cincinnati Financial Corp</name>
+        <lei>254900Q4WEDMZBOZ0002</lei>
+        <title>Cincinnati Financial Corp</title>
+        <cusip>172062101</cusip>
+        <identifiers>
+          <isin value="US1720621010"/>
+        </identifiers>
+        <balance>1046287.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>193709575.18000000</valUSD>
+        <pctVal>0.377205753403</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Citigroup Inc</name>
+        <lei>6SHGI4ZSSLCXXQSBB395</lei>
+        <title>Citigroup Inc</title>
+        <cusip>172967424</cusip>
+        <identifiers>
+          <isin value="US1729674242"/>
+        </identifiers>
+        <balance>11536271.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1614616489.16000000</valUSD>
+        <pctVal>3.144101827106</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Citizens Financial Group Inc</name>
+        <lei>2138004JDDA4ZQUPFW65</lei>
+        <title>Citizens Financial Group Inc</title>
+        <cusip>174610105</cusip>
+        <identifiers>
+          <isin value="US1746101054"/>
+        </identifiers>
+        <balance>2860384.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>200427106.88000000</valUSD>
+        <pctVal>0.390286632877</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Coinbase Global Inc</name>
+        <lei>5493004G3J2SC154DU06</lei>
+        <title>Coinbase Global Inc</title>
+        <cusip>19260Q107</cusip>
+        <identifiers>
+          <isin value="US19260Q1076"/>
+        </identifiers>
+        <balance>1504472.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>219938761.68000000</valUSD>
+        <pctVal>0.428281184474</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="79434421.65000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Corpay Inc</name>
+        <lei>549300DG6RR0NQSFLN74</lei>
+        <title>Corpay Inc</title>
+        <cusip>219948106</cusip>
+        <identifiers>
+          <isin value="US2199481068"/>
+        </identifiers>
+        <balance>442120.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>147345332.40000000</valUSD>
+        <pctVal>0.286921836810</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Erie Indemnity Co</name>
+        <lei>549300WA5KP94KRUFZ80</lei>
+        <title>Erie Indemnity Co</title>
+        <cusip>29530P102</cusip>
+        <identifiers>
+          <isin value="US29530P1021"/>
+        </identifiers>
+        <balance>171869.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>41205592.75000000</valUSD>
+        <pctVal>0.080238607943</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="38771933.55000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>FactSet Research Systems Inc</name>
+        <lei>549300ZSJE7NBK6K9P30</lei>
+        <title>FactSet Research Systems Inc</title>
+        <cusip>303075105</cusip>
+        <identifiers>
+          <isin value="US3030751057"/>
+        </identifiers>
+        <balance>246405.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>56692862.40000000</valUSD>
+        <pctVal>0.110396576185</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="44045690.92000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Fidelity National Information Services Inc</name>
+        <lei>6WQI0GK1PRFVBA061U48</lei>
+        <title>Fidelity National Information Services Inc</title>
+        <cusip>31620M106</cusip>
+        <identifiers>
+          <isin value="US31620M1062"/>
+        </identifiers>
+        <balance>3496246.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>135934044.48000000</valUSD>
+        <pctVal>0.264700924637</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Fifth Third Bancorp</name>
+        <lei>THRNG6BD57P9QWTQLG42</lei>
+        <title>Fifth Third Bancorp</title>
+        <cusip>316773100</cusip>
+        <identifiers>
+          <isin value="US3167731005"/>
+        </identifiers>
+        <balance>6130087.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>345553004.19000000</valUSD>
+        <pctVal>0.672886619906</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Fiserv Inc</name>
+        <lei>GI7UBEJLXYLGR2C7GV83</lei>
+        <title>Fiserv Inc</title>
+        <cusip>337738108</cusip>
+        <identifiers>
+          <isin value="US3377381088"/>
+        </identifiers>
+        <balance>3606968.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>176921780.40000000</valUSD>
+        <pctVal>0.344515305489</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Franklin Resources Inc</name>
+        <lei>RIFQSET379FOGTEFKS80</lei>
+        <title>Franklin Resources Inc</title>
+        <cusip>354613101</cusip>
+        <identifiers>
+          <isin value="US3546131018"/>
+        </identifiers>
+        <balance>2073467.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>68984247.09000000</valUSD>
+        <pctVal>0.134331278525</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Arthur J Gallagher &amp; Co</name>
+        <lei>54930049QLLMPART6V29</lei>
+        <title>Arthur J Gallagher &amp; Co</title>
+        <cusip>363576109</cusip>
+        <identifiers>
+          <isin value="US3635761097"/>
+        </identifiers>
+        <balance>1737682.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>398919656.74000000</valUSD>
+        <pctVal>0.776806151829</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Global Payments Inc</name>
+        <lei>549300NOMHGVQBX6S778</lei>
+        <title>Global Payments Inc</title>
+        <cusip>37940X102</cusip>
+        <identifiers>
+          <isin value="US37940X1028"/>
+        </identifiers>
+        <balance>1572434.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>114095811.04000000</valUSD>
+        <pctVal>0.222175885335</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="28889797.44000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Globe Life Inc</name>
+        <lei>5493001JFHKQOPP6XA71</lei>
+        <title>Globe Life Inc</title>
+        <cusip>37959E102</cusip>
+        <identifiers>
+          <isin value="US37959E1029"/>
+        </identifiers>
+        <balance>524858.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>93781627.44000000</valUSD>
+        <pctVal>0.182618589716</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Goldman Sachs Group Inc/The</name>
+        <lei>784F5XWPLTWKTBV3E584</lei>
+        <title>Goldman Sachs Group Inc/The</title>
+        <cusip>38141G104</cusip>
+        <identifiers>
+          <isin value="US38141G1040"/>
+        </identifiers>
+        <balance>1995167.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>2017852048.79000000</valUSD>
+        <pctVal>3.929312227408</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Hartford Insurance Group Inc/The</name>
+        <lei>IU7C3FTM7Y3BQM112U94</lei>
+        <title>Hartford Insurance Group Inc/The</title>
+        <cusip>416515104</cusip>
+        <identifiers>
+          <isin value="US4165151048"/>
+        </identifiers>
+        <balance>1854314.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>245733691.28000000</valUSD>
+        <pctVal>0.478510998074</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Jack Henry &amp; Associates Inc</name>
+        <lei>529900X1QS8C54W0JB21</lei>
+        <title>Jack Henry &amp; Associates Inc</title>
+        <cusip>426281101</cusip>
+        <identifiers>
+          <isin value="US4262811015"/>
+        </identifiers>
+        <balance>480646.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>66204180.04000000</valUSD>
+        <pctVal>0.128917724316</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Huntington Bancshares Inc/OH</name>
+        <lei>549300XTVCVV9I7B5T19</lei>
+        <title>Huntington Bancshares Inc/OH</title>
+        <cusip>446150104</cusip>
+        <identifiers>
+          <isin value="US4461501045"/>
+        </identifiers>
+        <balance>13710964.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>243095391.72000000</valUSD>
+        <pctVal>0.473373504110</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Interactive Brokers Group Inc</name>
+        <lei>5493004DT6DCDUZNDM53</lei>
+        <title>Interactive Brokers Group Inc</title>
+        <cusip>45841N107</cusip>
+        <identifiers>
+          <isin value="US45841N1072"/>
+        </identifiers>
+        <balance>3013316.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>262279024.64000000</valUSD>
+        <pctVal>0.510729307001</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Intercontinental Exchange Inc</name>
+        <lei>5493000F4ZO33MV32P92</lei>
+        <title>Intercontinental Exchange Inc</title>
+        <cusip>45866F104</cusip>
+        <identifiers>
+          <isin value="US45866F1049"/>
+        </identifiers>
+        <balance>3824938.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>470888117.18000000</valUSD>
+        <pctVal>0.916948513487</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>JPMorgan Chase &amp; Co</name>
+        <lei>8I5DZWZKVSZI1NUHU748</lei>
+        <title>JPMorgan Chase &amp; Co</title>
+        <cusip>46625H100</cusip>
+        <identifiers>
+          <isin value="US46625H1005"/>
+        </identifiers>
+        <balance>18123750.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>5932447087.50000000</valUSD>
+        <pctVal>11.55210407687</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>KKR &amp; Co Inc</name>
+        <lei>54930013V5I303TF9571</lei>
+        <title>KKR &amp; Co Inc</title>
+        <cusip>48251W104</cusip>
+        <identifiers>
+          <isin value="US48251W1045"/>
+        </identifiers>
+        <balance>4676479.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>429207242.62000000</valUSD>
+        <pctVal>0.835784401304</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>KeyCorp</name>
+        <lei>RKPI3RZGV1V1FJTH5T61</lei>
+        <title>KeyCorp</title>
+        <cusip>493267108</cusip>
+        <identifiers>
+          <isin value="US4932671088"/>
+        </identifiers>
+        <balance>6233480.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>143681714.00000000</valUSD>
+        <pctVal>0.279787765418</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Loews Corp</name>
+        <lei>R8V1FN4M5ITGZOG7BS19</lei>
+        <title>Loews Corp</title>
+        <cusip>540424108</cusip>
+        <identifiers>
+          <isin value="US5404241086"/>
+        </identifiers>
+        <balance>1141260.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>129202044.60000000</valUSD>
+        <pctVal>0.251591871642</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>M&amp;T Bank Corp</name>
+        <lei>549300WYXDDBYRASEG81</lei>
+        <title>M&amp;T Bank Corp</title>
+        <cusip>55261F104</cusip>
+        <identifiers>
+          <isin value="US55261F1049"/>
+        </identifiers>
+        <balance>990591.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>235770563.91000000</valUSD>
+        <pctVal>0.459110052290</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>MSCI Inc</name>
+        <lei>549300HTIN2PD78UB763</lei>
+        <title>MSCI Inc</title>
+        <cusip>55354G100</cusip>
+        <identifiers>
+          <isin value="US55354G1004"/>
+        </identifiers>
+        <balance>492409.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>275768736.36000000</valUSD>
+        <pctVal>0.536997481240</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Marsh &amp; McLennan Cos Inc</name>
+        <lei>549300XMP3KDCKJXIU47</lei>
+        <title>Marsh &amp; McLennan Cos Inc</title>
+        <cusip>571748102</cusip>
+        <identifiers>
+          <isin value="US5717481023"/>
+        </identifiers>
+        <balance>3258686.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>543125195.62000000</valUSD>
+        <pctVal>1.057613948179</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Mastercard Inc</name>
+        <lei>AR5L2ODV9HN37376R084</lei>
+        <title>Mastercard Inc</title>
+        <cusip>57636Q104</cusip>
+        <identifiers>
+          <isin value="US57636Q1040"/>
+        </identifiers>
+        <balance>5457568.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>2803006924.80000000</valUSD>
+        <pctVal>5.458224446995</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>MetLife Inc</name>
+        <lei>C4BXATY60WC6XEOZDX54</lei>
+        <title>MetLife Inc</title>
+        <cusip>59156R108</cusip>
+        <identifiers>
+          <isin value="US59156R1086"/>
+        </identifiers>
+        <balance>3655602.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>309300485.22000000</valUSD>
+        <pctVal>0.602293007184</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Moody's Corp</name>
+        <lei>549300GCEDD8YCF5WU84</lei>
+        <title>Moody's Corp</title>
+        <cusip>615369105</cusip>
+        <identifiers>
+          <isin value="US6153691059"/>
+        </identifiers>
+        <balance>1016285.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>460295802.20000000</valUSD>
+        <pctVal>0.896322366594</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Morgan Stanley</name>
+        <lei>IGJSJL3JD5P30I6NJZ34</lei>
+        <title>Morgan Stanley</title>
+        <cusip>617446448</cusip>
+        <identifiers>
+          <isin value="US6174464486"/>
+        </identifiers>
+        <balance>8108197.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1694937500.88000000</valUSD>
+        <pctVal>3.300508900488</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Nasdaq Inc</name>
+        <lei>549300L8X1Q78ERXFD06</lei>
+        <title>Nasdaq Inc</title>
+        <cusip>631103108</cusip>
+        <identifiers>
+          <isin value="US6311031081"/>
+        </identifiers>
+        <balance>3021801.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>238178354.82000000</valUSD>
+        <pctVal>0.463798682593</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Northern Trust Corp</name>
+        <lei>549300GLF98S992BC502</lei>
+        <title>Northern Trust Corp</title>
+        <cusip>665859104</cusip>
+        <identifiers>
+          <isin value="US6658591044"/>
+        </identifiers>
+        <balance>1251378.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>217539551.52000000</valUSD>
+        <pctVal>0.423609263248</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>PNC Financial Services Group Inc/The</name>
+        <lei>CFGNEKW0P8842LEUIA51</lei>
+        <title>PNC Financial Services Group Inc/The</title>
+        <cusip>693475105</cusip>
+        <identifiers>
+          <isin value="US6934751057"/>
+        </identifiers>
+        <balance>2715952.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>668721701.44000000</valUSD>
+        <pctVal>1.302184845403</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>PayPal Holdings Inc</name>
+        <lei>5493005X2GO78EFZ3E94</lei>
+        <title>PayPal Holdings Inc</title>
+        <cusip>70450Y103</cusip>
+        <identifiers>
+          <isin value="US70450Y1038"/>
+        </identifiers>
+        <balance>5966434.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>257630620.12000000</valUSD>
+        <pctVal>0.501677586520</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>T Rowe Price Group Inc</name>
+        <lei>549300SIV6FPS9Y7IH33</lei>
+        <title>T Rowe Price Group Inc</title>
+        <cusip>74144T108</cusip>
+        <identifiers>
+          <isin value="US74144T1088"/>
+        </identifiers>
+        <balance>1449296.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>164770462.24000000</valUSD>
+        <pctVal>0.320853351158</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <loanByFundCondition isLoanByFund="Y" loanVal="79425700.76000000"/>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Principal Financial Group Inc</name>
+        <lei>CUMYEZJOAF02RYZ1JJ85</lei>
+        <title>Principal Financial Group Inc</title>
+        <cusip>74251V102</cusip>
+        <identifiers>
+          <isin value="US74251V1026"/>
+        </identifiers>
+        <balance>1329380.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>143280576.40000000</valUSD>
+        <pctVal>0.279006640321</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Progressive Corp/The</name>
+        <lei>529900TACNVLY9DCR586</lei>
+        <title>Progressive Corp/The</title>
+        <cusip>743315103</cusip>
+        <identifiers>
+          <isin value="US7433151039"/>
+        </identifiers>
+        <balance>3952591.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>863443503.95000000</valUSD>
+        <pctVal>1.681361683469</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Prudential Financial Inc</name>
+        <lei>5PRBRS5FEH7NREC8OR45</lei>
+        <title>Prudential Financial Inc</title>
+        <cusip>744320102</cusip>
+        <identifiers>
+          <isin value="US7443201022"/>
+        </identifiers>
+        <balance>2347172.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>253330273.96000000</valUSD>
+        <pctVal>0.493303631274</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Raymond James Financial Inc</name>
+        <lei>RGUZHJ05YTITL6D76949</lei>
+        <title>Raymond James Financial Inc</title>
+        <cusip>754730109</cusip>
+        <identifiers>
+          <isin value="US7547301090"/>
+        </identifiers>
+        <balance>1172955.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>178324348.65000000</valUSD>
+        <pctVal>0.347246491146</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Regions Financial Corp</name>
+        <lei>CW05CS5KW59QTC0DG824</lei>
+        <title>Regions Financial Corp</title>
+        <cusip>7591EP100</cusip>
+        <identifiers>
+          <isin value="US7591EP1005"/>
+        </identifiers>
+        <balance>5772134.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>174318446.80000000</valUSD>
+        <pctVal>0.339445899854</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Robinhood Markets Inc</name>
+        <lei>213800FS5AO3YWIE6F63</lei>
+        <title>Robinhood Markets Inc</title>
+        <cusip>770700102</cusip>
+        <identifiers>
+          <isin value="US7707001027"/>
+        </identifiers>
+        <balance>5351347.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>536633077.16000000</valUSD>
+        <pctVal>1.044972010203</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>S&amp;P Global Inc</name>
+        <lei>Y6X4K52KMJMZE7I7MY94</lei>
+        <title>S&amp;P Global Inc</title>
+        <cusip>78409V104</cusip>
+        <identifiers>
+          <isin value="US78409V1044"/>
+        </identifiers>
+        <balance>2050596.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>835125726.96000000</valUSD>
+        <pctVal>1.626219192995</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Charles Schwab Corp/The</name>
+        <lei>549300VSGCJ7E698NM85</lei>
+        <title>Charles Schwab Corp/The</title>
+        <cusip>808513105</cusip>
+        <identifiers>
+          <isin value="US8085131055"/>
+        </identifiers>
+        <balance>11057400.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1020266298.00000000</valUSD>
+        <pctVal>1.986738741498</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Block Inc</name>
+        <lei>549300OHIIUWSTIZME52</lei>
+        <title>Block Inc</title>
+        <cusip>852234103</cusip>
+        <identifiers>
+          <isin value="US8522341036"/>
+        </identifiers>
+        <balance>3619815.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>275105940.00000000</valUSD>
+        <pctVal>0.535706834662</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>State Street Corp</name>
+        <lei>549300ZFEEJ2IP5VME73</lei>
+        <title>State Street Corp</title>
+        <cusip>857477103</cusip>
+        <identifiers>
+          <isin value="US8574771031"/>
+        </identifiers>
+        <balance>1872153.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>317517148.80000000</valUSD>
+        <pctVal>0.618293108228</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Synchrony Financial</name>
+        <lei>549300RS7EWPM9MA6C78</lei>
+        <title>Synchrony Financial</title>
+        <cusip>87165B103</cusip>
+        <identifiers>
+          <isin value="US87165B1035"/>
+        </identifiers>
+        <balance>2275319.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>173038009.95000000</valUSD>
+        <pctVal>0.336952537581</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Travelers Cos Inc/The</name>
+        <lei>549300Y650407RU8B149</lei>
+        <title>Travelers Cos Inc/The</title>
+        <cusip>89417E109</cusip>
+        <identifiers>
+          <isin value="US89417E1091"/>
+        </identifiers>
+        <balance>1438377.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>474837015.24000000</valUSD>
+        <pctVal>0.924638102742</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Truist Financial Corp</name>
+        <lei>549300DRQQI75D2JP341</lei>
+        <title>Truist Financial Corp</title>
+        <cusip>89832Q109</cusip>
+        <identifiers>
+          <isin value="US89832Q1094"/>
+        </identifiers>
+        <balance>8427067.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>419836477.94000000</valUSD>
+        <pctVal>0.817536948395</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>US Bancorp</name>
+        <lei>N1GZ7BBF3NP8GI976H15</lei>
+        <title>US Bancorp</title>
+        <cusip>902973304</cusip>
+        <identifiers>
+          <isin value="US9029733048"/>
+        </identifiers>
+        <balance>10499405.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>634164062.00000000</valUSD>
+        <pctVal>1.234891628696</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Visa Inc</name>
+        <lei>549300JZ4OKEHW3DPJ59</lei>
+        <title>Visa Inc</title>
+        <cusip>92826C839</cusip>
+        <identifiers>
+          <isin value="US92826C8394"/>
+        </identifiers>
+        <balance>11225943.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>3851508783.87000000</valUSD>
+        <pctVal>7.499945581989</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Wells Fargo &amp; Co</name>
+        <lei>PBLD0EJDB5FWOLXP3B76</lei>
+        <title>Wells Fargo &amp; Co</title>
+        <cusip>949746101</cusip>
+        <identifiers>
+          <isin value="US9497461015"/>
+        </identifiers>
+        <balance>20698485.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>1710522800.40000000</valUSD>
+        <pctVal>3.330857759815</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Aon PLC</name>
+        <lei>635400FALWQYX5E6QC64</lei>
+        <title>Aon PLC</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="IE00BLP1HW54"/>
+        </identifiers>
+        <balance>1444626.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>479167997.94000000</valUSD>
+        <pctVal>0.933071715747</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>IE</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Arch Capital Group Ltd</name>
+        <lei>549300AYR4P8AFKDCE43</lei>
+        <title>Arch Capital Group Ltd</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="BMG0450A1053"/>
+        </identifiers>
+        <balance>2353475.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>228428283.50000000</valUSD>
+        <pctVal>0.444812615464</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>BM</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Everest Group Ltd</name>
+        <lei>549300N24XF2VV0B3570</lei>
+        <title>Everest Group Ltd</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="BMG3223R1088"/>
+        </identifiers>
+        <balance>267664.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>95617610.72000000</valUSD>
+        <pctVal>0.186193753492</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>BM</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Invesco Ltd</name>
+        <lei>ECPGFXU8A2SHKVVGJI15</lei>
+        <title>Invesco Ltd</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="BMG491BT1088"/>
+        </identifiers>
+        <balance>2998511.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>79130705.29000000</valUSD>
+        <pctVal>0.154089219794</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>BM</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Willis Towers Watson PLC</name>
+        <lei>549300WHC56FF48KL350</lei>
+        <title>Willis Towers Watson PLC</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="IE00BDB6Q211"/>
+        </identifiers>
+        <balance>638821.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>166968644.77000000</valUSD>
+        <pctVal>0.325133816367</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>IE</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Chubb Ltd</name>
+        <lei>E0JAN6VLUDI1HITHT809</lei>
+        <title>Chubb Ltd</title>
+        <cusip>000000000</cusip>
+        <identifiers>
+          <isin value="CH0044328745"/>
+        </identifiers>
+        <balance>2439870.00000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>831361303.80000000</valUSD>
+        <pctVal>1.618888827044</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>CH</invCountry>
+
+        <isRestrictedSec>N</isRestrictedSec>
+
+        <fairValLevel>1</fairValLevel>
+        <securityLending>
+          <isCashCollateral>N</isCashCollateral>
+          <isNonCashCollateral>N</isNonCashCollateral>
+          <isLoanByFund>N</isLoanByFund>
+        </securityLending>
+      </invstOrSec>
+    </invstOrSecs>
+    <explntrNotes>
+
+
+
+    </explntrNotes>
+    <signature>
+      <ncom:dateSigned>2026-07-30</ncom:dateSigned>
+      <ncom:nameOfApplicant>SELECT SECTOR SPDR TRUST</ncom:nameOfApplicant>
+      <ncom:signature>Arthur Jensen</ncom:signature>
+      <ncom:signerName>Arthur Jensen</ncom:signerName>
+      <ncom:title>Deputy Treasurer</ncom:title>
+    </signature>
+  </formData>
+  <documents>XXXX</documents>
+</edgarSubmission>

@@ -32,6 +32,7 @@ every one of them. That bounds how many rows the Activity page can afford to
 load, and the bound is real rather than an optimisation to defer.
 """
 
+import datetime as dt
 from decimal import Decimal
 from datetime import datetime
 from typing import Any, Mapping, NamedTuple
@@ -40,12 +41,14 @@ from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
+    Date,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -55,6 +58,7 @@ from sqlalchemy.orm import (
     validates,
 )
 
+from corollary.data.news.article import FEED_VENDOR, NewsFeed
 from corollary.db.types import ActivityId, Money, UtcDateTime
 
 __all__ = [
@@ -67,9 +71,16 @@ __all__ = [
     "ENGINE_STATE_ID",
     "FILL_SIDES",
     "Fill",
+    "FredObservationRecord",
+    "ISIN_TICKER_SOURCES",
+    "IsinTicker",
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
+    "NEWS_FEEDS",
+    "NEWS_VENDORS",
+    "NewsArticle",
+    "NewsArticleTicker",
     "NOTIFICATION_DELIVERY_STATUSES",
     "NOTIFICATION_SEVERITIES",
     "NotificationDelivery",
@@ -82,6 +93,9 @@ __all__ = [
     "RiskLimit",
     "RISK_LIMIT_ABSOLUTE_MAX",
     "RISK_LIMIT_RANGES",
+    "TickerIpoDate",
+    "TickerTradeability",
+    "WatchSymbol",
     "validate_risk_limit",
 ]
 
@@ -90,8 +104,20 @@ __all__ = [
 ENGINE_STATE_ID = 1
 
 #: PRD §8.7's three audited categories, matching the frontend's
-#: ``AuditCategory`` union so a row renders without translation.
-AUDIT_CATEGORIES = ("risk", "feed", "notification")
+#: ``AuditCategory`` union so a row renders without translation, plus Phase 3
+#: decision 21's ``watchlist`` -- a manual watch added or removed (migration
+#: 0008). ``sentiment`` is step 5's and arrives with its own migration.
+AUDIT_CATEGORIES = ("risk", "feed", "notification", "watchlist")
+
+#: ``news_article.feed``'s CHECK set. Derived from :class:`NewsFeed` rather
+#: than restated, so the record a provider builds and the row it lands in
+#: cannot disagree about which feeds exist. (Migration 0008 restates the
+#: literals, as every migration does; a test pins the two together.)
+NEWS_FEEDS: tuple[str, ...] = tuple(feed.value for feed in NewsFeed)
+
+#: ``news_article.vendor``'s CHECK set: every vendor that owns a feed in
+#: :data:`FEED_VENDOR`, in first-appearance order.
+NEWS_VENDORS: tuple[str, ...] = tuple(dict.fromkeys(FEED_VENDOR.values()))
 
 #: PRD §10's two channels. ``Notifier`` gains more later; adding one is a
 #: migration, which is the point — a typo must not create a third silently.
@@ -1146,3 +1172,493 @@ class NotificationDelivery(Base):
     #: Bounded by the writer to ``wire.ERROR_BODY_MAX`` plus the truncation
     #: notice ``vendor_detail`` appends.
     detail: Mapped[str] = mapped_column(String(400), nullable=False)
+
+
+class FredObservationRecord(Base):
+    """One FRED observation of one series, as last fetched.
+
+    Phase 3 step 3; ``DGS3MO`` is the first series stored, as the risk-free
+    rate's source (decision 19), and later steps add ``VIXCLS`` and
+    ``BAMLH0A0HYM2`` beside it. Named ``...Record`` because
+    :class:`corollary.data.providers.fred.FredObservation` is the value this row
+    records -- the :class:`NotificationRecord` convention.
+
+    **One row per ``(series_id, date)``, upserted.** FRED revises
+    observations, and a re-fetch overwrites what it finds; nothing here is an
+    append-only history.
+
+    **``value`` is ``NULL`` when FRED reported ``"."`` -- no observation.**
+    Stored rather than skipped, so a retraction (a value FRED later replaces
+    with ``"."``) overwrites the stale number instead of leaving it to be read
+    as current. Readers filter ``value IS NOT NULL``; that is a presence test,
+    which ``Money`` permits, not a comparison of the stored text.
+
+    **Not exported.** ICE's notice on ``BAMLH0A0HYM2`` prohibits reproduction
+    of the raw series, so no route serves this table as CSV or in bulk;
+    derived figures only.
+    """
+
+    __tablename__ = "fred_observation"
+    __table_args__ = (
+        CheckConstraint(
+            _money_shape("value", nullable=True), name="ck_fred_observation_value"
+        ),
+    )
+
+    series_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: The observation's date -- the session it describes, not when it was
+    #: published or fetched. A date, not an instant.
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    #: In the series' own units (``DGS3MO`` is percent). ``Money`` for its
+    #: exact-decimal storage; SQL comparison of it is refused.
+    value: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: When this row was last written from a FRED response, UTC. The durable
+    #: answer to "how fresh is this feed", which survives a restart.
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+def _feed_vendor_pairing() -> str:
+    """A CHECK that each feed is stored under the vendor that owns it.
+
+    :class:`corollary.data.news.article.NewsArticle` refuses the contradiction
+    at construction; this refuses it at the write boundary too, because
+    ``vendor`` is half of the idempotency key ``(vendor, vendor_id)`` and a
+    mismatched pair would let one article land under two keys.
+    """
+    return " OR ".join(
+        f"(feed = '{feed.value}' AND vendor = '{vendor}')"
+        for feed, vendor in FEED_VENDOR.items()
+    )
+
+
+class NewsArticle(Base):
+    """One article as one vendor's feed delivered it (Phase 3 decision 3).
+
+    **Keyed ``(vendor, vendor_id)``**, so re-polling is idempotent. ``feed`` is
+    provenance -- which poll fetched the row -- and is CHECK-constrained to
+    :data:`NEWS_FEEDS`, ``vendor`` to :data:`NEWS_VENDORS`, and the pair to
+    :data:`~corollary.data.news.article.FEED_VENDOR`'s mapping.
+
+    **``canonical_id``: NULL means this row is canonical.** A cross-vendor
+    duplicate points at its group's canonical row; the canonical row points
+    at nothing. A row naming *itself* is refused (``ck_news_article_canonical``)
+    so there is one spelling of "canonical", not two. A canonical row is
+    itself canonical -- no chains -- which is ingest's invariant to keep:
+    SQLite admits no subquery in a CHECK, so the schema cannot state it.
+
+    **The self-FK has no ``ON DELETE`` action, and that is the enforcement of
+    decision 21's "a group goes as a unit, so no ``canonical_id`` dangles".**
+    SQLite's default (``NO ACTION``) checks an immediate foreign key at the end
+    of each *statement*, so:
+
+    * deleting a canonical row while any duplicate still names it **fails**;
+    * deleting a duplicate alone succeeds;
+    * deleting a whole group in one ``DELETE ... WHERE id IN (...)`` succeeds.
+
+    ``CASCADE`` was rejected because it would delete a labelled duplicate along
+    with its canonical row, and ``SET NULL`` because it would silently promote
+    every duplicate to canonical -- one story shown several times in the feed.
+    ``RESTRICT`` was rejected because SQLite fires it per row, mid-statement,
+    which can refuse the one-statement group delete retention needs. (All of
+    this rests on ``PRAGMA foreign_keys=ON``, which ``create_db_engine`` sets.)
+
+    **Two columns beyond the spec's list: ``url_key`` and ``headline_key``.**
+    Decision 3 links a duplicate to its canonical row *by normalised URL,
+    falling back to normalised headline within +/-10 minutes*. Both lookups
+    run against every incoming article, so the normalised forms are stored and
+    indexed rather than recomputed over the table:
+
+    * ``url_key`` -- the article's URL as ingest's URL normaliser renders it.
+      Indexed alone; equality is a URL match.
+    * ``headline_key`` -- the headline as ingest's headline normaliser renders
+      it. Indexed together with ``published_at``, so "same headline within
+      +/-10 minutes" is one range scan.
+
+    Both are **NOT NULL** and neither is unique: equal keys across vendors are
+    precisely the duplicates a group exists to hold. The normalisation
+    functions themselves belong to the ingest unit; whatever they are, a row's
+    keys must be exactly what they return for that row's ``url`` and
+    ``headline``, and changing a normaliser means re-deriving every stored key.
+
+    **Retention (decision 21).** ``summary`` is nulled after 90 days; the rest
+    of a labelled article's row -- headline, URL, publisher, time -- is kept
+    indefinitely, and unlabelled groups are deleted whole.
+    """
+
+    __tablename__ = "news_article"
+    __table_args__ = (
+        CheckConstraint(_in_list("feed", NEWS_FEEDS), name="ck_news_article_feed"),
+        CheckConstraint(
+            _in_list("vendor", NEWS_VENDORS), name="ck_news_article_vendor"
+        ),
+        CheckConstraint(_feed_vendor_pairing(), name="ck_news_article_feed_vendor"),
+        CheckConstraint(
+            "canonical_id IS NULL OR canonical_id <> id",
+            name="ck_news_article_canonical",
+        ),
+        UniqueConstraint("vendor", "vendor_id", name="uq_news_article_vendor_id"),
+        Index("ix_news_article_published_at", "published_at"),
+        Index("ix_news_article_canonical_id", "canonical_id"),
+        Index("ix_news_article_url_key", "url_key"),
+        Index(
+            "ix_news_article_headline_key_published_at",
+            "headline_key",
+            "published_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vendor: Mapped[str] = mapped_column(String(16), nullable=False)
+    vendor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    feed: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: NULL: this row is canonical. Otherwise the canonical row of its group.
+    canonical_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("news_article.id"), nullable=True
+    )
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    url_key: Mapped[str] = mapped_column(String(2048), nullable=False)
+    headline: Mapped[str] = mapped_column(String(1024), nullable=False)
+    headline_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    #: Nulled by the nightly retention job once the article is 90 days old.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publisher: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: The vendor's publication time, UTC.
+    published_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    #: When this row was first written, UTC.
+    ingested_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class NewsArticleTicker(Base):
+    """One ticker an article is tagged to. ``MARKET`` is a ticker value.
+
+    A child table because Massive tags one story to eight symbols and labels
+    each separately (decision 3). Uppercase and non-blank by CHECK -- the
+    record uppercases every tag, and a lowercase row would never match a
+    lookup. Rows go with their article (``ON DELETE CASCADE``).
+    """
+
+    __tablename__ = "news_article_ticker"
+    __table_args__ = (
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)",
+            name="ck_news_article_ticker_ticker",
+        ),
+        Index("ix_news_article_ticker_ticker", "ticker"),
+    )
+
+    article_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("news_article.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+class WatchSymbol(Base):
+    """One manual watch, from the owner's click to its removal (decision 21).
+
+    Manual watches only: the seed, the Markets universe and position
+    underlyings are derived where they live and never copied here.
+
+    **A removed watch keeps its row** -- ``removed_at`` is set, nothing is
+    deleted -- and a re-add is a new row. At most one row per ticker is
+    *active* (``removed_at IS NULL``), which a partial unique index enforces;
+    any number of removed rows is history, not a conflict.
+    """
+
+    __tablename__ = "watch_symbol"
+    __table_args__ = (
+        # Uppercase and non-blank, as ``news_article_ticker``'s tags are. The
+        # partial unique index below compares case-sensitively, so without
+        # this ``acme`` and ``ACME`` could both be active watches of one
+        # symbol. ``BRK.B`` passes: ``upper`` leaves the dot alone.
+        # (``ticker_tradeability.ticker`` is deliberately unconstrained -- it
+        # caches ``malformed_ticker`` verdicts, which need the bad input.)
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)",
+            name="ck_watch_symbol_ticker",
+        ),
+        # ``UtcDateTime`` stores a fixed-width ISO string, so this text
+        # comparison orders correctly.
+        CheckConstraint(
+            "removed_at IS NULL OR removed_at >= added_at",
+            name="ck_watch_symbol_removed_after_added",
+        ),
+        Index(
+            "ux_watch_symbol_active_ticker",
+            "ticker",
+            unique=True,
+            sqlite_where=text("removed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    added_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    removed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class TickerTradeability(Base):
+    """One cached tradeability verdict per ticker per session date (decision 21).
+
+    Holds every :class:`corollary.data.news.tradeability.TradeabilityResult`
+    the filter can produce, so three columns are nullable:
+
+    * ``standard_root`` -- ``None``: the standard-contract check was not run.
+    * ``avg_volume_20d`` -- ``None``: no completed session to average over,
+      or a partial window with no usable IPO date (Q12). An integer share
+      count otherwise (Q10: a recent listing averages over the 1-20 sessions
+      it has).
+    * ``last_close`` -- ``None``: no completed bar. ``Money``; SQL comparison
+      of it is refused, so a "close >= $5" filter reads rows into Python.
+
+    ``(ticker, session_date)`` is the primary key, which is the spec's UNIQUE
+    pair; the table has no surrogate id because nothing refers to a row.
+
+    **``failures`` is one column beyond the spec's list**: the result's
+    :class:`~corollary.data.news.tradeability.TradeabilityFailure` values,
+    comma-joined in the filter's declaration order, and ``''`` exactly when the
+    ticker passes. A failure is cached for the whole session, so a cached row
+    that could not say *why* would make the one question worth asking about it
+    unanswerable until tomorrow. ``passes`` is kept as its own column for the
+    candidate query, and ``ck_ticker_tradeability_passes`` holds the two
+    together. The tokens are not validated in SQL; the writer builds the
+    string from the enum and nothing else.
+    """
+
+    __tablename__ = "ticker_tradeability"
+    __table_args__ = (
+        CheckConstraint(
+            "typeof(sessions_available) = 'integer' AND sessions_available >= 0",
+            name="ck_ticker_tradeability_sessions_available",
+        ),
+        CheckConstraint(
+            "avg_volume_20d IS NULL OR "
+            "(typeof(avg_volume_20d) = 'integer' AND avg_volume_20d >= 0)",
+            name="ck_ticker_tradeability_avg_volume_20d",
+        ),
+        CheckConstraint(
+            _money_shape("last_close", nullable=True),
+            name="ck_ticker_tradeability_last_close",
+        ),
+        CheckConstraint(
+            "(passes = 1 AND failures = '') OR (passes = 0 AND failures <> '')",
+            name="ck_ticker_tradeability_passes",
+        ),
+    )
+
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    #: The session the verdict is for; only sessions strictly before it count.
+    session_date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    has_options: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    standard_root: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    avg_volume_20d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_close: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: The ADV divisor: 20 for an established name, 1-20 for a recent listing
+    #: (Q10, on a real IPO date since Q12), 0 when nothing could be averaged
+    #: (no completed session, or ``ipo_date_unavailable``) -- "ADV over N
+    #: sessions".
+    sessions_available: Mapped[int] = mapped_column(Integer, nullable=False)
+    passes: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    failures: Mapped[str] = mapped_column(String(256), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class TickerIpoDate(Base):
+    """One ticker's IPO date, as the vendor states it -- owner decision Q12 (migration 0009).
+
+    The tradeability filter asks for an IPO date only for a **partial ADV
+    window** -- a ticker whose first completed bar falls after the window's
+    first session, with none in the one-year lookback -- and a date does not
+    change, so each ticker costs at most one Finnhub ``/stock/profile2`` call
+    ever. Cached across sessions, unlike ``ticker_tradeability``'s per-session
+    verdicts.
+
+    **Only a successfully parsed date is ever stored**, which is why
+    ``ipo_date`` is ``NOT NULL``. A body with no usable ``ipo`` fails the ticker
+    closed for that session (its ``ticker_tradeability`` row says
+    ``ipo_date_unavailable``) and is asked again next session; a transport
+    failure, a 403 or a timeout stores nothing anywhere and is retried next
+    cycle. Storing either as a permanent answer would turn a vendor outage
+    into a ticker that can never be judged again.
+
+    ``fetched_at`` is when the date was fetched, UTC. ``ticker`` carries
+    ``watch_symbol``'s non-blank uppercase CHECK so a lookup cannot miss on
+    case.
+    """
+
+    __tablename__ = "ticker_ipo_date"
+    __table_args__ = (
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)",
+            name="ck_ticker_ipo_date_ticker",
+        ),
+    )
+
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    ipo_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+#: A snapshot attempt is one of these (migration 0010). ``refused`` is
+#: recorded so the UI can say why the seed did not move, and never becomes
+#: current.
+SPDR_SNAPSHOT_STATUSES: tuple[str, ...] = ("accepted", "refused")
+
+
+class SpdrHoldingsSnapshot(Base):
+    """One attempt to build the SPDR sector seed from a quarter's N-PORT filings.
+
+    Phase 3 step 4, owner decision: the eleven Select Sector SPDRs' holdings
+    come from SEC N-PORT, with CUSIPs resolved to tickers by Alpaca, and are
+    stored here rather than written into the source tree. The builder is
+    :mod:`corollary.data.seeds.nport`.
+
+    **The current seed is the latest ``accepted`` row** -- by ``report_date``,
+    then ``id``. A ``refused`` row records the rule and the reason the
+    attempt failed validation (fail closed: the previous accepted snapshot
+    stays current) and holds no ``spdr_holding`` rows. An attempt that was
+    *aborted* -- SEC refused access, or a CUSIP lookup failed with something
+    other than "unknown" -- stores nothing at all and is retried next run.
+
+    ``report_date`` is N-PORT's ``repPdDate`` (the holdings' as-of date) for
+    the quarter the filing index named; ``filed_date`` is the latest filing
+    date among the funds' filings. ``built_at`` is when the attempt finished,
+    UTC -- deliberately not called ``loaded_at``, since a refused attempt
+    loaded nothing. ``skipped_lines`` counts equity lines that were logged and
+    skipped (no CUSIP, a CUSIP Alpaca does not know, an unusable symbol or
+    weight).
+    """
+
+    __tablename__ = "spdr_holdings_snapshot"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('accepted', 'refused')",
+            name="ck_spdr_holdings_snapshot_status",
+        ),
+        # An accepted snapshot carries no refusal; a refused one always says why.
+        CheckConstraint(
+            "(status = 'accepted' AND rule IS NULL AND reason IS NULL) OR "
+            "(status = 'refused' AND rule IS NOT NULL AND rule <> '' "
+            "AND reason IS NOT NULL AND reason <> '')",
+            name="ck_spdr_holdings_snapshot_verdict",
+        ),
+        CheckConstraint(
+            "typeof(skipped_lines) = 'integer' AND skipped_lines >= 0",
+            name="ck_spdr_holdings_snapshot_skipped_lines",
+        ),
+        Index("ix_spdr_holdings_snapshot_status_report_date", "status", "report_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    filed_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    built_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    rule: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skipped_lines: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class SpdrHoldingRow(Base):
+    """One resolved common-equity holding of one fund in an accepted snapshot.
+
+    ``weight`` is N-PORT's ``pctVal`` -- percent of the fund's net assets --
+    as the exact decimal text the filing wrote, stored as ``Money`` (TEXT).
+    SQL comparison of it is refused; the loader compares in Python.
+
+    ``series_id`` and ``accession`` name the fund's filing, so any row traces
+    back to the document it came from. ``symbol`` is Alpaca's answer for the
+    ``cusip``, class shares in the dot form (``BRK.B``); a symbol is never
+    derived from ``name``. A line N-PORT filed with no CUSIP (``000000000``)
+    and only an ISIN is stored with ``cusip`` NULL and the ``isin`` that an
+    :class:`~corollary.data.seeds.nport.IsinResolver` answered for; ``isin``
+    is also kept, when the filing gave one, on CUSIP-resolved rows. Every row
+    carries at least one of the two (CHECK). The key is ``(snapshot_id, etf, symbol)`` -- the
+    seed's own invariant that no symbol appears twice within a fund.
+    """
+
+    __tablename__ = "spdr_holding"
+    __table_args__ = (
+        CheckConstraint(
+            "etf <> '' AND etf = upper(etf)", name="ck_spdr_holding_etf"
+        ),
+        CheckConstraint(
+            "symbol <> '' AND symbol = upper(symbol)", name="ck_spdr_holding_symbol"
+        ),
+        CheckConstraint(
+            "cusip IS NULL OR (length(cusip) = 9 AND cusip = upper(cusip))",
+            name="ck_spdr_holding_cusip",
+        ),
+        CheckConstraint(
+            "isin IS NULL OR (length(isin) = 12 AND isin = upper(isin))",
+            name="ck_spdr_holding_isin",
+        ),
+        CheckConstraint(
+            "cusip IS NOT NULL OR isin IS NOT NULL", name="ck_spdr_holding_identifier"
+        ),
+        CheckConstraint(
+            f"({_money_shape('weight')}) AND substr(weight, 1, 1) <> '-'",
+            name="ck_spdr_holding_weight",
+        ),
+    )
+
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("spdr_holdings_snapshot.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    etf: Mapped[str] = mapped_column(String(8), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    sector: Mapped[str] = mapped_column(String(64), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(10), nullable=False)
+    accession: Mapped[str] = mapped_column(String(20), nullable=False)
+    cusip: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    isin: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    weight: Mapped[Decimal] = mapped_column(Money, nullable=False)
+
+
+#: The ISIN sources :class:`IsinTicker` may record. One, for now.
+ISIN_TICKER_SOURCES: tuple[str, ...] = ("openfigi",)
+
+
+class IsinTicker(Base):
+    """One **accepted** ISIN -> ticker answer, cached for the SPDR seed (migration 0012).
+
+    Phase 3 spec Q17: the N-PORT equity lines filed with an ISIN and no
+    CUSIP are resolved through OpenFIGI by
+    :class:`corollary.data.seeds.isin.OpenFigiIsinResolver`, under the
+    acceptance rule stated there. Only an answer that rule accepted is
+    written; a refused ISIN is never stored and is asked again next run.
+
+    A cached ``ticker`` is re-checked against the day's asset directory on
+    every use, and a row whose ticker the broker no longer lists is deleted
+    (that run leaves the line unresolved; the next asks OpenFIGI afresh).
+
+    ``ticker`` is in the dot form (``BRK.B``). ``composite_figi`` is the
+    accepted US composite record's ``compositeFIGI`` when the accepted
+    records agree on one, else ``None``. ``resolved_at`` is aware UTC. No
+    money columns.
+    """
+
+    __tablename__ = "isin_ticker"
+    __table_args__ = (
+        CheckConstraint(
+            "length(isin) = 12 AND isin = upper(isin)", name="ck_isin_ticker_isin"
+        ),
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)", name="ck_isin_ticker_ticker"
+        ),
+        CheckConstraint(
+            "composite_figi IS NULL OR length(composite_figi) = 12",
+            name="ck_isin_ticker_composite_figi",
+        ),
+        CheckConstraint("source IN ('openfigi')", name="ck_isin_ticker_source"),
+    )
+
+    isin: Mapped[str] = mapped_column(String(12), primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    composite_figi: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    resolved_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

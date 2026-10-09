@@ -39,6 +39,15 @@ rolling window. That is true of the per-minute buckets today and is
 unchanged; for StockTwits it means a caller's own cadence -- 180/hour by the
 spec's budget, leaving 20 for retries -- is what keeps a *fixed-window*
 server counter happy after an idle spell, and this bucket is the backstop.
+
+**Two hosts, one bucket** (Phase 3 step 4). SEC's fair-access policy caps a
+requester at 10 requests per second *across* EDGAR, and the N-PORT path spans
+two hosts: ``data.sec.gov`` (the submissions list) and ``www.sec.gov`` (the
+ticker map and the filing archive). :data:`SHARED_BUCKETS` maps both to the
+one key :data:`SEC_BUCKET`, whose budget is 4 per second: steady 4/s, and a
+token bucket's worst case over any 1-second window is ``C + r*T`` = 4 + 4 = 8,
+under the stated 10 with margin for jitter compressing two requests together
+on the way to SEC's counter.
 """
 
 import asyncio
@@ -54,10 +63,20 @@ __all__ = [
     "FINNHUB_REQUESTS_PER_MINUTE",
     "FRED_HOST",
     "FRED_REQUESTS_PER_MINUTE",
+    "OPENFIGI_BUCKET_REQUESTS_PER_MINUTE",
+    "OPENFIGI_HOST",
+    "OPENFIGI_KEYED_REQUESTS_PER_6_SECONDS",
+    "OPENFIGI_KEYLESS_REQUESTS_PER_MINUTE",
     "MASSIVE_HOST",
     "MASSIVE_REQUESTS_PER_MINUTE",
     "STOCKTWITS_HOST",
     "STOCKTWITS_REQUESTS_PER_HOUR",
+    "SEC_BUCKET",
+    "SEC_DATA_HOST",
+    "SEC_HOSTS",
+    "SEC_REQUESTS_PER_SECOND",
+    "SEC_WWW_HOST",
+    "SHARED_BUCKETS",
     "ALPACA_LIVE_TRADING_HOST",
     "ALPACA_PAPER_TRADING_HOST",
     "DEFAULT_REQUESTS_PER_MINUTE",
@@ -101,9 +120,41 @@ MASSIVE_REQUESTS_PER_MINUTE = 5
 FRED_HOST = "api.stlouisfed.org"
 FRED_REQUESTS_PER_MINUTE = 120
 
+#: OpenFIGI -- ISIN to FIGI/ticker mapping for the N-PORT lines that carry no
+#: CUSIP (spec Q17, Q21). Its documented ceilings: keyless **25 requests per
+#: minute**, keyed **25 requests per 6 seconds** (250/min).
+OPENFIGI_HOST = "api.openfigi.com"
+OPENFIGI_KEYLESS_REQUESTS_PER_MINUTE = 25
+OPENFIGI_KEYED_REQUESTS_PER_6_SECONDS = 25
+
+#: The bucket actually used, keyed or not: **12 per 60 s**. A token bucket's
+#: worst case over any window T is ``C + r*T`` (module docstring), so 12 + 12
+#: = 24 in any rolling minute, under the keyless 25 -- whereas a bucket of 25
+#: would admit 50 after an idle spell. Keyed, the worst 6-second window is
+#: 12 + 1.2 = 13.2 against 25, and the worst minute 24 against 250, so the one
+#: bucket stays under whichever ceiling applies without knowing which. The key
+#: buys batch size (100 jobs a request, not 10), not request rate -- the 29
+#: ISIN-only lines are three requests keyless, one keyed.
+OPENFIGI_BUCKET_REQUESTS_PER_MINUTE = 12
+
 #: StockTwits -- keyless symbol streams, metered **per hour**, not per minute.
 STOCKTWITS_HOST = "api.stocktwits.com"
 STOCKTWITS_REQUESTS_PER_HOUR = 200
+
+#: SEC EDGAR -- the SPDR sector funds' N-PORT holdings. The submissions JSON
+#: lives on ``data.sec.gov``; the mutual-fund ticker map and every filing
+#: document on ``www.sec.gov``.
+SEC_DATA_HOST = "data.sec.gov"
+SEC_WWW_HOST = "www.sec.gov"
+SEC_HOSTS = (SEC_DATA_HOST, SEC_WWW_HOST)
+
+#: The one bucket both SEC hosts draw on. Not a hostname anyone requests; the
+#: key :data:`SHARED_BUCKETS` resolves both hosts to.
+SEC_BUCKET = "sec.gov"
+
+#: SEC states 10 requests per second per requester. Four per one-second
+#: window keeps the token bucket's worst case (8 in any second) under it.
+SEC_REQUESTS_PER_SECOND = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,8 +198,18 @@ DEFAULT_PER_HOST_BUDGETS: Mapping[str, HostBudget] = MappingProxyType(
         FINNHUB_HOST: HostBudget(FINNHUB_REQUESTS_PER_MINUTE),
         MASSIVE_HOST: HostBudget(MASSIVE_REQUESTS_PER_MINUTE),
         FRED_HOST: HostBudget(FRED_REQUESTS_PER_MINUTE),
+        OPENFIGI_HOST: HostBudget(OPENFIGI_BUCKET_REQUESTS_PER_MINUTE),
         STOCKTWITS_HOST: HostBudget(STOCKTWITS_REQUESTS_PER_HOUR, 3600.0),
+        SEC_BUCKET: HostBudget(SEC_REQUESTS_PER_SECOND, 1.0),
     }
+)
+
+#: Hosts metered as one server-side ceiling, mapped to the bucket they share.
+#: A fact about the vendor, not a tunable budget, so it is not a constructor
+#: argument: a limiter that could be told otherwise would be a limiter that
+#: one day is, and SEC would see twice the rate its policy allows.
+SHARED_BUCKETS: Mapping[str, str] = MappingProxyType(
+    {SEC_DATA_HOST: SEC_BUCKET, SEC_WWW_HOST: SEC_BUCKET}
 )
 
 Clock = Callable[[], float]
@@ -283,12 +344,22 @@ class HostRateLimiter:
             )
             for host, limit in source.items()
         }
+        # A budget keyed on one member of a shared group would never be read
+        # -- bucket_for looks up the group's key -- so it is refused rather
+        # than dropped in silence.
+        for host in self._per_host:
+            if host in SHARED_BUCKETS:
+                raise ValueError(
+                    f"{host} shares a bucket with the other hosts under "
+                    f"{SHARED_BUCKETS[host]!r}; budget that key, not the host"
+                )
         self._clock = clock
         self._sleep = sleep
         self._buckets: dict[str, TokenBucket] = {}
 
     def bucket_for(self, host: str) -> TokenBucket:
         key = host.lower()
+        key = SHARED_BUCKETS.get(key, key)
         bucket = self._buckets.get(key)
         if bucket is None:
             budget = self._per_host.get(key)

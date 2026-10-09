@@ -1,18 +1,22 @@
 """The owner's actions, told to the bell and Discord.
 
 The owner, 2026-09-24: *"put it on the bell and discord, any action i do
-should be put into the discord."* Five routes change state, and each emits one
+should be put into the discord."* Seven routes change state, and each emits one
 notification after its commit:
 
-========================================  ============================
+========================================  ====================================
 event                                     emitted by
-========================================  ============================
+========================================  ====================================
 ``operator_halt``                         ``POST /api/engine/halt``
 ``operator_resume``                       ``POST /api/engine/resume``
 ``risk_limits_changed``                   ``PUT /api/settings/limits``
 ``data_feeds_changed``                    ``PUT /api/settings/feeds``
 ``notification_routes_changed``           ``PUT /api/settings/routes``
-========================================  ============================
+``watchlist_changed``                     ``POST``/``DELETE /api/news/watch/{t}``
+========================================  ====================================
+
+``watchlist_changed`` is Phase 3 decision 21's, on decision 20's terms for the
+config events: ``info``, built from the one ``audit_log`` row the route wrote.
 
 Reading or dismissing a bell entry is not in the table and must never be: it
 would page Discord for reading Discord, and loop.
@@ -65,13 +69,15 @@ EASTERN: Final = ZoneInfo("America/New_York")
 
 
 class OperatorEvent(StrEnum):
-    """The five events an owner's action raises. The web codes against these."""
+    """The events an owner's action raises. The web codes against these."""
 
     OPERATOR_HALT = "operator_halt"
     OPERATOR_RESUME = "operator_resume"
     RISK_LIMITS_CHANGED = "risk_limits_changed"
     DATA_FEEDS_CHANGED = "data_feeds_changed"
     NOTIFICATION_ROUTES_CHANGED = "notification_routes_changed"
+    #: A manual news watch added or removed (Phase 3 decision 21).
+    WATCHLIST_CHANGED = "watchlist_changed"
 
 
 #: A halt is worth a glance; everything else is a record.
@@ -81,12 +87,14 @@ _SEVERITY: Final[dict[OperatorEvent, str]] = {
     OperatorEvent.RISK_LIMITS_CHANGED: "info",
     OperatorEvent.DATA_FEEDS_CHANGED: "info",
     OperatorEvent.NOTIFICATION_ROUTES_CHANGED: "info",
+    OperatorEvent.WATCHLIST_CHANGED: "info",
 }
 
 _SETTINGS_TITLE: Final[dict[OperatorEvent, str]] = {
     OperatorEvent.RISK_LIMITS_CHANGED: "Risk limits changed",
     OperatorEvent.DATA_FEEDS_CHANGED: "Data feeds changed",
     OperatorEvent.NOTIFICATION_ROUTES_CHANGED: "Notification routing changed",
+    OperatorEvent.WATCHLIST_CHANGED: "News watchlist changed",
 }
 
 

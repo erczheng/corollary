@@ -428,10 +428,81 @@ export interface NewsItem {
   ticker: string
   headline: string
   sentiment: Sentiment
-  publisher: string
+  /** `null` when the vendor named no publisher. The vendor is provenance,
+   * not a publisher, and the server does not substitute it — render a dash,
+   * never the string "null". */
+  publisher: string | null
   sector: string
-  /** Which tier of PRD.md §9 produced `sentiment`. */
-  tier: SentimentTier
+  /** Which tier of PRD.md §9 produced `sentiment`. **`null` while nothing
+   * has labelled the item** — every item in Phase 3 step 4, which serves
+   * `unclassified` with no tier. A `SENTIMENT_TIER_LABEL[item.tier]` lookup
+   * without the null check reads `undefined`. */
+  tier: SentimentTier | null
+  /** The article itself. Opens in a new tab. */
+  url: string
+  /** The labelling source that produced `sentiment`; `null` with no label. */
+  source: string | null
+  /** Whether that source is demoted. `false` with no source. */
+  demoted: boolean
+}
+
+/** `?lookback` on `GET /api/news` — calendar days in ET, never a trailing
+ * 24 hours. Same values as `news.ts`'s `Lookback`. */
+export type NewsLookback = 'today' | '3d' | '1w' | '2w' | 'all'
+
+/** `?scope`: the watch universe plus MARKET (the default), or everything. */
+export type NewsScope = 'watch' | 'all'
+
+/** One page of `GET /api/news`. Offset pagination; the server is the one
+ * sort, so the client never re-sorts `items`. */
+export interface NewsFeed {
+  items: NewsItem[]
+  /** Rows matching the query, not rows on this page. */
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
+  lookback: NewsLookback
+  scope: NewsScope
+  sort: 'newest' | 'oldest'
+  /** The lookback's lower bound as a UTC instant, or null for `all`. */
+  since: string | null
+  /** False until the SPDR holdings seed is built: every ticker files under
+   * `Other` (MARKET still under `Macro`), and the page says why. */
+  sectorsAvailable: boolean
+  /** Date-only — format in UTC. */
+  seedAsOf: string | null
+}
+
+/** One active manual watch. */
+export interface ManualWatch {
+  ticker: string
+  addedAt: string
+}
+
+/** `GET /api/news/watch`, and the body of every successful watch write. */
+export interface WatchList {
+  /** Sorted by ticker. Only these are removable. */
+  manual: ManualWatch[]
+  /** Every symbol the watch tier polls. */
+  symbols: number
+  /** What the cap counts (Q13): active manual watches, and nothing else —
+   * never the sector leaders, the Markets list or positions. */
+  manualCount: number
+  /** The manual-watch cap. Inclusive — the cap-th manual watch is
+   * permitted, one more is a 409. */
+  cap: number
+  /** Manual watches still addable: `cap - manualCount`, floored at zero. */
+  remaining: number
+  positionUnderlyings: number
+  positionsAsOf: string | null
+  /** True until the SPDR seed is built: no sector leaders are in the
+   * universe yet, so `symbols` is provisional. The cap is unaffected. */
+  seedMissing: boolean
+  /** False until the daily asset list has been fetched; until then an add
+   * is refused with a 503 rather than accepted unvalidated. */
+  assetListAvailable: boolean
+  assetListFetchedAt: string | null
 }
 
 /** The sector `MARKET` items are filed under. Macro is a sector in the
@@ -891,8 +962,14 @@ export interface RiskLimit {
  * Feed changes belong here specifically: switching historical equity bars
  * from SIP to IEX silently reinterprets every `min_avg_volume` in every
  * strategy YAML, since IEX is ~2.5% of US volume (CLAUDE.md). Nothing about
- * that is visible in the strategy document afterwards. */
-export type AuditCategory = 'risk' | 'feed' | 'notification'
+ * that is visible in the strategy document afterwards.
+ *
+ * `watchlist` (Phase 3 decision 21) is a manual watch added or removed via
+ * `POST`/`DELETE /api/news/watch/{ticker}`. It belongs here rather than
+ * beside calendar notes because a watch changes what is polled and graded,
+ * and grading governs what the scanner may read. Mirrors `AuditCategory` in
+ * `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in `db/models.py`. */
+export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist'
 
 export interface AuditLogEntry {
   id: string
@@ -907,11 +984,15 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The routable events: PRD.md §10's eight, plus five operator events.
+/** The routable events: PRD.md §10's eight, six operator events, and one engine record
+ * (`spdr_seed_amended`, owner decision 2026-09-30: an NPORT-P/A adopted into the
+ * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action).
  *
  * The owner's call: "any action i do should be put into the discord". So a
  * human halt or resume, and every change to risk limits, data feeds or the
- * routing matrix itself, is an event too. Only actions that reach the server
+ * routing matrix itself, is an event too — and so is adding or removing a
+ * manual news watch (`watchlist_changed`, Phase 3 decision 21, on the same
+ * terms as the config events). Only actions that reach the server
  * notify — client-only toggles gain an event when they gain an endpoint.
  *
  * A key, not the display string. The routing matrix, the severity map and
@@ -933,6 +1014,8 @@ export type NotificationEvent =
   | 'risk_limits_changed'
   | 'data_feeds_changed'
   | 'notification_routes_changed'
+  | 'watchlist_changed'
+  | 'spdr_seed_amended'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -948,6 +1031,8 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   risk_limits_changed: 'Risk limits changed',
   data_feeds_changed: 'Data feeds changed',
   notification_routes_changed: 'Notification routing changed',
+  watchlist_changed: 'News watchlist changed',
+  spdr_seed_amended: 'SPDR seed amended',
 }
 
 /** Routing per channel.

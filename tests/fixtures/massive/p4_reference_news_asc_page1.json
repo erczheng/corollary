@@ -1,0 +1,144 @@
+{
+  "recorded_at": "2026-09-24T18:30:15+00:00",
+  "request": "https://api.massive.com/v2/reference/news?limit=3&order=asc&sort=published_utc&published_utc.gt=2026-09-24T12%3A30%3A15Z",
+  "status_code": 200,
+  "body": {
+    "results": [
+      {
+        "id": "3cad1791185c4e0d21e7073d1c4deb2273f34e4d7ec5221f2f5597d598297933",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "Silver Holds Near $65 as Developers Turn to Mines Already Built",
+        "author": "Canada News Group",
+        "published_utc": "2026-09-24T12:55:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3368322/0/en/silver-holds-near-65-as-developers-turn-to-mines-already-built.html",
+        "tickers": [
+          "HL",
+          "HLpB",
+          "USAS",
+          "AG",
+          "VZLA"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/8706309d-9878-47a1-b292-8cc7e952fd84",
+        "description": "Honey Badger Silver released a Preliminary Economic Assessment for the PC Silver Mine in Northwest Territories, projecting 3.7 million ounces of silver annually over the first seven years with C$1.2-1.7 billion NPV. The company is leveraging the mine's 1980s infrastructure and existing permits to accelerate development compared to greenfield projects, with a Feasibility Study targeted for Q2 2027.",
+        "keywords": [
+          "silver mining",
+          "PC Silver Mine",
+          "preliminary economic assessment",
+          "Northwest Territories",
+          "past-producing assets",
+          "critical minerals",
+          "antimony",
+          "germanium"
+        ],
+        "insights": [
+          {
+            "ticker": "HL",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a producing peer with Keno Hill mine in Yukon showing both positive aspects (existing infrastructure) and challenges (extended ramp-up timelines), used for sector comparison rather than specific news."
+          },
+          {
+            "ticker": "HLpB",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a producing peer with Keno Hill mine in Yukon showing both positive aspects (existing infrastructure) and challenges (extended ramp-up timelines), used for sector comparison rather than specific news."
+          },
+          {
+            "ticker": "USAS",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Referenced as a sector peer combining past-producing assets with antimony strategy through joint venture, used for comparative context without specific operational updates."
+          },
+          {
+            "ticker": "AG",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Mentioned as a scaled producing company with positive Q2 2026 results and raised guidance, used as sector comparison representing the mature production end of the spectrum."
+          },
+          {
+            "ticker": "VZLA",
+            "sentiment": "negative",
+            "sentiment_reasoning": "Company faces site access constraints due to security-related events since February 2026, with 2027 first production contingent on factors outside its control, representing jurisdictional risk in the sector."
+          }
+        ]
+      },
+      {
+        "id": "4ecbe719db7e5fadf2ebe13b2224f6b89438fb2853de62973c8fbbfc512532bc",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "Solera Visits BYD Global Headquarters",
+        "author": "Not Specified",
+        "published_utc": "2026-09-24T12:55:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3368320/0/en/solera-visits-byd-global-headquarters.html",
+        "tickers": [
+          "BYDDY"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/205a1faf-bf28-45c8-993c-15f4e0115ae0",
+        "description": "Solera Holdings conducted a strategic visit to BYD Global Headquarters to discuss the global expansion of China's new energy vehicle (NEV) industry. The meeting, led by Solera's Chief Administrative Officer Jing Liao and attended by BYD Chief Scientist Lian Yubo and representatives from the China Intelligent Transportation Systems Association, focused on developing overseas service ecosystems, repair networks, technical talent development, and international industry collaboration to support Chinese automotive brands' expansion into global markets.",
+        "keywords": [
+          "new energy vehicles",
+          "global expansion",
+          "aftersales service ecosystem",
+          "international collaboration",
+          "vehicle lifecycle management",
+          "repair networks",
+          "Chinese automotive industry"
+        ],
+        "insights": [
+          {
+            "ticker": "BYDDY",
+            "sentiment": "positive",
+            "sentiment_reasoning": "BYD is highlighted as a leader in NEV technology and international expansion. The company is actively collaborating with global partners to strengthen overseas service networks and is recognized for its achievements in new energy vehicles, power battery technologies, and intelligent mobility solutions."
+          }
+        ]
+      },
+      {
+        "id": "cb3d00de965b84bc14073b74b686e29ac82df38bb06237604b04092276c18e41",
+        "publisher": {
+          "name": "GlobeNewswire Inc.",
+          "homepage_url": "https://www.globenewswire.com",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/globenewswire.svg",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/globenewswire.ico"
+        },
+        "title": "LPL Financial Welcomes Trio of Independent Texas Advisors",
+        "author": "Lpl Financial",
+        "published_utc": "2026-09-24T12:55:00Z",
+        "article_url": "https://www.globenewswire.com/news-release/2026/09/24/3368321/29579/en/lpl-financial-welcomes-trio-of-independent-texas-advisors.html",
+        "tickers": [
+          "LPLA",
+          "RJF"
+        ],
+        "image_url": "https://ml.globenewswire.com/Resource/Download/53e1e8c9-85a6-4959-822d-a2cead7e0840",
+        "description": "LPL Financial announced that three independent financial advisory firms from Texas—Burnett Financial Services, Fowler Investment Services, and Carlile Investment Services—have joined its broker-dealer and RIA platforms. The three firms collectively manage approximately $430 million in assets and were previously affiliated with Raymond James. The advisors cited LPL's technology, platform familiarity, and advisor-focused culture as key reasons for the move.",
+        "keywords": [
+          "advisor recruitment",
+          "wealth management",
+          "Texas advisory firms",
+          "asset management",
+          "financial services consolidation"
+        ],
+        "insights": [
+          {
+            "ticker": "LPLA",
+            "sentiment": "positive",
+            "sentiment_reasoning": "LPL Financial successfully recruited three established advisory firms with $430 million in combined assets, demonstrating continued growth in its advisor-mediated marketplace and competitive positioning in wealth management."
+          },
+          {
+            "ticker": "RJF",
+            "sentiment": "negative",
+            "sentiment_reasoning": "Raymond James lost three advisory practices managing approximately $430 million in assets to a competitor, representing a loss of client assets and advisory talent."
+          }
+        ]
+      }
+    ],
+    "status": "OK",
+    "request_id": "70bebf4cf44754e3177dbda89ce722b7",
+    "count": 3,
+    "next_url": "https://api.massive.com/v2/reference/news?cursor=YXA9MjAyNi0wOS0yNFQxMiUzQTU1JTNBMDBaJmFzPWNiM2QwMGRlOTY1Yjg0YmMxNDA3M2I3NGI2ODZlMjlhYzgyZGYzOGJiMDYyMzc2MDRiMDQwOTIyNzZjMThlNDEmbGltaXQ9MyZvcmRlcj1hc2NlbmRpbmcmcHVibGlzaGVkX3V0Yy5ndD0yMDI2LTA5LTI0VDEyJTNBMzAlM0ExNVo"
+  }
+}

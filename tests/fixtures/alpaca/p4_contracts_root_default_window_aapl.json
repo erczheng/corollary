@@ -1,0 +1,31 @@
+{
+  "body": {
+    "next_page_token": "MQ==",
+    "option_contracts": [
+      {
+        "close_price": null,
+        "close_price_date": null,
+        "expiration_date": "2026-09-25",
+        "id": "c454ba49-58ba-52fe-b647-012e3dc3f069",
+        "multiplier": "100",
+        "name": "AAPL Sep 25 2026 110 Call",
+        "open_interest": null,
+        "open_interest_date": null,
+        "ppind": true,
+        "root_symbol": "AAPL",
+        "size": "100",
+        "status": "active",
+        "strike_price": "110",
+        "style": "american",
+        "symbol": "AAPL260925C00110000",
+        "tradable": true,
+        "type": "call",
+        "underlying_asset_id": "f8a209f6-9468-5612-bd55-4d3046e65472",
+        "underlying_symbol": "AAPL"
+      }
+    ]
+  },
+  "recorded_at": "2026-09-24T20:16:31+00:00",
+  "request": "/v2/options/contracts?underlying_symbols=AAPL&root_symbol=AAPL&limit=1",
+  "status_code": 200
+}

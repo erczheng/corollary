@@ -42,19 +42,23 @@ a multiplier; both are carried here so the distinction survives.
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from corollary.data.seeds import normalize_symbol
 from corollary.instruments import OptionType, is_adjusted_root
 from corollary.pricing.blackscholes import Greeks
+from corollary.pricing.rates import RiskFreeRate, RiskFreeRateSource
 
 __all__ = [
     "AnalyticsSource",
+    "AssetDirectory",
     "Bar",
     "BarTimeframe",
     "ContractStatus",
+    "EquityAsset",
     "FeedAccessError",
     "MarketDataProvider",
     "OptionContract",
@@ -301,6 +305,11 @@ class OptionSnapshot:
     analytics_source: AnalyticsSource
     #: Why analytics are absent, when they are. Empty otherwise.
     analytics_note: str = ""
+    #: The risk-free rate a ``DERIVED`` IV and greeks were solved at, with its
+    #: provenance -- FRED ``DGS3MO`` and its observation date, or the stated
+    #: default (Phase 3 decision 19). ``None`` for ``VENDOR`` analytics, which
+    #: used no rate of ours, and for ``UNAVAILABLE``, which used none at all.
+    analytics_rate: RiskFreeRate | None = None
 
     @property
     def volume(self) -> int | None:
@@ -406,6 +415,81 @@ class OptionContract:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class EquityAsset:
+    """One active US equity from the broker's asset list. Reference data, not a price.
+
+    Phase 3 decision 21 reads three things from it: whether a news tag is an
+    active US equity at all (a crypto pair is not), the company ``name`` that
+    off-watch attribution matches headlines against, and ``has_options`` --
+    the first of the tradeability checks.
+
+    ``has_options`` is the vendor's *"listed options available on the
+    platform"*. It does **not** say whether any of those contracts are
+    standard: an underlying whose only live chain is adjusted still carries
+    it (AIFU on 2026-09-24, recorded in
+    ``tests/fixtures/alpaca/p4_contracts_root_adjusted_only.json``), which is
+    why the standard-root check exists alongside it.
+    """
+
+    symbol: str
+    name: str
+    #: The broker's own flag. An active asset can be untradable (an OTC right).
+    tradable: bool
+    has_options: bool
+    exchange: str
+
+
+@dataclass(frozen=True)
+class AssetDirectory:
+    """Every active US equity the broker lists, looked up by normalised symbol.
+
+    Built once a day. ``skipped`` counts rows the provider refused as
+    malformed or as some other asset class, each logged where it was
+    refused -- a directory quietly missing names is a tag filter quietly
+    dropping real equities.
+
+    Lookups normalise the way :func:`corollary.data.seeds.normalize_symbol`
+    does, so ``brk/b`` finds ``BRK.B``. Two assets on one symbol is refused
+    at construction: which one a lookup returned would be an accident.
+    """
+
+    assets: tuple[EquityAsset, ...]
+    skipped: int = 0
+    #: Rows kept that carried no ``attributes`` array (absent or null). They
+    #: read as ``has_options=False`` -- failing closed -- but a vendor change
+    #: dropping the field would otherwise empty the optionable set in
+    #: silence, so the provider counts them here and logs a WARNING.
+    missing_attributes: int = 0
+    _by_symbol: dict[str, EquityAsset] = field(
+        init=False, repr=False, compare=False, hash=False, default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        ordered = tuple(sorted(self.assets, key=lambda asset: asset.symbol))
+        by_symbol: dict[str, EquityAsset] = {}
+        for asset in ordered:
+            key = normalize_symbol(asset.symbol)
+            if key in by_symbol:
+                raise ValueError(f"two assets on the symbol {key!r}")
+            by_symbol[key] = asset
+        object.__setattr__(self, "assets", ordered)
+        object.__setattr__(self, "_by_symbol", by_symbol)
+
+    def __len__(self) -> int:
+        return len(self.assets)
+
+    def __contains__(self, symbol: object) -> bool:
+        return isinstance(symbol, str) and normalize_symbol(symbol) in self._by_symbol
+
+    def get(self, symbol: str) -> EquityAsset | None:
+        return self._by_symbol.get(normalize_symbol(symbol))
+
+    def optionable(self) -> frozenset[str]:
+        """Symbols carrying ``has_options`` -- the tradeability filter's first check."""
+        return frozenset(asset.symbol for asset in self.assets if asset.has_options)
+
+
 class MarketDataProvider(ABC):
     """Quotes, snapshots, bars, chains and contracts, vendor-agnostically.
 
@@ -424,6 +508,17 @@ class MarketDataProvider(ABC):
     * **Anything that places an order.** Rule 1 — there is exactly one path to
       ``submit_order`` and it is not a data provider.
     """
+
+    @property
+    def risk_free_rates(self) -> RiskFreeRateSource | None:
+        """The rate source this provider derives analytics at, or ``None``.
+
+        ``None`` -- the default -- is a provider that derives nothing. One
+        that does returns its source, so the composition root can prove it is
+        the same one the FRED job updates (``api/deps.py``); two sources would
+        price every chain at the default long after an observation was stored.
+        """
+        return None
 
     @abstractmethod
     async def latest_stock_quotes(

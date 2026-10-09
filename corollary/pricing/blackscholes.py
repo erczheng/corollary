@@ -33,14 +33,27 @@ Phase 2.
 Two assumptions, stated rather than hidden
 ------------------------------------------
 
-**Risk-free rate.** An injected parameter, defaulting to
-:data:`DEFAULT_RISK_FREE_RATE`. That default is a **placeholder**, not a
-measurement — FRED (series ``DGS3MO``) is the real source and is a planned
-§7 dependency; wiring it is a later step. The sensitivity is small at the
-tenors this app trades: at 30 DTE a 100bp error in ``r`` moves an ATM $150
-call by roughly a cent and its implied vol by a fraction of a point. It is
-*not* small at a one-year LEAP, so when FRED arrives this default should stop
-being reachable rather than merely stop being used.
+**Risk-free rate.** An injected parameter, **continuously compounded** -- the
+``r`` in ``exp(-r*T)``. The market-data provider passes the latest stored
+FRED ``DGS3MO`` observation (Phase 3 decision 19; see
+:mod:`corollary.pricing.rates`), converted from its quoted bond-equivalent
+yield by ``r = ln(1 + y*91/365) / (91/365)`` (owner decision Q16) before it
+arrives here, and every derived snapshot records which rate it was solved at
+and its observation date.
+``rate`` is a **required** keyword on :func:`price`, :func:`greeks`,
+:func:`implied_volatility` and :func:`derive_analytics`: this module supplies
+no rate of its own. The fallback number,
+:data:`corollary.pricing.rates.FALLBACK_RISK_FREE_RATE`, lives beside its
+``default`` label and is chosen only by the rate source -- only while no
+``DGS3MO`` observation has ever been obtained (no ``FRED_API_KEY``, or FRED
+unreachable since the database was created). Once an observation exists it is
+never returned to, however stale the observation grows; its date is shown
+instead. A keyword default here would let a caller that forgot the rate -- a
+stress loss behind rule 4, say -- solve at the fallback with no label at all. The sensitivity is small at the tenors this
+app trades: at 30 DTE a 100bp error in ``r`` moves an ATM $150 call by
+roughly a cent and its implied vol by a fraction of a point. It is *not*
+small at a one-year LEAP, which is why the fallback is labelled wherever it
+is used.
 
 **Dividend yield.** Zero, via :data:`DEFAULT_DIVIDEND_YIELD`, and this one is
 a real assumption with a real direction. There is no per-underlying dividend
@@ -95,7 +108,6 @@ from zoneinfo import ZoneInfo
 __all__ = [
     "ANALYTICS_PRECISION",
     "DEFAULT_DIVIDEND_YIELD",
-    "DEFAULT_RISK_FREE_RATE",
     "IMPLIED_VOL_CEILING",
     "IMPLIED_VOL_FLOOR",
     "Analytics",
@@ -111,10 +123,6 @@ __all__ = [
     "price",
     "years_to_expiry",
 ]
-
-#: Placeholder for the 3-month bill. Replace with FRED ``DGS3MO``; see the
-#: module docstring for why this is stated rather than silently chosen.
-DEFAULT_RISK_FREE_RATE = 0.0425
 
 #: No dividend. A stated assumption with a stated direction of error.
 DEFAULT_DIVIDEND_YIELD = 0.0
@@ -227,7 +235,7 @@ def price(
     years: float,
     vol: float,
     is_call: bool,
-    rate: float = DEFAULT_RISK_FREE_RATE,
+    rate: float,
     dividend_yield: float = DEFAULT_DIVIDEND_YIELD,
 ) -> float:
     """The Black-Scholes-Merton value of a European option.
@@ -270,7 +278,7 @@ def greeks(
     years: float,
     vol: float,
     is_call: bool,
-    rate: float = DEFAULT_RISK_FREE_RATE,
+    rate: float,
     dividend_yield: float = DEFAULT_DIVIDEND_YIELD,
 ) -> BlackScholesGreeks:
     """The five sensitivities, scaled per the table in the module docstring."""
@@ -330,7 +338,7 @@ def implied_volatility(
     strike: float,
     years: float,
     is_call: bool,
-    rate: float = DEFAULT_RISK_FREE_RATE,
+    rate: float,
     dividend_yield: float = DEFAULT_DIVIDEND_YIELD,
 ) -> float | None:
     """Solve for the volatility that reproduces ``target_price``, or ``None``.
@@ -451,14 +459,16 @@ def derive_analytics(
     strike: Decimal,
     years: float,
     is_call: bool,
-    rate: float = DEFAULT_RISK_FREE_RATE,
+    rate: Decimal | float,
     dividend_yield: float = DEFAULT_DIVIDEND_YIELD,
 ) -> Analytics | AnalyticsUnavailable:
     """The one boundary between exact decimals and the float interior.
 
     Takes the quote mid and the underlying spot as ``Decimal`` — which is what
     they are everywhere else in this codebase — converts once, solves, and
-    quantizes back. Returns :class:`AnalyticsUnavailable` with a reason rather
+    quantizes back. ``rate`` may arrive as the ``Decimal`` a
+    :class:`~corollary.pricing.rates.RiskFreeRate` carries; it is converted
+    here with the prices. Returns :class:`AnalyticsUnavailable` with a reason rather
     than raising, because a single unpriceable contract must not take down a
     200-row chain.
     """
@@ -473,9 +483,10 @@ def derive_analytics(
 
     spot_f = float(spot)
     strike_f = float(strike)
+    rate_f = float(rate)
     vol = implied_volatility(
         target_price=float(mid), spot=spot_f, strike=strike_f, years=years,
-        is_call=is_call, rate=rate, dividend_yield=dividend_yield,
+        is_call=is_call, rate=rate_f, dividend_yield=dividend_yield,
     )
     if vol is None:
         return AnalyticsUnavailable(
@@ -488,7 +499,7 @@ def derive_analytics(
 
     computed = greeks(
         spot=spot_f, strike=strike_f, years=years, vol=vol, is_call=is_call,
-        rate=rate, dividend_yield=dividend_yield,
+        rate=rate_f, dividend_yield=dividend_yield,
     )
     return Analytics(
         implied_volatility=_quantize(vol),
