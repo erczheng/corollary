@@ -323,6 +323,30 @@ async def test_two_copies_of_one_id_that_disagree_are_both_skipped_in_any_order(
     assert all("conflict" in s.reason for s in skipped)
 
 
+async def test_copies_spelled_differently_conflict_in_any_order() -> None:
+    # 1.73 and 1.730 are equal Decimals and different stored text. Collapsed,
+    # the kept spelling would follow page order, so the stored row would flip
+    # between fetches and count as updated every cycle. Compared as the store
+    # compares them -- by spelling -- they conflict, in every order.
+    plain = _cash("ca-1", rate=Decimal("1.73"))
+    padded = _cash("ca-1", rate=Decimal("1.730"))
+    other = _cash("ca-2", symbol="AAPW")
+    outcomes = set()
+    for order in permutations([plain, padded, other]):
+        events, skipped = _map(*order)
+        outcomes.add(
+            (
+                tuple((e.vendor_id, format(e.actual, "f")) for e in events),
+                tuple((s.vendor_id, s.reason) for s in skipped),
+            )
+        )
+    assert len(outcomes) == 1
+    [(spelled, skipped)] = outcomes
+    assert spelled == (("ca-2", "1.73"),)
+    assert [vendor_id for vendor_id, _ in skipped] == ["ca-1", "ca-1"]
+    assert all("conflict" in reason for _, reason in skipped)
+
+
 async def test_identical_copies_of_one_id_collapse_to_one_event() -> None:
     events, skipped = _map(_cash("ca-1"), _cash("ca-1"))
     assert [e.vendor_id for e in events] == ["ca-1"]

@@ -508,10 +508,19 @@ class FredProvider:
         ``count`` is checked, not trusted (unit 7.2c-1). Offset paging over a
         list that changes between requests repeats or skips rows while the
         total still reaches ``count``. So the read is refused when a later
-        page states a different ``count`` from the first, and when the number
-        of distinct ``(release_id, date)`` pairs read is not exactly
-        ``count`` -- a repeated row, within a page or across two, or more rows
-        than stated.
+        page states a different ``count`` from the first, and unless **both**
+        the rows read and the distinct ``(release_id, date)`` pairs among them
+        number exactly ``count`` -- which refuses a repeated row, within a page
+        or across two, and more rows than stated, including a repeat that a
+        surplus row would otherwise pad back up to the count.
+
+        **What this cannot catch.** A removal and an insertion between two
+        page requests leave ``count`` unchanged, and can shift a row across
+        the page boundary so that it is never read while every row that *is*
+        read is distinct. Nothing in the body distinguishes that from a clean
+        read. Repeats are caught; this kind of skip is not. In practice one
+        page covers today's window -- 842 rows against a page of 1,000 when
+        probed -- so there is no boundary for a row to slip across.
         """
         if end < start:
             raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
@@ -538,7 +547,7 @@ class FredProvider:
             if len(rows) + len(page.rows) >= page.count:
                 rows.extend(page.rows)
                 distinct = len({(r.release_id, r.date) for r in rows})
-                if distinct != page.count:
+                if len(rows) != page.count or distinct != page.count:
                     raise FredError(
                         f"releases/dates: read {len(rows)} rows, {distinct} distinct "
                         f"(release_id, date) pairs, against a stated count of "

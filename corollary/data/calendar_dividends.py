@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
@@ -282,6 +282,22 @@ def _log_skipped(skipped: SkippedDividend) -> None:
     )
 
 
+def _spelled(dividend: CashDividend) -> tuple[object, ...]:
+    """A copy's fields with every ``Decimal`` as the text the store keeps.
+
+    Copies are compared by this, not by ``==``: ``Decimal('0.26') ==
+    Decimal('0.260')``, but ``Money`` stores ``format(value, "f")`` and the
+    store's upsert compares that spelling, so collapsing the two would keep
+    whichever came first in page order -- the stored text would flip between
+    fetches and count as ``updated`` every cycle. Differently spelled copies
+    therefore conflict. The Finnhub mapper's ``_dedupe`` compares the same way.
+    """
+    return tuple(
+        format(value, "f") if isinstance(value, Decimal) else value
+        for value in (getattr(dividend, item.name) for item in fields(dividend))
+    )
+
+
 def dividend_events(
     read: CashDividendRead, *, today: date, watch: Iterable[str]
 ) -> tuple[tuple[CalendarEventInput, ...], tuple[SkippedDividend, ...]]:
@@ -294,7 +310,9 @@ def dividend_events(
     calendar's concern.
 
     **One vendor id listed more than once** (the store refuses a batch that
-    names one key twice). Identical copies collapse to one row. Copies that
+    names one key twice). Identical copies collapse to one row -- identical
+    as the store compares them, so a rate spelled ``0.26`` in one copy and
+    ``0.260`` in another is a disagreement (:func:`_spelled`). Copies that
     disagree -- including a readable copy beside an unreadable one -- are
     **all** skipped and reported as conflicting: nothing says which is
     current, and keeping the first would make the result depend on page
@@ -322,7 +340,7 @@ def dividend_events(
         if row.vendor_id is not None:
             unreadable[row.vendor_id] = unreadable.get(row.vendor_id, 0) + 1
     for vendor_id, group in copies.items():
-        if len(set(group)) > 1 or vendor_id in unreadable:
+        if len({_spelled(copy) for copy in group}) > 1 or vendor_id in unreadable:
             listed = len(group) + unreadable.get(vendor_id, 0)
             reason = (
                 f"the vendor id is listed {listed} times and the copies conflict; "

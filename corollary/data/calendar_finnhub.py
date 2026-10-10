@@ -79,7 +79,7 @@ import logging
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Final
@@ -470,10 +470,30 @@ def _skip(kind: CalendarKind, index: int, reason: str) -> SkippedRow:
     return SkippedRow(index=index, reason=reason)
 
 
+def _spelled(event: CalendarEventInput) -> tuple[object, ...]:
+    """An event's fields with every ``Decimal`` as the text the store keeps.
+
+    ``Decimal('1.25') == Decimal('1.250')``, but ``Money`` stores
+    ``format(value, "f")`` and the store's upsert compares that spelling. Two
+    copies equal only as numbers would collapse to whichever came first in
+    the vendor's row order, so the stored text would flip between fetches and
+    count as ``updated`` every cycle. Compared by spelling, they conflict.
+    The dividends mapper's ``_spelled`` compares the same way.
+    """
+    return tuple(
+        format(value, "f") if isinstance(value, Decimal) else value
+        for value in (getattr(event, item.name) for item in fields(event))
+    )
+
+
 def _dedupe(
     kind: CalendarKind, built: list[tuple[int, CalendarEventInput]]
 ) -> tuple[tuple[CalendarEventInput, ...], list[SkippedRow]]:
-    """Identical rows under one key collapse; conflicting ones are all skipped."""
+    """Identical rows under one key collapse; conflicting ones are all skipped.
+
+    Identical as the store compares them (:func:`_spelled`): a figure spelled
+    two ways under one key is a conflict, not a duplicate.
+    """
     by_key: dict[str, list[tuple[int, CalendarEventInput]]] = {}
     for index, event in built:
         by_key.setdefault(event.vendor_id, []).append((index, event))
@@ -481,7 +501,8 @@ def _dedupe(
     conflicts: list[SkippedRow] = []
     for vendor_id, group in by_key.items():
         first = group[0][1]
-        if all(event == first for _, event in group):
+        spelling = _spelled(first)
+        if all(_spelled(event) == spelling for _, event in group):
             events.append(first)
             continue
         indexes = [index for index, _ in group]

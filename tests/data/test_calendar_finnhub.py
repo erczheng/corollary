@@ -354,6 +354,26 @@ def test_an_identical_duplicate_collapses_to_one_row() -> None:
     assert len(batch.events) == 1 and batch.skipped == ()
 
 
+@pytest.mark.parametrize(
+    "order", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]
+)
+def test_duplicates_spelled_differently_conflict_in_any_order(
+    order: tuple[int, int, int],
+) -> None:
+    # 1.25 and 1.250 are equal Decimals and different stored text: collapsed,
+    # the kept spelling would follow the vendor's row order and the stored row
+    # would read as updated on every fetch. Compared by spelling, they conflict.
+    rows = [
+        _earning(epsEstimate=Decimal("1.25")),
+        _earning(epsEstimate=Decimal("1.250")),
+        _earning(symbol="AMD"),
+    ]
+    batch = earnings_events([rows[i] for i in order], ["NVDA", "AMD"])
+    assert [event.ticker for event in batch.events] == ["AMD"]
+    assert len(batch.skipped) == 2
+    assert all("NVDA:2027Q3" in s.reason for s in batch.skipped)
+
+
 def test_conflicting_duplicates_are_all_skipped() -> None:
     batch = earnings_events(
         [_earning(), _earning(date="2026-11-26"), _earning(symbol="AMD")], ["NVDA", "AMD"]

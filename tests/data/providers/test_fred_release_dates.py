@@ -372,6 +372,15 @@ async def test_more_rows_than_the_count_are_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_repeat_hidden_by_a_surplus_row_is_refused() -> None:
+    # Three rows against a count of two: the repeat makes the distinct pairs
+    # come out at exactly the count, so only the row total gives it away.
+    rows = [_row(10, "2026-10-14"), _row(10, "2026-10-14"), _row(50, "2026-10-14")]
+    with pytest.raises(FredError, match="distinct"):
+        await _release_dates(_paged({0: _page(rows, count=2)}), page_limit=3)
+
+
+@pytest.mark.asyncio
 async def test_a_count_that_changes_between_pages_is_refused() -> None:
     # [a, b, c, d] loses b after page 1: offset 2 is now [d], count 3. Three
     # distinct rows against a count of three -- and c was never read.
