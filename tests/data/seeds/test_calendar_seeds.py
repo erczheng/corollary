@@ -177,7 +177,14 @@ def test_bank_local_time_converts_through_zoneinfo() -> None:
     seed = parse_central_bank_seed(text)
     [decision] = seed.decisions
     assert decision.at == datetime(2026, 3, 19, 12, 0, tzinfo=UTC)
-    assert decision.at_et() == datetime(2026, 3, 19, 8, 0, tzinfo=ET)
+    # Aware datetimes compare by instant, so ``at_et() == ...`` would only
+    # re-check ``at``. The wall clock and the zone are what at_et() adds.
+    shown = decision.at_et()
+    assert shown is not None
+    assert shown.date() == date(2026, 3, 19)
+    assert shown.time() == time(8, 0)
+    assert isinstance(shown.tzinfo, ZoneInfo)
+    assert shown.tzinfo.key == "America/New_York"
 
 
 def test_econ_release_instant_is_et_on_the_given_day() -> None:
@@ -217,76 +224,74 @@ def test_banks_without_seed_reads_unpublished_from_file(tmp_path: Path) -> None:
 
 
 # --- a malformed row rejects the whole file ---------------------------------
+#
+# Each malformed case is its baseline with exactly one defect. The baselines
+# must parse on their own -- ``test_malformed_case_baselines_parse`` pins it --
+# or a case could pass on the baseline's own error rather than the defect it
+# names. (An audit finding: the event baseline once stated BOJ ``full`` with no
+# BOJ row, and that error alone satisfied the ``"date"`` and ``"bank"`` cases
+# whatever the bad row said.)
+
+_COVERAGE_BASELINE: tuple[str, ...] = (
+    f"FOMC,full,,2026-10-10,{_URL},{_URL},",
+    f"ECB,unpublished,,2026-10-10,{_URL},,ECB has not published 2027 dates",
+    f"BOE,full,,2026-10-10,{_URL},,",
+    f"BOJ,full,,2026-10-10,{_URL},,",
+)
+
+_GOOD_FOMC = f"FOMC,2027-01-26,2027-01-27,14:00,America/New_York,{_URL},"
+
+_EVENT_BASELINE: tuple[str, ...] = (
+    _GOOD_FOMC,
+    f"BOE,2027-02-04,2027-02-04,,Europe/London,{_URL},",
+    f"BOJ,2027-01-21,2027-01-22,,Asia/Tokyo,{_URL},",
+)
+
+
+def _coverage_with(bank: str, row: str | None) -> list[str]:
+    """The coverage baseline with ``bank``'s row replaced by ``row``, or removed if ``None``."""
+    out: list[str] = []
+    for line in _COVERAGE_BASELINE:
+        if not line.startswith(f"{bank},"):
+            out.append(line)
+        elif row is not None:
+            out.append(row)
+    return out
+
+
+def test_malformed_case_baselines_parse() -> None:
+    # Each baseline against the other's default, which is how the cases use them.
+    for seed in (
+        parse_central_bank_seed(_seed_text(coverage=list(_COVERAGE_BASELINE))),
+        parse_central_bank_seed(_seed_text(events=list(_EVENT_BASELINE))),
+        parse_central_bank_seed(
+            _seed_text(coverage=list(_COVERAGE_BASELINE), events=list(_EVENT_BASELINE))
+        ),
+    ):
+        assert {d.bank for d in seed.decisions} == {Bank.FOMC, Bank.BOE, Bank.BOJ}
 
 
 @pytest.mark.parametrize(
-    ("coverage", "events", "match"),
+    ("coverage", "match"),
     [
         # A bank missing from the coverage block is a silent absence.
-        (
-            [
-                f"FOMC,full,,2026-10-10,{_URL},{_URL},",
-                f"BOE,full,,2026-10-10,{_URL},,",
-                f"BOJ,full,,2026-10-10,{_URL},,",
-            ],
-            None,
-            "ECB",
-        ),
+        (_coverage_with("ECB", None), r"no row for \['ECB'\]"),
         # A bank listed twice in coverage.
-        (
-            [
-                f"FOMC,full,,2026-10-10,{_URL},{_URL},",
-                f"FOMC,full,,2026-10-10,{_URL},{_URL},",
-                f"ECB,full,,2026-10-10,{_URL},,",
-                f"BOE,full,,2026-10-10,{_URL},,",
-                f"BOJ,full,,2026-10-10,{_URL},,",
-            ],
-            None,
-            "twice",
-        ),
+        ([*_COVERAGE_BASELINE, f"FOMC,full,,2026-10-10,{_URL},{_URL},"], "FOMC appears twice"),
         # An unknown coverage word.
-        (
-            [
-                f"FOMC,mostly,,2026-10-10,{_URL},{_URL},",
-                f"ECB,full,,2026-10-10,{_URL},,",
-                f"BOE,full,,2026-10-10,{_URL},,",
-                f"BOJ,full,,2026-10-10,{_URL},,",
-            ],
-            None,
-            "coverage",
-        ),
+        (_coverage_with("FOMC", f"FOMC,mostly,,2026-10-10,{_URL},{_URL},"), "'mostly'"),
         # "from" needs a covers_from date.
         (
-            [
-                f"FOMC,from,,2026-10-10,{_URL},{_URL},",
-                f"ECB,full,,2026-10-10,{_URL},,",
-                f"BOE,full,,2026-10-10,{_URL},,",
-                f"BOJ,full,,2026-10-10,{_URL},,",
-            ],
-            None,
-            "covers_from",
+            _coverage_with("FOMC", f"FOMC,from,,2026-10-10,{_URL},{_URL},"),
+            "needs a covers_from",
         ),
         # An unpublished bank must say why.
-        (
-            [
-                f"FOMC,full,,2026-10-10,{_URL},{_URL},",
-                f"ECB,unpublished,,2026-10-10,{_URL},,",
-                f"BOE,full,,2026-10-10,{_URL},,",
-                f"BOJ,full,,2026-10-10,{_URL},,",
-            ],
-            None,
-            "note",
-        ),
+        (_coverage_with("ECB", f"ECB,unpublished,,2026-10-10,{_URL},,"), "needs a note"),
     ],
 )
-def test_malformed_coverage_rejects_the_file(
-    coverage: list[str], events: list[str] | None, match: str
-) -> None:
+def test_malformed_coverage_rejects_the_file(coverage: list[str], match: str) -> None:
     with pytest.raises(SeedError, match=match):
-        parse_central_bank_seed(_seed_text(coverage=coverage, events=events))
-
-
-_GOOD_FOMC = f"FOMC,2027-01-26,2027-01-27,14:00,America/New_York,{_URL},"
+        parse_central_bank_seed(_seed_text(coverage=coverage, events=list(_EVENT_BASELINE)))
 
 
 @pytest.mark.parametrize(
@@ -310,11 +315,7 @@ _GOOD_FOMC = f"FOMC,2027-01-26,2027-01-27,14:00,America/New_York,{_URL},"
     ],
 )
 def test_one_malformed_event_rejects_the_file(bad_row: str, match: str) -> None:
-    events = [
-        _GOOD_FOMC,
-        f"BOE,2027-02-04,2027-02-04,,Europe/London,{_URL},",
-        bad_row,
-    ]
+    events = [*_EVENT_BASELINE, bad_row]
     with pytest.raises(SeedError, match=match):
         parse_central_bank_seed(_seed_text(events=events), source="seed.csv")
 
