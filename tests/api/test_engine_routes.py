@@ -366,6 +366,9 @@ SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/activity",
     "/api/activity/rejections",
     "/api/activity/stats",
+    "/api/calendar",
+    "/api/calendar/manual",
+    "/api/calendar/manual/{event_id}",
     "/api/engine/halt",
     "/api/engine/resume",
     "/api/engine/state",
@@ -422,6 +425,7 @@ def test_the_routes_package_exports_every_router() -> None:
     """
     assert routes.account_router.prefix == "/api/account"
     assert routes.activity_router.prefix == "/api/activity"
+    assert routes.calendar_router.prefix == "/api/calendar"
     assert routes.engine_router.prefix == "/api/engine"
     assert routes.markets_router.prefix == "/api/markets"
     assert routes.news_router.prefix == "/api/news"

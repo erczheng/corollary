@@ -113,6 +113,10 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     # defaults -- bell off, Discord on -- a parent-session assumption.
     ("spdr_seed_amended", "bell", False),
     ("spdr_seed_amended", "discord", True),
+    # A manual calendar entry added, edited or removed (Phase 3 decisions 9
+    # and 20, migration 0013): ``info``, a record for Discord, not the bell.
+    ("calendar_changed", "bell", False),
+    ("calendar_changed", "discord", True),
 )
 
 

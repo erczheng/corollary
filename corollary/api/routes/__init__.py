@@ -22,6 +22,7 @@ same thing and one import someone gets wrong.
 
 from corollary.api.routes.account import router as account_router
 from corollary.api.routes.activity import router as activity_router
+from corollary.api.routes.calendar import router as calendar_router
 from corollary.api.routes.engine import router as engine_router
 from corollary.api.routes.markets import router as markets_router
 from corollary.api.routes.news import router as news_router
@@ -33,6 +34,7 @@ from corollary.api.routes.ws import router as ws_router
 __all__ = [
     "account_router",
     "activity_router",
+    "calendar_router",
     "engine_router",
     "markets_router",
     "news_router",

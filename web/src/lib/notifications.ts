@@ -46,7 +46,9 @@ export type { NotificationSeverity }
  * added or removed, which belongs to no book (`account: null`, so it shows
  * in both bells). `spdr_seed_amended` (owner decision 2026-09-30) is `info`
  * too: an NPORT-P/A adopted into the sector seed after passing the same
- * validation as an original — a record, also `account: null`. */
+ * validation as an original — a record, also `account: null`. So is
+ * `calendar_changed` (Phase 3 decisions 9 and 20): a manual geopolitical
+ * calendar entry added, edited or removed. */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -63,6 +65,7 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   notification_routes_changed: 'info',
   watchlist_changed: 'info',
   spdr_seed_amended: 'info',
+  calendar_changed: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

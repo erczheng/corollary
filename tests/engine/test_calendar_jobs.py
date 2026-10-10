@@ -990,7 +990,40 @@ async def test_a_catch_up_on_rows_written_within_a_day_skips_and_asks_nothing(
         outcome = await catch_up()
         assert isinstance(outcome, JobSkipped), name
         assert fresh.isoformat() in outcome.reason, name
+        # The skip carries the instant, so a reader can say "up to date" in
+        # its own zone instead of quoting this UTC text; the period is words.
+        assert outcome.fresh_as_of == fresh, name
+        assert "less than 1 day ago" in outcome.reason, name
+        assert "0:00:00" not in outcome.reason, name
     assert finnhub.calls == [] and dividends.calls == [] and releases.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_catch_up_is_recorded_apart_from_a_real_skip(db_engine: Engine) -> None:
+    """``last_skip_fresh_as_of`` marks the calm skip, and a later real skip clears it."""
+    fresh = NOW - timedelta(hours=2)
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.EARNINGS,
+        source=CalendarSource.FINNHUB,
+        vendor_id="NVDA:2027Q3",
+        day=date(2026, 11, 20),
+        ticker="NVDA",
+        stamped=fresh,
+    )
+    job = _jobs(_services(db_engine, finnhub=FakeFinnhubCalendar()))["calendar_earnings"]
+    assert job.catch_up is not None
+    scheduler = _scheduler(job)
+    record = scheduler._records[job.name]
+
+    await scheduler._run_catch_up(job, job.catch_up, record)
+    assert scheduler.status()[job.name].last_skip_fresh_as_of == fresh
+
+    no_vendor = _jobs(_services(db_engine))["calendar_earnings"]
+    await scheduler._run_catch_up(no_vendor, no_vendor.run, record)
+    status = scheduler.status()[job.name]
+    assert status.skips == 2
+    assert status.last_skip_fresh_as_of is None
 
 
 @pytest.mark.asyncio
@@ -1197,3 +1230,136 @@ async def test_each_shipped_calendar_body_blocks_only_off_the_event_loop(
     on_loop = [called for called, thread in spy.calls if thread == loop_thread]
     assert on_loop == [], on_loop
     assert worst < _BLOCK_SECONDS * 0.6, f"the loop stalled {worst:.3f}s while {name} ran"
+
+
+# --------------------------------------------------------------------------
+# What a fetch is dated by: its own start, recorded, never inferred
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_success_keeps_its_own_start_after_a_later_run_starts_and_fails() -> None:
+    """Audit finding 2, under the real :class:`Scheduler`.
+
+    The catch-up starts 23:59 EST on the 9th and finishes 00:00:20 on the
+    10th; the 07:00 slot run then starts and fails. ``last_started`` is the
+    slot run's now, so the success's start must be on the record by itself:
+    the route dates coverage from it.
+    """
+    started = datetime(2026, 11, 10, 4, 59, tzinfo=UTC)  # 23:59 EST on the 9th
+    finished = datetime(2026, 11, 10, 5, 0, 20, tzinfo=UTC)  # 00:00:20 EST on the 10th
+    slot = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)  # 07:00 EST on the 10th
+    clock = [started]
+    parked = asyncio.Event()
+    never = asyncio.Event()
+
+    async def catch_up() -> JobSkipped | None:
+        clock[0] = finished
+        return None
+
+    async def run() -> JobSkipped | None:
+        clock[0] = slot + timedelta(seconds=30)
+        raise TimeoutError("the slot run failed")
+
+    sleeps = 0
+
+    async def sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 1:
+            clock[0] = slot
+            return
+        parked.set()
+        await never.wait()
+
+    job = ScheduledJob(
+        name="calendar_earnings",
+        schedule=AtTime(time(7, 0), every_day),
+        run=run,
+        catch_up=catch_up,
+        rule="test",
+    )
+    scheduler = Scheduler([job], secrets=lambda: (), clock=lambda: clock[0], sleep=sleep)
+    scheduler.start()
+    try:
+        await asyncio.wait_for(parked.wait(), timeout=10)
+    finally:
+        await scheduler.aclose()
+
+    status = scheduler.status()["calendar_earnings"]
+    assert status.last_started == slot
+    assert status.last_success == finished
+    assert status.last_success_started == started
+    assert status.failing
+
+
+@pytest.mark.asyncio
+async def test_a_skip_leaves_the_last_successes_start_alone(db_engine: Engine) -> None:
+    job = _jobs(_services(db_engine, finnhub=FakeFinnhubCalendar(earnings=[_earning()])))[
+        "calendar_earnings"
+    ]
+    scheduler = _scheduler(job)
+    record = scheduler._records[job.name]
+    await scheduler._run_catch_up(job, job.run, record)
+    assert scheduler.status()[job.name].last_success_started == NOW
+
+    no_vendor = _jobs(_services(db_engine))["calendar_earnings"]
+    await scheduler._run_catch_up(no_vendor, no_vendor.run, record)
+
+    status = scheduler.status()[job.name]
+    assert status.skips == 1
+    assert status.last_success_started == NOW
+
+
+class _ClockMovingFinnhub(FakeFinnhubCalendar):
+    """Moves the job's clock past midnight ET while the fetch is in flight."""
+
+    def __init__(self, clock: list[datetime], after: datetime, **rows: Any) -> None:
+        super().__init__(**rows)
+        self._clock = clock
+        self._after = after
+
+    async def earnings_calendar(self, start: date, end: date) -> list[Any]:
+        self._clock[0] = self._after
+        return await super().earnings_calendar(start, end)
+
+
+@pytest.mark.asyncio
+async def test_a_fetchs_rows_are_stamped_with_the_clock_read_before_the_fetch(
+    db_engine: Engine,
+) -> None:
+    """Audit note 3: ``fresh_at_start`` dates coverage from the newest row's
+    ``updated_at``, which is honest only because that stamp is the run's
+    pre-fetch ``now`` -- the same instant the window was dated from. A run
+    straddling midnight ET still stamps the earlier day.
+    """
+    before = datetime(2026, 11, 10, 4, 59, tzinfo=UTC)  # 23:59 EST on the 9th
+    after = datetime(2026, 11, 10, 5, 0, 20, tzinfo=UTC)  # 00:00:20 EST on the 10th
+    clock = [before]
+    finnhub = _ClockMovingFinnhub(clock, after, earnings=[_earning()])
+    services = _services(db_engine, finnhub=finnhub)
+    job = {
+        job.name: job for job in context_jobs(services, clock=lambda: clock[0])
+    }["calendar_earnings"]
+
+    assert await job.run() is None
+
+    assert clock[0] == after  # the fetch did move the clock
+    assert finnhub.calls == [("earnings", date(2026, 11, 9), date(2026, 11, 9) + EARNINGS_WINDOW)]
+    with Session(db_engine) as session:
+        stamps = session.scalars(select(CalendarEvent.updated_at)).all()
+    assert stamps and all(stamp == before for stamp in stamps)
+
+
+@pytest.mark.parametrize(
+    ("years_ahead", "words"),
+    [(0, "this year;"), (1, "this year and next;"), (2, "this year and the 2 after;")],
+)
+def test_the_central_bank_rule_names_the_years_the_constant_imports(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, years_ahead: int, words: str
+) -> None:
+    monkeypatch.setattr(scheduler_module, "CALENDAR_CENTRAL_BANK_YEARS_AHEAD", years_ahead)
+
+    rule = _jobs(_services(db_engine))["calendar_central_banks"].rule
+
+    assert words in rule

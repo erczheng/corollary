@@ -36,7 +36,16 @@ at merge regardless. Once it has merged, a change here is a new revision.
 number and re-points ``down_revision`` at the head it lands on; no merge
 revision.
 
-The downgrade drops the table, discarding manual rows with it.
+**``calendar_changed`` routing (unit 7.3, amended in-branch on the same
+terms).** Decision 20 -- *"every operator action notifies"* -- reaches the
+manual rows' routes, so the two ``notification_route`` rows for
+``calendar_changed`` are seeded here, on decision 20's info defaults: bell
+off, Discord on. Insert-if-missing, as ``0011`` does: ``seed.py`` carries the
+same rows and runs on every startup, and an existing row is a human's choice.
+No CHECK to widen -- ``notification_route.event`` has none by design.
+
+The downgrade drops the table, discarding manual rows with it, and deletes
+the two route rows, discarding any edit made to them.
 
 Revision ID: 0013
 Revises: 0012
@@ -57,6 +66,18 @@ depends_on: str | Sequence[str] | None = None
 # A copy, not an import, for the reason every earlier revision states: a
 # migration is a frozen record of the schema on the day.
 _MONEY_TEXT_WIDTH = 40
+
+_ROUTES: tuple[tuple[str, str, bool], ...] = (
+    ("calendar_changed", "bell", False),
+    ("calendar_changed", "discord", True),
+)
+
+_notification_route = sa.table(
+    "notification_route",
+    sa.column("event", sa.String(length=64)),
+    sa.column("channel", sa.String(length=16)),
+    sa.column("enabled", sa.Boolean()),
+)
 
 
 def _money_shape(column: str, *, nullable: bool = False) -> str:
@@ -184,8 +205,30 @@ def upgrade() -> None:
         sa.UniqueConstraint("source", "kind", "vendor_id", name="uq_calendar_event_vendor_key"),
     )
     op.create_index("ix_calendar_event_date", "calendar_event", ["date"], unique=False)
+    _seed_routes()
+
+
+def _seed_routes() -> None:
+    bind = op.get_bind()
+    existing = {
+        (event, channel)
+        for event, channel in bind.execute(
+            sa.select(_notification_route.c.event, _notification_route.c.channel)
+        )
+    }
+    missing = [
+        {"event": event, "channel": channel, "enabled": enabled}
+        for event, channel, enabled in _ROUTES
+        if (event, channel) not in existing
+    ]
+    if missing:
+        op.bulk_insert(_notification_route, missing)
 
 
 def downgrade() -> None:
+    events = sorted({event for event, _channel, _enabled in _ROUTES})
+    op.execute(
+        _notification_route.delete().where(_notification_route.c.event.in_(events))
+    )
     op.drop_index("ix_calendar_event_date", table_name="calendar_event")
     op.drop_table("calendar_event")

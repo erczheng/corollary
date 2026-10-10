@@ -66,13 +66,17 @@ import contextlib
 import functools
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Final, cast
+from datetime import datetime, timezone
+from typing import Any, Final, cast, get_args
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -90,6 +94,7 @@ from corollary.api.operator import deliver_notice
 from corollary.api.routes import (
     account_router,
     activity_router,
+    calendar_router,
     engine_router,
     markets_router,
     news_router,
@@ -309,14 +314,183 @@ def _database_handler(request: Request, exc: Exception) -> Response:
     return _envelope(503, "database_unavailable", _DATABASE_MESSAGE)
 
 
+_VALIDATION_RULE: Final = (
+    "rule 4: every request is validated server-side; a body, query or path "
+    "that fails its schema is refused before any handler runs"
+)
+
+
+def _route_template(request: Request) -> str:
+    """The matched route's template (``/api/calendar/manual/{event_id}``).
+
+    The template, not the raw path: a path parameter is client input, and
+    this is logged.
+    """
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) else "(unmatched route)"
+
+
+#: What a ``loc`` segment becomes in the log when it is not a name the
+#: route declared. With ``extra="forbid"`` an unknown key reaches ``loc``
+#: exactly as the client sent it -- a credential-shaped key name, or a 1 MB
+#: one, would otherwise be written verbatim (rule 6).
+UNDECLARED_SEGMENT: Final = "<undeclared>"
+
+#: The longest any client-reachable string in a refusal's log line may be.
+#: Declared names and Pydantic's error types are far shorter; this bounds
+#: whatever is not.
+_LOGGED_TEXT_MAX: Final = 120
+
+#: ``loc``'s first segment names where the error was: these are FastAPI's own.
+_LOCATIONS: Final = frozenset({"body", "query", "path", "header", "cookie"})
+
+
+def _capped(text: str) -> str:
+    """``text``, truncated to :data:`_LOGGED_TEXT_MAX` characters."""
+    if len(text) <= _LOGGED_TEXT_MAX:
+        return text
+    return text[: _LOGGED_TEXT_MAX - 3] + "..."
+
+
+def _model_names(annotation: object, seen: set[type[BaseModel]], into: set[str]) -> None:
+    """Every field name and string alias of each Pydantic model in ``annotation``.
+
+    Walks ``list[Model]``, ``Model | None`` and ``Annotated[...]`` through
+    their arguments, and each model's own fields, so a nested model's names
+    count as declared too.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if annotation in seen:
+            return
+        seen.add(annotation)
+        for name, field in annotation.model_fields.items():
+            into.add(name)
+            if isinstance(field.alias, str):
+                into.add(field.alias)
+            if isinstance(field.validation_alias, str):
+                into.add(field.validation_alias)
+            _model_names(field.annotation, seen, into)
+        return
+    for argument in get_args(annotation):
+        _model_names(argument, seen, into)
+
+
+def _declared_names(request: Request) -> frozenset[str]:
+    """The parameter and body-field names the matched route declares.
+
+    Built from the route's own signature -- its path, query, header, cookie
+    and body parameters, those of its dependencies, and the fields of any
+    Pydantic body model -- never from the request.
+    """
+    route = request.scope.get("route")
+    if not isinstance(route, APIRoute):
+        return frozenset()
+    names: set[str] = set()
+    models: set[type[BaseModel]] = set()
+    pending: list[Any] = [route.dependant]
+    while pending:
+        dependant = pending.pop()
+        for param in (
+            *dependant.path_params,
+            *dependant.query_params,
+            *dependant.header_params,
+            *dependant.cookie_params,
+            *dependant.body_params,
+        ):
+            names.add(param.name)
+            names.add(param.alias)
+            _model_names(param.field_info.annotation, models, names)
+        pending.extend(dependant.dependencies)
+    return frozenset(names)
+
+
+def logged_location(loc: Sequence[object], declared: frozenset[str]) -> str:
+    """``loc`` as the log may carry it: declared names and indices only.
+
+    The first segment is kept if it is one of FastAPI's locations (``body``,
+    ``query``, ...). Any segment that is an integer -- a list index or a JSON
+    decode position -- is kept, and so is a name in ``declared``. Anything
+    else is client-chosen and becomes :data:`UNDECLARED_SEGMENT`; so does a
+    name over :data:`_LOGGED_TEXT_MAX`, declared or not.
+    """
+    parts: list[str] = []
+    for index, part in enumerate(loc):
+        if isinstance(part, int) and not isinstance(part, bool):
+            parts.append(str(part))
+        elif (
+            isinstance(part, str)
+            and len(part) <= _LOGGED_TEXT_MAX
+            and (part in declared or (index == 0 and part in _LOCATIONS))
+        ):
+            parts.append(part)
+        else:
+            parts.append(UNDECLARED_SEGMENT)
+    return ".".join(parts)
+
+
+def _log_validation_refusal(request: Request, exc: RequestValidationError) -> None:
+    """Rule 8 for a refusal FastAPI raised: the rule, where, and when -- never a value.
+
+    Each error is logged by its location and Pydantic error type only; the
+    ``input`` and ``msg`` are left out (a message can quote the input). A
+    location carries only names the route declared (:func:`logged_location`):
+    an unknown key's *name* is client input as much as its value is, so an
+    ``extra_forbidden`` error is not listed, only counted. A body's ``title``
+    is free text bound for Discord, so only its *length* is recorded. Every
+    string is capped. The response body is built separately and unchanged.
+    **Never raises**: a refusal must not become a 500 because its log line
+    could not be built.
+    """
+    try:
+        body = exc.body
+        title = body.get("title") if isinstance(body, dict) else None
+        declared = _declared_names(request)
+        errors: list[dict[str, str]] = []
+        extra_forbidden = 0
+        for error in exc.errors():
+            kind = _capped(str(error.get("type", "")))
+            if kind == "extra_forbidden":
+                extra_forbidden += 1
+                continue
+            errors.append(
+                {"loc": logged_location(error.get("loc", ()), declared), "type": kind}
+            )
+        method = _capped(request.method)
+        route = _capped(_route_template(request))
+        logger.warning(
+            "request refused by validation: %s %s",
+            method,
+            route,
+            extra={
+                "event": "api_request_refused",
+                "rule": _VALIDATION_RULE,
+                "method": method,
+                "route": route,
+                "errors": errors,
+                "extra_forbidden": extra_forbidden,
+                "title_length": len(title) if isinstance(title, str) else None,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "correlation_id": str(uuid.uuid4()),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "a validation refusal could not be logged in full",
+            extra={"event": "api_request_refused_unlogged", "rule": _VALIDATION_RULE},
+        )
+
+
 def _validation_handler(request: Request, exc: Exception) -> Response:
     """422, built from field locations and messages -- never from the input.
 
     ``exc.errors()`` carries the offending ``input`` alongside each error.
     Echoing it back is how a mistyped request that happened to contain a
-    credential ends up quoted in a response.
+    credential ends up quoted in a response. Every such refusal is logged
+    (:func:`_log_validation_refusal`); the body is unchanged by that.
     """
     assert isinstance(exc, RequestValidationError)
+    _log_validation_refusal(request, exc)
     detail = "; ".join(
         f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
         for error in exc.errors()
@@ -1104,6 +1278,7 @@ def create_app(
     # not decide a path. Listed alphabetically for the reader's sake.
     app.include_router(account_router)
     app.include_router(activity_router)
+    app.include_router(calendar_router)
     app.include_router(engine_router)
     app.include_router(markets_router)
     app.include_router(news_router)

@@ -246,6 +246,43 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     assert EXPECTED_TABLES <= tables
 
 
+def test_0013_seeds_the_calendar_changed_routes_and_downgrades_them(
+    db_path: Path,
+) -> None:
+    """Unit 7.3, amended into 0013 in-branch: decision 20's info defaults."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("calendar_changed", "bell")] is False
+    assert routes[("calendar_changed", "discord")] is True
+
+    command.downgrade(cfg, "0012")
+    routes = _route_rows(url)
+    assert not {event for event, _channel in routes} & {"calendar_changed"}
+    assert len(routes) == 30
+
+    command.upgrade(cfg, "head")
+    assert _route_rows(url)[("calendar_changed", "discord")] is True
+
+
+def test_0013_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> None:
+    """``seed.py`` runs on every startup; an edited row must survive 0013."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "0012")
+    eng = create_db_engine(url)
+    with Session(eng) as sess:
+        sess.add(NotificationRoute(event="calendar_changed", channel="discord", enabled=False))
+        sess.commit()
+    eng.dispose()
+
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("calendar_changed", "discord")] is False
+    assert routes[("calendar_changed", "bell")] is False
+
+
 def test_0013_downgrades_to_0012_and_back(db_path: Path) -> None:
     """``calendar_event`` comes and goes alone; 0012's cache stays.
 
@@ -413,9 +450,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     assert len(routes) == 16  # 0001's table, untouched
 
     command.upgrade(cfg, "head")
-    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows and
-    # 0011's two ``spdr_seed_amended`` rows.
-    assert len(_route_rows(url)) == 30
+    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows, 0011's
+    # two ``spdr_seed_amended`` rows and 0013's two ``calendar_changed`` rows.
+    assert len(_route_rows(url)) == 32
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:

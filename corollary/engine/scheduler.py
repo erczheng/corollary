@@ -154,6 +154,7 @@ from corollary.data.calendar import (
     upsert_events,
 )
 from corollary.data.calendar_dividends import (
+    DIVIDEND_EX_DATE_HORIZON,
     CashDividendSource,
     DividendOutcome,
     fetch_dividends,
@@ -166,6 +167,7 @@ from corollary.data.calendar_finnhub import (
     ipo_events,
 )
 from corollary.data.calendar_releases import (
+    FRED_RELEASES_HORIZON_DAYS,
     ReleaseDatesSource,
     ReleasesNotFetched,
     fetch_release_events,
@@ -606,9 +608,16 @@ class JobSkipped:
 
     Recorded as a skip with ``reason`` -- never as a success. See the module
     docstring's *A run that fetched nothing is skipped*.
+
+    ``fresh_as_of`` is set only by a calendar catch-up that did not fetch
+    because the stored rows were already fresh: the newest row's write
+    instant, UTC. That is a different state from a skip for want of a key,
+    and a reader says "up to date as of" from it rather than quoting
+    ``reason`` (whose instant is UTC text, for the log).
     """
 
     reason: str
+    fresh_as_of: datetime | None = None
 
 
 #: A job body: ``None`` for work done, :class:`JobSkipped` for nothing to do,
@@ -659,6 +668,14 @@ class JobStatus:
     skips: int = 0
     last_skipped: datetime | None = None
     last_skip_reason: str | None = None
+    #: :attr:`JobSkipped.fresh_as_of` of the newest skip; ``None`` for a
+    #: skip that was not "already fresh at start".
+    last_skip_fresh_as_of: datetime | None = None
+    #: When the run that set :attr:`last_success` *started*, recorded at the
+    #: moment it succeeded. Not :attr:`last_started`, which every later run
+    #: overwrites as it begins: a calendar fetch takes "today" at its start,
+    #: so this -- and only this -- dates what that success asked about.
+    last_success_started: datetime | None = None
 
     @property
     def failing(self) -> bool:
@@ -686,6 +703,8 @@ class _JobRecord:
     skips: int = 0
     last_skipped: datetime | None = None
     last_skip_reason: str | None = None
+    last_skip_fresh_as_of: datetime | None = None
+    last_success_started: datetime | None = None
 
 
 # --------------------------------------------------------------------------
@@ -838,6 +857,8 @@ class Scheduler:
                 skips=record.skips,
                 last_skipped=record.last_skipped,
                 last_skip_reason=record.last_skip_reason,
+                last_skip_fresh_as_of=record.last_skip_fresh_as_of,
+                last_success_started=record.last_success_started,
             )
             for job in self._jobs
             for record in (self._records[job.name],)
@@ -940,7 +961,8 @@ class Scheduler:
                 return
             await self._sleep_until(upcoming)
             due = upcoming
-            record.last_started = self._now()
+            started = self._now()
+            record.last_started = started
             try:
                 outcome = await job.run()
             except asyncio.CancelledError:
@@ -953,6 +975,7 @@ class Scheduler:
                     continue
                 record.runs += 1
                 record.last_success = self._now()
+                record.last_success_started = started
                 logger.debug(
                     "context job ran",
                     extra={
@@ -970,7 +993,8 @@ class Scheduler:
         record: _JobRecord,
     ) -> None:
         """The job's start-up catch-up, once. A failure is stated, never fatal."""
-        record.last_started = self._now()
+        started = self._now()
+        record.last_started = started
         try:
             outcome = await catch_up()
         except asyncio.CancelledError:
@@ -985,6 +1009,7 @@ class Scheduler:
                 return
             record.runs += 1
             record.last_success = self._now()
+            record.last_success_started = started
             logger.debug(
                 "context job caught up at start",
                 extra={
@@ -1017,6 +1042,8 @@ class Scheduler:
         except Exception:
             reason = "(the skip reason could not be rendered)"
         record.last_skip_reason = reason
+        fresh_as_of = getattr(skipped, "fresh_as_of", None)
+        record.last_skip_fresh_as_of = fresh_as_of if isinstance(fresh_as_of, datetime) else None
         try:
             logger.info(
                 "a context job had nothing to fetch; recorded as skipped, not "
@@ -2122,6 +2149,10 @@ CALENDAR_CATCH_UP_AFTER: Final = timedelta(days=1)
 #: this module may not import ``corollary.api``, so a test pins the two
 #: together). One missed refresh is tolerated, two in a row is a gap.
 HELD_POSITIONS_STALE_AFTER: Final = timedelta(minutes=10)
+#: The central-bank job imports this year's seed and this many following
+#: years'. ``corollary.api.routes.calendar`` reads it to know which dates the
+#: job covers, so the number lives here once.
+CALENDAR_CENTRAL_BANK_YEARS_AHEAD: Final = 1
 
 #: Q15, as a failure log leads with it.
 _CALENDAR_ACCESS_DENIED_RULE: Final = (
@@ -2323,7 +2354,7 @@ async def _read_finnhub_calendar(
 async def _calendar_earnings(
     services: ContextServices, universe: UniverseSource, clock: UtcClock
 ) -> JobSkipped | None:
-    """Earnings for the watch universe, today -> +21 days: one ``/calendar/earnings`` request."""
+    """Earnings for the watch universe, today -> ``EARNINGS_WINDOW``: one ``/calendar/earnings`` request."""
     source = services.finnhub_calendar
     if source is None:
         return JobSkipped(_NO_FINNHUB_CALENDAR)
@@ -2350,7 +2381,7 @@ async def _calendar_earnings(
 
 
 async def _calendar_ipos(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
-    """Upcoming IPOs, market-wide, today -> +30 days: one ``/calendar/ipo`` request (Q15)."""
+    """Upcoming IPOs, market-wide, today -> ``IPO_WINDOW``: one ``/calendar/ipo`` request (Q15)."""
     source = services.finnhub_calendar
     if source is None:
         return JobSkipped(_NO_FINNHUB_CALENDAR)
@@ -2408,7 +2439,7 @@ async def _calendar_dividends(
 
 
 async def _calendar_releases(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
-    """FRED's release dates for the next 30 days, at the committed table's ET times (Q3).
+    """FRED's release dates, ``FRED_RELEASES_HORIZON_DAYS`` ahead, at the committed table's ET times (Q3).
 
     ``ReleasesNotFetched`` -- no key, or nothing FRED listed is a timed
     release -- is a skip and withdraws nothing. The times table is read on a
@@ -2460,15 +2491,19 @@ def _import_central_banks_blocking(
 async def _calendar_central_banks(
     services: ContextServices, clock: UtcClock
 ) -> JobSkipped | None:
-    """The committed central-bank seed for this year and next, at start and daily.
+    """The committed central-bank seed for this year and ``CALENDAR_CENTRAL_BANK_YEARS_AHEAD`` more, at start and daily.
 
     A local file, so no vendor and no budget: running at every start costs a
     file read and an upsert that leaves unchanged rows untouched.
     """
     now = _require_utc(clock())
     year = _et_date(now).year
+    last_year = year + CALENDAR_CENTRAL_BANK_YEARS_AHEAD
     imported = await asyncio.to_thread(
-        _import_central_banks_blocking, services.session_factory, (year, year + 1), now
+        _import_central_banks_blocking,
+        services.session_factory,
+        tuple(range(year, last_year + 1)),
+        now,
     )
     for seed_year, found, gaps in imported:
         if gaps:
@@ -2483,9 +2518,24 @@ async def _calendar_central_banks(
             )
     if not any(found for _, found, _ in imported):
         return JobSkipped(
-            f"no central-bank seed file for {year} or {year + 1}; nothing imported"
+            f"no central-bank seed file for {year} through {last_year}; nothing imported"
         )
     return None
+
+
+def _central_bank_years_in_words(years_ahead: int) -> str:
+    """``this year``, ``this year and next``, ``this year and the 2 after``."""
+    if years_ahead <= 0:
+        return "this year"
+    if years_ahead == 1:
+        return "this year and next"
+    return f"this year and the {years_ahead} after"
+
+
+def days_in_words(span: timedelta) -> str:
+    """``1 day``, ``21 days`` -- never ``str(timedelta)``'s ``1 day, 0:00:00``."""
+    days = span.days
+    return f"{days} day" if days == 1 else f"{days} days"
 
 
 def _newest_calendar_write_blocking(
@@ -2544,8 +2594,9 @@ async def _calendar_catch_up(
     if newest is not None and now - newest < CALENDAR_CATCH_UP_AFTER:
         return JobSkipped(
             f"the newest stored {source.value} {kind.value} row was written at "
-            f"{newest.isoformat()}, within {CALENDAR_CATCH_UP_AFTER}; the daily "
-            "slot will fetch"
+            f"{newest.isoformat()}, less than {days_in_words(CALENDAR_CATCH_UP_AFTER)} "
+            "ago; the start-up catch-up does not fetch again, and the daily slot will",
+            fresh_as_of=newest,
         )
     return await run()
 
@@ -2573,8 +2624,8 @@ def _calendar_jobs(
             catch_up=catch_up(earnings, CalendarSource.FINNHUB, CalendarKind.EARNINGS),
             rule=(
                 "decision 7's earnings calendar for the watch universe, today to "
-                "+21 days; when this fails the stored earnings rows stay as they "
-                "were and the panel reads them stale"
+                f"+{days_in_words(EARNINGS_WINDOW)}; when this fails the stored "
+                "earnings rows stay as they were and the panel reads them stale"
             ),
             inputs={"host": FINNHUB_HOST, "endpoint": "/calendar/earnings"},
         ),
@@ -2584,7 +2635,8 @@ def _calendar_jobs(
             run=ipos,
             catch_up=catch_up(ipos, CalendarSource.FINNHUB, CalendarKind.IPO),
             rule=(
-                "Q15's upcoming IPOs, market-wide, today to +30 days; a 403 is a "
+                "Q15's upcoming IPOs, market-wide, today to "
+                f"+{days_in_words(IPO_WINDOW)}; a 403 is a "
                 "premium refusal for the owner (CalendarAccessDenied); when this "
                 "fails the stored IPO rows stay as they were"
             ),
@@ -2597,8 +2649,9 @@ def _calendar_jobs(
             catch_up=catch_up(dividends, CalendarSource.ALPACA, CalendarKind.DIVIDEND),
             rule=(
                 "decision 7's announced cash dividends for the watch universe, "
-                "ex-dates today to +90 days; a failed read is a failure, never "
-                "'none announced', and the stored rows stay. REST corporate "
+                f"ex-dates today to +{days_in_words(DIVIDEND_EX_DATE_HORIZON)}; a "
+                "failed read is a failure, never 'none announced', and the stored "
+                "rows stay. REST corporate "
                 "actions, never a rule 9 input"
             ),
             inputs={
@@ -2613,7 +2666,8 @@ def _calendar_jobs(
             run=releases,
             catch_up=catch_up(releases, CalendarSource.FRED, CalendarKind.ECONOMIC),
             rule=(
-                "Q3's economic calendar: FRED release dates for the next 30 days "
+                "Q3's economic calendar: FRED release dates for the next "
+                f"{days_in_words(timedelta(days=FRED_RELEASES_HORIZON_DAYS))} "
                 "at the committed table's ET times; when this fails the stored "
                 "release rows stay as they were"
             ),
@@ -2626,9 +2680,10 @@ def _calendar_jobs(
             # A local file: imported at every start, unconditionally.
             catch_up=central_banks,
             rule=(
-                "decision 8's committed central-bank seed for this year and next; "
-                "when this fails (a malformed file) nothing of either year is "
-                "written and the stored rows stay"
+                "decision 8's committed central-bank seed for "
+                f"{_central_bank_years_in_words(CALENDAR_CENTRAL_BANK_YEARS_AHEAD)}; "
+                "when this fails (a malformed file) nothing of any of those years "
+                "is written and the stored rows stay"
             ),
             inputs={"host": "local", "seed": "corollary/data/seeds/central_banks_<year>.csv"},
         ),

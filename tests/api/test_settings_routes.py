@@ -681,6 +681,7 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "notification_routes_changed",
         "watchlist_changed",
         "spdr_seed_amended",
+        "calendar_changed",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -699,6 +700,12 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
     # decision 20's info-event defaults -- a parent-session assumption.
     assert routed["spdr_seed_amended"] == {
         "event": "spdr_seed_amended",
+        "bell": False,
+        "discord": True,
+    }
+    # Phase 3 decisions 9 and 20 (migration 0013): a manual calendar entry.
+    assert routed["calendar_changed"] == {
+        "event": "calendar_changed",
         "bell": False,
         "discord": True,
     }

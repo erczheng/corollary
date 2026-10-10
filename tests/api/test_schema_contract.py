@@ -31,6 +31,7 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "ApiKeyPresence": schemas.ApiKeyPresence,
     "AttachedExit": schemas.AttachedExit,
     "AuditLogEntry": schemas.AuditLogEntry,
+    "CalendarEvent": schemas.CalendarEventItem,
     "ChainSpec": schemas.ChainSpec,
     "DataFeed": schemas.DataFeed,
     "DataSourceStatus": schemas.DataSourceStatus,
@@ -63,6 +64,28 @@ DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     # (owner decision Q16); tests/api/test_chain_risk_free_rate.py pins it.
     "OptionContract": frozenset(
         {"ivSource", "riskFreeRate", "riskFreeRateSource", "riskFreeRateDate"}
+    ),
+    # Phase 3 step 7, unit 7.3: the calendar API serves these ahead of the
+    # panel, a later frontend unit that declares them in ``types.ts``.
+    # ``source``/``editable`` (decision 9), ``session`` (decision 7), the
+    # exact-string figures and ``consensus: "unavailable"`` (Q3), and Q15's
+    # IPO fields. ``CalendarEventType`` also lacks ``ipo`` until then.
+    "CalendarEvent": frozenset(
+        {
+            "source",
+            "editable",
+            "session",
+            "estimate",
+            "prior",
+            "actual",
+            "consensus",
+            "unit",
+            "exchange",
+            "shares",
+            "priceLow",
+            "priceHigh",
+            "ipoStatus",
+        }
     ),
 }
 

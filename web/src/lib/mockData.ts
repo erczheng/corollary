@@ -1798,6 +1798,8 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   // Owner decision 2026-09-30, migration 0011: decision 20's info defaults
   // (a parent-session assumption).
   { event: 'spdr_seed_amended', bell: false, discord: true },
+  // Phase 3 decisions 9 and 20, migration 0013: a manual calendar entry.
+  { event: 'calendar_changed', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

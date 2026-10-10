@@ -992,7 +992,9 @@ export interface AuditLogEntry {
  * human halt or resume, and every change to risk limits, data feeds or the
  * routing matrix itself, is an event too — and so is adding or removing a
  * manual news watch (`watchlist_changed`, Phase 3 decision 21, on the same
- * terms as the config events). Only actions that reach the server
+ * terms as the config events), and so is adding, editing or removing a
+ * manual calendar entry (`calendar_changed`, Phase 3 decisions 9 and 20 —
+ * notified, though never audit-logged). Only actions that reach the server
  * notify — client-only toggles gain an event when they gain an endpoint.
  *
  * A key, not the display string. The routing matrix, the severity map and
@@ -1016,6 +1018,7 @@ export type NotificationEvent =
   | 'notification_routes_changed'
   | 'watchlist_changed'
   | 'spdr_seed_amended'
+  | 'calendar_changed'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -1033,6 +1036,7 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   notification_routes_changed: 'Notification routing changed',
   watchlist_changed: 'News watchlist changed',
   spdr_seed_amended: 'SPDR seed amended',
+  calendar_changed: 'Calendar entry changed',
 }
 
 /** Routing per channel.

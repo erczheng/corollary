@@ -43,13 +43,35 @@ here, and that mismatch is real rather than an oversight -- see the field.
 """
 
 import logging
+import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
+from typing import Annotated, Final, Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    field_validator,
+)
 from pydantic.alias_generators import to_camel
+
+from corollary.data.calendar_event import TITLE_MAX
+
+#: A calendar date written as one: four-digit year, two-digit month and day.
+#: ASCII digits only: ``\d`` would also match other scripts' digits.
+_ISO_DATE: Final = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+#: An ISO 8601 instant written out: a ``YYYY-MM-DD`` date, ``T``, ``HH:MM``
+#: with optional seconds and fraction, and a ``Z`` or ``+HH:MM`` offset. What
+#: a manual entry's ``at`` must match *before* Pydantic parses it -- its lax
+#: mode would otherwise read ``"1792155600"`` as a Unix timestamp.
+_ISO_INSTANT: Final = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]{1,6})?)?"
+    r"(Z|[+-][0-9]{2}:[0-9]{2})"
+)
 
 __all__ = [
     "AccountMode",
@@ -69,6 +91,19 @@ __all__ = [
     "AuditCategory",
     "AuditLogEntry",
     "CalendarDate",
+    "CalendarDay",
+    "CalendarEventItem",
+    "CalendarEventKind",
+    "CalendarJobName",
+    "CalendarJobNotice",
+    "CalendarJobState",
+    "CalendarNotices",
+    "CalendarRange",
+    "CalendarReleaseFiguresNotice",
+    "CalendarSeedGapKind",
+    "CalendarSeedGapNotice",
+    "DecimalString",
+    "ManualCalendarEventRequest",
     "ChainSpec",
     "DataFeed",
     "DataSourceStatus",
@@ -307,6 +342,9 @@ NotificationEvent: TypeAlias = Literal[
     # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
     # 2026-09-30, migration 0011), emitted by the ``spdr_holdings`` job.
     "spdr_seed_amended",
+    # A manual calendar entry added, edited or removed (Phase 3 decisions 9
+    # and 20, migration 0013), emitted by the calendar's manual routes.
+    "calendar_changed",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]
@@ -1621,6 +1659,286 @@ class WatchList(ApiModel):
     #: add is refused with a 503 rather than accepted unvalidated.
     asset_list_available: bool
     asset_list_fetched_at: datetime | None
+
+
+# --------------------------------------------------------------------------
+# The News calendar (Phase 3 step 7)
+# --------------------------------------------------------------------------
+
+
+def _decimal_to_text(value: Decimal) -> str:
+    """``format(value, "f")``: the exact digits, never an exponent, never a float."""
+    return format(value, "f")
+
+
+DecimalString: TypeAlias = Annotated[
+    Decimal,
+    PlainSerializer(_decimal_to_text, return_type=str, when_used="json"),
+]
+"""An exact ``Decimal`` that serializes as a JSON **string**.
+
+Not :data:`JsonMoney`. That one is a display-boundary float for the money
+figures Phase 2 sanctioned; a calendar figure (an EPS estimate of
+``1.2350``, a CPI print, an IPO's offer range) is a reported number whose
+digits are the fact, and a client that wants arithmetic on it parses the
+string itself. ``format(value, "f")`` writes ``1E+2`` as ``100`` and keeps
+trailing zeros, so the text is exactly what the store holds. Python mode
+still yields the ``Decimal``.
+"""
+
+CalendarEventKind: TypeAlias = Literal[
+    "earnings", "economic", "central-bank", "dividend", "geopolitical", "ipo"
+]
+"""``types.ts``'s ``CalendarEventType`` spellings, plus ``ipo`` (Q15)."""
+
+CalendarSourceName: TypeAlias = Literal["finnhub", "alpaca", "fred", "seed", "manual"]
+EarningsSessionName: TypeAlias = Literal["bmo", "amc", "dmh"]
+IpoStatusName: TypeAlias = Literal["expected", "filed", "priced", "withdrawn"]
+
+CalendarJobName: TypeAlias = Literal[
+    "calendar_earnings",
+    "calendar_ipo",
+    "calendar_dividends",
+    "calendar_releases",
+    "calendar_central_banks",
+]
+
+CalendarJobState: TypeAlias = Literal[
+    "scheduler_not_running",
+    "not_scheduled",
+    "never_run",
+    "ok",
+    "fresh_at_start",
+    "skipped",
+    "failing",
+    "access_denied",
+]
+"""What a calendar job's last outcome was, from the scheduler's record.
+
+* ``scheduler_not_running`` -- this app runs no context scheduler (a test
+  app, or a scheduler that could not start); every row is as last written.
+* ``not_scheduled`` -- a scheduler runs but has no such job.
+* ``never_run`` -- scheduled, and no run has completed in this process yet.
+* ``ok`` -- the newest outcome is a success.
+* ``fresh_at_start`` -- the newest outcome is the start-up catch-up
+  declining to fetch because the stored rows were written less than a day
+  ago (by an earlier process). Calm, not a fault: ``freshAsOf`` is the
+  newest row's write instant and the daily slot fetches as usual.
+  ``lastSkipReason`` is ``None`` -- the scheduler's text is for its log.
+* ``skipped`` -- the newest outcome is a skip (no key, nothing to fetch);
+  ``lastSkipReason`` says why. Never a success: nothing was fetched.
+* ``failing`` -- the newest outcome is a failure; ``lastErrorType`` names it.
+* ``access_denied`` -- a failure whose type is ``CalendarAccessDenied``: a
+  Finnhub 401/403, the premium refusal Q15 sends back to the owner rather
+  than retrying around. Separate from ``failing`` so the panel can say
+  *"not on this plan"* rather than *"try again"*.
+"""
+
+CalendarSeedGapKind: TypeAlias = Literal["no_file", "unpublished", "partial", "unreadable"]
+
+
+class CalendarEventItem(ApiModel):
+    """One live ``calendar_event`` row.
+
+    ``types.ts``'s ``CalendarEvent`` plus what step 7 adds. ``date`` is the
+    **Eastern** session the event falls on and is what grouping keys on;
+    ``at`` is the instant (aware UTC) or ``None`` for an event that is a
+    property of a day -- an ex-date, a BoJ decision, an earnings report the
+    vendor gives only a session for.
+
+    **Consensus.** ``consensus`` is ``"unavailable"`` on every ``economic``
+    row and ``None`` on every other kind (Q3: no free source sells a release
+    consensus, and the panel renders the string as *"not available"*). On an
+    earnings row the consensus *is* ``estimate``, Finnhub's figure.
+    """
+
+    #: The integer row id, as a string -- ``types.ts`` keys rows by string.
+    id: str
+    date: CalendarDate
+    at: datetime | None
+    type: CalendarEventKind
+    title: str
+    ticker: str | None
+    source: CalendarSourceName
+    #: True only for ``source == "manual"`` rows (decision 9): the only rows
+    #: ``PUT``/``DELETE /api/calendar/manual/{id}`` accept.
+    editable: bool
+    #: Earnings only: ``bmo``/``amc``/``dmh`` (decision 7), rendered as a
+    #: session label and never as a time. ``None`` when the vendor gave none.
+    session: EarningsSessionName | None
+    estimate: DecimalString | None
+    prior: DecimalString | None
+    actual: DecimalString | None
+    consensus: Literal["unavailable"] | None
+    unit: str | None
+    #: IPO only (Q15). Each may be ``None`` -- Finnhub leaves most of them
+    #: null on a ``filed`` row.
+    exchange: str | None
+    shares: int | None
+    price_low: DecimalString | None
+    price_high: DecimalString | None
+    ipo_status: IpoStatusName | None
+
+
+class CalendarDay(ApiModel):
+    """The events of one Eastern date, in display order (all-day rows first)."""
+
+    date: CalendarDate
+    events: list[CalendarEventItem]
+
+
+class CalendarSeedGapNotice(ApiModel):
+    """Something the panel must say about one central bank in one year (decision 8).
+
+    ``unreadable`` is a committed seed file that failed validation: no bank
+    is named (``bank`` is ``None``) because the whole year is unreadable.
+    """
+
+    bank: str | None
+    year: int
+    kind: CalendarSeedGapKind
+    reason: str
+    #: ``partial`` only: the first date the seed covers.
+    covers_from: CalendarDate | None
+
+
+class CalendarJobNotice(ApiModel):
+    """One calendar job's freshness, for *"stale since HH:MM"* and *"absent because"*.
+
+    All instants aware UTC; ``None`` is "never, in this process". The
+    scheduler's records are in memory, so a restart resets them -- the rows
+    themselves persist, and ``rowsInRange`` counts what is stored.
+    """
+
+    job: CalendarJobName
+    #: The ``type`` values this job writes.
+    kinds: list[CalendarEventKind]
+    state: CalendarJobState
+    #: ``state == "access_denied"``, stated on its own so a client need not
+    #: know which error type means a premium refusal.
+    access_denied: bool
+    last_success: datetime | None
+    last_failure: datetime | None
+    #: The exception's class name only -- never its text.
+    last_error_type: str | None
+    last_skipped: datetime | None
+    #: Why the newest skip fetched nothing; ``None`` unless ``state`` is
+    #: ``skipped`` or the skip predates a later outcome.
+    last_skip_reason: str | None
+    #: ``fresh_at_start`` only: the newest stored row's write instant.
+    fresh_as_of: datetime | None
+    next_run: datetime | None
+    #: The last Eastern date the newest known fetch asked its vendor about:
+    #: the fetch's own date plus the job's horizon. ``None`` when nothing is
+    #: known to have been fetched. Dates after it have not been asked about,
+    #: so an empty range there is "not covered", never "none".
+    covered_through: CalendarDate | None
+    #: Rows of ``kinds`` in the requested range, after soft deletes.
+    rows_in_range: int
+    #: One sentence for the panel, times in ``America/New_York``.
+    message: str
+
+
+class CalendarReleaseFiguresNotice(ApiModel):
+    """Why an economic row's ``prior`` and ``actual`` are null (unit 7.2b-R).
+
+    Q3 says they come from FRED after release, but not *which* series and
+    transform is a release's headline figure; that is an open owner
+    question, and until it is answered both are ``None`` on every economic
+    row. Stated here so the null is a reason, not a silence.
+    """
+
+    state: Literal["pending_owner_decision"]
+    reason: str
+
+
+class CalendarNotices(ApiModel):
+    """Everything the panel must say aloud beside the rows."""
+
+    seed_gaps: list[CalendarSeedGapNotice]
+    jobs: list[CalendarJobNotice]
+    release_figures: CalendarReleaseFiguresNotice
+
+
+class CalendarRange(ApiModel):
+    """``GET /api/calendar?from&to``: the live rows of an Eastern date range."""
+
+    #: The requested range, inclusive on both ends, as Eastern dates.
+    start: CalendarDate
+    end: CalendarDate
+    #: The widest range the route serves, in dates counted inclusively.
+    max_span_days: int
+    #: Only dates with at least one event, ascending.
+    days: list[CalendarDay]
+    total: int
+    notices: CalendarNotices
+
+
+class ManualCalendarEventRequest(ApiModel):
+    """The body of ``POST``/``PUT /api/calendar/manual``: a geopolitical note.
+
+    ``PUT`` replaces all three fields -- an omitted ``at`` makes the row
+    date-only. Every field is validated again by the store
+    (:func:`corollary.data.calendar_event.check_title` and ``check_when``):
+    ``at`` must carry an offset, and its Eastern date must be ``date``.
+    ``extra="forbid"`` (the base model) refuses a ``kind``, ``source`` or
+    ``ticker`` the client tried to set -- the server assigns those.
+    """
+
+    title: str
+    date: CalendarDate
+    at: AwareDatetime | None = None
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def _date_text(cls, value: object) -> object:
+        """``YYYY-MM-DD`` text only: never a timestamp number or a datetime string.
+
+        Pydantic's lax ``date`` would take ``1760400000`` or
+        ``2026-10-14T00:00:00`` and pick a day for the client; a calendar
+        date is written as one, or refused.
+        """
+        if not isinstance(value, str) or not _ISO_DATE.fullmatch(value):
+            raise ValueError("date must be a YYYY-MM-DD calendar date")
+        return value
+
+    @field_validator("at", mode="before")
+    @classmethod
+    def _at_text(cls, value: object) -> object:
+        """An ISO 8601 instant with a date, a time and an offset, or null.
+
+        Never a number, and never a numeric string: Pydantic's lax datetime
+        reads ``"1792155600"`` as a Unix timestamp and would pick the
+        instant for the client. A date with no time, or a time with no
+        offset, is refused here too rather than guessed.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, str) or not _ISO_INSTANT.fullmatch(value):
+            raise ValueError(
+                "at must be an ISO 8601 timestamp with a date, a time and an "
+                "offset (YYYY-MM-DDTHH:MM[:SS]Z or +HH:MM), or null"
+            )
+        return value
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: str) -> str:
+        """Trimmed, non-blank, at most ``TITLE_MAX``, and one line of printable text.
+
+        Rule 4's spirit: the title is client text that lands in a stored row
+        and in a Discord message, so a control character (a newline that
+        forges a second line, an escape) is refused rather than kept.
+        Messages never quote the value back.
+        """
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("a calendar entry needs a non-blank title")
+        if len(trimmed) > TITLE_MAX:
+            raise ValueError(f"the title is longer than {TITLE_MAX} characters")
+        if any(not character.isprintable() for character in trimmed):
+            raise ValueError("the title must be one line of printable text")
+        return trimmed
 
 
 # --------------------------------------------------------------------------
