@@ -1,0 +1,33 @@
+year,2026
+bank,coverage,covers_from,retrieved,date_source_url,time_source_url,note
+FOMC,full,,2026-10-10,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,https://www.federalreserve.gov/newsevents/pressreleases/monetary20260916a.htm,"Decision date is the meeting's last day. Time: the Board's statement press releases read 'For release at 2:00 p.m.' Eastern."
+ECB,from,2026-10-10,2026-10-10,https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html,https://www.ecb.europa.eu/press/govcdec/mopo/html/index.en.html,"The ECB's calendar page, read 2026-10-10, lists meetings from 28/10/2026 onward only; 2026 decisions before that date are not seeded and were not inferred. Decision date is Day 2 ('followed by press conference'). Time: decisions are 'published in a press release at 14:15 CET', read as Frankfurt local time (Europe/Berlin)."
+BOE,full,,2026-10-10,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,,"Dates are the page's '2026 confirmed dates'. The Bank's dates page states no announcement time, so rows are date-only."
+BOJ,full,,2026-10-10,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,,"Decision date is the meeting's second day. The BoJ publishes no fixed announcement time, so rows are date-only."
+bank,meeting_start,date,local_time,timezone,source_url,note
+FOMC,2026-01-27,2026-01-28,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-03-17,2026-03-18,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-04-28,2026-04-29,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-06-16,2026-06-17,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-07-28,2026-07-29,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-09-15,2026-09-16,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-10-27,2026-10-28,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+FOMC,2026-12-08,2026-12-09,14:00,America/New_York,https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm,
+ECB,2026-10-28,2026-10-29,14:15,Europe/Berlin,https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html,
+ECB,2026-12-16,2026-12-17,14:15,Europe/Berlin,https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html,
+BOE,2026-02-05,2026-02-05,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-03-19,2026-03-19,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-04-30,2026-04-30,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-06-18,2026-06-18,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-07-30,2026-07-30,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-09-17,2026-09-17,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-11-05,2026-11-05,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOE,2026-12-17,2026-12-17,,Europe/London,https://www.bankofengland.co.uk/monetary-policy/upcoming-mpc-dates,
+BOJ,2026-01-22,2026-01-23,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-03-18,2026-03-19,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-04-27,2026-04-28,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-06-15,2026-06-16,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-07-30,2026-07-31,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-09-17,2026-09-18,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-10-29,2026-10-30,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
+BOJ,2026-12-17,2026-12-18,,Asia/Tokyo,https://www.boj.or.jp/en/mopo/mpmsche_minu/index.htm,
