@@ -2580,7 +2580,9 @@ company news covers the whole watch universe, and a discovery tier is added
 (decision 21). Step 5's re-measurement can still reopen it.
 *Since 2026-09-30 two things wait on the owner again:* step 4's sector leaders
 and sector column wait on Q17's guard decision, and Q20 pauses step 5 and
-everything after it until the owner says to go on.
+everything after it until the owner says to go on. *Since 2026-10-10 (Q22):*
+the sector leaders landed with step 4 (Q21, Q17), and steps 5, 6 and 7 are
+released. Steps 8 and 9 remain paused under Q20.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -2796,7 +2798,7 @@ tradeability and the watch list.**
 
 **5. Sentiment labelling: rules and Massive; `SentimentTier` resolved; the
 discovery panel.**
-- *Status:* not started. *Depends on:* 4.
+- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 4.
 - *Files:* `corollary/data/news/{rules,vendor,discovery}.py`,
   `corollary/data/providers/massive.py` (insights), migration for
   `sentiment_label`, `GET /api/news/movers`, the *Movers in the news* panel,
@@ -2818,7 +2820,9 @@ discovery panel.**
     goes back to the owner.
 
 **6. The self-audit and the demotion state.**
-- *Status:* not started. *Depends on:* 1 (for the two alerts), 5.
+- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 1 (for
+  the two alerts), 5. Its transitions do not merge while a below-1.5 result
+  from step 5's re-measurement is still with the owner (Q22).
 - *Carries:* Q5 (excess-return scoring, neutral excluded), Q6 (per source,
   52/66 hysteresis, automatic re-promotion, ≥30 / ≥100 floors), Q7 (no
   backfill) — all decided. Q9 widens what is graded (decision 12: discovery
@@ -2843,7 +2847,8 @@ discovery panel.**
 
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
-- *Status:* not started. *Depends on:* 0, 2, 3.
+- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 0, 2,
+  3, all done, so it runs in parallel with step 5 under Q22's migration rule.
 - *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
   project's key first**: its swagger flags are null, and a premium 403 goes
   back to the owner before any of the IPO work is built.
