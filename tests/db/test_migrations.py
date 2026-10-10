@@ -67,10 +67,16 @@ EXPECTED_TABLES = {
     "spdr_holding",
     # 0012 -- Q17: the OpenFIGI ISIN -> ticker cache
     "isin_ticker",
+    # 0013 -- step 7: the News calendar (provisional number, Q22: renumbered
+    # by whichever of steps 5 and 7 merges second)
+    "calendar_event",
 }
 
 #: Everything 0012 created.
 _0012_TABLES = {"isin_ticker"}
+
+#: Everything 0013 created.
+_0013_TABLES = {"calendar_event"}
 
 #: Everything 0010 created.
 _0010_TABLES = {"spdr_holdings_snapshot", "spdr_holding"}
@@ -126,7 +132,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES - _0010_TABLES - _0012_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -153,7 +159,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0012"]
+    assert script.get_heads() == ["0013"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -166,7 +172,10 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES <= tables
+    assert (
+        EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES
+        <= tables
+    )
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -194,7 +203,7 @@ def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert EXPECTED_TABLES - _0012_TABLES <= tables  # 0011 dropped nothing
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables  # 0011 dropped nothing
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
@@ -227,7 +236,7 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0012_TABLES == set()
-    assert EXPECTED_TABLES - _0012_TABLES <= tables
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
 
     command.upgrade(cfg, "head")
@@ -235,6 +244,35 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert EXPECTED_TABLES <= tables
+
+
+def test_0013_downgrades_to_0012_and_back(db_path: Path) -> None:
+    """``calendar_event`` comes and goes alone; 0012's cache stays.
+
+    Q22: 0013 is provisional. Whichever of steps 5 and 7 merges second
+    renumbers its revision, re-points ``down_revision`` and updates this test
+    and ``test_there_is_exactly_one_head``.
+    """
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0012")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert tables & _0013_TABLES == set()
+    assert EXPECTED_TABLES - _0013_TABLES <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    indexes = {ix["name"] for ix in inspect(eng).get_indexes("calendar_event")}
+    columns = {c["name"]: c for c in inspect(eng).get_columns("calendar_event")}
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
+    assert "ix_calendar_event_date" in indexes
+    # Decision 7's earnings session survives the round trip, nullable.
+    assert columns["session"]["nullable"] is True
 
 
 # Autogenerate does not compare CHECK constraints; run the same rows against
@@ -314,7 +352,7 @@ def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0010_TABLES == set()
-    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES <= tables
+    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -399,6 +437,7 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
         - _0008_TABLES
         - _0010_TABLES
         - _0012_TABLES
+        - _0013_TABLES
         <= tables
     )
 

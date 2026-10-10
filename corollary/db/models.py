@@ -58,13 +58,23 @@ from sqlalchemy.orm import (
     validates,
 )
 
+from corollary.data.calendar_event import (
+    KIND_SOURCE,
+    CalendarKind,
+    CalendarSource,
+    EarningsSession,
+)
 from corollary.data.news.article import FEED_VENDOR, NewsFeed
 from corollary.db.types import ActivityId, Money, UtcDateTime
 
 __all__ = [
     "ACCOUNT_MODES",
     "AuditLog",
+    "CALENDAR_EVENT_KINDS",
+    "CALENDAR_EVENT_SOURCES",
+    "CalendarEvent",
     "Base",
+    "EARNINGS_SESSIONS",
     "CLOSE_KINDS",
     "DataFeed",
     "EngineState",
@@ -1662,3 +1672,137 @@ class IsinTicker(Base):
     composite_figi: Mapped[str | None] = mapped_column(String(12), nullable=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     resolved_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+#: ``calendar_event.kind``'s CHECK set, derived from :class:`CalendarKind` so
+#: the record a fetcher builds and the row it lands in cannot disagree about
+#: which kinds exist. (Migration 0013 restates the literals, as every
+#: migration does; ``tests/db/test_calendar_event.py`` pins them.)
+CALENDAR_EVENT_KINDS: tuple[str, ...] = tuple(kind.value for kind in CalendarKind)
+
+#: ``calendar_event.source``'s CHECK set, derived from :class:`CalendarSource`.
+CALENDAR_EVENT_SOURCES: tuple[str, ...] = tuple(source.value for source in CalendarSource)
+
+#: ``calendar_event.session``'s CHECK set, derived from :class:`EarningsSession`.
+EARNINGS_SESSIONS: tuple[str, ...] = tuple(s.value for s in EarningsSession)
+
+
+def _calendar_kind_source_pairing() -> str:
+    """A CHECK that each kind is stored under the one producer the spec gives it.
+
+    :class:`corollary.data.calendar_event.CalendarEventInput` refuses the
+    contradiction at construction; this refuses it at the write boundary too,
+    because ``source`` is half of the upsert key and a mismatched pair would
+    let one event land under two keys.
+    """
+    return " OR ".join(
+        f"(kind = '{kind.value}' AND source = '{source.value}')"
+        for kind, source in KIND_SOURCE.items()
+    )
+
+
+class CalendarEvent(Base):
+    """One row of the News calendar (Phase 3 step 7, migration 0013).
+
+    Decisions 7, 8 and 9, Q3 and Q15. Producers and their keys:
+
+    * ``finnhub`` -- ``earnings`` and ``ipo``; ``alpaca`` -- ``dividend``;
+      ``fred`` -- ``economic``; ``seed`` -- ``central-bank``. Each upserts on
+      **UNIQUE (source, kind, vendor_id)**, so a re-fetch updates the row it
+      wrote last time instead of adding a second. ``kind`` is in the key
+      because a fetcher composes keys per endpoint (Finnhub's earnings and IPO
+      calendars are separate), and two endpoints' keys must not collide.
+      Not ``(kind, ticker, date)``: a rescheduled earnings date would then be
+      a *new* row, leaving a phantom event on the old date.
+    * ``manual`` -- ``geopolitical``, decision 9. No ``vendor_id`` (its
+      identity is ``id``; SQLite's UNIQUE treats NULLs as distinct, so manual
+      rows never collide). The only rows a person may edit or remove, and
+      removal is a soft delete through ``deleted_at``. Not written to the
+      configuration audit log.
+
+    ``date`` is the **Eastern** session the event falls on and ``at`` the
+    instant, nullable: a date-only event (an ex-date, a BoJ decision) is never
+    stored as a midnight instant, which would group under the previous day in
+    New York. Grouping and range reads run off ``date``.
+
+    ``estimate``/``prior``/``actual`` are ``Money`` (TEXT, exact ``Decimal``;
+    SQL comparison, ordering and aggregation refused). ``estimate`` is NULL on
+    an economic release (Q3: consensus unavailable) -- CHECK-enforced.
+
+    ``session`` is an earnings report's ``bmo``/``amc``/``dmh`` (decision 7:
+    "Before open" / "After close"), NULL when the vendor gave none and NULL on
+    every other kind -- both CHECK-enforced. It is not a time: an earnings row
+    with a session keeps ``at`` NULL rather than a placeholder instant.
+
+    ``deleted_at`` is not restricted to manual rows: the seed import also
+    withdraws a seeded decision a corrected seed no longer lists, and revives
+    it if a later file restores it. The API's refusal to edit a non-manual row
+    lives in :mod:`corollary.data.calendar`.
+    """
+
+    __tablename__ = "calendar_event"
+    __table_args__ = (
+        CheckConstraint(_in_list("kind", CALENDAR_EVENT_KINDS), name="ck_calendar_event_kind"),
+        CheckConstraint(
+            _in_list("source", CALENDAR_EVENT_SOURCES), name="ck_calendar_event_source"
+        ),
+        CheckConstraint(_calendar_kind_source_pairing(), name="ck_calendar_event_kind_source"),
+        CheckConstraint(
+            "(source = 'manual' AND vendor_id IS NULL) OR "
+            "(source <> 'manual' AND vendor_id IS NOT NULL AND vendor_id <> '')",
+            name="ck_calendar_event_vendor_id",
+        ),
+        CheckConstraint("trim(title) <> ''", name="ck_calendar_event_title"),
+        CheckConstraint(
+            "ticker IS NULL OR (ticker <> '' AND ticker = upper(ticker))",
+            name="ck_calendar_event_ticker",
+        ),
+        CheckConstraint(
+            "kind NOT IN ('earnings', 'dividend') OR ticker IS NOT NULL",
+            name="ck_calendar_event_ticker_required",
+        ),
+        CheckConstraint(
+            "kind <> 'economic' OR estimate IS NULL",
+            name="ck_calendar_event_economic_estimate",
+        ),
+        CheckConstraint(
+            _in_list_or_null("session", EARNINGS_SESSIONS), name="ck_calendar_event_session"
+        ),
+        CheckConstraint(
+            "session IS NULL OR kind = 'earnings'",
+            name="ck_calendar_event_session_earnings_only",
+        ),
+        CheckConstraint(
+            _money_shape("estimate", nullable=True), name="ck_calendar_event_estimate"
+        ),
+        CheckConstraint(_money_shape("prior", nullable=True), name="ck_calendar_event_prior"),
+        CheckConstraint(
+            _money_shape("actual", nullable=True), name="ck_calendar_event_actual"
+        ),
+        UniqueConstraint("source", "kind", "vendor_id", name="uq_calendar_event_vendor_key"),
+        Index("ix_calendar_event_date", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    ticker: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    #: The Eastern session the event falls on. A date, not an instant.
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    #: The scheduled instant, UTC; NULL for a date-only event.
+    at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    estimate: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    prior: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    actual: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: What ``estimate``/``prior``/``actual`` are in (``USD``, ``Percent``).
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: Earnings only: ``bmo``/``amc``/``dmh``, or NULL when the vendor gave none.
+    #: Not a time -- ``at`` stays NULL beside it (decision 7).
+    session: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    #: The producer's stable key for the event; NULL exactly on manual rows.
+    vendor_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    #: Set when the row was removed; a removed row is never read.
+    deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
