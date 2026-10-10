@@ -6,8 +6,11 @@ release dates) and, per decision 19, uses it first for the risk-free rate:
 wherever an observation has been obtained.
 
 **This is the entire FRED surface area**, the way ``data/providers/alpaca.py``
-is Alpaca's and ``finnhub.py`` Finnhub's. One method so far --
-:meth:`FredProvider.observations` -- because step 3 needs one.
+is Alpaca's and ``finnhub.py`` Finnhub's. Two methods:
+:meth:`FredProvider.observations` (step 3's series) and
+:meth:`FredProvider.release_dates` (Q3's economic calendar, unit 7.2b-R),
+which reads ``/fred/releases/dates`` forward with
+``include_release_dates_with_no_data=true`` -- dates only, never times.
 
 Four things this file is deliberate about
 -----------------------------------------
@@ -67,7 +70,13 @@ __all__ = [
     "FredError",
     "FredObservation",
     "FredProvider",
+    "FredReleaseDate",
+    "FredReleaseDatesPage",
+    "RELEASE_DATES_MAX_PAGES",
+    "RELEASE_DATES_PAGE_LIMIT",
     "parse_observations",
+    "parse_release_dates",
+    "release_dates_params",
 ]
 
 logger = logging.getLogger(__name__)
@@ -92,6 +101,22 @@ _API_KEY_PARAM: Final = re.compile(r"(?i)(api_key=)[^&\s\"'<>]+")
 #: How many observations a default request asks for. Ten covers a fortnight of
 #: sessions, so a missed day or two of refreshes is back-filled by the next.
 DEFAULT_OBSERVATION_LIMIT: Final = 10
+
+#: ``/fred/releases/dates``' documented ``limit`` ceiling: "integer between 1
+#: and 1000". (The per-release ``/fred/release/dates`` allows 10000; this is
+#: the all-releases endpoint, and its ceiling is the smaller one.)
+#: https://fred.stlouisfed.org/docs/api/fred/releases_dates.html
+RELEASE_DATES_PAGE_LIMIT: Final = 1000
+
+#: Pages :meth:`FredProvider.release_dates` reads before refusing. A 30-day
+#: forward window was 842 rows (one page) when probed on 2026-09-24; ten pages
+#: is ten thousand rows, so reaching it means the ``count`` is wrong, not that
+#: the window is long, and a loop that trusted it would spend the FRED budget.
+RELEASE_DATES_MAX_PAGES: Final = 10
+
+#: Exactly ``YYYY-MM-DD``. ``date.fromisoformat`` alone also accepts
+#: ``20261014`` and ``2026-W42-3`` since Python 3.11, which FRED never sends.
+_ISO_DATE: Final = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 class FredCredentialsError(RuntimeError):
@@ -205,6 +230,99 @@ def parse_observations(series_id: str, payload: Any) -> list[FredObservation]:
         )
     observations.sort(key=lambda o: o.date, reverse=True)
     return observations
+
+
+@dataclass(frozen=True, slots=True)
+class FredReleaseDate:
+    """One scheduled (or past) date of one FRED release.
+
+    A **date only**: FRED's release calendar carries no time of day (probed
+    2026-09-24, spec *Constraints -> FRED*). The time comes from the committed
+    table in ``data/seeds/econ_release_times.csv``, never from here.
+    ``release_last_updated`` is deliberately not kept: it is the release's last
+    revision stamp, not a scheduled time, and carrying it would invite reading
+    it as one.
+    """
+
+    release_id: int
+    release_name: str
+    date: date
+
+
+@dataclass(frozen=True, slots=True)
+class FredReleaseDatesPage:
+    """One page of ``/fred/releases/dates``: its rows and the total ``count``."""
+
+    count: int
+    rows: tuple[FredReleaseDate, ...]
+
+
+def release_dates_params(
+    start: date, end: date, *, offset: int, limit: int = RELEASE_DATES_PAGE_LIMIT
+) -> dict[str, str | int]:
+    """The query for one page of release dates in ``[start, end]``, key excluded.
+
+    Public so ``tests/fixtures/record_fred.py`` records with exactly the
+    request this module sends. Per
+    https://fred.stlouisfed.org/docs/api/fred/releases_dates.html:
+
+    * ``include_release_dates_with_no_data=true`` -- the default ``false``
+      "excludes release dates that do not have data", which is every date that
+      has not happened yet. A forward calendar is nothing *but* those.
+    * ``realtime_start`` / ``realtime_end`` bound the release dates returned.
+      Both are sent: the defaults are the first of the current year and
+      ``9999-12-31``.
+    * ``order_by=release_date``, ``sort_order=asc`` -- stated rather than
+      defaulted (the documented ``sort_order`` default is ``desc``), so pages
+      are cut from a stable order.
+    """
+    return {
+        "file_type": "json",
+        "include_release_dates_with_no_data": "true",
+        "realtime_start": start.isoformat(),
+        "realtime_end": end.isoformat(),
+        "order_by": "release_date",
+        "sort_order": "asc",
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _release_date_row(row: object) -> FredReleaseDate:
+    if not isinstance(row, Mapping):
+        raise FredError("releases/dates: a release date is not an object")
+    release_id = row.get("release_id")
+    # bool is an int subclass; True is not release 1.
+    if isinstance(release_id, bool) or not isinstance(release_id, int):
+        raise FredError(f"releases/dates: release_id {release_id!r} is not an integer")
+    name = row.get("release_name")
+    if not isinstance(name, str) or not name.strip():
+        raise FredError(f"releases/dates: release {release_id} has no release_name")
+    raw_day = row.get("date")
+    if not isinstance(raw_day, str) or not _ISO_DATE.fullmatch(raw_day):
+        raise FredError(
+            f"releases/dates: release {release_id} date {str(raw_day)[:40]!r} is not YYYY-MM-DD"
+        )
+    try:
+        day = date.fromisoformat(raw_day)
+    except ValueError as exc:
+        raise FredError(
+            f"releases/dates: release {release_id} date {raw_day!r} is not a calendar date"
+        ) from exc
+    return FredReleaseDate(release_id=release_id, release_name=name.strip(), date=day)
+
+
+def parse_release_dates(payload: Any) -> FredReleaseDatesPage:
+    """One ``/fred/releases/dates`` body. Any malformed row refuses the whole page."""
+    if not isinstance(payload, Mapping):
+        raise FredError("releases/dates: the response body is not an object")
+    rows = payload.get("release_dates")
+    if not isinstance(rows, list):
+        raise FredError("releases/dates: the response carries no release_dates list")
+    count = payload.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise FredError(f"releases/dates: count {count!r} is not a non-negative integer")
+    return FredReleaseDatesPage(count=count, rows=tuple(_release_date_row(r) for r in rows))
 
 
 def _redact_query_key(text: str, secrets: Sequence[str]) -> str:
@@ -366,3 +484,46 @@ class FredProvider:
             },
         )
         return parse_observations(series_id, payload)
+
+    async def release_dates(
+        self, start: date, end: date, *, page_limit: int = RELEASE_DATES_PAGE_LIMIT
+    ) -> list[FredReleaseDate]:
+        """Every release date of every FRED release in ``[start, end]``, scheduled ones included.
+
+        One request per page of ``page_limit`` rows (each metered against the
+        FRED bucket), read by ``offset`` until the body's ``count`` is reached.
+        Sorted ``(date, release_id)`` here rather than trusted to the wire.
+
+        Refused (:class:`FredError`), never returned short: a page that comes
+        back empty before ``count`` is reached, and a ``count`` that would take
+        more than :data:`RELEASE_DATES_MAX_PAGES` pages. A partial calendar
+        presented as a whole one would hide a release.
+        """
+        if end < start:
+            raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
+        if not 1 <= page_limit <= RELEASE_DATES_PAGE_LIMIT:
+            raise ValueError(
+                f"page_limit must be 1..{RELEASE_DATES_PAGE_LIMIT}, got {page_limit}"
+            )
+        rows: list[FredReleaseDate] = []
+        for page_number in range(RELEASE_DATES_MAX_PAGES):
+            payload = await self._get(
+                "/releases/dates",
+                release_dates_params(start, end, offset=len(rows), limit=page_limit),
+            )
+            page = parse_release_dates(payload)
+            if len(rows) + len(page.rows) >= page.count:
+                rows.extend(page.rows)
+                rows.sort(key=lambda r: (r.date, r.release_id))
+                return rows
+            if not page.rows:
+                raise FredError(
+                    f"releases/dates: page {page_number + 1} was empty at offset "
+                    f"{len(rows)} of a stated count of {page.count}"
+                )
+            rows.extend(page.rows)
+        raise FredError(
+            f"releases/dates: {start.isoformat()}..{end.isoformat()} needs more than "
+            f"{RELEASE_DATES_MAX_PAGES} pages of {page_limit}; refused rather than "
+            "spending the FRED budget on a count that is probably wrong"
+        )
