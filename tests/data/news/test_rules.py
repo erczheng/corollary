@@ -161,7 +161,7 @@ ASSET_NAMES: dict[str, str] = {
     "QQQ": "Invesco QQQ Trust, Series 1",
 }
 #: The fund and market tickers among them: what the caller derives from the
-#: universe's ``fund`` flag and ``MARKETS`` membership. EPS and IPO are funds
+#: curated universe's ``fund`` flag. EPS and IPO are funds
 #: too, which is the point -- nothing in the labeller knows SPY by name.
 FUNDS = frozenset({"SPY", "QQQ", "EPS", "IPO"})
 BOOK = NameBook(watch=WATCH, watch_names=WATCH_COMPANY_NAMES, asset_names=ASSET_NAMES, funds=FUNDS)
@@ -1337,6 +1337,87 @@ def test_audit3_m1_which_tickers_are_funds_is_the_book_s_input_not_a_list_of_nam
 def test_audit3_m1_a_named_fund_is_still_a_mention() -> None:
     """Only the single-tag rule stays off funds: a headline that names one is read."""
     assert labelled("$SPY Prices $1.5B Common Stock Offering") == {"SPY": "secondary_offering bearish"}
+
+
+# 5.2 audit M1: the asset list carries every listed ETF, but ``funds`` is only
+# the curated universe's five -- so a macro release tagged with any other ETF
+# alone used to land as an earnings label on it. Names as the broker lists them.
+_UNCURATED_ETFS = {
+    "DIA": "SPDR Dow Jones Industrial Average ETF Trust",
+    "VOO": "Vanguard S&P 500 ETF",
+    "TLT": "iShares 20+ Year Treasury Bond ETF",
+    "XLF": "Financial Select Sector SPDR Fund",
+    "USO": "United States Oil Fund, LP",
+}
+_ETF_BOOK = NameBook(
+    watch=WATCH,
+    watch_names=WATCH_COMPANY_NAMES,
+    asset_names={**ASSET_NAMES, **_UNCURATED_ETFS},
+    funds=FUNDS,
+)
+#: What an unattributed earnings match says about why, in part.
+_EARNINGS_REASON = "an earnings phrase never takes the article's only tag"
+_MACRO_RELEASES = (
+    "Jobless Claims Below Expectations",
+    "US Consumer Prices Rise 0.2%, Below Expectations",
+    "US Initial Jobless Claims Fall To 210,000, Below Estimates",
+    "US Retail Sales Top Estimates In August",
+    "US Core PCE Price Index Tops Estimates",
+)
+
+
+@pytest.mark.parametrize("tag", sorted(_UNCURATED_ETFS))
+@pytest.mark.parametrize("headline", _MACRO_RELEASES)
+@pytest.mark.parametrize("feed", [NewsFeed.ALPACA_NEWS, NewsFeed.MASSIVE_NEWS])
+def test_5_2_m1_a_subjectless_earnings_phrase_never_lands_on_a_lone_tag(
+    headline: str, tag: str, feed: NewsFeed
+) -> None:
+    """Macro releases speak beat/miss/estimates and carry a lone index or ETF
+    tag, which the fund list cannot be relied on to cover: the earnings family
+    never takes the single-tag rule, so the phrase attributes to nobody."""
+    assert _ETF_BOOK.is_equity(tag) and not _ETF_BOOK.is_fund(tag)
+    result = result_of(headline, feed, (tag,), _ETF_BOOK)
+    assert result.labels == ()
+    assert result.matches, "the phrase must still fire, or this test proves nothing"
+    assert all(m.tickers == () for m in result.matches)
+    assert result.unattributed == result.matches
+    assert all(_EARNINGS_REASON in m.attribution for m in result.unattributed)
+
+
+@pytest.mark.parametrize(
+    ("headline", "tag", "expected"),
+    [
+        ("Intel Q3 EPS Beats Estimates", "INTC", {"INTC": "earnings_beat bullish"}),
+        ("Netflix Misses Estimates", "NFLX", {"NFLX": "earnings_miss bearish"}),
+        ("Intel Q3 EPS Beats Estimates", "XLF", {"INTC": "earnings_beat bullish"}),
+    ],
+)
+def test_5_2_m1_an_earnings_phrase_with_a_named_subject_still_labels(
+    headline: str, tag: str, expected: dict[str, str]
+) -> None:
+    assert labelled(headline, NewsFeed.ALPACA_NEWS, (tag,), _ETF_BOOK) == expected
+
+
+@pytest.mark.parametrize(
+    ("headline", "expected"),
+    [
+        ("Company Raises Full-Year Guidance", "guidance_raised bullish"),
+        ("Company Prices $1.5B Common Stock Offering", "secondary_offering bearish"),
+        ("Company Agrees to Be Acquired", "mna_target bullish"),
+    ],
+)
+def test_5_2_m1_the_single_tag_rule_still_applies_to_every_other_family(headline: str, expected: str) -> None:
+    """Only earnings is excluded; the spec's single-tag rule stands for the rest."""
+    assert labelled(headline, NewsFeed.ALPACA_NEWS, ("FSLY",), _ETF_BOOK) == {"FSLY": expected}
+
+
+def test_5_2_m1_a_subjectless_earnings_phrase_on_a_lone_company_tag_is_unattributed() -> None:
+    """The exclusion is by family, not by what the tag is: no lone tag, fund or
+    company, takes an earnings label for a phrase whose subject is unnamed."""
+    result = result_of("Company Beats Estimates", NewsFeed.ALPACA_NEWS, ("FSLY",), _ETF_BOOK)
+    assert result.labels == ()
+    assert [m.rule_id for m in result.unattributed] == ["earnings_beat"]
+    assert _EARNINGS_REASON in result.unattributed[0].attribution
 
 
 def _synthetic_book(size: int) -> NameBook:

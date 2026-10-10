@@ -110,11 +110,16 @@ name set aside (a rater, an ordinary word, a name covered by a longer one),
 not by the first word of its own name. It never applies at all when a
 capitalised word follows *by*, *from*, *at* or *for* -- a name in some other
 role, which may be the tag's. A lone tag that the headline names as the
-acquirer or the broker is the wrong company. And it never applies to a fund
-or market tag -- the ``funds`` a :class:`NameBook` is built with -- since a
-macro release (*US Consumer Prices Rise 0.2%, Below Expectations*) is tagged
-with SPY alone, and its phrase is about the economy, often in the opposite
-direction to the fund.
+acquirer or the broker is the wrong company. It never applies to a fund or
+market tag -- the ``funds`` a :class:`NameBook` is built with -- since a macro
+release (*US Consumer Prices Rise 0.2%, Below Expectations*) is tagged with
+SPY alone, and its phrase is about the economy, often in the opposite
+direction to the fund. And it never applies to an earnings phrase
+(:data:`NO_SINGLE_TAG_FAMILIES`, 5.2 audit M1), whatever the tag: macro
+releases speak beat/miss/estimates, and the asset list carries every listed
+ETF while ``funds`` is only the curated universe's, so a release tagged DIA,
+VOO, TLT, XLF or USO alone would otherwise land as an earnings label on that
+fund. An earnings phrase with no named subject is unattributed, and says so.
 
 Input
 -----
@@ -171,9 +176,11 @@ adversarial headline.
   vendor tags a story about a supplier, a customer or a rival with the
   company it matters to, and when the headline names nobody the book knows,
   the lone tag takes the label: *Hon Hai CEO Steps Down* tagged AAPL labels
-  Apple bearish, *Foxconn Cuts Outlook* likewise, *SK Hynix Beats Estimates*
-  tagged NVDA labels Nvidia. That is the spec's rule, applied as written; only
-  a fund or market tag is exempt (AUDIT3-M1).
+  Apple bearish, *Foxconn Cuts Outlook* likewise. That is the spec's rule,
+  applied as written; a fund or market tag is exempt (AUDIT3-M1), and an
+  earnings phrase never takes it (5.2 audit M1) -- so *SK Hynix Beats
+  Estimates* tagged NVDA is silent, as is *Company Beats Estimates* tagged
+  with the company it is about.
 * **Guidance followed by anything but an allowed tail.** After the guidance
   noun only the clause's end, *after/amid/as/again*, or *for <period>* may
   follow (``_GUIDANCE_TAIL``, a whitelist). That is what keeps a bank's
@@ -234,6 +241,7 @@ from corollary.data.news.labels import (
 __all__ = [
     "LEGAL_AND_CLASS_SUFFIXES",
     "MAX_HEADLINE_CHARS",
+    "NO_SINGLE_TAG_FAMILIES",
     "RULE_PATTERNS",
     "SINGLE_TAG_FEEDS",
     "WATCH_COMPANY_NAMES",
@@ -1016,6 +1024,15 @@ SINGLE_TAG_FEEDS: Final[frozenset[NewsFeed]] = frozenset(
     {NewsFeed.ALPACA_NEWS, NewsFeed.MASSIVE_NEWS}
 )
 
+#: Families a phrase with no named subject never attributes by the single-tag
+#: rule (5.2 audit M1). Macro data releases are written in earnings language --
+#: *Jobless Claims Below Expectations*, *Retail Sales Top Estimates* -- and
+#: carry a lone index or ETF tag. ``funds`` covers only the curated universe,
+#: while the asset list carries every listed ETF (DIA, VOO, TLT, XLF, USO...),
+#: so the fund exemption cannot be what stops it: an earnings phrase must name
+#: its company, or it attributes to nobody.
+NO_SINGLE_TAG_FAMILIES: Final[frozenset[RuleFamily]] = frozenset({RuleFamily.EARNINGS})
+
 #: Explicit symbol mentions. ``px`` is a bracketed symbol's exchange prefix.
 _EXPLICIT_SYMBOL: Final = re.compile(
     r"\((?:(?P<px>NYSE American|NYSE|NASDAQ|Nasdaq|AMEX|OTC|Cboe|CBOE)\s?:\s?)?(?P<p>[A-Z][A-Z.]{0,6})\)"
@@ -1141,11 +1158,14 @@ class NameBook:
     tokenised once rather than scanned once per ticker (:class:`_TokenIndex`).
     ``watch_names`` is the hand-kept table for watch tickers (normally
     :data:`WATCH_COMPANY_NAMES`); ``asset_names`` maps every active US equity
-    symbol to its broker ``name``; ``funds`` is every fund and market ticker
-    -- the caller's ``MARKETS`` membership and the universe's ``fund`` flag --
-    which the single-tag rule never lands on. It is required, not defaulted:
-    an empty default would quietly reopen AUDIT3-M1 for a caller that forgot
-    it. Order of any input does not matter. Read-only after construction.
+    symbol to its broker ``name``; ``funds`` is the tickers the single-tag
+    rule never lands on. The engine passes exactly the curated universe's
+    ``fund`` flag (``UNIVERSE_FUND_SYMBOLS``: SPY, QQQ, IWM, XLE, ARKK) --
+    not every ETF in the asset list, which is why the earnings family does not
+    take the single-tag rule at all (:data:`NO_SINGLE_TAG_FAMILIES`). It is
+    required, not defaulted: an empty default would quietly reopen AUDIT3-M1
+    for a caller that forgot it. Order of any input does not matter.
+    Read-only after construction.
     """
 
     __slots__ = ("_symbols", "_funds", "_by_name", "_word_named", "_own_names", "_index", "_word_index")
@@ -1306,6 +1326,9 @@ _OBJECT_OF: Final = "the object of the matched phrase"
 _CHAINED_SUBJECT: Final = "the subject of the phrase before it"
 _ONLY_TAG: Final = "the article's only tag"
 _NO_SUBJECT: Final = "no named company in the subject position"
+_NO_SUBJECT_EARNINGS: Final = (
+    "no named company in the subject position, and an earnings phrase never takes the article's only tag"
+)
 _NOT_ONE_OBJECT: Final = "the object is not exactly one named company"
 _AMBIGUOUS_LIST: Final = "ambiguous: the subject is one of several coordinated names"
 _AMBIGUOUS_OBJECT: Final = "ambiguous: the object names more than one company"
@@ -1464,10 +1487,20 @@ def _bind_all(
             previous = max(before, key=lambda i: found[i].end)
             if _CHAINED.fullmatch(headline, found[previous].end, hit.start):
                 bound[index] = (bound[previous][0], _CHAINED_SUBJECT)
-    # The single-tag rule, for a phrase with no named subject.
+    # The single-tag rule, for a phrase with no named subject -- never one of
+    # NO_SINGLE_TAG_FAMILIES, which stays unattributed and says why.
     only = _single_tag(headline, mentions, suppressed, feed, tags, book)
     if only is not None:
-        bound = [((only,), _ONLY_TAG) if how == _NO_SUBJECT else (who, how) for who, how in bound]
+        bound = [
+            (
+                ((), _NO_SUBJECT_EARNINGS)
+                if hit.pattern.family in NO_SINGLE_TAG_FAMILIES
+                else ((only,), _ONLY_TAG)
+            )
+            if how == _NO_SUBJECT
+            else (who, how)
+            for hit, (who, how) in zip(found, bound)
+        ]
     return bound
 
 
@@ -1485,6 +1518,8 @@ def _single_tag(
     -- CPI, payrolls, jobless claims -- with SPY or QQQ alone, and the phrase
     that fires on it (*Below Expectations*) is about the economy, often in the
     opposite direction to the fund. Which tags are funds is the book's input.
+    (The earnings family is kept off every lone tag by the caller,
+    :func:`_bind_all`, through :data:`NO_SINGLE_TAG_FAMILIES`.)
 
     Never when the headline names that company in any way at all -- as a
     mention, as a name set aside for any reason (a rater, an ordinary word,
