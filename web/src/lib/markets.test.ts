@@ -83,6 +83,7 @@ function stock(over: Partial<SortableStock>): SortableStock {
     volumeDate: '2026-08-07',
     avgVolume: 1_000_000,
     marketCap: 100,
+    isFund: false,
     ...over,
   }
 }
@@ -281,7 +282,7 @@ describe('sortStocks', () => {
 
   it('sorts a fund last in BOTH directions rather than treating null as zero', () => {
     const rows = [
-      stock({ symbol: 'SPY', marketCap: null }),
+      stock({ symbol: 'SPY', marketCap: null, isFund: true }),
       stock({ symbol: 'SMALL', marketCap: 12 }),
       stock({ symbol: 'BIG', marketCap: 3_540 }),
     ]
@@ -303,9 +304,9 @@ describe('sortStocks', () => {
 
   it('orders funds against each other deterministically', () => {
     const rows = [
-      stock({ symbol: 'QQQ', marketCap: null }),
-      stock({ symbol: 'ARKK', marketCap: null }),
-      stock({ symbol: 'SPY', marketCap: null }),
+      stock({ symbol: 'QQQ', marketCap: null, isFund: true }),
+      stock({ symbol: 'ARKK', marketCap: null, isFund: true }),
+      stock({ symbol: 'SPY', marketCap: null, isFund: true }),
     ]
 
     expect(sortStocks(rows, { key: 'marketCap', direction: 'descending' }).map((s) => s.symbol)).toEqual([
