@@ -289,6 +289,7 @@ const ROW: StockQuote = {
   volumeDate: '2026-09-16',
   avgVolume: 2_000,
   marketCap: 3_000,
+  isFund: false,
 }
 
 describe('the poll writes the live quote map', () => {

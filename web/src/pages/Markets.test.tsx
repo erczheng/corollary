@@ -53,6 +53,7 @@ const STOCKS: StockQuote[] = [
     volumeDate: '2026-09-11',
     avgVolume: 126_161_848,
     marketCap: 5_300,
+    isFund: false,
   },
   {
     symbol: 'SPY',
@@ -71,6 +72,7 @@ const STOCKS: StockQuote[] = [
     avgVolume: 40_407_880,
     // A fund has none. Never 0.
     marketCap: null,
+    isFund: true,
   },
   {
     symbol: 'RDDT',
@@ -87,6 +89,7 @@ const STOCKS: StockQuote[] = [
     volumeDate: '2026-09-04',
     avgVolume: 10_000_000,
     marketCap: 35,
+    isFund: false,
   },
   {
     symbol: 'ZZZ',
@@ -105,6 +108,7 @@ const STOCKS: StockQuote[] = [
     volumeDate: null,
     avgVolume: null,
     marketCap: 1,
+    isFund: false,
   },
 ]
 
@@ -388,6 +392,20 @@ describe('the stock table reads the served universe', () => {
     // column of dollars would state that SPY is worth nothing.
     fireEvent.click(within(chainOrStockHeader('Market cap')).getByRole('button'))
     expect(cellText(bodyRows(stockTable())[bodyRows(stockTable()).length - 1], 0)).toBe('SPY')
+  })
+
+  it('labels a fund\'s empty market cap "ETF" and a company\'s missing one as a dash', async () => {
+    // A company's null is a vendor outage or a symbol not fetched yet. Read
+    // "fund" off the null and NVDA would be passed off as an ETF; only the
+    // served `isFund` may say it.
+    const outage = STOCKS.map((s) => (s.symbol === 'NVDA' ? { ...s, marketCap: null } : s))
+    serve({ stocks: jsonResponse(200, outage) })
+    render(<App />)
+    await screen.findByText('SPDR S&P 500 ETF Trust')
+
+    expect(cellText(rowFor(stockTable(), 'SPY'), 7)).toBe('ETF')
+    expect(cellText(rowFor(stockTable(), 'NVDA'), 7)).not.toContain('ETF')
+    expect(cellText(rowFor(stockTable(), 'NVDA'), 7)).toContain('—')
   })
 })
 
@@ -795,6 +813,7 @@ const PAGED_STOCKS: StockQuote[] = Array.from({ length: 20 }, (_, i) => {
     volumeDate: '2026-09-11',
     avgVolume: 10_000_000,
     marketCap: 10 + i,
+    isFund: false,
   }
 })
 
