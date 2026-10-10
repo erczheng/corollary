@@ -23,9 +23,48 @@ rule the ingest applies within one row.
 
 **One item per (canonical article, ticker)**, shaped as ``types.ts``'s
 ``NewsItem`` plus ``url`` and the spec's *"the tier and source that produced
-it, and whether that source is demoted"*. Step 4 labels nothing, so every
-item is ``unclassified`` with no tier and no source, and not demoted (decision
-4's labelling is step 5). No label is invented to fill the column.
+it, and whether that source is demoted"*. The tickers are the group's tags
+**union its label tickers**: the rules tier labels any company a headline
+names, tagged or not, and such an item carries ``attributedBy: "headline"``
+(a tagged one ``"tag"``). The ``ticker``, ``sentiment`` and scope filters and
+``total`` all include them. A label ticker is not a tag, so a story tagged
+only ``MARKET`` keeps its ``MARKET`` item beside the headline one.
+
+**Labels (step 5, decision 4): rules, then vendor.** A group's labels for a
+ticker are read across every member of the group -- the same union the tags
+use -- one per source: the canonical row's when it carries one, else the
+lowest member id's (:func:`corollary.data.news.signals.group_labels`, the one
+selector Movers and the tradeability refresh also read). The displayed label is the rules one if any, else
+Massive's, else ``unclassified`` with no tier, no source and no status
+(decision 17). The other label, when both sources labelled, is served as
+``otherLabel``. The ``sentiment`` filter applies to the *displayed* label, in
+SQL, so ``total`` and the pages agree with it. Each source's status is
+``unaudited`` (Q22) until step 6's ``sentiment_source_status`` exists.
+
+``GET /api/news/movers``
+------------------------
+
+Decision 21's discovery candidates, computed by the pure
+:func:`corollary.data.news.discovery.discover` from what is stored: every
+picked directional label in the lookback
+(:func:`corollary.data.news.signals.stored_signals`), mapped to its group's
+canonical article; the watch universe at read time; and, per signalled
+ticker, the **latest** ``ticker_tradeability`` row on or before today's ET
+date. The cache is filled per session date, by the tradeability refresh,
+for exactly the off-watch tickers this route would call signalled -- the
+same read and the same ``qualifies`` -- over the longest bounded lookback
+(``2w``), tagged or not, newest qualifying label first under the per-run cap;
+so yesterday's verdict is the newest answer until today's check runs, and its
+session date is served beside it. **No vendor is called**: a ticker the cache
+has not judged is counted under ``awaitingCheck``, never fetched here. Under
+``all`` a signal older than two weeks that was never judged stays there.
+
+The response separates the spec's two empty states server-side (see
+:class:`~corollary.api.schemas.NewsMovers`): the three discovery feeds'
+freshness, from the scheduler's job records and the newest stored row per
+feed -- stale on a failure or skip, a stopped job, or
+:data:`STALE_AFTER_SLOTS` of the job's own slots passing with no delivery --
+and the tradeability cache's last evaluation.
 
 **Sector** from the SPDR seed (decision 6); ``Other`` outside it; ``MARKET``
 under ``Macro``. Before the owner builds the seed every ticker is ``Other``
@@ -91,13 +130,12 @@ arrival can never push the count past the cap or take a slot back.
 import logging
 import threading
 import uuid
-from collections.abc import Iterable
-from datetime import datetime, time, timedelta, timezone
+from collections.abc import Iterable, Mapping
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Final
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Path, Query, Request
-from sqlalchemy import Select, and_, exists, false, func, or_, select
+from sqlalchemy import Select, and_, exists, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session, aliased
 
 from corollary.api.deps import (
@@ -105,6 +143,7 @@ from corollary.api.deps import (
     AssetDirectoryDep,
     PositionUnderlyings,
     PositionUnderlyingsDep,
+    SchedulerStatusDep,
     SessionDep,
     SpdrSeedDep,
 )
@@ -116,16 +155,38 @@ from corollary.api.operator import (
 )
 from corollary.api.routes.markets import UNIVERSE_SYMBOLS
 from corollary.api.schemas import (
+    DiscoveryEvaluation,
+    DiscoveryFeedFreshness,
+    DiscoveryFeedName,
     ManualWatch,
+    MoverDirection,
+    NewsDirection,
     NewsFeed,
     NewsItem,
+    NewsLabel,
+    NewsLabelSource,
     NewsLookback,
+    NewsMover,
+    NewsMoverArticle,
+    NewsMoverEvidence,
+    NewsMoverReason,
+    NewsMovers,
     NewsScope,
     NewsSentiment,
     NewsSort,
+    NewsSourceStatus,
     WatchList,
 )
 from corollary.data.news.assets import AssetDirectoryHolder
+from corollary.data.news.discovery import CachedVerdict, Candidate, discover
+from corollary.data.news.labels import SOURCE_TIER, Direction, LabelSource, SentimentTier
+from corollary.data.news.signals import (
+    EASTERN,
+    LOOKBACK_DAYS,
+    group_labels,
+    lookback_start,
+    stored_signals,
+)
 from corollary.data.news.watchlist import (
     MANUAL_WATCH_CAP,
     MARKET_TICKER,
@@ -138,13 +199,24 @@ from corollary.data.news.watchlist import (
     watch_universe,
 )
 from corollary.data.seeds import SpdrSeed, normalize_symbol
-from corollary.db.models import AuditLog, NewsArticle, NewsArticleTicker, WatchSymbol
+from corollary.db.models import (
+    AuditLog,
+    NewsArticle,
+    NewsArticleTicker,
+    TickerTradeability,
+    WatchSymbol,
+)
+from corollary.engine.scheduler import JobStatus
 
 __all__ = [
+    "DISCOVERY_FEED_JOBS",
     "LOOKBACK_DAYS",
     "MACRO_SECTOR",
     "NOT_WATCHED",
     "OTHER_SECTOR",
+    "SOURCE_STATUS",
+    "STALE_AFTER_SLOTS",
+    "TRADEABILITY_JOB",
     "WATCHED",
     "lookback_start",
     "request_now",
@@ -155,25 +227,44 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/news", tags=["news"])
 
-EASTERN: Final = ZoneInfo("America/New_York")
-
 #: ``MACRO_SECTOR`` in ``types.ts``: where ``MARKET`` stories file.
 MACRO_SECTOR: Final = "Macro"
 #: Decision 3: a ticker outside the seed, or any ticker with no seed.
 OTHER_SECTOR: Final = "Other"
 
-#: Calendar days per lookback, ``None`` for no bound -- ``LOOKBACK_DAYS`` in
-#: ``web/src/lib/news.ts``, value for value.
-LOOKBACK_DAYS: Final[dict[str, int | None]] = {
-    "today": 1,
-    "3d": 3,
-    "1w": 7,
-    "2w": 14,
-    "all": None,
+#: ``LOOKBACK_DAYS`` and :func:`lookback_start` live in
+#: :mod:`corollary.data.news.signals`, which the tradeability refresh reads
+#: too; re-exported here for the route's callers.
+
+#: Decision 4: no source labelled the item for that ticker.
+_UNLABELLED: Final[NewsSentiment] = "unclassified"
+
+#: Each labelling source's audit status (Q22). **``unaudited`` for both until
+#: step 6**, which replaces this table with ``sentiment_source_status``. Never
+#: ``active`` before an audit has run: that would claim a pass nobody graded.
+SOURCE_STATUS: Final[dict[LabelSource, NewsSourceStatus]] = {
+    LabelSource.RULES: "unaudited",
+    LabelSource.MASSIVE: "unaudited",
 }
 
-#: Step 4 labels nothing (decision 4's sources arrive in step 5).
-_UNLABELLED: Final[NewsSentiment] = "unclassified"
+#: Decision 21's three discovery firehoses and the scheduler job polling each.
+#: ``test_movers_route.py`` pins these names against the shipped job set.
+DISCOVERY_FEED_JOBS: Final[dict[DiscoveryFeedName, str]] = {
+    "alpaca_news": "news_alpaca",
+    "finnhub_market": "news_finnhub_market",
+    "massive_news": "news_massive",
+}
+#: The job that fills ``ticker_tradeability`` -- discovery's last evaluation.
+TRADEABILITY_JOB: Final = "tradeability_cache"
+
+#: A discovery feed is stale once this many of its job's **own scheduled
+#: slots** have passed since it last delivered -- three times its cadence,
+#: measured on the job definition's schedule (``JobStatus.cadence``), so a
+#: two-rate job is judged at the rate it was actually meant to run at.
+STALE_AFTER_SLOTS: Final = 3
+
+#: Tickers per ``IN (...)`` when reading the tradeability cache.
+_VERDICT_CHUNK: Final = 500
 
 #: The audit values for a watch change. ``web/src/lib/settings.ts``'s
 #: ``auditFieldLabel`` and ``mockData.ts``'s audit fixture assume exactly
@@ -200,20 +291,6 @@ NowDep = Annotated[datetime, Depends(request_now)]
 # --------------------------------------------------------------------------
 # Pure helpers
 # --------------------------------------------------------------------------
-
-
-def lookback_start(lookback: str, now: datetime) -> datetime | None:
-    """The first instant inside ``lookback``, as aware UTC, or ``None`` for ``all``.
-
-    The start of the ET calendar date ``days - 1`` days before ``now``'s ET
-    date. Midnight is never inside a DST transition in New York (they happen
-    at 02:00), so ``datetime.combine`` with the zone is unambiguous.
-    """
-    days = LOOKBACK_DAYS[lookback]
-    if days is None:
-        return None
-    first = now.astimezone(EASTERN).date() - timedelta(days=days - 1)
-    return datetime.combine(first, time.min, tzinfo=EASTERN).astimezone(timezone.utc)
 
 
 def _sector(ticker: str, seed: SpdrSeed | None) -> str:
@@ -324,6 +401,22 @@ def _feed_query(
     )
     other = tags.alias("other_tags")
     canonical = aliased(NewsArticle, name="canonical")
+    labels = group_labels()
+    rules = labels.alias("rules_label")
+    vendor = labels.alias("vendor_label")
+    # The items: tags union label tickers, one row per (group, ticker), with
+    # ``tagged`` 1 when any copy carries the ticker as a tag. A label on a
+    # company the headline names, untagged, is an item of its own
+    # (``attributedBy: headline``).
+    pairs = union_all(
+        select(tags.c.gid, tags.c.ticker, literal(1).label("tagged")),
+        select(labels.c.gid, labels.c.ticker, literal(0).label("tagged")),
+    ).subquery("item_pairs")
+    items = (
+        select(pairs.c.gid, pairs.c.ticker, func.max(pairs.c.tagged).label("tagged"))
+        .group_by(pairs.c.gid, pairs.c.ticker)
+        .cte("group_items")
+    )
 
     stmt: Select[Any] = (
         select(
@@ -332,16 +425,42 @@ def _feed_query(
             canonical.headline,
             canonical.url,
             canonical.publisher,
-            tags.c.ticker,
+            items.c.ticker,
+            items.c.tagged,
+            rules.c.direction.label("rules_direction"),
+            rules.c.rule_id.label("rules_rule_id"),
+            rules.c.reasoning.label("rules_reasoning"),
+            vendor.c.direction.label("vendor_direction"),
+            vendor.c.reasoning.label("vendor_reasoning"),
         )
-        .join(tags, tags.c.gid == canonical.id)
+        .join(items, items.c.gid == canonical.id)
+        .outerjoin(
+            rules,
+            and_(
+                rules.c.gid == items.c.gid,
+                rules.c.ticker == items.c.ticker,
+                rules.c.source == LabelSource.RULES.value,
+                rules.c.pick == 1,
+            ),
+        )
+        .outerjoin(
+            vendor,
+            and_(
+                vendor.c.gid == items.c.gid,
+                vendor.c.ticker == items.c.ticker,
+                vendor.c.source == LabelSource.MASSIVE.value,
+                vendor.c.pick == 1,
+            ),
+        )
         .where(canonical.canonical_id.is_(None))
-        # MARKET means "no tag": not served for a group that has a real one.
+        # MARKET means "no tag": not served for a group that has a real
+        # *tag*. A label-only ticker is not a tag, so a MARKET-only story
+        # whose headline names a company keeps its MARKET item.
         .where(
             or_(
-                tags.c.ticker != MARKET_TICKER,
+                items.c.ticker != MARKET_TICKER,
                 ~exists().where(
-                    and_(other.c.gid == tags.c.gid, other.c.ticker != MARKET_TICKER)
+                    and_(other.c.gid == items.c.gid, other.c.ticker != MARKET_TICKER)
                 ),
             )
         )
@@ -349,29 +468,85 @@ def _feed_query(
     if since is not None:
         stmt = stmt.where(canonical.published_at >= since)
     if tickers_in is not None:
-        stmt = stmt.where(tags.c.ticker.in_(sorted(tickers_in)))
+        stmt = stmt.where(items.c.ticker.in_(sorted(tickers_in)))
     if ticker is not None:
-        stmt = stmt.where(tags.c.ticker == ticker)
+        stmt = stmt.where(items.c.ticker == ticker)
     if publisher is not None:
         stmt = stmt.where(canonical.publisher == publisher)
     if sector is not None:
         if sector == MACRO_SECTOR:
-            stmt = stmt.where(tags.c.ticker == MARKET_TICKER)
+            stmt = stmt.where(items.c.ticker == MARKET_TICKER)
         elif sector == OTHER_SECTOR:
-            stmt = stmt.where(tags.c.ticker != MARKET_TICKER)
+            stmt = stmt.where(items.c.ticker != MARKET_TICKER)
             if seed is not None:
-                stmt = stmt.where(tags.c.ticker.not_in(sorted(seed.symbols())))
+                stmt = stmt.where(items.c.ticker.not_in(sorted(seed.symbols())))
         else:
             in_sector = (
                 sorted(symbol for symbol in seed.symbols() if seed.sector_of(symbol) == sector)
                 if seed is not None
                 else []
             )
-            stmt = stmt.where(tags.c.ticker.in_(in_sector))
-    # Every item is unclassified in step 4, so any other label matches nothing.
-    if sentiment is not None and sentiment != _UNLABELLED:
-        stmt = stmt.where(false())
-    return stmt, canonical, tags.c.ticker
+            stmt = stmt.where(items.c.ticker.in_(in_sector))
+    # On the *displayed* label: rules, then vendor (decision 4).
+    if sentiment == _UNLABELLED:
+        stmt = stmt.where(rules.c.direction.is_(None), vendor.c.direction.is_(None))
+    elif sentiment is not None:
+        stmt = stmt.where(func.coalesce(rules.c.direction, vendor.c.direction) == sentiment)
+    return stmt, canonical, items.c.ticker
+
+
+def _label(
+    source: LabelSource, direction: str, rule_id: str | None, reasoning: str | None
+) -> NewsLabel:
+    return NewsLabel(
+        sentiment=_direction(direction),
+        tier="rules" if SOURCE_TIER[source] is SentimentTier.RULES else "vendor",
+        source=_wire_source(source),
+        source_status=SOURCE_STATUS[source],
+        rule_id=rule_id,
+        reasoning=reasoning,
+    )
+
+
+def _direction(stored: str) -> NewsDirection:
+    """A stored ``sentiment_label.direction`` as the wire literal (CHECK-constrained)."""
+    direction = Direction(stored)
+    if direction is Direction.BULLISH:
+        return "bullish"
+    if direction is Direction.BEARISH:
+        return "bearish"
+    return "neutral"
+
+
+def _feed_item(row: Any, seed: SpdrSeed | None) -> NewsItem:
+    """One feed row, its displayed label by precedence rules -> vendor."""
+    rules = (
+        None
+        if row.rules_direction is None
+        else _label(LabelSource.RULES, row.rules_direction, row.rules_rule_id, row.rules_reasoning)
+    )
+    vendor = (
+        None
+        if row.vendor_direction is None
+        else _label(LabelSource.MASSIVE, row.vendor_direction, None, row.vendor_reasoning)
+    )
+    shown = rules if rules is not None else vendor
+    other = vendor if rules is not None else None
+    return NewsItem(
+        id=f"{row.id}:{row.ticker}",
+        time=row.published_at,
+        ticker=row.ticker,
+        headline=row.headline,
+        sentiment=_UNLABELLED if shown is None else shown.sentiment,
+        publisher=row.publisher,
+        sector=_sector(row.ticker, seed),
+        tier=None if shown is None else shown.tier,
+        url=row.url,
+        source=None if shown is None else shown.source,
+        source_status=None if shown is None else shown.source_status,
+        other_label=other,
+        attributed_by="tag" if row.tagged else "headline",
+    )
 
 
 @router.get("", summary="Canonical news rows, one per ticker, newest first")
@@ -415,22 +590,7 @@ def read_news(
         ordering = (canonical.published_at.asc(), canonical.id.asc(), ticker_col.asc())
     rows = session.execute(stmt.order_by(*ordering).offset(offset).limit(limit)).all()
 
-    items = [
-        NewsItem(
-            id=f"{row.id}:{row.ticker}",
-            time=row.published_at,
-            ticker=row.ticker,
-            headline=row.headline,
-            sentiment=_UNLABELLED,
-            publisher=row.publisher,
-            sector=_sector(row.ticker, seed),
-            tier=None,
-            url=row.url,
-            source=None,
-            demoted=False,
-        )
-        for row in rows
-    ]
+    items = [_feed_item(row, seed) for row in rows]
     return NewsFeed(
         items=items,
         total=total,
@@ -443,6 +603,305 @@ def read_news(
         since=since,
         sectors_available=seed is not None,
         seed_as_of=seed.as_of if seed is not None else None,
+    )
+
+
+# --------------------------------------------------------------------------
+# GET /api/news/movers
+# --------------------------------------------------------------------------
+
+
+def _verdict(row: TickerTradeability, correlation_id: str) -> CachedVerdict:
+    """A cache row as the read path needs it. An unreadable row fails closed, logged."""
+    failures = tuple(token for token in row.failures.split(",") if token)
+    try:
+        return CachedVerdict(
+            ticker=row.ticker,
+            session_date=row.session_date,
+            passes=row.passes,
+            avg_volume_20d=row.avg_volume_20d,
+            last_close=row.last_close,
+            sessions_available=row.sessions_available,
+            failures=failures,
+            checked_at=row.checked_at,
+        )
+    except ValueError as exc:
+        logger.error(
+            "a tradeability cache row cannot be read; the ticker is treated as failing",
+            extra={
+                "event": "discovery_verdict_unreadable",
+                "rule": "decision 21: a ticker is a candidate only on a verdict that passes",
+                "ticker": row.ticker,
+                "session_date": row.session_date.isoformat(),
+                "error": str(exc),
+                "correlation_id": correlation_id,
+            },
+        )
+        return CachedVerdict(
+            ticker=row.ticker,
+            session_date=row.session_date,
+            passes=False,
+            avg_volume_20d=None,
+            last_close=None,
+            sessions_available=row.sessions_available,
+            failures=("unreadable_cache_row",),
+            checked_at=row.checked_at,
+        )
+
+
+def _latest_verdicts(
+    session: Session, tickers: Iterable[str], today: date, correlation_id: str
+) -> dict[str, CachedVerdict]:
+    """Each ticker's newest cached verdict for a session on or before ``today``.
+
+    Read from ``ticker_tradeability`` only -- never a vendor. The newest row
+    is chosen in Python, by ``session_date``, which is a real ``Date``
+    column; nothing here compares ``Money``.
+    """
+    wanted = sorted(set(tickers))
+    newest: dict[str, TickerTradeability] = {}
+    for start in range(0, len(wanted), _VERDICT_CHUNK):
+        chunk = wanted[start : start + _VERDICT_CHUNK]
+        rows = session.scalars(
+            select(TickerTradeability)
+            .where(TickerTradeability.ticker.in_(chunk))
+            .where(TickerTradeability.session_date <= today)
+        )
+        for row in rows:
+            held = newest.get(row.ticker)
+            if held is None or row.session_date > held.session_date:
+                newest[row.ticker] = row
+    return {ticker: _verdict(row, correlation_id) for ticker, row in newest.items()}
+
+
+def _job_failing_or_skipped(status: JobStatus) -> bool:
+    """The job's most recent completed outcome was a failure or a skip.
+
+    A skip fetched nothing (no key configured, say), so the feed is not being
+    read; a failure is a fault. A job that has completed nothing yet is
+    neither.
+    """
+    if status.failing:
+        return True
+    if status.last_skipped is None:
+        return False
+    return status.last_success is None or status.last_skipped > status.last_success
+
+
+def _later(a: datetime | None, b: datetime | None) -> datetime | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _overdue(record: JobStatus, since: datetime | None, now: datetime) -> bool:
+    """:data:`STALE_AFTER_SLOTS` of the job's own slots have passed since ``since``.
+
+    ``since`` is the feed's last known-good instant, else the start of a run
+    that never finished; ``None`` -- nothing delivered and nothing started --
+    is no evidence either way. A slot "has passed" when it is strictly
+    before ``now``. A schedule with nothing more to say stops the count:
+    that job's ``stopped`` flag is what reports it.
+    """
+    if since is None:
+        return False
+    slot: datetime | None = since
+    for _ in range(STALE_AFTER_SLOTS):
+        assert slot is not None
+        slot = record.cadence.next_run(slot)
+        if slot is None:
+            return False
+    assert slot is not None
+    return slot < now
+
+
+def _feed_stale(record: JobStatus | None, delivered: datetime | None, now: datetime) -> bool:
+    """Decision 21's *stale* for one discovery feed. See :class:`~corollary.api.schemas.NewsMovers`.
+
+    Stale when there is no scheduler or no such job; when its latest outcome
+    failed or skipped; when its job has stopped and will never run again;
+    or when :data:`STALE_AFTER_SLOTS` of its slots have passed since it last
+    delivered (``max(last_success, newest row ingested)``) -- a hung run, a
+    dead task, and a restart into a days-old feed all read stale that way.
+    """
+    if record is None or _job_failing_or_skipped(record):
+        return True
+    if record.stopped:
+        return True
+    reference = delivered if delivered is not None else record.last_started
+    return _overdue(record, reference, now)
+
+
+def _feed_freshness(
+    session: Session, status: Mapping[str, JobStatus] | None, now: datetime
+) -> list[DiscoveryFeedFreshness]:
+    newest: dict[str, datetime] = {
+        feed: at
+        for feed, at in session.execute(
+            select(NewsArticle.feed, func.max(NewsArticle.ingested_at))
+            .where(NewsArticle.feed.in_(sorted(DISCOVERY_FEED_JOBS)))
+            .group_by(NewsArticle.feed)
+        ).tuples()
+    }
+    feeds: list[DiscoveryFeedFreshness] = []
+    for feed, job in DISCOVERY_FEED_JOBS.items():
+        record = None if status is None else status.get(job)
+        ingested = newest.get(feed)
+        last_success = None if record is None else record.last_success
+        delivered = _later(last_success, ingested)
+        stale = _feed_stale(record, delivered, now)
+        feeds.append(
+            DiscoveryFeedFreshness(
+                feed=feed,
+                job=job,
+                scheduled=record is not None,
+                last_success=last_success,
+                last_failure=None if record is None else record.last_failure,
+                failing=False if record is None else record.failing,
+                last_ingested_at=ingested,
+                stale=stale,
+                stale_since=delivered if stale else None,
+            )
+        )
+    return feeds
+
+
+def _evaluation(
+    session: Session, status: Mapping[str, JobStatus] | None
+) -> DiscoveryEvaluation:
+    record = None if status is None else status.get(TRADEABILITY_JOB)
+    last_checked: datetime | None = session.scalar(
+        select(func.max(TickerTradeability.checked_at))
+    )
+    return DiscoveryEvaluation(
+        job=TRADEABILITY_JOB,
+        scheduled=record is not None,
+        last_success=None if record is None else record.last_success,
+        last_failure=None if record is None else record.last_failure,
+        failing=False if record is None else record.failing,
+        last_checked_at=last_checked,
+    )
+
+
+def _mover_direction(direction: Direction) -> MoverDirection:
+    if direction is Direction.BULLISH:
+        return "bullish"
+    if direction is Direction.BEARISH:
+        return "bearish"
+    raise ValueError(f"a discovery reason is directional, not {direction.value}")
+
+
+def _wire_source(source: LabelSource) -> NewsLabelSource:
+    return "rules" if source is LabelSource.RULES else "massive"
+
+
+def _mover(candidate: Candidate, seed: SpdrSeed | None) -> NewsMover:
+    reasons = [
+        NewsMoverReason(
+            source=_wire_source(reason.source),
+            tier="rules" if reason.tier is SentimentTier.RULES else "vendor",
+            rule_id=reason.rule_id,
+            family=None if reason.family is None else reason.family.value,
+            direction=_mover_direction(reason.direction),
+            article_ids=list(reason.article_ids),
+            evidence=[
+                NewsMoverEvidence(
+                    article_id=item.article_id,
+                    time=item.published_at,
+                    reasoning=item.reasoning,
+                )
+                for item in reason.evidence
+            ],
+            latest_at=reason.latest_at,
+        )
+        for reason in candidate.reasons
+    ]
+    return NewsMover(
+        ticker=candidate.ticker,
+        sector=_sector(candidate.ticker, seed),
+        rank_group="rules" if candidate.has_rules_reason else "massive_only",
+        reasons=reasons,
+        directions=[_mover_direction(d) for d in candidate.directions],
+        articles=[
+            NewsMoverArticle(
+                id=article.id,
+                time=article.published_at,
+                headline=article.headline,
+                url=article.url,
+                publisher=article.publisher,
+            )
+            for article in candidate.articles
+        ],
+        article_count=len(candidate.articles),
+        latest_at=candidate.latest_at,
+        avg_volume=candidate.avg_volume_20d,
+        adv_sessions=candidate.sessions_available,
+        # ``format(..., "f")``: the exact stored digits, never an exponent.
+        last_close=format(candidate.last_close, "f"),
+        tradeability_session_date=candidate.tradeability_session_date,
+        tradeability_checked_at=candidate.tradeability_checked_at,
+    )
+
+
+@router.get("/movers", summary="Discovery candidates: off-watch names flagged by news, ranked")
+def read_movers(
+    session: SessionDep,
+    seed: SpdrSeedDep,
+    positions: PositionUnderlyingsDep,
+    status: SchedulerStatusDep,
+    now: NowDep,
+    lookback: Annotated[NewsLookback, Query()] = "today",
+) -> NewsMovers:
+    """Decision 21's *Movers in the news*, derived on read and served in rank order.
+
+    Flagged by news, not confirmed by price: no snapshot and no vendor call.
+    """
+    correlation_id = str(uuid.uuid4())
+    since = lookback_start(lookback, now)
+    today = now.astimezone(EASTERN).date()
+    universe, _ = _universe(session, seed, positions, correlation_id)
+    signals = stored_signals(session, since)
+    off_watch = {s.ticker for s in signals if s.ticker not in universe}
+    verdicts = _latest_verdicts(session, off_watch, today, correlation_id)
+    found = discover(signals, watched=universe, verdicts=verdicts, since=since)
+    feeds = _feed_freshness(session, status, now)
+    stale = [feed for feed in feeds if feed.stale]
+    known_good = [feed.stale_since for feed in stale if feed.stale_since is not None]
+
+    logger.info(
+        "discovery evaluated: %d movers from %d signalled off-watch names",
+        len(found.candidates),
+        found.signalled,
+        extra={
+            "event": "discovery_evaluated",
+            "lookback": lookback,
+            "since": None if since is None else since.isoformat(),
+            "signalled": found.signalled,
+            "movers": len(found.candidates),
+            "watched_excluded": found.watched_excluded,
+            "failed_tradeability": found.failed_tradeability,
+            "awaiting_check": len(found.awaiting_check),
+            "stale_feeds": [feed.feed for feed in stale],
+            "at": now.isoformat(),
+            "correlation_id": correlation_id,
+        },
+    )
+    return NewsMovers(
+        items=[_mover(candidate, seed) for candidate in found.candidates],
+        lookback=lookback,
+        since=since,
+        evaluated_at=now,
+        signalled=found.signalled,
+        watched_excluded=found.watched_excluded,
+        failed_tradeability=found.failed_tradeability,
+        awaiting_check=len(found.awaiting_check),
+        feeds=feeds,
+        feeds_stale=bool(stale),
+        stale_since=min(known_good) if known_good else None,
+        evaluation=_evaluation(session, status),
+        sectors_available=seed is not None,
     )
 
 

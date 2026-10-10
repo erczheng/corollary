@@ -9,7 +9,7 @@ optionable) still apply to what a test hands it.
 
 import asyncio
 from collections.abc import Iterable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import Engine
@@ -18,7 +18,13 @@ from sqlalchemy.orm import Session
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import AssetDirectory, EquityAsset
 from corollary.data.seeds import SPDR_SECTORS, SpdrHolding, SpdrSeed
-from corollary.db.models import NewsArticle, NewsArticleTicker, WatchSymbol
+from corollary.db.models import (
+    NewsArticle,
+    NewsArticleTicker,
+    SentimentLabelRow,
+    TickerTradeability,
+    WatchSymbol,
+)
 
 #: Two holdings in XLK, one in every other fund -- every fund present, as
 #: ``SpdrSeed`` requires. All twelve are leaders (fewer than five per fund).
@@ -141,3 +147,63 @@ def filler_symbols(count: int, *, exclude: Iterable[str] = ()) -> list[str]:
             if len(out) == count:
                 return out
     raise AssertionError("ran out of filler symbols")
+
+
+def add_label(
+    engine: Engine,
+    *,
+    article_id: int,
+    ticker: str,
+    source: str,
+    direction: str,
+    rule_id: str | None = None,
+    reasoning: str | None = None,
+    labeled_at: datetime | None = None,
+) -> None:
+    """One ``sentiment_label`` row, written directly (the labeller has its own suite)."""
+    tier = {"rules": "rules", "massive": "vendor"}[source]
+    with Session(engine) as session:
+        session.add(
+            SentimentLabelRow(
+                article_id=article_id,
+                ticker=ticker,
+                source=source,
+                tier=tier,
+                direction=direction,
+                reasoning=reasoning,
+                rule_id=rule_id if source == "rules" else None,
+                labeled_at=labeled_at or datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()
+
+
+def add_verdict(
+    engine: Engine,
+    *,
+    ticker: str,
+    session_date: date,
+    passes: bool = True,
+    avg_volume_20d: int | None = 2_500_000,
+    last_close: Decimal | None = Decimal("41.20"),
+    sessions_available: int = 20,
+    failures: str = "",
+    checked_at: datetime | None = None,
+) -> None:
+    """One ``ticker_tradeability`` row, as the cache would hold it."""
+    with Session(engine) as session:
+        session.add(
+            TickerTradeability(
+                ticker=ticker,
+                session_date=session_date,
+                has_options=True,
+                standard_root=True,
+                avg_volume_20d=avg_volume_20d,
+                last_close=last_close,
+                sessions_available=sessions_available,
+                passes=passes,
+                failures=failures if not passes else "",
+                checked_at=checked_at or datetime(2026, 9, 26, 11, 30, tzinfo=timezone.utc),
+            )
+        )
+        session.commit()

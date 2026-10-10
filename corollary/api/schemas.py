@@ -48,7 +48,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 __all__ = [
@@ -1521,21 +1521,79 @@ NewsLookback: TypeAlias = Literal["today", "3d", "1w", "2w", "all"]
 NewsScope: TypeAlias = Literal["watch", "all"]
 #: ``NewsSort`` in ``web/src/lib/news.ts`` (``NEWS_SORT_LABEL``'s keys).
 NewsSort: TypeAlias = Literal["newest", "oldest"]
+#: ``sentiment_label.direction``: a stored label's direction. ``unclassified``
+#: is the *absence* of a label, never a stored value.
+NewsDirection: TypeAlias = Literal["bullish", "bearish", "neutral"]
+#: ``sentiment_label.source`` (decision 13's demotion unit).
+NewsLabelSource: TypeAlias = Literal["rules", "massive"]
+#: A labelling source's audit status (Q22). **Until step 6 exists every source
+#: is ``unaudited``**, never "not demoted": no audit has run, so none has been
+#: passed. Step 6 replaces it with ``sentiment_source_status``; the client's
+#: *display only* suffix keys on ``demoted``.
+NewsSourceStatus: TypeAlias = Literal["unaudited", "active", "demoted"]
+#: The three discovery feeds (decision 21) whose freshness ``/movers`` reports.
+DiscoveryFeedName: TypeAlias = Literal["alpaca_news", "finnhub_market", "massive_news"]
+#: ``rules``: at least one rules reason. ``massive_only``: none. Rules rows
+#: rank first (decision 21, confirmed by the owner as written in Q22).
+MoverRankGroup: TypeAlias = Literal["rules", "massive_only"]
+#: A discovery reason's direction: ``neutral`` never qualifies (decision 21).
+MoverDirection: TypeAlias = Literal["bullish", "bearish"]
+#: Why a feed item is filed under its ticker: ``tag`` -- a vendor tag on some
+#: copy of the story; ``headline`` -- no copy is tagged to it, and a label is
+#: (the rules tier names a company the headline mentions).
+NewsAttribution: TypeAlias = Literal["tag", "headline"]
+
+
+class NewsLabel(ApiModel):
+    """One stored label on one (duplicate group, ticker), as ``GET /api/news`` serves it."""
+
+    sentiment: NewsDirection
+    tier: NewsSentimentTier
+    source: NewsLabelSource
+    #: Q22: ``unaudited`` until step 6's audit runs.
+    source_status: NewsSourceStatus
+    #: The pattern that fired, for a rules label; ``None`` for Massive.
+    rule_id: str | None
+    #: The rules tier's matched phrase, or Massive's own text verbatim.
+    reasoning: str | None
 
 
 class NewsItem(ApiModel):
     """One (canonical article, ticker) row -- ``NewsItem`` in ``types.ts``.
 
     The canonical row of a cross-vendor duplicate group is served once per
-    ticker the group is tagged to, naming the canonical row's publisher
-    (decision 3). Three fields beyond the TS shape, per the spec's *API*
-    section -- *"the tier and source that produced it, and whether that
-    source is demoted"* -- plus ``url``.
+    ticker the group is tagged to **or labelled for**, naming the canonical
+    row's publisher (decision 3). Beyond the TS shape, per the spec's *API*
+    section -- *"the tier and source that produced it, and whether that source
+    is demoted"* -- plus ``url`` and ``attributedBy``.
 
-    **Step 4 labels nothing.** ``sentiment`` is ``unclassified``, ``tier`` and
-    ``source`` are ``None`` and ``demoted`` is ``False`` on every item until
-    step 5's labelling lands. That is the honest answer, not a placeholder:
-    no source has produced a label, so none is named.
+    **``attributedBy``.** ``tag`` when any copy of the story carries the
+    ticker as a tag; ``headline`` when none does and a label does -- the rules
+    tier attaches a label to any company the headline names, and decision 21
+    expects most Finnhub market news to be untagged. A ``headline`` item is
+    always labelled (it exists only because of its label), so the client can
+    say the ticker came from the headline rather than the vendor. The story's
+    tag rows are unchanged by it: a story tagged only ``MARKET`` keeps its
+    ``MARKET`` item beside the ``headline`` one.
+
+    **The displayed label (decision 4): rules, then vendor.** The labels for
+    this ticker are read across every member of the duplicate group (a
+    Massive insight sits on the Massive copy, a rules label on whichever
+    copies carried the headline). When one source labelled several copies,
+    the canonical row's label is used, else the lowest member id's --
+    deterministic, never input order. ``sentiment`` is the rules label's
+    direction if there is one, else Massive's, else ``unclassified``, and
+    **``tier``, ``source`` and ``sourceStatus`` are ``None`` exactly when
+    ``sentiment`` is ``unclassified``** (decision 17): no source labelled the
+    item for that ticker, so none is named.
+
+    ``otherLabel`` is the label that did **not** win display, when both
+    sources labelled the item, and ``None`` otherwise. It is served so the
+    client may show a disagreement; it never changes ``sentiment``.
+
+    ``demoted`` is gone (Q22, *rejected: a boolean ``demoted: false`` in step
+    5*): it would claim a source passed an audit that has never run.
+    ``sourceStatus`` replaces it, ``unaudited`` for both sources until step 6.
     """
 
     #: ``"{canonical article id}:{ticker}"`` -- unique per row served.
@@ -1554,10 +1612,29 @@ class NewsItem(ApiModel):
     sector: str
     tier: NewsSentimentTier | None
     url: str
-    #: The labelling source that produced ``sentiment``; ``None`` in step 4.
-    source: str | None
-    #: Whether that source is demoted (decision 4/9). ``False`` with no source.
-    demoted: bool
+    #: The labelling source that produced ``sentiment``; ``None`` with no label.
+    source: NewsLabelSource | None
+    #: That source's audit status (Q22); ``None`` with no label.
+    source_status: NewsSourceStatus | None
+    #: The non-displayed label, when both sources labelled this item.
+    other_label: NewsLabel | None
+    #: ``tag`` or ``headline`` -- see the class docstring.
+    attributed_by: NewsAttribution
+
+    @model_validator(mode="after")
+    def _labelled_exactly_when_classified(self) -> "NewsItem":
+        """Decision 17: no tier, source or status exactly when ``unclassified``."""
+        unlabelled = self.sentiment == "unclassified"
+        if unlabelled and self.attributed_by == "headline":
+            raise ValueError("a headline-attributed item exists only because it is labelled")
+        named = (self.tier, self.source, self.source_status)
+        if unlabelled and any(part is not None for part in named):
+            raise ValueError("an unclassified item names no tier, source or source status")
+        if not unlabelled and any(part is None for part in named):
+            raise ValueError("a labelled item names its tier, source and source status")
+        if unlabelled and self.other_label is not None:
+            raise ValueError("an unclassified item has no other label")
+        return self
 
 
 class NewsFeed(ApiModel):
@@ -1586,6 +1663,186 @@ class NewsFeed(ApiModel):
     #: under ``Other`` (``MARKET`` still under ``Macro``), and the UI says why.
     sectors_available: bool
     seed_as_of: date | None
+
+
+class NewsMoverEvidence(ApiModel):
+    """One article a discovery reason rests on, with that label's own text."""
+
+    article_id: int
+    #: The canonical article's publication time, aware UTC.
+    time: datetime
+    #: The rules tier's matched phrase, or Massive's ``sentiment_reasoning``
+    #: verbatim (decision 17: published as-is).
+    reasoning: str | None
+
+
+class NewsMoverReason(ApiModel):
+    """One (source, rule, direction) a mover was flagged by (decision 21).
+
+    Conflicting directions are separate reasons, side by side, never netted.
+    """
+
+    source: NewsLabelSource
+    tier: NewsSentimentTier
+    #: The pattern that fired, for a rules reason; ``None`` for Massive.
+    rule_id: str | None
+    #: The pattern's family (``earnings``, ``guidance``, ...); ``None`` for Massive.
+    family: str | None
+    direction: MoverDirection
+    #: Canonical article ids, newest first. Never empty.
+    article_ids: list[int]
+    #: The same articles, each with its label's reasoning, in the same order.
+    evidence: list[NewsMoverEvidence]
+    latest_at: datetime
+
+
+class NewsMoverArticle(ApiModel):
+    """A canonical article behind at least one of a mover's reasons."""
+
+    id: int
+    time: datetime
+    headline: str
+    url: str
+    #: ``None`` when the vendor named none; never substituted.
+    publisher: str | None
+
+
+class NewsMover(ApiModel):
+    """One *Movers in the news* row, in the server's rank order.
+
+    The ADV and last close are the cached tradeability verdict's, exactly as
+    stored. **``lastClose`` is a decimal string**, not a JSON number: it is
+    displayed, never computed with, and a string carries the exact
+    ``Decimal`` with no float on the path at all.
+    """
+
+    ticker: str
+    #: From the SPDR seed; ``Other`` outside it or with no seed.
+    sector: str
+    rank_group: MoverRankGroup
+    #: Rules first, then Massive; newest first within a source.
+    reasons: list[NewsMoverReason]
+    #: The distinct directions among the reasons, sorted. Two means the
+    #: reasons disagree: shown side by side, never netted.
+    directions: list[MoverDirection]
+    #: Newest first.
+    articles: list[NewsMoverArticle]
+    article_count: int
+    #: The newest qualifying article's time -- the within-group rank key.
+    latest_at: datetime
+    #: Average daily volume, shares, over ``advSessions`` completed sessions
+    #: (20 for an established name; 1-20 for a recent listing, Q10/Q12).
+    avg_volume: int
+    adv_sessions: int
+    #: The last completed session's close, a decimal string (``"41.20"``).
+    last_close: str
+    #: The session date the tradeability verdict is for (decision 21's cache
+    #: is per ticker per session date), and when it was checked.
+    tradeability_session_date: CalendarDate
+    tradeability_checked_at: datetime
+
+
+class DiscoveryFeedFreshness(ApiModel):
+    """One discovery feed's freshness (decision 21's three firehoses).
+
+    ``stale`` is true when the feed is not known to be delivering. Any one
+    of these makes it so:
+
+    * there is no running scheduler, or the scheduler has no such job;
+    * the job's most recent completed outcome was a **failure**, or a
+      **skip** (a run that completed without fault and fetched nothing -- no
+      key configured, say -- so the feed is not being read);
+    * the job has **stopped**: its task died, or its calendar ran out
+      (``context_job_unscheduled``), so it has no next run and never will in
+      this process;
+    * **three of the job's own scheduled slots** (``STALE_AFTER_SLOTS`` in
+      ``routes/news.py``, read from the job definition's schedule) have
+      passed since the feed last delivered -- the later of ``lastSuccess``
+      and ``lastIngestedAt`` -- or, when it has never delivered, since its
+      current run started. That is what catches a run that hangs, a task that
+      stopped without saying so, and a restart into a feed whose newest row
+      is days old.
+
+    A job that has not run yet in this process, with nothing stored or a
+    recent row, is **not** stale -- there is no evidence of a fault -- and
+    reads ``lastSuccess: null``.
+
+    ``staleSince`` is the last time the feed's data was known good: the later
+    of the job's ``lastSuccess`` and the newest stored row's ``ingestedAt``
+    (the durable answer that survives a restart). ``None`` when not stale,
+    and ``None`` for a stale feed that has **never delivered** anything.
+    """
+
+    feed: DiscoveryFeedName
+    #: The scheduler job that polls it.
+    job: str
+    #: Whether a running scheduler carries this job.
+    scheduled: bool
+    last_success: datetime | None
+    last_failure: datetime | None
+    failing: bool
+    #: When the newest stored row from this feed was written, UTC.
+    last_ingested_at: datetime | None
+    stale: bool
+    stale_since: datetime | None
+
+
+class DiscoveryEvaluation(ApiModel):
+    """When discovery's inputs were last evaluated -- the tradeability cache."""
+
+    #: The tradeability refresh job's name.
+    job: str
+    scheduled: bool
+    last_success: datetime | None
+    last_failure: datetime | None
+    failing: bool
+    #: The newest ``ticker_tradeability.checked_at`` stored, UTC: the last
+    #: time any off-watch ticker was judged.
+    last_checked_at: datetime | None
+
+
+class NewsMovers(ApiModel):
+    """``GET /api/news/movers``: decision 21's discovery candidates, ranked.
+
+    **Two empty states, distinguishable from this body alone** (the spec's
+    *Frontend -> News -- discovery*):
+
+    * ``feedsStale`` true -- *"discovery feeds stale since {staleSince}"*:
+      at least one of the three firehoses is not known to be polling, so an
+      empty (or short) list may be missing names.
+    * ``feedsStale`` false and ``items`` empty -- *"no off-watch-list name
+      passed the filter since {since}"* (``since`` is the lookback's first
+      instant; ``null`` for ``all``). ``signalled``, ``failedTradeability``
+      and ``awaitingCheck`` say *why* it is empty: nothing signalled, every
+      signalled name failed, or some are still awaiting their first check.
+
+    ``evaluatedAt`` is when this list was derived (candidates are never
+    stored), and ``evaluation`` is when the tradeability cache last judged a
+    ticker. Every instant is aware UTC; the client formats it in
+    ``America/New_York``, as ``NewsFeed.since`` already is.
+    """
+
+    items: list[NewsMover]
+    lookback: NewsLookback
+    since: datetime | None
+    evaluated_at: datetime
+    #: Off-watch tickers with a qualifying signal in the lookback.
+    signalled: int
+    #: Watched tickers that carried one, and are therefore not movers.
+    watched_excluded: int
+    failed_tradeability: int
+    #: Signalled tickers with no cached tradeability verdict yet.
+    awaiting_check: int
+    feeds: list[DiscoveryFeedFreshness]
+    feeds_stale: bool
+    #: The earliest ``staleSince`` among the stale feeds **that have
+    #: delivered** -- a stale feed that never delivered has no such instant
+    #: and is left out here, reported in ``feeds`` with ``staleSince: null``.
+    #: ``None`` when no feed is stale, or when every stale feed never
+    #: delivered (``feedsStale`` is then still true).
+    stale_since: datetime | None
+    evaluation: DiscoveryEvaluation
+    sectors_available: bool
 
 
 class ManualWatch(ApiModel):

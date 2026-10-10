@@ -48,7 +48,7 @@ from corollary.data.news.pollers import (
     watch_interval,
 )
 from corollary.data.news.labelling import labelled_article_ids
-from corollary.data.news.tradeability import RefreshResult
+from corollary.data.news.tradeability import MAX_TICKERS_PER_RUN, RefreshResult
 from corollary.data.news.watchlist import Membership, watch_universe
 from corollary.data.providers.finnhub import CompanyNews, MarketNews
 from corollary.data.providers.interface import AssetDirectory, EquityAsset
@@ -56,7 +56,7 @@ from corollary.data.providers.massive import MassiveNews
 from corollary.data.seeds import SeedError, SpdrSeed
 from corollary.db.models import Base
 from corollary.db.models import NewsArticle as ArticleRow
-from corollary.db.models import WatchSymbol
+from corollary.db.models import SentimentLabelRow, WatchSymbol
 from corollary.db.session import create_db_engine, sqlite_url
 
 #: Thursday 2026-09-24, 10:00 ET -- a full session, inside the watch window.
@@ -1227,26 +1227,163 @@ class NoInputs:
         raise AssertionError("not called")
 
 
-@pytest.mark.asyncio
-async def test_tradeability_candidates_are_todays_et_tags_minus_the_watch(
-    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+def label(
+    sessions: Callable[[], Session],
+    vendor_id: str,
+    ticker: str,
+    *,
+    source: str = "rules",
+    direction: str = "bullish",
+    rule_id: str | None = "guidance_raised",
 ) -> None:
-    await holder.refresh(DirectorySource())
-    now = et(2026, 9, 24, 21, 30)  # 01:30 UTC on the 25th: the ET date is still the 24th
-    seed_rows(
-        sessions,
-        article(NewsFeed.ALPACA_NEWS, "today", published_at=et(2026, 9, 24, 0, 0), tickers=("ORCL", "NVDA")),
-        article(NewsFeed.ALPACA_NEWS, "yday", published_at=et(2026, 9, 23, 23, 59), tickers=("MSFT",)),
-    )
-    result = await refresh_tradeability_cache(
+    """One ``sentiment_label`` row on the stored article ``vendor_id``, written directly."""
+    with sessions() as session:
+        article_id = session.scalars(
+            select(ArticleRow.id).where(ArticleRow.vendor_id == vendor_id)
+        ).one()
+        session.add(
+            SentimentLabelRow(
+                article_id=article_id,
+                ticker=ticker,
+                source=source,
+                tier="rules" if source == "rules" else "vendor",
+                direction=direction,
+                reasoning="raises full-year guidance",
+                rule_id=rule_id if source == "rules" else None,
+                labeled_at=NOW,
+            )
+        )
+        session.commit()
+
+
+async def _refresh(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, now: datetime
+) -> RefreshResult | PollSkipped:
+    return await refresh_tradeability_cache(
         holder=holder,
         provider=NoInputs(),
         universe=UniverseBox("NVDA"),
         session_factory=sessions,
         now=now,
     )
+
+
+@pytest.mark.asyncio
+async def test_tradeability_candidates_are_qualifying_signals_minus_the_watch(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    """Decision 21: only off-watch tickers carrying a qualifying signal, for today's ET date."""
+    await holder.refresh(DirectorySource())
+    now = et(2026, 9, 24, 21, 30)  # 01:30 UTC on the 25th: the ET date is still the 24th
+    seed_rows(
+        sessions,
+        article(NewsFeed.ALPACA_NEWS, "today", published_at=et(2026, 9, 24, 0, 0), tickers=("ORCL", "NVDA")),
+    )
+    label(sessions, "today", "ORCL")
+    label(sessions, "today", "NVDA")
+    result = await _refresh(sessions, holder, now)
     assert isinstance(result, RefreshResult)
     assert fake_refresh == [TradeabilityCall(["ORCL"], date(2026, 9, 24), DIRECTORY)]
+
+
+@pytest.mark.asyncio
+async def test_a_rules_signal_on_a_ticker_the_article_does_not_tag_is_checked(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    """The audit's probe: a MARKET-only Finnhub market story whose headline names ACME."""
+    await holder.refresh(DirectorySource())
+    seed_rows(sessions, article(NewsFeed.FINNHUB_MARKET, "acme", tickers=("MARKET",)))
+    label(sessions, "acme", "ACME")
+    await _refresh(sessions, holder, NOW)
+    assert [call.tickers for call in fake_refresh] == [["ACME"]]
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_day_signal_left_unchecked_is_checked_on_a_later_run(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    """Deferred or errored on the 21st, never cached: asked again on the 24th."""
+    await holder.refresh(DirectorySource())
+    seed_rows(
+        sessions,
+        article(NewsFeed.ALPACA_NEWS, "old", published_at=et(2026, 9, 21, 9, 0), tickers=("ORCL",)),
+    )
+    label(sessions, "old", "ORCL", source="massive", direction="bearish", rule_id=None)
+    await _refresh(sessions, holder, NOW)
+    assert fake_refresh == [TradeabilityCall(["ORCL"], date(2026, 9, 24), DIRECTORY)]
+
+
+@pytest.mark.asyncio
+async def test_a_tagged_ticker_with_no_qualifying_signal_is_not_checked(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    await holder.refresh(DirectorySource())
+    seed_rows(sessions, article(NewsFeed.ALPACA_NEWS, "tagged", tickers=("ORCL", "MSFT")))
+    label(sessions, "tagged", "MSFT", source="massive", direction="neutral", rule_id=None)
+    result = await _refresh(sessions, holder, NOW)
+    assert isinstance(result, PollSkipped) and "qualifying signal" in result.reason
+    assert fake_refresh == []
+
+
+@pytest.mark.asyncio
+async def test_candidates_go_newest_qualifying_signal_first(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder, fake_refresh: list[TradeabilityCall]
+) -> None:
+    await holder.refresh(DirectorySource())
+    seed_rows(
+        sessions,
+        article(NewsFeed.ALPACA_NEWS, "a", published_at=NOW - timedelta(days=3), tickers=("AAPL",)),
+        article(NewsFeed.ALPACA_NEWS, "b", published_at=NOW - timedelta(hours=1), tickers=("MSFT",)),
+        article(NewsFeed.ALPACA_NEWS, "c", published_at=NOW - timedelta(hours=1), tickers=("ORCL",)),
+    )
+    for vendor_id, ticker in (("a", "AAPL"), ("b", "MSFT"), ("c", "ORCL")):
+        label(sessions, vendor_id, ticker)
+    await _refresh(sessions, holder, NOW)
+    assert [call.tickers for call in fake_refresh] == [["MSFT", "ORCL", "AAPL"]]
+
+
+class EmptyBars:
+    """No bars for anyone: every checked ticker fails closed and is cached, no root call."""
+
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    async def has_standard_root(self, ticker: str) -> bool:
+        raise AssertionError("a ticker with no bars never reaches the root check")
+
+    async def adv_daily_bars(self, symbols: Sequence[str], *, session_date: date) -> Any:
+        self.requested.extend(symbols)
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_the_per_run_cap_defers_the_oldest_signals(
+    sessions: Callable[[], Session], holder: AssetDirectoryHolder
+) -> None:
+    await holder.refresh(DirectorySource())
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    tickers = [f"Q{a}{b}" for a in letters for b in letters][: MAX_TICKERS_PER_RUN + 1]
+    seed_rows(
+        sessions,
+        *(
+            article(
+                NewsFeed.FINNHUB_MARKET, f"s{i}", tickers=("MARKET",),
+                published_at=NOW - timedelta(minutes=i + 1),
+            )
+            for i in range(len(tickers))
+        ),
+    )
+    for i, ticker in enumerate(tickers):
+        label(sessions, f"s{i}", ticker)
+    inputs = EmptyBars()
+    result = await refresh_tradeability_cache(
+        holder=holder, provider=inputs, universe=UniverseBox("NVDA"),
+        session_factory=sessions, now=NOW,
+    )
+    assert isinstance(result, RefreshResult)
+    assert [r.ticker for r in result.results] == tickers[:MAX_TICKERS_PER_RUN]
+    assert result.deferred == (tickers[-1],)
+    assert inputs.requested == tickers[:MAX_TICKERS_PER_RUN]
 
 
 class Ipos:
@@ -1265,6 +1402,7 @@ async def test_tradeability_passes_the_ipo_date_source_through_and_defaults_to_n
         sessions,
         article(NewsFeed.ALPACA_NEWS, "today", published_at=et(2026, 9, 24, 0, 0), tickers=("ORCL",)),
     )
+    label(sessions, "today", "ORCL")
     common: dict[str, Any] = dict(
         holder=holder, provider=NoInputs(), universe=UniverseBox("NVDA"),
         session_factory=sessions, now=now,
@@ -1299,6 +1437,7 @@ async def test_a_stale_directory_is_still_used_and_logged_with_its_age(
     await stale.refresh(DirectorySource())
     clock[0] = NOW
     seed_rows(sessions, article(NewsFeed.ALPACA_NEWS, "x", tickers=("ORCL",)))
+    label(sessions, "x", "ORCL")
     with caplog.at_level(logging.WARNING, logger=pollers.__name__):
         result = await refresh_tradeability_cache(
             holder=stale, provider=NoInputs(), universe=UniverseBox("NVDA"),

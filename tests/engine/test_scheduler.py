@@ -618,8 +618,45 @@ async def test_a_job_task_that_dies_is_logged_when_it_dies_and_aclose_survives_i
         assert len(died) == 1
         assert getattr(died[0], "job") == "doomed"
         assert getattr(died[0], "error_type") == "RuntimeError"
+        # A reader of the status sees a job that will not run again, not the
+        # slot it was sleeping toward -- what reads its feed stale (5.3).
+        doomed = scheduler.status()["doomed"]
+        assert doomed.next_run is None and doomed.stopped is True
         await scheduler.aclose()  # does not raise
         await scheduler.aclose()
+
+
+class _NoMoreSlots:
+    """A schedule past its published calendar: it has nothing to say."""
+
+    def next_run(self, after: datetime) -> datetime | None:
+        return None
+
+    def describe(self) -> str:
+        return "never"
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_schedule_runs_out_is_stopped_and_its_status_says_so() -> None:
+    async def body() -> None:
+        return None
+
+    cadence = _NoMoreSlots()
+    scheduler = Scheduler(
+        [ScheduledJob(name="ended", schedule=cadence, run=body, rule="test")],
+        secrets=no_secrets,
+        clock=lambda: WED_1500_ET,
+    )
+    before = scheduler.status()["ended"]
+    assert before.stopped is False and before.next_run is None  # not yet asked
+    assert before.cadence is cadence
+    scheduler.start()
+    await asyncio.wait_for(scheduler.ready(), timeout=10)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    after = scheduler.status()["ended"]
+    assert after.next_run is None and after.stopped is True
+    await scheduler.aclose()
 
 
 @pytest.mark.asyncio

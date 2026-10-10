@@ -108,11 +108,11 @@ from corollary.data.news.labelling import (
     log_label_write,
 )
 from corollary.data.news.retention import PruneResult, prune
+from corollary.data.news.signals import signal_window_start, signalled_tickers
 from corollary.data.news.tradeability import (
     IpoDateSource,
     RefreshResult,
     TradeabilityInputs,
-    recent_article_tickers,
     refresh_tradeability,
     tickers_needing_check,
 )
@@ -1060,10 +1060,11 @@ def _session_start_utc(now: datetime) -> tuple[date, datetime]:
 def _candidates(
     session_factory: SessionFactory, since: datetime, watch: WatchUniverse, session_date: date
 ) -> list[str]:
+    """Decision 21's set: off-watch tickers with a qualifying signal and no verdict today."""
     with session_factory() as session:
-        recent = recent_article_tickers(session, since)
+        signalled = signalled_tickers(session, since=since, watch=watch)
         return tickers_needing_check(
-            session, candidates=recent, watch=watch, session_date=session_date
+            session, candidates=signalled, watch=watch, session_date=session_date
         )
 
 
@@ -1076,7 +1077,22 @@ async def refresh_tradeability_cache(
     now: datetime,
     ipo_dates: IpoDateSource | None = None,
 ) -> RefreshResult | PollSkipped:
-    """Check the off-watch tickers tagged since midnight ET today, for today's ET date.
+    """Check the off-watch tickers carrying a qualifying signal, for today's ET date.
+
+    The candidates are decision 21's: *"only for off-watch tickers that
+    already carry a qualifying signal"* --
+    :func:`~corollary.data.news.signals.signalled_tickers` over the longest
+    bounded Movers lookback
+    (:func:`~corollary.data.news.signals.signal_window_start`), the same read
+    and the same :func:`~corollary.data.news.discovery.qualifies` Movers
+    uses, less every ticker already holding a verdict for today's ET date.
+    Never every tagged ticker: the labeller attaches a rules label to any
+    company a headline names, tagged or not, and a tag with no qualifying
+    label is no signal. A signal from an earlier day whose check was deferred
+    or failed is still in the window, so it is asked again. Newest qualifying
+    signal first, so the per-run cap
+    (:data:`~corollary.data.news.tradeability.MAX_TICKERS_PER_RUN`) defers
+    the oldest.
 
     ``ipo_dates`` settles a partial ADV window (owner decision Q12) and is
     passed straight through; ``None`` fails every such ticker closed with
@@ -1112,13 +1128,15 @@ async def refresh_tradeability_cache(
             },
         )
     built = await universe()
-    session_date, since = _session_start_utc(now)
+    session_date, _ = _session_start_utc(now)
+    since = signal_window_start(now)
     tickers = await asyncio.to_thread(
         _candidates, session_factory, since, built.universe, session_date
     )
     if not tickers:
         return PollSkipped(
-            f"no off-watch ticker tagged since {since.isoformat()} needs a check for {session_date}"
+            f"no off-watch ticker with a qualifying signal since {since.isoformat()} "
+            f"needs a check for {session_date}"
         )
     result = await refresh_tradeability(
         provider=provider,
