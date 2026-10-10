@@ -208,18 +208,22 @@ describe('the news corpus', () => {
     expect(seen).toEqual(new Set(['bullish', 'bearish', 'neutral', 'unclassified']))
   })
 
-  it('covers all three classification tiers', () => {
+  /** Decision 17: two tiers, plus the null of an item nothing labelled. An
+   * `llm` or `provider` here is a fixture claiming a producer Phase 3 does
+   * not have. */
+  it('covers both classification tiers and the untiered case', () => {
     const seen = new Set(NEWS_ITEMS.map((i) => i.tier))
-    expect(seen).toEqual(new Set(['provider', 'rules', 'llm']))
+    expect(seen).toEqual(new Set(['rules', 'vendor', null]))
   })
 
-  /** PRD.md §9: tiers 1 and 2 always publish a direction, so an unlabelled
-   * item is always tier 3 falling below its confidence threshold. If a
-   * `provider` or `rules` item ever reads Unclassified, either the fixture
-   * or the story that produced it is wrong. */
-  it('only ever leaves an LLM-tier item unclassified', () => {
+  /** Decision 4: `unclassified` means no source labelled the item for that
+   * ticker, so there is no tier to name — and a labelled item always names
+   * the source that labelled it. Both directions, because a tierless
+   * `Neutral` is as wrong as a tiered `Unclassified`: a Massive `neutral`
+   * is a label. */
+  it('makes an item unclassified if and only if its tier is null', () => {
     const wrong = [...NEWS_ITEMS, ...NEWS_INCOMING].filter(
-      (i) => i.sentiment === 'unclassified' && i.tier !== 'llm',
+      (i) => (i.sentiment === 'unclassified') !== (i.tier === null),
     )
     expect(wrong).toEqual([])
   })

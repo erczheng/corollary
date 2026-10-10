@@ -240,17 +240,21 @@ describe('the live feed', () => {
     expect(within(cell).getByText('No publisher named')).toHaveClass('sr-only')
   })
 
-  /** Nothing labelled a headline in step 4, which is the system working, not
-   * failing: caution, never error. And no tier chip — no tier produced it. */
-  it('reads Unclassified in caution with no tier chip', async () => {
+  /** No source labelling a headline is the system working, not failing:
+   * caution, never error. And no tier name — no tier produced it, so the
+   * tier slot is an em dash (decision 17). */
+  it('reads Unclassified in caution with an em dash for its tier', async () => {
     render(<App />)
     const table = await feedTable()
-    const label = within(bodyRows(table)[0]).getByText('UNCL')
+    const row = bodyRows(table)[0]
+    const label = within(row).getByText('UNCL')
 
     expect(label).toHaveAttribute('title', 'Unclassified')
     expect(label).toHaveClass('text-caution')
     expect(label).not.toHaveClass('text-error')
-    for (const tier of ['Provider', 'Rules', 'LLM', 'undefined']) {
+    expect(label.closest('td')?.textContent).toContain('—')
+    expect(within(row).getByText('No tier')).toHaveClass('sr-only')
+    for (const tier of ['Vendor', 'Rules', 'Provider', 'LLM', 'undefined', 'null']) {
       expect(within(table).queryByText(tier)).not.toBeInTheDocument()
     }
   })

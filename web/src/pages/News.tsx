@@ -135,16 +135,24 @@ function RailCard({
 // Live feed — real since Phase 3 step 4
 // ---------------------------------------------------------------------- //
 
-/** Which tier labelled the item, or nothing while no tier has.
+/** Which tier labelled the item, or an em dash while no source has.
  *
  * Deliberately not a coloured mark. The sentiment beside it already owns
  * the colour in this row, and a second one would compete with the one
  * carrying the actual claim — this says *who said so*, which is supporting
- * evidence rather than the finding. **A null tier renders nothing**: in
- * step 4 no item is labelled, and a tag reading "undefined" (or a guessed
- * tier) would name a source that produced nothing. */
+ * evidence rather than the finding. **A null tier renders an em dash**,
+ * the publisher cell's convention: the tier is null exactly when the item
+ * is unclassified (decision 17), and a tag reading "undefined" — or a
+ * guessed tier — would name a source that produced nothing. */
 function TierTag({ item }: { item: NewsItem }) {
-  if (item.tier === null) return null
+  if (item.tier === null) {
+    return (
+      <span title="No source labelled this item" className="ml-2 text-caption text-on-surface-variant">
+        <span aria-hidden="true">—</span>
+        <span className="sr-only">No tier</span>
+      </span>
+    )
+  }
   return (
     <span
       title={SENTIMENT_TIER_DETAIL[item.tier]}

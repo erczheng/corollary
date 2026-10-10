@@ -356,18 +356,21 @@ export interface WorkingOrder {
 
 export type Sentiment = 'bullish' | 'bearish' | 'neutral' | 'unclassified'
 
-/** Which of PRD.md §9's three tiers produced a label.
+/** The word for each label, and the honest account of `unclassified`.
  *
- * Carried on the item because the tiers do not have equal standing and the
- * feed should not pretend they do: tier 1 is a score the vendor shipped,
- * tier 2 is a deterministic pattern match on a high-signal event, and tier
- * 3 is the LLM. Settings reports accuracy *per tier*, so a reader comparing
- * that table against a headline has to know which row the headline belongs
- * to.
+ * Which source produced a label is `SentimentTier`, carried on the item
+ * because the sources do not have equal standing and the feed should not
+ * pretend they do: `vendor` is Massive's per-ticker insight, published as
+ * shipped, and `rules` is a deterministic pattern match on a high-signal
+ * event. Settings reports accuracy per source, so a reader comparing that
+ * table against a headline has to know which row the headline belongs to.
  *
- * It is also the only honest account of `unclassified`: tiers 1 and 2
- * always publish a direction, so an unlabelled item is always tier 3
- * falling below its confidence threshold. Silence beats a wrong label. */
+ * In Phase 3 `Unclassified` means **no source labelled the item for that
+ * ticker** — no rule matched the headline, and Massive carried no insight
+ * for that ticker on that article. It is not a low-confidence label and not
+ * a failure: a Massive `neutral` is a label and reads `Neutral`, never
+ * `Unclassified`. An unclassified item is never graded, has no tier, and
+ * renders in `caution`, not `error`. Silence beats a wrong label. */
 export const SENTIMENT_LABEL: Record<Sentiment, string> = {
   bullish: 'Bullish',
   bearish: 'Bearish',
@@ -396,8 +399,8 @@ export const SENTIMENT_SHORT: Record<Sentiment, string> = {
  * sets the row height for the sake of a two-word label. Chips stay for
  * places with room to breathe.
  *
- * `unclassified` takes `caution`, never `error` — the LLM declining to
- * commit is the system working as PRD.md §9 specifies, not a failure. And
+ * `unclassified` takes `caution`, never `error` — no source having
+ * labelled an item is the system working, not a failure. And
  * `neutral` the token is 4.27:1 and below the text floor, so a neutral
  * label reads in `on-surface-variant` instead. */
 export const SENTIMENT_CLASS: Record<Sentiment, string> = {
@@ -407,18 +410,28 @@ export const SENTIMENT_CLASS: Record<Sentiment, string> = {
   unclassified: 'text-caution',
 }
 
-export type SentimentTier = 'provider' | 'rules' | 'llm'
+/** Which source produced a label — decision 17.
+ *
+ * Two members, because Phase 3 has two producers. `'vendor'` was
+ * `'provider'`, renamed because the label is sourced from Massive. There is
+ * deliberately **no `'llm'` member**, not even reserved for Phase 4: a
+ * member with no producer is a member a fixture can claim, and a feed row
+ * reading "LLM" in a phase with no model would be a fixture impersonating a
+ * tier. Phase 4 adds it back alongside the thing that produces it.
+ *
+ * Not `Recommendation.origin`'s `'llm'`, which is LLM *origination* and a
+ * different question. */
+export type SentimentTier = 'rules' | 'vendor'
 
 export const SENTIMENT_TIER_LABEL: Record<SentimentTier, string> = {
-  provider: 'Provider',
   rules: 'Rules',
-  llm: 'LLM',
+  vendor: 'Vendor',
 }
 
 export const SENTIMENT_TIER_DETAIL: Record<SentimentTier, string> = {
-  provider: 'Tier 1 — a score shipped by Finnhub or Alpaca, published as-is.',
-  rules: 'Tier 2 — a deterministic headline pattern for a high-signal event.',
-  llm: 'Tier 3 — the LLM, batched 20 headlines per call and cached by article ID. Publishes a direction only above its confidence threshold.',
+  rules: 'A deterministic headline pattern for a high-signal event.',
+  vendor:
+    "Massive's per-ticker insight — the score and its reasoning are Massive's, published as-is.",
 }
 
 export interface NewsItem {
@@ -433,10 +446,11 @@ export interface NewsItem {
    * never the string "null". */
   publisher: string | null
   sector: string
-  /** Which tier of PRD.md §9 produced `sentiment`. **`null` while nothing
-   * has labelled the item** — every item in Phase 3 step 4, which serves
-   * `unclassified` with no tier. A `SENTIMENT_TIER_LABEL[item.tier]` lookup
-   * without the null check reads `undefined`. */
+  /** Which source produced `sentiment`. **`null` exactly when `sentiment`
+   * is `'unclassified'`** — an unclassified item is one no source labelled,
+   * so there is no tier to name, and every labelled item names one. The
+   * feed renders an em dash for null. A `SENTIMENT_TIER_LABEL[item.tier]`
+   * lookup without the null check reads `undefined`. */
   tier: SentimentTier | null
   /** The article itself. Opens in a new tab. */
   url: string
