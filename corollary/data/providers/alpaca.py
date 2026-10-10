@@ -82,6 +82,11 @@ from typing import Any, Callable, Final
 import httpx
 
 from corollary.calendars import NYSE_TZ, nyse_close_at
+from corollary.data.calendar_dividends import (
+    CashDividend,
+    CashDividendRead,
+    SkippedDividend,
+)
 from corollary.data.news.article import (
     NewsAccessDenied,
     NewsArticle,
@@ -1872,6 +1877,87 @@ class AlpacaProvider(MarketDataProvider):
             end=end.astimezone(timezone.utc),
         )
 
+    # ------------------------------------------------------ corporate actions
+
+    async def cash_dividends(
+        self, *, symbols: Sequence[str], start: date, end: date
+    ) -> CashDividendRead:
+        """Announced cash dividends for ``symbols``, every page, with the rows it could not read.
+
+        ``GET /v1/corporate-actions?types=cash_dividend`` on the **data** host
+        (decision 15: its bucket in the shared limiter). Unit 7.2b-A; the
+        window arithmetic and the ``ex_date`` filter are
+        :mod:`corollary.data.calendar_dividends`'s, not this method's, because
+        **Alpaca's ``start``/``end`` filter on process/payable date, not on
+        ``ex_date``** (probed 2026-09-24 and 2026-10-10). This returns what the
+        window returned.
+
+        ``symbols`` is sent sorted, so the same universe is the same URL. It
+        is the difference between one page for the watch universe and three
+        for the whole market (2,156 rows over +365 days in the probe), and the
+        feeds table budgets this read at two requests a day.
+
+        **``rate`` is an unquoted JSON number**, and arrives here as the
+        ``Decimal`` of its literal text via ``_decode``'s ``parse_float``. An
+        integer rate (13 of 2,156 rows in the probe, e.g. ``1``) decodes as an
+        ``int``, which :func:`~corollary.wire.as_decimal` turns into
+        ``Decimal(1)`` -- exact, since an ``int`` is. No float exists on the
+        path. A row whose rate (or id, symbol, ex-date, or ``special`` flag)
+        is missing or unreadable is **skipped, not coerced**, and returned in
+        :attr:`CashDividendRead.skipped` with what of it was readable.
+
+        A page whose ``corporate_actions`` carries no ``cash_dividends`` key
+        is read as no rows: asked for one type, an empty page may omit it.
+        (Assumed, not recorded: the probe had no empty window to observe.) A
+        body of any other shape raises :class:`ProviderError`, as does any
+        HTTP failure.
+        """
+        normalised = sorted({normalize_symbol(s) for s in symbols})
+        if not normalised:
+            raise ValueError("cash_dividends needs at least one symbol")
+        bad = [s for s in normalised if not EQUITY_SYMBOL_RE.fullmatch(s)]
+        if bad:
+            raise ValueError(f"not equity symbols: {bad!r}")
+        if end < start:
+            raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
+        pages = await self._paginate(
+            DATA_BASE_URL,
+            _CORPORATE_ACTIONS_PATH,
+            {
+                "symbols": ",".join(normalised),
+                "types": _CASH_DIVIDEND_TYPE,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "limit": _CORPORATE_ACTIONS_PAGE_LIMIT,
+            },
+        )
+        dividends: list[CashDividend] = []
+        skipped: list[SkippedDividend] = []
+        for page in pages:
+            for raw in self._cash_dividend_rows(page):
+                parsed = _cash_dividend(raw, self._scrub)
+                if isinstance(parsed, CashDividend):
+                    dividends.append(parsed)
+                else:
+                    skipped.append(parsed)
+        return CashDividendRead(dividends=tuple(dividends), skipped=tuple(skipped))
+
+    def _cash_dividend_rows(self, page: Any) -> list[Any]:
+        """One page's ``cash_dividends`` array, or a :class:`ProviderError` naming the shape."""
+        actions = page.get("corporate_actions") if isinstance(page, Mapping) else None
+        if not isinstance(actions, Mapping):
+            raise ProviderError(
+                f"GET {_CORPORATE_ACTIONS_PATH} answered without a corporate_actions "
+                f"object: {self._scrub(repr(page))}"
+            )
+        rows = actions.get("cash_dividends", [])
+        if not isinstance(rows, list):
+            raise ProviderError(
+                f"GET {_CORPORATE_ACTIONS_PATH} answered cash_dividends as a "
+                f"{type(rows).__name__}, not a list: {self._scrub(repr(rows))}"
+            )
+        return rows
+
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -2180,6 +2266,82 @@ def _log_asset_skipped(symbol: str, cause: str) -> None:
             "cause": cause,
         },
     )
+
+
+# --------------------------------------------------------------------------
+# Corporate-action rows (Phase 3 step 7, unit 7.2b-A)
+# --------------------------------------------------------------------------
+
+_CORPORATE_ACTIONS_PATH: Final = "/v1/corporate-actions"
+_CASH_DIVIDEND_TYPE: Final = "cash_dividend"
+#: The reference's maximum; the watch universe fits one page.
+_CORPORATE_ACTIONS_PAGE_LIMIT: Final = 1000
+#: Alpaca documents ``interest`` and ``return_of_capital``; anything shaped
+#: like an identifier is carried, anything else is an unreadable row.
+_SUB_TYPE_RE: Final = re.compile(r"[a-z][a-z_]{0,39}")
+
+
+def _cash_dividend(row: Any, scrub: _Scrub) -> CashDividend | SkippedDividend:
+    """One ``cash_dividends`` row, or the reason it was refused and what of it was readable.
+
+    Identity first (id, symbol, ex-date), so a row refused for its rate
+    still says which dividend it was.
+    """
+    vendor_id: str | None = None
+    symbol: str | None = None
+    ex_date: date | None = None
+    try:
+        if not isinstance(row, Mapping):
+            raise ValueError(f"row is a {type(row).__name__}, not an object")
+        raw_id = row.get("id")
+        if isinstance(raw_id, str) and raw_id.strip():
+            vendor_id = raw_id.strip()
+        raw_symbol = row.get("symbol")
+        if isinstance(raw_symbol, str) and raw_symbol.strip():
+            symbol = normalize_symbol(raw_symbol)
+        with suppress(WireFormatError):
+            ex_date = as_date(row.get("ex_date"))
+        if vendor_id is None:
+            raise ValueError(f"id is {raw_id!r}, not a non-blank string")
+        if symbol is None or not EQUITY_SYMBOL_RE.fullmatch(symbol):
+            raise ValueError(f"symbol is {raw_symbol!r}, not an equity symbol")
+        if ex_date is None:
+            raise ValueError(f"ex_date is {row.get('ex_date')!r}, not a YYYY-MM-DD date")
+        if row.get("rate") is None:
+            raise ValueError("rate is missing")
+        try:
+            rate = as_decimal(row["rate"])
+        except (TypeError, WireFormatError) as exc:
+            raise ValueError(f"rate is unreadable: {exc}") from exc
+        if rate is None:
+            raise ValueError("rate is missing")
+        if rate <= 0:
+            raise ValueError(f"rate {rate} is not positive")
+        special = row.get("special")
+        if not isinstance(special, bool):
+            raise ValueError(f"special is {special!r}, not a boolean")
+        sub_type = row.get("sub_type")
+        if sub_type is not None and not (
+            isinstance(sub_type, str) and _SUB_TYPE_RE.fullmatch(sub_type)
+        ):
+            raise ValueError(f"sub_type is {sub_type!r}, not an identifier")
+        foreign = row.get("foreign")
+        return CashDividend(
+            vendor_id=vendor_id,
+            symbol=symbol,
+            ex_date=ex_date,
+            rate=rate,
+            special=special,
+            sub_type=sub_type,
+            foreign=foreign if isinstance(foreign, bool) else None,
+        )
+    except ValueError as exc:
+        return SkippedDividend(
+            vendor_id=None if vendor_id is None else scrub(vendor_id),
+            symbol=None if symbol is None else scrub(symbol),
+            ex_date=ex_date,
+            reason=scrub(str(exc)),
+        )
 
 
 # --------------------------------------------------------------------------
