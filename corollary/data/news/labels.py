@@ -15,8 +15,11 @@ Shared by ``rules.py`` and ``vendor.py`` so the two tiers cannot drift apart on
 what a label is. Pure: no I/O, no clock.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Final
 
 __all__ = ["Direction", "LabelSource", "SentimentLabel", "SentimentTier"]
 
@@ -44,10 +47,13 @@ class LabelSource(StrEnum):
 
 
 #: Which tier each source belongs to. A label claiming another pairing is refused.
-SOURCE_TIER: dict[LabelSource, SentimentTier] = {
-    LabelSource.RULES: SentimentTier.RULES,
-    LabelSource.MASSIVE: SentimentTier.VENDOR,
-}
+#: Read-only: a caller re-pairing a source would change what every label means.
+SOURCE_TIER: Final[Mapping[LabelSource, SentimentTier]] = MappingProxyType(
+    {
+        LabelSource.RULES: SentimentTier.RULES,
+        LabelSource.MASSIVE: SentimentTier.VENDOR,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

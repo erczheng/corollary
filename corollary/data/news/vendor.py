@@ -36,12 +36,23 @@ One label per ticker
 --------------------
 
 ``sentiment_label`` is UNIQUE ``(article_id, ticker, source)``. Should an
-article carry two insights for one ticker, they collapse to the first when
-their directions agree, and to **no label** when they disagree -- PRD section
-9's *"silence beats a wrong label"* -- with the ticker returned in
-:attr:`VendorLabelling.conflicting`. No recorded response has shown either
-case; both are handled so that neither can reach the table as a constraint
-violation or a silent pick.
+article carry several insights for one ticker:
+
+* **All agree in direction** -- one label, from the first; the rest are
+  returned in :attr:`VendorLabelling.duplicates`, collapsed but not dropped.
+* **Two known values disagree** -- **no label** for that ticker, PRD section
+  9's *"silence beats a wrong label"*, and the ticker is returned in
+  :attr:`VendorLabelling.conflicting`.
+* **A known value beside an unknown one** -- also conflicting, so also no
+  label. The unknown value could be the vendor's word for the opposite
+  direction, so the known one is not safe to publish alone. The unknown
+  insight is still in :attr:`VendorLabelling.unmapped`.
+* **Only unknown values** -- unmapped, and not conflicting: there is nothing
+  known for them to disagree with.
+
+No recorded response has shown any of these; they are handled so that none
+can reach the table as a constraint violation, a silent pick, or a silent
+drop (rule 8's spirit).
 """
 
 from collections.abc import Mapping
@@ -79,8 +90,11 @@ class VendorLabelling:
     labels: tuple[SentimentLabel, ...]
     #: Insights whose ``sentiment`` is not one of Massive's four values.
     unmapped: tuple[VendorInsight, ...]
-    #: Tickers given two insights that disagree in direction, so given none.
+    #: Tickers given insights that disagree -- two known directions, or a known
+    #: value beside an unknown one -- so given no label. First-seen order.
     conflicting: tuple[str, ...]
+    #: Insights collapsed into an earlier one for the same ticker that agrees.
+    duplicates: tuple[VendorInsight, ...]
 
 
 def vendor_labels(article: NewsArticle) -> VendorLabelling:
@@ -89,32 +103,39 @@ def vendor_labels(article: NewsArticle) -> VendorLabelling:
     A ticker the article is tagged with but no insight names gets no label;
     an article with no insights gets none at all. Same article, same result.
     """
-    chosen: dict[str, SentimentLabel] = {}
-    conflicting: list[str] = []
+    grouped: dict[str, list[VendorInsight]] = {}
     unmapped: list[VendorInsight] = []
     for insight in article.insights:
-        direction = MASSIVE_SENTIMENT_DIRECTION.get(insight.sentiment)
-        if direction is None:
+        grouped.setdefault(insight.ticker, []).append(insight)
+        if insight.sentiment not in MASSIVE_SENTIMENT_DIRECTION:
             unmapped.append(insight)
+
+    labels: list[SentimentLabel] = []
+    conflicting: list[str] = []
+    duplicates: list[VendorInsight] = []
+    for ticker, group in grouped.items():
+        known = [i for i in group if i.sentiment in MASSIVE_SENTIMENT_DIRECTION]
+        if not known:
+            continue  # unknown values only: already in ``unmapped``
+        directions = {MASSIVE_SENTIMENT_DIRECTION[i.sentiment] for i in known}
+        if len(directions) > 1 or len(known) < len(group):
+            conflicting.append(ticker)
             continue
-        if insight.ticker in conflicting:
-            continue
-        held = chosen.get(insight.ticker)
-        if held is not None:
-            if held.direction is not direction:
-                del chosen[insight.ticker]
-                conflicting.append(insight.ticker)
-            continue
-        chosen[insight.ticker] = SentimentLabel(
-            ticker=insight.ticker,
-            source=LabelSource.MASSIVE,
-            tier=SentimentTier.VENDOR,
-            direction=direction,
-            reasoning=insight.reasoning,
-            rule_id=None,
+        first = known[0]
+        duplicates.extend(known[1:])
+        labels.append(
+            SentimentLabel(
+                ticker=ticker,
+                source=LabelSource.MASSIVE,
+                tier=SentimentTier.VENDOR,
+                direction=MASSIVE_SENTIMENT_DIRECTION[first.sentiment],
+                reasoning=first.reasoning,
+                rule_id=None,
+            )
         )
     return VendorLabelling(
-        labels=tuple(chosen.values()),
+        labels=tuple(labels),
         unmapped=tuple(unmapped),
         conflicting=tuple(conflicting),
+        duplicates=tuple(duplicates),
     )

@@ -205,6 +205,38 @@ def test_a_repeated_insight_that_agrees_is_one_label_the_first() -> None:
         ),
     )
     assert result.conflicting == ()
+    # Collapsed, not dropped: the second insight is returned for the caller to log.
+    assert result.duplicates == (again,)
+    assert result.unmapped == ()
+
+
+def test_an_unknown_sentiment_beside_a_known_one_labels_that_ticker_with_nothing() -> None:
+    """SYNTHETIC: {AAA: positive} and {AAA: <unknown>} is not a bullish AAA.
+
+    The unknown value could be the vendor's word for the opposite direction,
+    so the ticker is conflicting -- silence beats a wrong label -- and the
+    unknown insight is still reported as unmapped. The order does not matter.
+    """
+    known = VendorInsight(ticker="AAA", sentiment="positive", reasoning="up")
+    odd = VendorInsight(ticker="AAA", sentiment="very_negative", reasoning="?")
+    other = VendorInsight(ticker="BBB", sentiment="negative", reasoning="down")
+    for insights in ((known, odd, other), (odd, known, other)):
+        result = vendor_labels(article(*insights))
+        assert [l.ticker for l in result.labels] == ["BBB"]
+        assert result.conflicting == ("AAA",)
+        assert result.unmapped == (odd,)
+        assert result.duplicates == ()
+
+
+def test_two_unknown_sentiments_on_one_ticker_are_unmapped_not_conflicting() -> None:
+    """SYNTHETIC: nothing known to disagree with -- reported as unmapped only."""
+    one = VendorInsight(ticker="AAA", sentiment="strange", reasoning=None)
+    two = VendorInsight(ticker="AAA", sentiment="stranger", reasoning=None)
+    result = vendor_labels(article(one, two))
+    assert result.labels == ()
+    assert result.unmapped == (one, two)
+    assert result.conflicting == ()
+    assert result.duplicates == ()
 
 
 def test_a_repeated_insight_that_disagrees_labels_that_ticker_with_nothing() -> None:
@@ -216,6 +248,7 @@ def test_a_repeated_insight_that_disagrees_labels_that_ticker_with_nothing() -> 
     assert [l.ticker for l in result.labels] == ["BBB"]
     assert result.labels[0].reasoning is None
     assert result.conflicting == ("AAA",)
+    assert result.duplicates == ()
 
 
 def test_an_insight_naming_an_untagged_ticker_still_labels_it() -> None:
@@ -237,6 +270,18 @@ def test_the_same_article_gives_the_same_labels_in_the_same_order() -> None:
 
 
 # ------------------------------------------------------------- the record
+
+
+def test_source_tier_cannot_be_edited_at_runtime() -> None:
+    """A mutable table would let any caller re-pair a source with another tier."""
+    from corollary.data.news.labels import SOURCE_TIER
+
+    assert dict(SOURCE_TIER) == {
+        LabelSource.RULES: SentimentTier.RULES,
+        LabelSource.MASSIVE: SentimentTier.VENDOR,
+    }
+    with pytest.raises(TypeError):
+        SOURCE_TIER[LabelSource.MASSIVE] = SentimentTier.RULES  # type: ignore[index]
 
 
 def test_a_label_refuses_a_source_and_tier_that_do_not_pair() -> None:
