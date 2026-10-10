@@ -6,8 +6,10 @@
 ``tests/fixtures/record_massive.py`` with the exact query this provider
 sends -- ascending, ``published_utc.gt`` -- at ``limit=3`` so the second page
 is a real ``next_url`` follow. ``p4_unauthorized`` is the same recorder's
-``unauthorized`` mode: a real 401 from a deliberately invalid key. Bodies
-built in test code are **synthetic** and say so.
+``unauthorized`` mode: a real 401 from a deliberately invalid key.
+``p5_reference_news_mixed_insight`` is its ``mixed`` mode (step 5): a whole,
+unmodified response carrying a real ``mixed`` insight. Bodies built in test
+code are **synthetic** and say so.
 """
 
 import json
@@ -226,8 +228,27 @@ async def test_the_recorded_page_decodes_into_articles_with_insights() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_recorded_mixed_insight_decodes_verbatim() -> None:
+    """Massive's real ``mixed`` value reaches the article untouched; the
+    labeller, not the transport, decides what it means (``vendor.py``)."""
+    body = fixture_body("p5_reference_news_mixed_insight")
+    assert "next_url" not in body
+    provider, _ = build(lambda request: (200, json.dumps(body)))
+    result = await provider.news_since(SINCE)
+    (article,) = result.articles
+    assert [(i.ticker, i.sentiment) for i in article.insights] == [
+        ("UEC", "negative"),
+        ("CCJ", "negative"),
+        ("UUUU", "mixed"),
+        ("URG", "neutral"),
+    ]
+    assert all(i.reasoning for i in article.insights)
+
+
+@pytest.mark.asyncio
 async def test_a_mixed_insight_is_kept_verbatim() -> None:
-    """SYNTHETIC: ``mixed`` is real (3 of 7,843 in step 0) but not on disk yet."""
+    """SYNTHETIC: case and whitespace normalised, the value itself untouched.
+    The recorded counterpart is the test above."""
     body = json.loads(synthetic_page(["2026-09-24T12:55:00Z"], next_url=None))
     body["results"][0]["insights"] = [
         {"ticker": "nvda", "sentiment": "mixed", "sentiment_reasoning": "both ways"}

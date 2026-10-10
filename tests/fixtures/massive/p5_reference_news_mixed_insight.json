@@ -1,0 +1,64 @@
+{
+  "recorded_at": "2026-10-10T05:01:48+00:00",
+  "request": "https://api.massive.com/v2/reference/news?ticker=UUUU&published_utc.gte=2026-09-16T16%3A32%3A00Z&published_utc.lte=2026-09-16T16%3A32%3A00Z&limit=10&order=asc&sort=published_utc",
+  "status_code": 200,
+  "note": "A whole, unmodified response. Article a964532f3cf8066943f51dc6ed8dff3703f49ad639a8ec684746dabb3b033019 carries a real 'mixed' insight for UUUU; it was found by scanning ascending limit=1000 pages from 2026-09-10 (scanned pages not stored), then re-requested by ticker with its exact published_utc as both bounds.",
+  "body": {
+    "results": [
+      {
+        "id": "a964532f3cf8066943f51dc6ed8dff3703f49ad639a8ec684746dabb3b033019",
+        "publisher": {
+          "name": "Zacks Investment Research",
+          "homepage_url": "https://www.zacks.com/",
+          "logo_url": "https://s3.massive.com/public/assets/news/logos/zacks.png",
+          "favicon_url": "https://s3.massive.com/public/assets/news/favicons/zacks.ico"
+        },
+        "title": "UEC Gears Up to Report Q4 Earnings: What's in Store for the Stock?",
+        "author": "Na",
+        "published_utc": "2026-09-16T16:32:00Z",
+        "article_url": "https://www.zacks.com/stock/news/2990850/uec-gears-up-to-report-q4-earnings-what-s-in-store-for-the-stock?cid=CS-ZC-FT-analyst_blog|earnings_preview-2990850",
+        "tickers": [
+          "UEC",
+          "CCJ",
+          "UUUU",
+          "URG"
+        ],
+        "image_url": "https://staticx-tuner.zacks.com/images/articles/main/be/10103.jpg",
+        "description": "Uranium Energy (UEC) is expected to report $9 million in Q4 revenues versus nil a year ago, but still post a loss of four cents per share. While uranium prices rose 16% year-over-year, higher operating, exploration, and development costs are expected to offset revenue gains. The company's shares have declined 18.1% over the past year.",
+        "keywords": [
+          "uranium mining",
+          "Q4 earnings",
+          "uranium prices",
+          "exploration stage",
+          "inventory sales",
+          "operating expenses"
+        ],
+        "insights": [
+          {
+            "ticker": "UEC",
+            "sentiment": "negative",
+            "sentiment_reasoning": "Expected to report a loss despite revenue growth; higher operating and exploration costs offset increased revenues; stock has underperformed the industry with an 18.1% decline over the past year; Earnings ESP of 0% indicates no predictive advantage for an earnings beat."
+          },
+          {
+            "ticker": "CCJ",
+            "sentiment": "negative",
+            "sentiment_reasoning": "Total revenues declined 7% in Q2 2026; uranium sales volumes fell 18%; adjusted earnings fell 75% year-over-year due to lower uranium sales volumes and decline in equity earnings from Westinghouse."
+          },
+          {
+            "ticker": "UUUU",
+            "sentiment": "mixed",
+            "sentiment_reasoning": "Q2 revenues surged 496% to $25 million, showing strong growth; however, posted a wider loss of 13 cents per share compared to 10 cents in the year-ago quarter, indicating profitability challenges despite revenue expansion."
+          },
+          {
+            "ticker": "URG",
+            "sentiment": "neutral",
+            "sentiment_reasoning": "Q2 revenues increased to $14.37 million from $10.44 million year-over-year; uranium sales volume increased from 165,000 to 215,000 pounds; quarterly loss of four cents per share was in line with the year-ago quarter, showing stable performance."
+          }
+        ]
+      }
+    ],
+    "status": "OK",
+    "request_id": "75b0e03183498b6336b2adbacec12fbd",
+    "count": 1
+  }
+}
