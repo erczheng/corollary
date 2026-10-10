@@ -1511,8 +1511,9 @@ class ApiKeyPresence(ApiModel):
 #: ``Sentiment`` in ``types.ts``, value for value -- lower case on the wire;
 #: ``SENTIMENT_LABEL`` is where the client capitalises it.
 NewsSentiment: TypeAlias = Literal["bullish", "bearish", "neutral", "unclassified"]
-#: ``SentimentTier`` in ``types.ts``.
-NewsSentimentTier: TypeAlias = Literal["provider", "rules", "llm"]
+#: ``SentimentTier`` in ``types.ts`` -- decision 17: the two Phase 3 sources,
+#: and no ``llm`` member until Phase 4 builds a producer for it.
+NewsSentimentTier: TypeAlias = Literal["rules", "vendor"]
 #: ``Lookback`` in ``web/src/lib/news.ts`` (``LOOKBACKS``).
 NewsLookback: TypeAlias = Literal["today", "3d", "1w", "2w", "all"]
 #: ``watch`` (the default): watch-universe tickers plus ``MARKET``. ``all``:
