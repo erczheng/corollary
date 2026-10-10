@@ -294,7 +294,9 @@ def _release_date_row(row: object) -> FredReleaseDate:
     release_id = row.get("release_id")
     # bool is an int subclass; True is not release 1.
     if isinstance(release_id, bool) or not isinstance(release_id, int):
-        raise FredError(f"releases/dates: release_id {release_id!r} is not an integer")
+        raise FredError(
+            f"releases/dates: release_id {str(release_id)[:40]!r} is not an integer"
+        )
     name = row.get("release_name")
     if not isinstance(name, str) or not name.strip():
         raise FredError(f"releases/dates: release {release_id} has no release_name")
@@ -321,7 +323,9 @@ def parse_release_dates(payload: Any) -> FredReleaseDatesPage:
         raise FredError("releases/dates: the response carries no release_dates list")
     count = payload.get("count")
     if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-        raise FredError(f"releases/dates: count {count!r} is not a non-negative integer")
+        raise FredError(
+            f"releases/dates: count {str(count)[:40]!r} is not a non-negative integer"
+        )
     return FredReleaseDatesPage(count=count, rows=tuple(_release_date_row(r) for r in rows))
 
 
@@ -497,7 +501,17 @@ class FredProvider:
         Refused (:class:`FredError`), never returned short: a page that comes
         back empty before ``count`` is reached, and a ``count`` that would take
         more than :data:`RELEASE_DATES_MAX_PAGES` pages. A partial calendar
-        presented as a whole one would hide a release.
+        presented as a whole one would hide a release -- and since unit
+        7.2c-1 a complete fetch is what lets the store *withdraw* rows the
+        fetch no longer lists, so a short read would delete real events.
+
+        ``count`` is checked, not trusted (unit 7.2c-1). Offset paging over a
+        list that changes between requests repeats or skips rows while the
+        total still reaches ``count``. So the read is refused when a later
+        page states a different ``count`` from the first, and when the number
+        of distinct ``(release_id, date)`` pairs read is not exactly
+        ``count`` -- a repeated row, within a page or across two, or more rows
+        than stated.
         """
         if end < start:
             raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
@@ -506,14 +520,30 @@ class FredProvider:
                 f"page_limit must be 1..{RELEASE_DATES_PAGE_LIMIT}, got {page_limit}"
             )
         rows: list[FredReleaseDate] = []
+        stated: int | None = None
         for page_number in range(RELEASE_DATES_MAX_PAGES):
             payload = await self._get(
                 "/releases/dates",
                 release_dates_params(start, end, offset=len(rows), limit=page_limit),
             )
             page = parse_release_dates(payload)
+            if stated is None:
+                stated = page.count
+            elif page.count != stated:
+                raise FredError(
+                    f"releases/dates: page {page_number + 1} states a count of "
+                    f"{page.count}, page 1 stated {stated}; the calendar changed while "
+                    "it was being paged, so offsets no longer line up"
+                )
             if len(rows) + len(page.rows) >= page.count:
                 rows.extend(page.rows)
+                distinct = len({(r.release_id, r.date) for r in rows})
+                if distinct != page.count:
+                    raise FredError(
+                        f"releases/dates: read {len(rows)} rows, {distinct} distinct "
+                        f"(release_id, date) pairs, against a stated count of "
+                        f"{page.count}; refused rather than presented as the whole calendar"
+                    )
                 rows.sort(key=lambda r: (r.date, r.release_id))
                 return rows
             if not page.rows:

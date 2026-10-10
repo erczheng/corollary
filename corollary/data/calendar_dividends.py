@@ -60,7 +60,12 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final, Protocol
 
-from corollary.data.calendar_event import CalendarEventInput, CalendarKind, CalendarSource
+from corollary.data.calendar_event import (
+    VENDOR_ID_MAX,
+    CalendarEventInput,
+    CalendarKind,
+    CalendarSource,
+)
 from corollary.data.news.watchlist import MARKET_TICKER
 from corollary.data.providers.interface import ProviderError
 from corollary.data.seeds import normalize_symbol
@@ -71,6 +76,7 @@ __all__ = [
     "DIVIDEND_REQUEST_LOOKBACK",
     "DIVIDEND_TITLE",
     "DIVIDEND_UNIT",
+    "DIVIDEND_UNIT_FOREIGN",
     "CashDividend",
     "CashDividendRead",
     "CashDividendSource",
@@ -96,8 +102,17 @@ DIVIDEND_REQUEST_LOOKBACK: Final = timedelta(days=7)
 
 #: What ``actual`` is measured in. Alpaca's ``rate`` is cash per share; the
 #: reference gives it no currency field, and every row the probe saw is a
-#: US-listed security quoted in dollars.
+#: US-listed security quoted in dollars. Used only on a row whose ``foreign``
+#: is ``False``.
 DIVIDEND_UNIT: Final = "USD/share"
+
+#: ``unit`` on a row whose ``foreign`` is ``True`` -- or unreadable. The rate
+#: is kept, but no currency is claimed for it: a foreign issuer (the probe's
+#: ADRs, ``AAGRY`` and ``ABEV``) declares in its home currency, and nothing
+#: in the row says whether Alpaca's ``rate`` is that amount or a converted
+#: dollar figure. "USD" there would be an assertion with no evidence behind
+#: it (unit 7.2c-1).
+DIVIDEND_UNIT_FOREIGN: Final = "per share"
 
 #: The frontend's own wording for an ex-date row (``mockData.ts``'s fixtures).
 DIVIDEND_TITLE: Final = "Ex-dividend date"
@@ -109,9 +124,14 @@ class CashDividend:
 
     ``sub_type`` is the vendor's own qualifier (Alpaca documents
     ``interest`` and ``return_of_capital``), ``None`` on an ordinary
-    dividend. ``foreign`` is carried as read and deliberately **not** used:
+    dividend. ``foreign`` is carried as read and kept out of the title:
     Alpaca documents it as a required boolean with no description, and a
     title asserting what it means would be a claim the data does not make.
+    It decides one thing only -- whether the ``unit`` may say ``USD``
+    (:data:`DIVIDEND_UNIT_FOREIGN`). ``vendor_id`` is at most
+    :data:`~corollary.data.calendar_event.VENDOR_ID_MAX` characters, the
+    column's width, so a longer one is a skipped row rather than a refused
+    batch.
     """
 
     vendor_id: str
@@ -125,6 +145,11 @@ class CashDividend:
     def __post_init__(self) -> None:
         if not isinstance(self.vendor_id, str) or not self.vendor_id.strip():
             raise ValueError("a dividend needs the vendor's id")
+        if len(self.vendor_id) > VENDOR_ID_MAX:
+            raise ValueError(
+                f"the vendor's id is {len(self.vendor_id)} characters; the column "
+                f"holds {VENDOR_ID_MAX}"
+            )
         if not isinstance(self.symbol, str) or self.symbol != normalize_symbol(self.symbol):
             raise ValueError(f"symbol {self.symbol!r} is not a normalised symbol")
         if not self.symbol:
@@ -263,14 +288,25 @@ def dividend_events(
     """The calendar rows ``read`` holds for ``watch`` in the window, and the skips that matter.
 
     Pure. Keeps a dividend when its symbol is watched and
-    ``today <= ex_date <= today + DIVIDEND_EX_DATE_HORIZON``. A vendor id
-    listed twice keeps its first row; the second is skipped, since the store
-    refuses a batch that names one key twice. Skipped rows are returned only
-    if they could have been calendar rows (watched, in the window, or with
-    those parts unreadable); the rest are not this calendar's concern.
+    ``today <= ex_date <= today + DIVIDEND_EX_DATE_HORIZON``. Skipped rows are
+    returned only if they could have been calendar rows (watched, in the
+    window, or with those parts unreadable); the rest are not this
+    calendar's concern.
 
-    Events are sorted by ``(date, ticker, vendor_id)`` so identical inputs give
-    identical output whatever order the vendor paged in.
+    **One vendor id listed more than once** (the store refuses a batch that
+    names one key twice). Identical copies collapse to one row. Copies that
+    disagree -- including a readable copy beside an unreadable one -- are
+    **all** skipped and reported as conflicting: nothing says which is
+    current, and keeping the first would make the result depend on page
+    order. The same rule as the Finnhub mapper's.
+
+    A row :class:`~corollary.data.calendar_event.CalendarEventInput` refuses
+    (a rate too wide for its column) is skipped and reported, and costs no
+    other row.
+
+    Events are sorted by ``(date, ticker, vendor_id)`` and skips by their
+    fields, so identical inputs give identical output whatever order the
+    vendor paged in.
     """
     symbols = frozenset(_watch_symbols(watch))
     first, last = today, today + DIVIDEND_EX_DATE_HORIZON
@@ -278,23 +314,36 @@ def dividend_events(
     skipped: list[SkippedDividend] = [
         row for row in read.skipped if _relevant(row.symbol, row.ex_date, symbols, first, last)
     ]
-    seen: set[str] = set()
+    copies: dict[str, list[CashDividend]] = {}
     for dividend in read.dividends:
-        if dividend.vendor_id in seen:
-            duplicate = SkippedDividend(
-                vendor_id=dividend.vendor_id,
-                symbol=dividend.symbol,
-                ex_date=dividend.ex_date,
-                reason="the vendor id is listed twice; the first row is kept",
+        copies.setdefault(dividend.vendor_id, []).append(dividend)
+    unreadable: dict[str, int] = {}
+    for row in read.skipped:
+        if row.vendor_id is not None:
+            unreadable[row.vendor_id] = unreadable.get(row.vendor_id, 0) + 1
+    for vendor_id, group in copies.items():
+        if len(set(group)) > 1 or vendor_id in unreadable:
+            listed = len(group) + unreadable.get(vendor_id, 0)
+            reason = (
+                f"the vendor id is listed {listed} times and the copies conflict; "
+                "every copy is skipped and none is taken as current"
             )
-            if _relevant(dividend.symbol, dividend.ex_date, symbols, first, last):
-                skipped.append(duplicate)
+            skipped.extend(
+                SkippedDividend(
+                    vendor_id=vendor_id,
+                    symbol=copy.symbol,
+                    ex_date=copy.ex_date,
+                    reason=reason,
+                )
+                for copy in group
+                if _relevant(copy.symbol, copy.ex_date, symbols, first, last)
+            )
             continue
-        seen.add(dividend.vendor_id)
+        dividend = group[0]
         if dividend.symbol not in symbols or not first <= dividend.ex_date <= last:
             continue
-        events.append(
-            CalendarEventInput(
+        try:
+            event = CalendarEventInput(
                 kind=CalendarKind.DIVIDEND,
                 source=CalendarSource.ALPACA,
                 vendor_id=dividend.vendor_id,
@@ -303,9 +352,19 @@ def dividend_events(
                 at=None,
                 ticker=dividend.symbol,
                 actual=dividend.rate,
-                unit=DIVIDEND_UNIT,
+                unit=DIVIDEND_UNIT if dividend.foreign is False else DIVIDEND_UNIT_FOREIGN,
             )
-        )
+        except ValueError as exc:
+            skipped.append(
+                SkippedDividend(
+                    vendor_id=dividend.vendor_id,
+                    symbol=dividend.symbol,
+                    ex_date=dividend.ex_date,
+                    reason=str(exc),
+                )
+            )
+            continue
+        events.append(event)
     events.sort(key=lambda e: (e.date, e.ticker or "", e.vendor_id))
     skipped.sort(
         key=lambda s: (s.ex_date or date.min, s.symbol or "", s.vendor_id or "", s.reason)

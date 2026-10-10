@@ -1,6 +1,6 @@
 """The News calendar's storage layer: ``calendar_event`` reads and writes.
 
-Phase 3 step 7, unit 7.2a. Four jobs, and nothing else:
+Phase 3 step 7, units 7.2a and 7.2c-1. Five jobs, and nothing else:
 
 1. **Upsert vendor and seed rows** (:func:`upsert_events`) by their key
    ``(source, kind, vendor_id)``. The input is
@@ -20,6 +20,11 @@ Phase 3 step 7, unit 7.2a. Four jobs, and nothing else:
    stamped, and **nothing written to the configuration audit log** -- a note
    that a summit is on Thursday governs nothing. Editing or deleting any
    other row raises :class:`CalendarEventNotEditableError`.
+5. **Replace a vendor window** (:func:`replace_window`): upsert one
+   complete fetch and withdraw the rows of that source and those kinds in
+   the fetched window that it no longer lists -- the vendor counterpart of
+   the seed import's withdrawal. Only ever after a successful, complete
+   fetch.
 
 Every function flushes and none commits: the caller owns the transaction, as
 in :mod:`corollary.data.news.ingest`. Every timestamp is passed in (``now``)
@@ -34,6 +39,7 @@ session, so a route can serialise it after the session closes.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -47,6 +53,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from corollary.data.calendar_event import (
     ET_ZONE,
+    KIND_SOURCE,
     CalendarEventInput,
     CalendarKind,
     CalendarSource,
@@ -66,6 +73,8 @@ from corollary.data.seeds.calendar_seeds import (
 )
 from corollary.db.models import CalendarEvent
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "CalendarEventNotEditableError",
     "CalendarEventNotFoundError",
@@ -73,6 +82,8 @@ __all__ = [
     "SeedImport",
     "StoredCalendarEvent",
     "UpsertCounts",
+    "WindowReplace",
+    "WindowReplaceError",
     "central_bank_inputs",
     "create_manual",
     "delete_manual",
@@ -80,6 +91,7 @@ __all__ = [
     "import_central_bank_seed",
     "import_central_bank_year",
     "read_range",
+    "replace_window",
     "seed_gaps_between",
     "update_manual",
     "upsert_events",
@@ -129,6 +141,16 @@ class CalendarEventNotEditableError(CalendarStoreError):
         self.kind = kind
 
 
+class WindowReplaceError(ValueError):
+    """A :func:`replace_window` call the store refuses; nothing was written.
+
+    A ``ValueError``, not a :class:`CalendarStoreError`: no route reaches
+    this, and a refusal here is a caller bug (an event outside its own
+    window, a kind from the wrong source), not a client's request to map to
+    a 4xx.
+    """
+
+
 # --- values -----------------------------------------------------------------
 
 
@@ -176,6 +198,24 @@ class UpsertCounts:
     updated: int
     unchanged: int
     withdrawn: int = 0
+
+
+@dataclass(frozen=True)
+class WindowReplace:
+    """What one :func:`replace_window` did.
+
+    ``inserted + updated + unchanged + revived`` is the number of events
+    passed in; ``updated`` excludes revivals. ``withdrawn_keys`` names every
+    row withdrawn, as ``(kind, vendor_id)`` sorted, so the scheduler can log
+    which events went away and not only how many.
+    """
+
+    inserted: int
+    updated: int
+    unchanged: int
+    withdrawn: int
+    revived: int
+    withdrawn_keys: tuple[tuple[CalendarKind, str], ...]
 
 
 @dataclass(frozen=True)
@@ -402,6 +442,190 @@ def upsert_events(
             unchanged += 1
     session.flush()
     return UpsertCounts(inserted=inserted, updated=updated, unchanged=unchanged)
+
+
+# --- vendor window replacement --------------------------------------------------
+
+
+def _check_window(
+    events: Sequence[CalendarEventInput],
+    *,
+    source: CalendarSource,
+    kinds: frozenset[CalendarKind],
+    window_start: date,
+    window_end: date,
+) -> None:
+    """Every refusal :func:`replace_window` makes, all before anything is written."""
+    for name, day in (("window_start", window_start), ("window_end", window_end)):
+        if isinstance(day, datetime) or not isinstance(day, date):
+            raise WindowReplaceError(f"{name} must be a calendar date, got {day!r}")
+    if window_end < window_start:
+        raise WindowReplaceError(
+            f"window_end {window_end.isoformat()} is before window_start "
+            f"{window_start.isoformat()}"
+        )
+    if not isinstance(source, CalendarSource):
+        raise WindowReplaceError(f"source must be a CalendarSource, got {source!r}")
+    if source in (CalendarSource.MANUAL, CalendarSource.SEED):
+        raise WindowReplaceError(
+            f"{source.value} rows are not replaced by window: manual rows are a "
+            "person's, and the seed import withdraws inside its own covered window"
+        )
+    if not kinds:
+        raise WindowReplaceError("kinds is empty; a window replacement must name what it covers")
+    for kind in sorted(kinds):
+        if not isinstance(kind, CalendarKind):
+            raise WindowReplaceError(f"kinds must hold CalendarKind values, got {kind!r}")
+        if KIND_SOURCE[kind] is not source:
+            raise WindowReplaceError(
+                f"{kind.value} events come from {KIND_SOURCE[kind].value}, not "
+                f"{source.value}; a {source.value} fetch cannot replace them"
+            )
+    seen: set[tuple[CalendarKind, str]] = set()
+    for event in events:
+        label = f"{event.source.value} {event.kind.value} {event.vendor_id!r}"
+        if event.source is not source:
+            raise WindowReplaceError(f"{label} is not a {source.value} event")
+        if event.kind not in kinds:
+            raise WindowReplaceError(
+                f"{label} is outside the kinds being replaced "
+                f"({', '.join(sorted(k.value for k in kinds))})"
+            )
+        if not window_start <= event.date <= window_end:
+            raise WindowReplaceError(
+                f"{label} is dated {event.date.isoformat()}, outside the window "
+                f"{window_start.isoformat()}..{window_end.isoformat()}"
+            )
+        key = (event.kind, event.vendor_id)
+        if key in seen:
+            raise WindowReplaceError(f"{label} appears twice in one batch")
+        seen.add(key)
+
+
+def replace_window(
+    session: Session,
+    events: Sequence[CalendarEventInput],
+    *,
+    source: CalendarSource,
+    kinds: frozenset[CalendarKind],
+    window_start: date,
+    window_end: date,
+    now: datetime,
+) -> WindowReplace:
+    """Make ``events`` the complete set of live ``source``/``kinds`` rows in the window.
+
+    **Call this only with the result of a successful, complete fetch of
+    exactly this window.** Every live row of ``source``, of a kind in
+    ``kinds``, dated ``window_start <= date <= window_end`` (both inclusive,
+    by the Eastern-session ``date`` column) whose ``vendor_id`` is not in
+    ``events`` is **withdrawn** -- soft-deleted, ``deleted_at`` and
+    ``updated_at`` set to ``now``. So a failed fetch, a fetch that stopped
+    short (a page missing, a 429 mid-way), or a fetch of a narrower window
+    than the one stated here would withdraw real events. A caller that is not
+    sure its fetch was complete must not call this; it may still call
+    :func:`upsert_events`, which withdraws nothing. An *empty* complete
+    fetch is a real answer and withdraws the whole window.
+
+    The vendor equivalent of the seed import's withdrawal. It closes the
+    stale-row gap the fetcher audits reported: an IPO first keyed by name and
+    later given a symbol, a FRED release moved to another date (its
+    ``vendor_id`` carries the date), and a cancelled earnings report each
+    leave a row behind under plain upsert.
+
+    The steps:
+
+    1. **Refuse** (:class:`WindowReplaceError`, nothing written) an inverted
+       window, empty ``kinds``, a kind ``source`` does not produce
+       (:data:`~corollary.data.calendar_event.KIND_SOURCE`), ``source``
+       ``manual`` or ``seed``, or any event of another source, of a kind
+       outside ``kinds``, dated outside the window, or keyed twice.
+    2. **Upsert** ``events``. A previously withdrawn row that reappears is
+       **revived** -- the same row, ``deleted_at`` cleared.
+    3. **Withdraw** the live rows in scope that ``events`` does not list.
+       Each withdrawal is logged. Rows outside the window, of other sources
+       or other kinds -- manual and seed rows always among them -- are never
+       read for withdrawal.
+
+    The four upsert counts partition ``events``: ``inserted + updated +
+    unchanged + revived == len(events)``; a revived row is counted as
+    revived only, even if its content also changed.
+
+    Flushes, never commits: the caller owns the transaction.
+    """
+    now = _utc_now(now)
+    _check_window(
+        events, source=source, kinds=kinds, window_start=window_start, window_end=window_end
+    )
+
+    # Which listed keys are currently withdrawn rows -- they revive on upsert.
+    listed: dict[CalendarKind, set[str]] = {kind: set() for kind in kinds}
+    for event in events:
+        listed[event.kind].add(event.vendor_id)
+    revived = 0
+    for kind, vendor_ids in listed.items():
+        if not vendor_ids:
+            continue
+        revived += len(
+            session.scalars(
+                select(CalendarEvent.id).where(
+                    CalendarEvent.source == source.value,
+                    CalendarEvent.kind == kind.value,
+                    CalendarEvent.vendor_id.in_(sorted(vendor_ids)),
+                    CalendarEvent.deleted_at.is_not(None),
+                )
+            ).all()
+        )
+
+    counts = upsert_events(session, events, now=now)
+
+    stale = session.scalars(
+        select(CalendarEvent).where(
+            CalendarEvent.source == source.value,
+            CalendarEvent.kind.in_(sorted(kind.value for kind in kinds)),
+            CalendarEvent.date >= window_start,
+            CalendarEvent.date <= window_end,
+            CalendarEvent.deleted_at.is_(None),
+        )
+    )
+    withdrawn: list[tuple[CalendarKind, str]] = []
+    for row in stale:
+        assert row.vendor_id is not None  # ck_calendar_event_vendor_id: vendor rows carry one
+        kind = CalendarKind(row.kind)
+        if row.vendor_id in listed[kind]:
+            continue
+        row.deleted_at = now
+        row.updated_at = now
+        withdrawn.append((kind, row.vendor_id))
+    withdrawn.sort()
+    for kind, vendor_id in withdrawn:
+        logger.info(
+            "withdrew %s %s %s: absent from a complete fetch of its window",
+            source.value,
+            kind.value,
+            vendor_id,
+            extra={
+                "event": "calendar_window_withdrawn",
+                "rule": (
+                    "unit 7.2c-1: a vendor row in a completely fetched window that the "
+                    "fetch no longer lists is soft-deleted"
+                ),
+                "source": source.value,
+                "kind": kind.value,
+                "vendor_id": vendor_id,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "at": now.isoformat(),
+            },
+        )
+    session.flush()
+    return WindowReplace(
+        inserted=counts.inserted,
+        updated=counts.updated - revived,
+        unchanged=counts.unchanged,
+        withdrawn=len(withdrawn),
+        revived=revived,
+        withdrawn_keys=tuple(withdrawn),
+    )
 
 
 # --- reads ------------------------------------------------------------------

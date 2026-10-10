@@ -41,18 +41,23 @@ event at all, is :class:`ReleasesNotFetched` with the reason -- step 3's
 convention (:class:`~corollary.data.macro.risk_free.NotRefreshed`), so a
 scheduler never calls a FRED feed fresh that produced nothing.
 
-A known limitation, stated where it bites
------------------------------------------
+A rescheduled release, and who removes the old date
+---------------------------------------------------
 
-**A rescheduled release leaves its old row behind.** ``vendor_id`` is
-``<release_id>:<date>`` because FRED's release calendar carries no stable
-identity for one issue of a release -- no reference period, no issue id; the
-date is all there is. :class:`CalendarEventInput`'s docstring warns that a
-movable date in the ``vendor_id`` turns a reschedule into a second row, and
-that is what happens here: if BLS moves CPI from the 14th to the 15th, the
-next fetch upserts ``10:<15th>`` and nothing removes ``10:<14th>``. Clearing
-FRED rows in the fetched window that the fetch no longer lists is the store's
-job (``calendar.py``) and is not done by this unit.
+``vendor_id`` is ``<release_id>:<date>`` because FRED's release calendar
+carries no stable identity for one issue of a release -- no reference
+period, no issue id; the date is all there is. :class:`CalendarEventInput`'s
+docstring warns that a movable date in the ``vendor_id`` turns a reschedule
+into a second row: if BLS moves CPI from the 14th to the 15th, the next fetch
+lists ``10:<15th>`` and not ``10:<14th>``. Upsert alone leaves the 14th
+behind. :func:`corollary.data.calendar.replace_window`, given this module's
+complete result for ``start..end``, withdraws it (unit 7.2c-1). That is safe
+only because a FRED read is all or nothing:
+:meth:`~corollary.data.providers.fred.FredProvider.release_dates` raises
+rather than return a short or repeated read.
+
+A row :class:`CalendarEventInput` refuses is reported in
+:attr:`ReleaseEvents.skipped` and logged, and costs no other row.
 """
 
 import logging
@@ -72,6 +77,7 @@ __all__ = [
     "ReleaseDatesSource",
     "ReleaseEvents",
     "ReleasesNotFetched",
+    "SkippedRelease",
     "actual_for",
     "fetch_release_events",
     "prior_for",
@@ -129,6 +135,39 @@ class ReleaseEvents:
     ignored: tuple[IgnoredRelease, ...]
     unscheduled: tuple[int, ...]
     name_mismatches: tuple[tuple[int, str], ...]
+    #: Timed release dates whose input was refused (a value too wide for its
+    #: column, once ``prior``/``actual`` carry figures), ordered by
+    #: ``(release_id, date)``. Each is logged; none costs another row.
+    skipped: tuple["SkippedRelease", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedRelease:
+    """A timed release date left out of :attr:`ReleaseEvents.events`, and why."""
+
+    release_id: int
+    date: date
+    reason: str
+
+
+def _skip(release_id: int, day: date, reason: str) -> SkippedRelease:
+    logger.warning(
+        "skipped FRED release %d on %s: %s",
+        release_id,
+        day.isoformat(),
+        reason,
+        extra={
+            "event": "fred_release_row_skipped",
+            "rule": (
+                "unit 7.2c-1: a release date whose calendar input is refused is "
+                "skipped and reported; it never costs the rest of the window"
+            ),
+            "release_id": release_id,
+            "date": day.isoformat(),
+            "reason": reason,
+        },
+    )
+    return SkippedRelease(release_id=release_id, date=day, reason=reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +241,7 @@ def release_events(
     them (FRED's window *is* the filter).
     """
     timed: dict[tuple[int, date], CalendarEventInput] = {}
+    skipped: dict[tuple[int, date], SkippedRelease] = {}
     ignored: dict[int, tuple[str, set[date]]] = {}
     mismatches: dict[int, str] = {}
     for row in rows:
@@ -213,12 +253,19 @@ def release_events(
         if row.release_name != known.release_name:
             mismatches[row.release_id] = row.release_name
         key = (row.release_id, row.date)
-        if key in timed:
+        # FredProvider.release_dates refuses a read with a repeated pair
+        # (unit 7.2c-1), so this only collapses a repeat in a caller's own
+        # rows; the event depends on the key and the table alone, so the
+        # copies cannot disagree.
+        if key in timed or key in skipped:
             continue
         at = times.at(row.release_id, row.date)
         if at is None:  # pragma: no cover - by_id answered, so at() does
             raise AssertionError(f"release {row.release_id} is in the table but untimed")
-        timed[key] = _event(row.release_id, known.release_name, at, row.date)
+        try:
+            timed[key] = _event(row.release_id, known.release_name, at, row.date)
+        except ValueError as exc:  # CalendarEventInput's refusals: this row only
+            skipped[key] = _skip(row.release_id, row.date, str(exc))
 
     events = tuple(
         sorted(
@@ -226,7 +273,8 @@ def release_events(
             key=lambda e: (e.date, e.at, int(e.vendor_id.partition(":")[0])),
         )
     )
-    scheduled = {release_id for release_id, _ in timed}
+    # A skipped row was still scheduled by FRED; it is not "unscheduled".
+    scheduled = {release_id for release_id, _ in timed} | {rid for rid, _ in skipped}
     return ReleaseEvents(
         start=start,
         end=end,
@@ -239,6 +287,7 @@ def release_events(
             sorted(row.release_id for row in times.rows if row.release_id not in scheduled)
         ),
         name_mismatches=tuple(sorted(mismatches.items())),
+        skipped=tuple(skipped[key] for key in sorted(skipped)),
     )
 
 
@@ -280,6 +329,7 @@ async def fetch_release_events(
             "rows": len(rows),
             "events": len(result.events),
             "ignored_releases": len(result.ignored),
+            "skipped": len(result.skipped),
             "unscheduled": list(result.unscheduled),
         },
     )
@@ -298,8 +348,9 @@ async def fetch_release_events(
         return ReleasesNotFetched(
             reason=(
                 f"FRED listed {len(rows)} release dates for {start.isoformat()}.."
-                f"{end.isoformat()} and none is a timed release; ignored release ids: "
-                f"{[i.release_id for i in result.ignored]}"
+                f"{end.isoformat()} and none became an event; ignored release ids: "
+                f"{[i.release_id for i in result.ignored]}; skipped timed rows: "
+                f"{len(result.skipped)}"
             )
         )
     return result

@@ -35,11 +35,13 @@ row instead of leaving a phantom on the old date.
 kept with ``ticker=None`` and the company name as the title. The name is
 normalised -- case-folded, punctuation and runs of space collapsed -- so
 ``"Holtec Nuclear Corp"`` and ``"HOLTEC Nuclear Corp."`` are one company.
-*Known limit:* a row first listed by name and later given a symbol changes
-key, so the name-keyed row stays behind until something removes it. The
-recorded past window shows exactly this pair (``New Iceland Arctic
-Acquisition Corp.``, once without a symbol, once as ``NIAAU``) -- as two
-rows with different statuses, which is what Finnhub sent.
+A row first listed by name and later given a symbol changes key; the
+name-keyed row is withdrawn by :func:`corollary.data.calendar.replace_window`
+when the scheduler hands it a complete fetch of the window (unit 7.2c-1), and
+stays behind under plain upsert. The recorded past window shows exactly this
+pair (``New Iceland Arctic Acquisition Corp.``, once without a symbol, once
+as ``NIAAU``) -- as two rows with different statuses, which is what Finnhub
+sent.
 
 **IPO price is text.** ``"14.00-16.00"`` is a range, ``"10.00"`` a single
 price (low == high), null or ``""`` none; parsed with an ASCII-only pattern
@@ -48,7 +50,8 @@ straight to ``Decimal``. Anything else skips the row.
 **What skips a row, and what only nulls a field.** A value that cannot be
 read *exactly* -- an EPS that is a bool, NaN or text that is not a number;
 an offer price that does not parse; a share count that is not a whole
-number; no date; no identity -- **skips the row**, reported in
+number; no date; no identity; a number too wide for its column (an EPS of
+``1e50``, a share count past 64 bits) -- **skips the row**, reported in
 :attr:`FinnhubCalendarBatch.skipped` and logged with its rule. A *label*
 the vendor spelled in a way not recognised (``hour``, ``status``) nulls that
 field and keeps the row, logged, per decision 7's "empty or unknown ->

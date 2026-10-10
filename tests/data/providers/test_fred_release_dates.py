@@ -321,3 +321,88 @@ def test_a_well_formed_page_parses() -> None:
     assert page.rows == (
         FredReleaseDate(release_id=10, release_name="Consumer Price Index", date=date(2026, 10, 14)),
     )
+
+
+# --------------------------------------------------------------------------
+# Unit 7.2c-1: paging is checked against count, not trusted to it
+# --------------------------------------------------------------------------
+
+
+def _paged(pages: dict[int, dict[str, Any]]) -> Any:
+    def respond(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        if offset not in pages:  # pragma: no cover
+            raise AssertionError(f"unexpected offset {offset}")
+        return httpx.Response(200, content=json.dumps(pages[offset]).encode("utf-8"))
+
+    return respond
+
+
+async def _release_dates(respond: Any, *, page_limit: int = 2) -> list[FredReleaseDate]:
+    provider, _ = _provider(respond)
+    async with provider:
+        return await provider.release_dates(
+            date(2026, 10, 10), date(2026, 11, 9), page_limit=page_limit
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_row_repeated_across_pages_is_refused_not_counted() -> None:
+    # The calendar shifted between requests: page 2 repeats page 1's last row,
+    # and the third distinct row was never seen. len(rows) reaches count anyway.
+    first = [_row(10, "2026-10-14"), _row(50, "2026-10-14")]
+    repeat = [_row(50, "2026-10-14")]
+    respond = _paged({0: _page(first, count=3), 2: _page(repeat, count=3, offset=2)})
+    with pytest.raises(FredError, match="distinct"):
+        await _release_dates(respond)
+
+
+@pytest.mark.asyncio
+async def test_a_row_repeated_within_a_page_is_refused() -> None:
+    rows = [_row(10, "2026-10-14"), _row(10, "2026-10-14")]
+    with pytest.raises(FredError, match="distinct"):
+        await _release_dates(_paged({0: _page(rows, count=2)}))
+
+
+@pytest.mark.asyncio
+async def test_more_rows_than_the_count_are_refused() -> None:
+    rows = [_row(10, "2026-10-14"), _row(50, "2026-10-14")]
+    with pytest.raises(FredError, match="distinct"):
+        await _release_dates(_paged({0: _page(rows, count=1)}))
+
+
+@pytest.mark.asyncio
+async def test_a_count_that_changes_between_pages_is_refused() -> None:
+    # [a, b, c, d] loses b after page 1: offset 2 is now [d], count 3. Three
+    # distinct rows against a count of three -- and c was never read.
+    first = [_row(10, "2026-10-14"), _row(50, "2026-10-14")]
+    later = [_row(46, "2026-10-16")]
+    respond = _paged({0: _page(first, count=4), 2: _page(later, count=3, offset=2)})
+    with pytest.raises(FredError, match="count"):
+        await _release_dates(respond)
+
+
+@pytest.mark.asyncio
+async def test_distinct_rows_equal_to_the_count_are_accepted() -> None:
+    rows = [_row(10, "2026-10-14"), _row(10, "2026-10-15")]  # one release, two dates
+    got = await _release_dates(_paged({0: _page(rows, count=2)}))
+    assert [(r.release_id, r.date) for r in got] == [
+        (10, date(2026, 10, 14)),
+        (10, date(2026, 10, 15)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _page([_row("x" * 500, "2026-10-14")]),
+        {"release_dates": [], "count": "y" * 500},
+    ],
+    ids=["release_id", "count"],
+)
+def test_a_refusal_quotes_at_most_forty_characters_of_fred_text(payload: Any) -> None:
+    with pytest.raises(FredError) as info:
+        parse_release_dates(payload)
+    message = str(info.value)
+    assert "x" * 41 not in message and "y" * 41 not in message
+    assert len(message) < 160

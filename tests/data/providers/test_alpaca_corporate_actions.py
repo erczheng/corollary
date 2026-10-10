@@ -272,3 +272,25 @@ async def test_the_arguments_are_refused_before_any_request(make_provider: Any) 
     with pytest.raises(ValueError, match="end"):
         await provider.cash_dividends(symbols=SYMBOLS, start=END, end=START)
     assert transport.requests == []
+
+
+# --- a vendor id too long for the column is a skipped row (unit 7.2c-1) ---------
+
+AAP_ID = "3d300f69-484e-4c8d-bcb8-c6a10f5c46aa"
+
+
+async def test_an_id_longer_than_the_column_is_skipped_not_fatal(make_provider: Any) -> None:
+    long_id = "x" * 129
+    result, _ = await read(make_provider, edited(AAP_ID, long_id))
+    assert long_id not in by_id(result)
+    assert len(result.dividends) == 5  # the other rows are unaffected
+    [skipped] = result.skipped
+    assert skipped.symbol == "AAP"
+    assert "128" in skipped.reason
+
+
+async def test_an_id_of_exactly_the_column_width_is_read(make_provider: Any) -> None:
+    edge_id = "x" * 128
+    result, _ = await read(make_provider, edited(AAP_ID, edge_id))
+    assert edge_id in by_id(result)
+    assert result.skipped == ()

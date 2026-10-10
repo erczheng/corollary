@@ -46,6 +46,12 @@ string to the enum is the fetcher's job, so a raw string is refused here.
 economic release (Q3: consensus is unavailable on the free plan), and the
 record refuses one rather than storing a number nobody supplied.
 
+**Every value fits its column, or is refused here.** A value the column
+CHECK would refuse at flush -- money wider than :data:`MONEY_TEXT_MAX`
+characters written out exactly, ``shares`` past :data:`SHARES_MAX` -- aborts
+the whole batch there, good rows with it. Refused at construction, it is a
+``ValueError`` a mapper catches per row and reports as skipped.
+
 **An IPO carries five fields no other kind has** (Q15): ``exchange``,
 ``shares``, ``price_low``, ``price_high`` and ``ipo_status``. Each is
 optional -- Finnhub leaves ``exchange``, ``numberOfShares`` and ``price``
@@ -74,6 +80,8 @@ __all__ = [
     "IPO_FIELDS",
     "IpoStatus",
     "KIND_SOURCE",
+    "MONEY_TEXT_MAX",
+    "SHARES_MAX",
     "TICKER_REQUIRED_KINDS",
     "check_title",
     "check_when",
@@ -88,6 +96,15 @@ TICKER_MAX: Final = 16
 UNIT_MAX: Final = 32
 VENDOR_ID_MAX: Final = 128
 EXCHANGE_MAX: Final = 64
+#: The ``Money`` CHECK's width, ``length(text) BETWEEN 1 AND 40``, over the
+#: ``format(value, "f")`` spelling ``Money`` binds (sign included). Repeated
+#: from ``corollary.db.models._MONEY_TEXT_WIDTH``, which this module may not
+#: import. A wider value refused at flush aborts the whole batch; refused
+#: here, the mapper skips its one row.
+MONEY_TEXT_MAX: Final = 40
+#: SQLite INTEGER is signed 64-bit; a larger ``int`` raises ``OverflowError``
+#: at bind time, again for the whole batch.
+SHARES_MAX: Final = 2**63 - 1
 
 
 class CalendarKind(StrEnum):
@@ -194,6 +211,12 @@ def _check_money(name: str, value: Decimal | None) -> None:
         )
     if not value.is_finite():
         raise ValueError(f"{name} must be a finite number, got {value!r}")
+    width = len(format(value, "f"))
+    if width > MONEY_TEXT_MAX:
+        raise ValueError(
+            f"{name} is {width} characters written out exactly; the column holds "
+            f"{MONEY_TEXT_MAX}"
+        )
 
 
 @dataclass(frozen=True)
@@ -301,6 +324,11 @@ class CalendarEventInput:
         ):
             raise ValueError(
                 f"shares must be a positive integer or None, got {self.shares!r}"
+            )
+        if self.shares is not None and self.shares > SHARES_MAX:
+            raise ValueError(
+                f"shares {self.shares} is past the 64-bit integer column's ceiling "
+                f"of {SHARES_MAX}"
             )
         _check_money("price_low", self.price_low)
         _check_money("price_high", self.price_high)

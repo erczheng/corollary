@@ -10,10 +10,12 @@ of a clock change.
 import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import corollary.data.calendar_releases as releases
 from corollary.data.calendar_event import CalendarEventInput, CalendarKind, CalendarSource
 from corollary.data.calendar_releases import (
     FRED_RELEASES_HORIZON_DAYS,
@@ -288,3 +290,34 @@ async def test_today_must_be_a_calendar_date(today: object) -> None:
 async def test_a_horizon_below_one_day_is_refused() -> None:
     with pytest.raises(ValueError):
         await fetch_release_events(FakeFred([]), today=START, horizon_days=0)
+
+
+# --------------------------------------------------------------------------
+# Unit 7.2c-1: a row the input refuses is skipped, not fatal
+# --------------------------------------------------------------------------
+
+
+def test_a_row_the_input_refuses_is_skipped_and_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # actual_for is None today; once it is filled in, a figure too wide for
+    # its column must cost that one row, not the window.
+
+    def too_wide(release_id: int, day: date) -> Decimal | None:
+        return Decimal("1e50") if release_id == CPI else None
+
+    monkeypatch.setattr(releases, "actual_for", too_wide)
+    rows = [_row(CPI, date(2026, 10, 14)), _row(EMPLOYMENT, date(2026, 11, 6))]
+    with caplog.at_level("WARNING", logger="corollary.data.calendar_releases"):
+        result = release_events(rows, TIMES, start=START, end=END)
+    assert [e.vendor_id for e in result.events] == ["50:2026-11-06"]
+    [skipped] = result.skipped
+    assert (skipped.release_id, skipped.date) == (CPI, date(2026, 10, 14))
+    assert "40" in skipped.reason
+    assert any(
+        getattr(r, "event", None) == "fred_release_row_skipped" for r in caplog.records
+    )
+
+
+def test_a_clean_window_skips_nothing() -> None:
+    assert recorded().skipped == ()

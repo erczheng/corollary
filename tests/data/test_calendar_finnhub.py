@@ -577,3 +577,34 @@ async def test_fetch_ipos_requests_once(make_provider: ProviderFactory) -> None:
     batch = await fetch_ipos(provider, start=date(2026, 9, 10), end=date(2026, 10, 10))
     assert len(transport.requests) == 1
     assert len(batch.events) == 58
+
+
+# --- a value too wide for its column skips its row, not the batch (7.2c-1) -----
+
+
+@pytest.mark.parametrize("eps", [Decimal("1e50"), Decimal("1e-45")], ids=["1e50", "1e-45"])
+def test_an_eps_too_wide_for_its_column_skips_only_that_row(
+    session: Session, eps: Decimal
+) -> None:
+    rows = [_earning(symbol="NVDA", epsEstimate=eps), _earning(symbol="AAPL")]
+    batch = earnings_events(rows, ["NVDA", "AAPL"])
+    assert [e.ticker for e in batch.events] == ["AAPL"]
+    assert [s.index for s in batch.skipped] == [0]
+    assert "40" in batch.skipped[0].reason
+    upsert_events(session, batch.events, now=T0)
+    session.commit()
+    assert [e.ticker for e in read_range(session, date(2026, 11, 1), date(2026, 11, 30))] == [
+        "AAPL"
+    ]
+
+
+def test_a_share_count_past_sqlite_integer_skips_only_that_row(session: Session) -> None:
+    rows = [
+        _ipo(symbol="BIG", numberOfShares=99999999999999999999),
+        _ipo(symbol="IAM"),
+    ]
+    batch = ipo_events(rows)
+    assert [e.ticker for e in batch.events] == ["IAM"]
+    assert [s.index for s in batch.skipped] == [0]
+    upsert_events(session, batch.events, now=T0)
+    session.commit()

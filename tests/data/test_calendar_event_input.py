@@ -188,3 +188,56 @@ def test_an_ipo_field_on_another_kind_is_refused(overrides: dict[str, Any]) -> N
 def test_a_bad_ipo_field_is_refused(overrides: dict[str, Any], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         _ipo(**overrides)
+
+
+# --- column widths: refused at construction, never at flush (unit 7.2c-1) -----
+
+# The Money CHECK is ``length(text) BETWEEN 1 AND 40`` and Money binds with
+# ``format(value, "f")``; SQLite INTEGER is signed 64-bit.
+_FORTY = Decimal("1" * 40)  # 40 characters as "f"
+_FORTY_ONE = Decimal("1" * 41)
+
+
+@pytest.mark.parametrize("field", ["estimate", "prior", "actual"])
+def test_a_money_value_of_forty_characters_is_accepted(field: str) -> None:
+    make = _economic if field != "estimate" else _earnings
+    event = make(**{field: _FORTY})
+    assert getattr(event, field) == _FORTY
+    assert len(format(-Decimal("1" * 39), "f")) == 40
+    make(**{field: -Decimal("1" * 39)})  # the sign counts, and 40 still fits
+
+
+@pytest.mark.parametrize(
+    "value",
+    [_FORTY_ONE, Decimal("1e50"), Decimal("1e-45"), -Decimal("1" * 40)],
+    ids=["41-digits", "1e50", "1e-45", "negative-41-chars"],
+)
+@pytest.mark.parametrize("field", ["estimate", "prior", "actual"])
+def test_a_money_value_too_wide_for_its_column_is_refused(field: str, value: Decimal) -> None:
+    make = _economic if field != "estimate" else _earnings
+    with pytest.raises(ValueError, match="40"):
+        make(**{field: value})
+
+
+@pytest.mark.parametrize("field", ["price_low", "price_high"])
+def test_an_offer_price_too_wide_for_its_column_is_refused(field: str) -> None:
+    wide = Decimal("1e50")
+    with pytest.raises(ValueError, match="40"):
+        _ipo(price_low=Decimal("1") if field == "price_high" else wide,
+             price_high=wide)
+
+
+def test_shares_at_the_sqlite_integer_ceiling_is_accepted() -> None:
+    assert _ipo(shares=2**63 - 1).shares == 2**63 - 1
+
+
+def test_shares_past_the_sqlite_integer_ceiling_is_refused() -> None:
+    with pytest.raises(ValueError, match="64-bit"):
+        _ipo(shares=2**63)
+
+
+def test_the_money_width_matches_the_column_check() -> None:
+    from corollary.data.calendar_event import MONEY_TEXT_MAX
+    from corollary.db import models
+
+    assert MONEY_TEXT_MAX == models._MONEY_TEXT_WIDTH

@@ -22,6 +22,7 @@ ABEV is the probe's headline fact in one row: a 2025 ex-date returned by a
 """
 
 from datetime import date, timedelta
+from itertools import permutations
 from decimal import Decimal
 from typing import Any
 
@@ -32,8 +33,13 @@ from corollary.data.calendar_dividends import (
     DIVIDEND_REQUEST_HORIZON,
     DIVIDEND_REQUEST_LOOKBACK,
     DIVIDEND_UNIT,
+    DIVIDEND_UNIT_FOREIGN,
+    CashDividend,
+    CashDividendRead,
     DividendFetch,
     DividendOutcome,
+    SkippedDividend,
+    dividend_events,
     fetch_dividends,
 )
 from corollary.data.calendar_event import CalendarKind, CalendarSource
@@ -231,17 +237,20 @@ async def test_when_every_announced_row_is_unreadable_the_outcome_is_not_empty(
     assert result.outcome is DividendOutcome.ANNOUNCED
 
 
-async def test_a_vendor_id_listed_twice_keeps_the_first_and_reports_the_second(
+async def test_a_vendor_id_listed_twice_with_different_rows_skips_both(
     make_provider: Any,
 ) -> None:
+    # Unit 7.2c-1: first-wins made the result depend on page order. Two rows
+    # under one id that disagree are both skipped and reported as conflicting.
     body = edited(
         "4a52283b-0fbf-4996-9e27-15f324115a5b", ABBV_ID
     )  # AAPW's row now carries ABBV's id
     result, _ = await fetch(make_provider, body)
-    assert [e.vendor_id for e in result.events].count(ABBV_ID) == 1
-    [skipped] = result.skipped
-    assert skipped.vendor_id == ABBV_ID
-    assert "twice" in skipped.reason
+    assert ABBV_ID not in [e.vendor_id for e in result.events]
+    assert tickers(result) == ["AAGRY"]
+    assert sorted(s.symbol or "" for s in result.skipped) == ["AAPW", "ABBV"]
+    assert all(s.vendor_id == ABBV_ID and "conflict" in s.reason for s in result.skipped)
+    assert result.outcome is DividendOutcome.ANNOUNCED
 
 
 async def test_no_dividend_in_the_window_is_a_real_answer(make_provider: Any) -> None:
@@ -277,3 +286,94 @@ async def test_identical_inputs_give_identical_output(make_provider: Any) -> Non
     first, _ = await fetch(make_provider)
     second, _ = await fetch(make_provider)
     assert first == second
+
+
+# --- unit 7.2c-1: width bounds, order-independent duplicates, foreign rows ------
+
+def _cash(vendor_id: str = "ca-1", **overrides: Any) -> CashDividend:
+    fields: dict[str, Any] = {
+        "vendor_id": vendor_id,
+        "symbol": "ABBV",
+        "ex_date": date(2026, 10, 15),
+        "rate": Decimal("1.73"),
+        "special": False,
+        "foreign": False,
+    }
+    fields.update(overrides)
+    return CashDividend(**fields)
+
+
+def _map(*rows: CashDividend) -> tuple[Any, ...]:
+    return dividend_events(
+        CashDividendRead(dividends=rows, skipped=()),
+        today=RECORDED_DAY,
+        watch=frozenset({"ABBV", "AAPW"}),
+    )
+
+
+async def test_two_copies_of_one_id_that_disagree_are_both_skipped_in_any_order() -> None:
+    first = _cash("ca-1", rate=Decimal("1.73"))
+    second = _cash("ca-1", rate=Decimal("1.74"))
+    other = _cash("ca-2", symbol="AAPW")
+    results = {_map(*order) for order in permutations([first, second, other])}
+    assert len(results) == 1  # identical output whatever order the vendor paged in
+    [(events, skipped)] = results
+    assert [e.vendor_id for e in events] == ["ca-2"]
+    assert [s.vendor_id for s in skipped] == ["ca-1", "ca-1"]
+    assert all("conflict" in s.reason for s in skipped)
+
+
+async def test_identical_copies_of_one_id_collapse_to_one_event() -> None:
+    events, skipped = _map(_cash("ca-1"), _cash("ca-1"))
+    assert [e.vendor_id for e in events] == ["ca-1"]
+    assert skipped == ()
+
+
+async def test_a_readable_copy_conflicts_with_an_unreadable_copy_of_its_id() -> None:
+    unreadable = SkippedDividend(
+        vendor_id="ca-1", symbol="ABBV", ex_date=date(2026, 10, 15), reason="rate is unreadable"
+    )
+    events, skipped = dividend_events(
+        CashDividendRead(dividends=(_cash("ca-1"),), skipped=(unreadable,)),
+        today=RECORDED_DAY,
+        watch=frozenset({"ABBV"}),
+    )
+    assert events == ()
+    assert {s.reason for s in skipped} >= {"rate is unreadable"}
+    assert any("conflict" in s.reason for s in skipped)
+
+
+async def test_a_rate_too_wide_for_its_column_skips_only_that_row() -> None:
+    events, skipped = _map(_cash("ca-1", rate=Decimal("1e50")), _cash("ca-2", symbol="AAPW"))
+    assert [e.vendor_id for e in events] == ["ca-2"]
+    [row] = skipped
+    assert row.vendor_id == "ca-1"
+    assert "40" in row.reason
+
+
+async def test_an_id_longer_than_the_column_is_refused_by_the_record() -> None:
+    with pytest.raises(ValueError, match="128"):
+        _cash("x" * 129)
+    assert _cash("x" * 128).vendor_id == "x" * 128
+
+
+async def test_an_id_longer_than_the_column_does_not_stop_the_fetch(
+    make_provider: Any,
+) -> None:
+    body = edited(ABBV_ID, "x" * 129)
+    result, _ = await fetch(make_provider, body)
+    assert "ABBV" not in tickers(result)
+    assert tickers(result) == ["AAGRY", "AAPW"]
+    [skipped] = result.skipped
+    assert skipped.symbol == "ABBV"
+    assert result.outcome is DividendOutcome.ANNOUNCED
+
+
+async def test_a_foreign_row_keeps_its_rate_but_claims_no_currency(
+    make_provider: Any,
+) -> None:
+    result, _ = await fetch(make_provider, watch=frozenset({"AAGRY", "ABBV"}))
+    by_ticker = {e.ticker: e for e in result.events}
+    assert by_ticker["AAGRY"].actual == Decimal("0.03892")
+    assert by_ticker["AAGRY"].unit == DIVIDEND_UNIT_FOREIGN == "per share"
+    assert by_ticker["ABBV"].unit == DIVIDEND_UNIT == "USD/share"
