@@ -15,6 +15,8 @@ off-watch-list names in the news. Decision 21 carries it; decisions 3, 4, 12,
 labelled a parent-session assumption.
 **Paused 2026-09-30 (Q20)** after step 4's follow-ups: step 5 and beyond wait
 on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
+**Resumed 2026-10-10 (Q22) for steps 5, 6 and 7.** Steps 8 and 9 stay paused
+under Q20.
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -1100,6 +1102,45 @@ guard and provider done (synthetic tests; no live call yet).* The owner chose
   worst rolling minute `C + r·T` = 24 against the keyless 25; worst 6 s 13.2
   against the keyed 25. One bucket under whichever ceiling applies; the key
   buys batch size (100 jobs, not 10), not rate.
+
+**Q22 — Steps 5, 6 and 7 resume (2026-10-10); Q20 is lifted for them only.**
+The owner's answer, verbatim: *"yes start on all 3 steps."* Steps 8 and 9 stay
+paused under Q20 until the owner says otherwise.
+
+- **The four parent-session numbers step 6 and step 5 rest on were explained
+  to the owner the same day:** the 250-ticker discovery audit cap (decision
+  12), the ≥100 re-promotion floor (Q6), transitions acting on the combined
+  figure rather than the watch-only one (decision 12), and the Movers ranking
+  (decision 21). **They stand as written unless the owner changes them.** Each
+  one is a single constant or a single `scope` value, so a change after step 6
+  lands is cheap.
+- **Step 5 owns decision 13's second-risk check.** Its re-measurement is the
+  trigger. If the rules tier's watch-universe rate is below 1.5 directional
+  labels per session, step 5 still lands. The choice between a longer
+  demotion lookback and a permanently `unaudited` rules source goes to the
+  owner before step 6's transitions are merged.
+
+Two sequencing rules, supplied by this spec because steps 5 and 7 now run in
+parallel. Neither is an owner decision.
+
+- **Migration numbers are assigned when a step merges, not when it branches.**
+  Steps 5 and 7 each add a migration on `0012`, and two revisions sharing a
+  `down_revision` give Alembic two heads. Whichever step merges second
+  renumbers its migration to the next free number, re-points `down_revision`
+  at the head it lands on, and shows one head in `uv run alembic heads` before
+  merging. Step 6 follows the same rule. *Rejected:* an Alembic merge revision
+  (an empty revision whose only job is to hide that two branches raced), and
+  pre-assigning `0013` to step 5 and `0014` to step 7 (step 7 would then wait
+  on step 5's merge for no reason).
+- **Until step 6 exists, a label's source reports `unaudited`, never "not
+  demoted".** The API section's *"whether that source is demoted"* on
+  `GET /api/news` is carried as the source's status, `unaudited | active |
+  demoted`. Step 5 serves `unaudited` for both sources, and step 6 replaces it
+  with `sentiment_source_status`. The *display only* suffix keys on `demoted`,
+  so it cannot appear before step 6 runs a real audit. *Rejected:* a boolean
+  `demoted: false` in step 5. It would tell the page a source had passed an
+  audit that has never run, which is the claim Settings' *insufficient sample*
+  state exists to avoid.
 
 ---
 
