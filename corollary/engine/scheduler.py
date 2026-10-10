@@ -167,6 +167,7 @@ from corollary.data.news.pollers import (
     UniverseSource,
     WatchTierPoller,
     build_watch_universe,
+    news_name_books,
     prune_news,
     refresh_assets,
     refresh_tradeability_cache,
@@ -1400,6 +1401,14 @@ class ContextServices:
     #: The Markets page's universe -- the watch universe's ``markets`` members.
     #: Passed in, because this module may not import ``corollary.api``.
     markets: tuple[str, ...] = ()
+    #: The curated universe's funds (its ``fund`` flag), which the rules
+    #: tier's single-tag rule never lands on (AUDIT3-M1). Passed in, like
+    #: :attr:`markets`. Read only when the services build their own news
+    #: store; a store passed in brings its own name-book source. Required,
+    #: keyword-only, with no default: an empty default would quietly reopen
+    #: AUDIT3-M1 for a caller that forgot it -- the reason ``NameBook``
+    #: refuses to default it too. ``()`` must be said, not implied.
+    funds: tuple[str, ...] = field(kw_only=True)
     position_underlyings: PositionUnderlyingsSource = _no_position_underlyings
     #: The SPDR seed, for the sector leaders. The lifespan passes
     #: ``app.state.spdr_seed_loader`` so the jobs and the watch routes agree.
@@ -1591,13 +1600,24 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
     per feed. The cursors live in the pollers, in memory, recovered from the
     stored rows on each first run.
     """
+    seed_loader = services.seed_loader
+    assert seed_loader is not None  # filled by ContextServices.__post_init__
     store = (
         services.news_store
         if services.news_store is not None
-        else NewsStore(session_factory=services.session_factory, assets=services.assets)
+        else NewsStore(
+            session_factory=services.session_factory,
+            assets=services.assets,
+            books=news_name_books(
+                markets=services.markets,
+                position_underlyings=services.position_underlyings,
+                session_factory=services.session_factory,
+                seed_loader=seed_loader,
+                assets=services.assets,
+                funds=services.funds,
+            ),
+        )
     )
-    seed_loader = services.seed_loader
-    assert seed_loader is not None  # filled by ContextServices.__post_init__
     universe: UniverseSource = functools.partial(
         build_watch_universe,
         markets=services.markets,

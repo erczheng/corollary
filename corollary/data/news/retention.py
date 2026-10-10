@@ -62,13 +62,14 @@ Decisions this unit made, each pinned by ``tests/data/news/test_retention.py``
 Labels
 ------
 
-``sentiment_label`` is step 5's table and does not exist yet, so which
-articles carry a label is **injected**: ``labelled_article_ids`` is called
-once, under the write lock, and returns the ids of every labelled article. It
-defaults to :func:`no_labels`. **Step 5 wires ``sentiment_label`` in** by
-passing a predicate that selects its distinct article ids; until then a
-default run deletes every old group, which is correct only while nothing can
-be labelled.
+Which articles carry a label is **injected**: ``labelled_article_ids`` is
+called once, under the write lock, and returns the ids of every labelled
+article. The news store passes
+:func:`corollary.data.news.labelling.labelled_article_ids`, which reads
+``sentiment_label`` (unit 5.2). That table's article FK has no delete action,
+so a predicate that missed a labelled article would make the prune's
+``DELETE`` fail and roll back, never delete the labels.
+:func:`no_labels` remains for tests of the group logic alone.
 """
 
 import logging
@@ -114,15 +115,15 @@ REASON_CANONICAL_CHAIN = "canonical_chain"
 #: on, which ``create_db_engine`` sets; checked because it is cheap.
 REASON_CANONICAL_MISSING = "canonical_missing"
 
-#: Returns the id of every labelled article. Step 5 supplies the real one.
+#: Returns the id of every labelled article (``labelling.labelled_article_ids``).
 LabelledArticleIds = Callable[[Session], Set[int]]
 
 
 def no_labels(session: Session) -> Set[int]:
-    """The default predicate: no article carries a label.
+    """A predicate under which no article carries a label.
 
-    True until step 5 creates ``sentiment_label``; step 5 must then pass a
-    predicate reading it, or the prune deletes labelled groups.
+    For tests of the group logic only: the news store passes
+    :func:`corollary.data.news.labelling.labelled_article_ids`.
     """
     return frozenset()
 
@@ -171,12 +172,11 @@ def prune(
 ) -> PruneResult:
     """Apply decision 21's retention rule to ``news_article`` as of ``now``.
 
-    ``labelled_article_ids`` is required, with no default, on purpose: until
-    step 5 the caller passes :func:`no_labels` explicitly, and step 5 must
-    replace that call with the ``sentiment_label`` predicate. A default would
-    let the nightly job outlive step 5 still deleting labelled groups -- or,
-    under a NO ACTION label FK, failing every night and silently stopping
-    retention.
+    ``labelled_article_ids`` is required, with no default, on purpose: the
+    news store passes the ``sentiment_label`` predicate, and a default of
+    :func:`no_labels` would let a caller that forgot it try to delete
+    labelled groups -- which, under the label table's NO ACTION FK, fails the
+    prune every night and stops retention.
 
     Does not commit: the caller commits, or rolls the whole prune back.
     Raises ``ValueError`` on a naive ``now``, a non-positive ``retention`` or

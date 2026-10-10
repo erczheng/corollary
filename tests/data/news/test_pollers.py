@@ -47,7 +47,7 @@ from corollary.data.news.pollers import (
     refresh_tradeability_cache,
     watch_interval,
 )
-from corollary.data.news.retention import no_labels
+from corollary.data.news.labelling import labelled_article_ids
 from corollary.data.news.tradeability import RefreshResult
 from corollary.data.news.watchlist import Membership, watch_universe
 from corollary.data.providers.finnhub import CompanyNews, MarketNews
@@ -110,7 +110,7 @@ def holder() -> AssetDirectoryHolder:
 
 @pytest.fixture
 def store(sessions: Callable[[], Session], holder: AssetDirectoryHolder) -> NewsStore:
-    return NewsStore(session_factory=sessions, assets=holder)
+    return NewsStore(session_factory=sessions, assets=holder, books=None)
 
 
 _FEED_VENDOR = {
@@ -640,6 +640,34 @@ async def test_a_failed_store_does_not_advance_the_cursor(
     monkeypatch.undo()
     await poller.poll(NOW)
     assert provider.calls == [NOW - FIRST_RUN_LOOKBACK] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_labeller_failure_rolls_the_store_back_and_leaves_the_cursor(
+    store: NewsStore, sessions: Callable[[], Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unit 5.2: articles and their labels commit together or not at all. A
+    labeller bug is a failed job, never news silently stored without labels."""
+    cursor = NOW - timedelta(minutes=3)
+    provider = FakeAlpaca(
+        answers=[
+            FakeAlpacaNewsAnswer(articles=(article(NewsFeed.ALPACA_NEWS, "1"),), cursor=cursor),
+            FakeAlpacaNewsAnswer(articles=(article(NewsFeed.ALPACA_NEWS, "1"),), cursor=cursor),
+        ]
+    )
+    poller = AlpacaNewsPoller(provider=provider, store=store)
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("labeller bug")
+
+    monkeypatch.setattr(pollers, "label_stored", boom)
+    with pytest.raises(RuntimeError, match="labeller bug"):
+        await poller.poll(NOW)
+    assert row_count(sessions) == 0  # the articles written before the labeller ran are rolled back
+    monkeypatch.undo()
+    result = await poller.poll(NOW)
+    assert isinstance(result, DiscoveryPollResult) and result.ingest.inserted == 1
+    assert provider.calls == [NOW - FIRST_RUN_LOOKBACK] * 2  # the failed poll did not advance it
 
 
 @pytest.mark.asyncio
@@ -1284,7 +1312,7 @@ async def test_a_stale_directory_is_still_used_and_logged_with_its_age(
 
 
 @pytest.mark.asyncio
-async def test_prune_passes_no_labels_and_runs_under_the_store_lock(
+async def test_prune_passes_the_label_predicate_and_runs_under_the_store_lock(
     store: NewsStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: dict[str, Any] = {}
@@ -1297,7 +1325,7 @@ async def test_prune_passes_no_labels_and_runs_under_the_store_lock(
 
     monkeypatch.setattr(pollers, "prune", spy)
     await prune_news(store, NOW)
-    assert seen["labelled_article_ids"] is no_labels
+    assert seen["labelled_article_ids"] is labelled_article_ids
     assert seen["now"] == NOW
     assert seen["locked"] is True
 

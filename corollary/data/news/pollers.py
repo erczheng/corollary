@@ -98,7 +98,16 @@ from corollary.calendars import NYSE_TZ, nyse_session_close
 from corollary.data.news.article import NewsArticle, NewsFeed
 from corollary.data.news.assets import AssetDirectoryHolder, AssetSource
 from corollary.data.news.ingest import IngestResult, store_articles
-from corollary.data.news.retention import PruneResult, no_labels, prune
+from corollary.data.news.labelling import (
+    BookBuild,
+    LabelWrite,
+    NameBooks,
+    WatchSource,
+    label_stored,
+    labelled_article_ids,
+    log_label_write,
+)
+from corollary.data.news.retention import PruneResult, prune
 from corollary.data.news.tradeability import (
     IpoDateSource,
     RefreshResult,
@@ -144,6 +153,7 @@ __all__ = [
     "WatchTierPoller",
     "build_watch_universe",
     "in_watch_window",
+    "news_name_books",
     "prune_news",
     "refresh_assets",
     "refresh_tradeability_cache",
@@ -328,11 +338,30 @@ class NewsStore:
 
     ``store`` and ``prune`` both run under :attr:`lock` (and a thread lock
     inside the worker; see the module docstring), so no two writes overlap.
+
+    **Labels are written by ``store``, in the same transaction as the
+    articles** (unit 5.2, :mod:`corollary.data.news.labelling`): an article
+    and its labels commit together or not at all. ``books`` supplies the
+    rules tier's name book, and is required: pass ``None`` to mean "no rules
+    tier" explicitly, never by omission. Without one -- or when building this
+    cycle's book fails (``news_label_book_unavailable``, bounded error) -- the
+    rules tier is skipped, the articles and their Massive labels are stored
+    regardless, and the store's ``news_labels_written`` line says so
+    (``rules_available: false``). A failure of the labeller itself, by
+    contrast, rolls the whole store back: news stored without the labels it
+    should have carried would be silently ungraded.
     """
 
-    def __init__(self, *, session_factory: SessionFactory, assets: AssetDirectoryHolder) -> None:
+    def __init__(
+        self,
+        *,
+        session_factory: SessionFactory,
+        assets: AssetDirectoryHolder,
+        books: NameBooks | None,
+    ) -> None:
         self._session_factory = session_factory
         self._assets = assets
+        self._books = books
         self._lock = asyncio.Lock()
         self._thread_lock = threading.Lock()
 
@@ -348,6 +377,10 @@ class NewsStore:
     def assets(self) -> AssetDirectoryHolder:
         return self._assets
 
+    @property
+    def books(self) -> NameBooks | None:
+        return self._books
+
     async def store(self, articles: Sequence[NewsArticle], *, now: datetime) -> IngestResult:
         """Upsert ``articles`` and commit, serialised with every other write.
 
@@ -358,21 +391,54 @@ class NewsStore:
         require_aware(now, "now")
         directory = self._assets.current()
         batch = list(articles)
+        # This cycle's name book, built (or reused) before the write lock is
+        # taken: a rebuild compiles a pattern per listed equity, in a thread.
+        build = await self._current_book() if self._books is not None and batch else None
+        book = None if build is None else build.book
 
-        def write(session: Session) -> IngestResult:
-            return store_articles(session, batch, assets=directory, now=now)
+        def write(session: Session) -> tuple[IngestResult, LabelWrite]:
+            ingest = store_articles(session, batch, assets=directory, now=now)
+            # The same directory ingest filtered the tags with, so a vendor
+            # label never names a ticker ingest dropped.
+            labels = label_stored(session, ingest.stored, book, assets=directory, now=now)
+            return ingest, labels
 
         async with self._lock:
-            return await asyncio.to_thread(self._in_session, write)
+            ingest, labels = await asyncio.to_thread(self._in_session, write)
+        if ingest.stored:
+            log_label_write(labels, build)
+        return ingest
+
+    async def _current_book(self) -> BookBuild | None:
+        """This cycle's name book, or ``None`` -- logged -- when building it fails.
+
+        A name book is the rules tier's input, not ingestion's: a failed build
+        skips that one tier for this store and never stops the news.
+        """
+        assert self._books is not None
+        try:
+            return await self._books.current()
+        except Exception as exc:
+            error = _describe(exc)
+            logger.warning(
+                "news labelling has no name book this store; the rules tier is skipped: %s",
+                error,
+                extra={
+                    "event": "news_label_book_unavailable",
+                    "error": error,
+                    "rules_available": False,
+                    "rule": "a failed name-book build skips the rules tier, never the store or the vendor labels",
+                },
+            )
+            return None
 
     async def prune(self, *, now: datetime) -> PruneResult:
         """Decision 21's retention as of ``now``, committed, serialised with every ingest."""
         require_aware(now, "now")
 
         def write(session: Session) -> PruneResult:
-            # Step 5 replaces ``no_labels`` with the ``sentiment_label``
-            # predicate; until then no article carries a label.
-            return prune(session, now=now, labelled_article_ids=no_labels)
+            # Decision 21: only groups of which no member carries a label go.
+            return prune(session, now=now, labelled_article_ids=labelled_article_ids)
 
         async with self._lock:
             return await asyncio.to_thread(self._in_session, write)
@@ -503,6 +569,37 @@ async def build_watch_universe(
         seed_error=seed_error,
         positions_error=positions_error,
     )
+
+
+def news_name_books(
+    *,
+    markets: Iterable[str],
+    position_underlyings: Callable[[], Awaitable[Iterable[str]]],
+    session_factory: SessionFactory,
+    seed_loader: Callable[[], SpdrSeed | None],
+    assets: AssetDirectoryHolder,
+    funds: Iterable[str],
+) -> NameBooks:
+    """The rules tier's name-book source over this cycle's watch universe.
+
+    The universe is built exactly as the watch tier builds it
+    (:func:`build_watch_universe`, same arguments), so the labeller's watch
+    names and the polled symbols cannot disagree. ``funds`` is the curated
+    universe's ``fund`` flag, passed in: ``data/`` never imports the API.
+    """
+    market_symbols = tuple(markets)
+
+    async def watch() -> tuple[str, ...]:
+        built = await build_watch_universe(
+            markets=market_symbols,
+            position_underlyings=position_underlyings,
+            session_factory=session_factory,
+            seed_loader=seed_loader,
+        )
+        return built.universe.symbols
+
+    source: WatchSource = watch
+    return NameBooks(watch=source, assets=assets, funds=funds)
 
 
 # --------------------------------------------------------------------------
@@ -1040,8 +1137,9 @@ async def refresh_tradeability_cache(
 async def prune_news(store: NewsStore, now: datetime) -> PruneResult:
     """Decision 21's retention, committed, under the store lock so it never races an ingest.
 
-    Passes :func:`~corollary.data.news.retention.no_labels`; step 5 replaces
-    it with the ``sentiment_label`` predicate (see :meth:`NewsStore.prune`).
+    Passes :func:`~corollary.data.news.labelling.labelled_article_ids`, the
+    ``sentiment_label`` predicate: a group any member of which carries a label
+    is kept (see :meth:`NewsStore.prune`).
     """
     result = await store.prune(now=now)
     logger.info(

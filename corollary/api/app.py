@@ -99,9 +99,9 @@ from corollary.api.routes import (
     ws_router,
 )
 from corollary.api.schemas import ApiErrorBody, ApiErrorResponse
-from corollary.api.routes.markets import UNIVERSE_SYMBOLS
+from corollary.api.routes.markets import UNIVERSE_FUND_SYMBOLS, UNIVERSE_SYMBOLS
 from corollary.data.news.assets import AssetDirectoryHolder
-from corollary.data.news.pollers import NewsStore
+from corollary.data.news.pollers import NewsStore, news_name_books
 from corollary.data.providers.sec import SEC_USER_AGENT_ENV
 from corollary.data.seeds.nport import CusipResolver, DatabaseSeedLoader
 from corollary.data.providers.alpaca import (
@@ -654,19 +654,32 @@ def _context_services(
     registry: ServiceRegistry = app.state.registry
     holder: AssetDirectoryHolder = app.state.asset_directory
     alpaca = _alpaca_context_source(registry)
+    positions = HeldPositionUnderlyings(app.state.position_underlyings)
+    # The rules tier's name book reads the same watch universe the watch
+    # tier polls -- the same markets, positions, sessions and seed -- and the
+    # funds off the curated universe's ``fund`` flag (unit 5.2).
+    books = news_name_books(
+        markets=UNIVERSE_SYMBOLS,
+        position_underlyings=positions,
+        session_factory=sessions,
+        seed_loader=app.state.spdr_seed_loader,
+        assets=holder,
+        funds=UNIVERSE_FUND_SYMBOLS,
+    )
     return ContextServices(
         session_factory=sessions,
         # ``None`` when FRED_API_KEY is unset -- said once, inside.
         fred=registry.fred_provider(),
         rates=registry.rates,
         assets=holder,
-        news_store=NewsStore(session_factory=sessions, assets=holder),
+        news_store=NewsStore(session_factory=sessions, assets=holder, books=books),
         alpaca=alpaca,
         finnhub=_finnhub_news_source(registry),
         # ``None`` when MASSIVE_API_KEY is unset -- said once, inside.
         massive=registry.massive_provider(),
         markets=UNIVERSE_SYMBOLS,
-        position_underlyings=HeldPositionUnderlyings(app.state.position_underlyings),
+        funds=UNIVERSE_FUND_SYMBOLS,
+        position_underlyings=positions,
         seed_loader=app.state.spdr_seed_loader,
         # ``None`` when SEC_USER_AGENT is unset -- said once, inside -- and
         # the ``spdr_holdings`` job skips.
