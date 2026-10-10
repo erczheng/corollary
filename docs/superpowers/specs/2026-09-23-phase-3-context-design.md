@@ -1111,9 +1111,10 @@ paused under Q20 until the owner says otherwise.
   to the owner the same day:** the 250-ticker discovery audit cap (decision
   12), the ≥100 re-promotion floor (Q6), transitions acting on the combined
   figure rather than the watch-only one (decision 12), and the Movers ranking
-  (decision 21). **They stand as written unless the owner changes them.** Each
-  one is a single constant or a single `scope` value, so a change after step 6
-  lands is cheap.
+  (decision 21). **The owner confirmed all four as written the same day**
+  (*"let them stay as written"*), so they are now owner decisions rather than
+  assumptions. Each one is a single constant or a single `scope` value, so a
+  change after step 6 lands is still cheap.
 - **Step 5 owns decision 13's second-risk check.** Its re-measurement is the
   trigger. If the rules tier's watch-universe rate is below 1.5 directional
   labels per session, step 5 still lands. The choice between a longer
