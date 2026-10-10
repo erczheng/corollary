@@ -45,6 +45,14 @@ string to the enum is the fetcher's job, so a raw string is refused here.
 ``actual`` land in ``Money`` columns. ``estimate`` is ``None`` for an
 economic release (Q3: consensus is unavailable on the free plan), and the
 record refuses one rather than storing a number nobody supplied.
+
+**An IPO carries five fields no other kind has** (Q15): ``exchange``,
+``shares``, ``price_low``, ``price_high`` and ``ipo_status``. Each is
+optional -- Finnhub leaves ``exchange``, ``numberOfShares`` and ``price``
+null on most ``filed`` rows -- and each is refused on any other kind. A
+single offer price is ``price_low == price_high``. ``price_low <=
+price_high`` is checked **here**, not in SQL: the columns are ``Money``,
+which refuses SQL comparison because TEXT compares lexicographically.
 """
 
 from __future__ import annotations
@@ -63,6 +71,8 @@ __all__ = [
     "CalendarSource",
     "ET_ZONE",
     "EarningsSession",
+    "IPO_FIELDS",
+    "IpoStatus",
     "KIND_SOURCE",
     "TICKER_REQUIRED_KINDS",
     "check_title",
@@ -77,6 +87,7 @@ TITLE_MAX: Final = 256
 TICKER_MAX: Final = 16
 UNIT_MAX: Final = 32
 VENDOR_ID_MAX: Final = 128
+EXCHANGE_MAX: Final = 64
 
 
 class CalendarKind(StrEnum):
@@ -106,6 +117,19 @@ class EarningsSession(StrEnum):
     BMO = "bmo"  # before market open
     AMC = "amc"  # after market close
     DMH = "dmh"  # during market hours
+
+
+class IpoStatus(StrEnum):
+    """Where an IPO stands (Q15). Finnhub's ``status`` spellings, every one recorded."""
+
+    EXPECTED = "expected"
+    FILED = "filed"
+    PRICED = "priced"
+    WITHDRAWN = "withdrawn"
+
+
+#: The fields only an ``ipo`` row may carry (Q15). Repeated in migration 0013.
+IPO_FIELDS: Final = ("exchange", "shares", "price_low", "price_high", "ipo_status")
 
 
 #: The one producer the spec gives each kind. Decision 7: earnings from
@@ -197,6 +221,15 @@ class CalendarEventInput:
     unit: str | None = None
     #: Earnings only; ``None`` when the vendor gave no (or no known) session.
     session: EarningsSession | None = None
+    #: IPO only (Q15): the listing venue, as the vendor names it.
+    exchange: str | None = None
+    #: IPO only: shares offered. A positive ``int``; ``None`` when not given.
+    shares: int | None = None
+    #: IPO only: the offer range. Both or neither; a single price is low == high.
+    price_low: Decimal | None = None
+    price_high: Decimal | None = None
+    #: IPO only: ``None`` when the vendor gave no (or no known) status.
+    ipo_status: IpoStatus | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, CalendarKind):
@@ -244,3 +277,49 @@ class CalendarEventInput:
                 raise ValueError(
                     f"a {self.kind.value} event has no earnings session; only earnings do"
                 )
+        self._check_ipo_fields()
+
+    def _check_ipo_fields(self) -> None:
+        if self.kind is not CalendarKind.IPO:
+            present = [name for name in IPO_FIELDS if getattr(self, name) is not None]
+            if present:
+                raise ValueError(
+                    f"a {self.kind.value} event cannot carry {', '.join(present)}; "
+                    "only ipo events do (Q15)"
+                )
+            return
+        if self.exchange is not None and (
+            not isinstance(self.exchange, str)
+            or not self.exchange.strip()
+            or len(self.exchange) > EXCHANGE_MAX
+        ):
+            raise ValueError(
+                f"exchange {self.exchange!r} must be non-empty and at most {EXCHANGE_MAX}"
+            )
+        if self.shares is not None and (
+            isinstance(self.shares, bool) or not isinstance(self.shares, int) or self.shares <= 0
+        ):
+            raise ValueError(
+                f"shares must be a positive integer or None, got {self.shares!r}"
+            )
+        _check_money("price_low", self.price_low)
+        _check_money("price_high", self.price_high)
+        if (self.price_low is None) != (self.price_high is None):
+            raise ValueError(
+                "price_low and price_high are both or neither; a single offer "
+                "price is low == high"
+            )
+        if self.price_low is not None and self.price_high is not None:
+            if self.price_low <= 0 or self.price_high <= 0:
+                raise ValueError(
+                    f"offer prices must be positive, got {self.price_low}-{self.price_high}"
+                )
+            if self.price_low > self.price_high:
+                raise ValueError(
+                    f"price_low {self.price_low} is above price_high {self.price_high}"
+                )
+        if self.ipo_status is not None and not isinstance(self.ipo_status, IpoStatus):
+            raise ValueError(
+                f"ipo_status must be an IpoStatus or None, got {self.ipo_status!r}; "
+                "an unknown vendor status is None"
+            )

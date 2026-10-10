@@ -124,6 +124,22 @@ Measured against this project's key on 2026-09-24 and recorded under
 * **``minId`` is exclusive** -- ``minId=N`` returned only ids above ``N`` --
   and the general page is ordered by time, not id, so the next cursor is the
   maximum id over the whole page.
+
+Calendars (Phase 3, step 7)
+---------------------------
+
+Two more reads, :meth:`FinnhubProvider.earnings_calendar`
+(``/calendar/earnings``, decision 7) and :meth:`FinnhubProvider.ipo_calendar`
+(``/calendar/ipo``, Q15). Each is **one request for the whole window** on the
+shared ``finnhub.io`` bucket -- the earnings calendar is filtered to the
+watch universe after the fact, so the daily refresh costs one request, not
+one per symbol. Both return the vendor's rows decoded exactly
+(:func:`corollary.wire.decode_json`) and otherwise untouched; mapping them
+into ``calendar_event`` rows is :mod:`corollary.data.calendar_finnhub`'s
+job. Recorded under ``tests/fixtures/finnhub/p3_calendar_earnings.json`` and
+``p7_calendar_ipo*.json``; the IPO calendar answered 200 on the free key on
+2026-10-10, though the swagger marks it neither free nor premium, so a 403
+is :class:`CalendarAccessDenied` and goes back to the owner (Q15).
 """
 
 import asyncio
@@ -162,6 +178,8 @@ from corollary.wire import (
 __all__ = [
     "COMPANY_NEWS_CAP",
     "COMPANY_NEWS_CAP_THRESHOLD",
+    "CalendarAccessDenied",
+    "CalendarProviderError",
     "CompanyNews",
     "FINNHUB_API_KEY_ENV",
     "FINNHUB_BASE_URL",
@@ -267,6 +285,14 @@ class MarketNews:
     #: the page was empty. ``None`` only if both were.
     min_id: int | None
     skipped: int
+
+
+class CalendarProviderError(RuntimeError):
+    """A Finnhub calendar could not be read: transport, status, or body shape."""
+
+
+class CalendarAccessDenied(CalendarProviderError):
+    """401/403: the key was refused, or the calendar is not on this plan (Q15)."""
 
 
 class FinnhubCredentialsError(RuntimeError):
@@ -559,6 +585,73 @@ class FinnhubProvider(FundamentalsProvider):
             )
         return ipo_date_from_profile(wanted, payload)
 
+
+    # ------------------------------------------------------------- calendars
+
+    async def earnings_calendar(self, start: date, end: date) -> list[Any]:
+        """``/calendar/earnings`` over ``[start, end]``: the vendor's rows, decoded exactly.
+
+        Decision 7. Each row is ``{symbol, date, hour, year, quarter,
+        epsEstimate, epsActual, revenueEstimate, revenueActual}``; ``hour`` is
+        a session code, not a time. One request for the window, every symbol.
+        """
+        return await self._get_calendar("/calendar/earnings", "earningsCalendar", start, end)
+
+    async def ipo_calendar(self, start: date, end: date) -> list[Any]:
+        """``/calendar/ipo`` over ``[start, end]``: the vendor's rows, decoded exactly.
+
+        Q15. Each row is ``{date, exchange, name, numberOfShares, price,
+        status, symbol, totalSharesValue}``; ``price`` is text
+        (``"14.00-16.00"`` or ``"10.00"``) or null.
+        """
+        return await self._get_calendar("/calendar/ipo", "ipoCalendar", start, end)
+
+    async def _get_calendar(self, path: str, key: str, start: date, end: date) -> list[Any]:
+        """One calendar GET: the list under ``key``, or a :class:`CalendarProviderError`.
+
+        A missing or null ``key`` is an error, not an empty calendar: every
+        recorded response carries the key as a list, and reading any other
+        shape as "nothing scheduled" would empty the panel silently. (An
+        empty window has not been recorded; if Finnhub answers one with a
+        null, this raises loudly and the rule is revisited with a recording.)
+        """
+        if end < start:
+            raise ValueError(f"{path}: end {end.isoformat()} is before start {start.isoformat()}")
+        response = await self._send(
+            path, {"from": start.isoformat(), "to": end.isoformat()}, error=CalendarProviderError
+        )
+        if response.status_code in (401, 403):
+            raise CalendarAccessDenied(
+                f"GET {path} returned {response.status_code}: "
+                f"{self._detail(response)}. Either the key was refused -- check "
+                f"{FINNHUB_API_KEY_ENV} -- or the endpoint is not on this plan "
+                "(Finnhub answers a premium endpoint with a JSON 403)."
+            )
+        if response.status_code == 429:
+            raise CalendarProviderError(
+                f"GET {path} returned 429 despite the local budget of 60/min. "
+                "Another process may be sharing this key."
+            )
+        if response.status_code >= 400:
+            raise CalendarProviderError(
+                f"GET {path} returned {response.status_code}: {self._detail(response)}"
+            )
+        try:
+            payload = decode_json(response.text)
+        except WireFormatError as exc:
+            raise CalendarProviderError(f"GET {path}: {self._scrub(str(exc))}") from exc
+        if not isinstance(payload, Mapping):
+            raise CalendarProviderError(
+                f"GET {path} answered with a {type(payload).__name__}, not an object: "
+                f"{self._detail(response)}"
+            )
+        rows = payload.get(key)
+        if not isinstance(rows, list):
+            raise CalendarProviderError(
+                f"GET {path} carried no {key} list (got {type(rows).__name__}): "
+                f"{self._detail(response)}"
+            )
+        return rows
 
     # ----------------------------------------------------------------- news
 

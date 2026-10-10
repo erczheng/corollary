@@ -25,11 +25,13 @@ from corollary.data.calendar_event import (
     CalendarKind,
     CalendarSource,
     EarningsSession,
+    IpoStatus,
 )
 from corollary.db.models import (
     CALENDAR_EVENT_KINDS,
     CALENDAR_EVENT_SOURCES,
     EARNINGS_SESSIONS,
+    IPO_STATUSES,
     Base,
     CalendarEvent,
 )
@@ -290,3 +292,147 @@ def test_ordering_or_aggregating_a_money_column_is_refused(any_engine: Engine) -
             session.execute(select(CalendarEvent).order_by(CalendarEvent.actual))
         with pytest.raises(MoneyComparisonError):
             session.execute(select(func.max(CalendarEvent.estimate)))
+
+
+# --- Q15: the IPO-only columns (unit 7.2b-F) -----------------------------------
+
+
+def _ipo_row(**overrides: Any) -> CalendarEvent:
+    values: dict[str, Any] = {
+        "kind": "ipo",
+        "source": "finnhub",
+        "title": "Iambic Therapeutics, Inc.",
+        "ticker": "IAM",
+        "estimate": None,
+        "unit": None,
+        "vendor_id": "symbol:IAM",
+        "exchange": "NASDAQ Global Select",
+        "shares": 9375000,
+        "price_low": Decimal("15.00"),
+        "price_high": Decimal("17.00"),
+        "ipo_status": "expected",
+    }
+    values.update(overrides)
+    return _row(**values)
+
+
+def test_the_ipo_status_set_matches_the_enum() -> None:
+    assert IPO_STATUSES == ("expected", "filed", "priced", "withdrawn")
+    assert IPO_STATUSES == tuple(s.value for s in IpoStatus)
+
+
+def test_an_ipo_row_round_trips(any_engine: Engine) -> None:
+    with Session(any_engine) as session:
+        session.add(_ipo_row())
+        session.commit()
+    with Session(any_engine) as session:
+        row = session.scalars(select(CalendarEvent)).one()
+    assert (row.exchange, row.shares, row.ipo_status) == (
+        "NASDAQ Global Select",
+        9375000,
+        "expected",
+    )
+    assert type(row.price_low) is Decimal and str(row.price_low) == "15.00"
+    assert type(row.price_high) is Decimal and str(row.price_high) == "17.00"
+    with any_engine.connect() as conn:
+        assert conn.execute(
+            text("SELECT typeof(shares), typeof(price_low) FROM calendar_event")
+        ).one() == ("integer", "text")
+
+
+@pytest.mark.parametrize("status", ["expected", "filed", "priced", "withdrawn", None])
+def test_every_ipo_status_is_accepted(any_engine: Engine, status: str | None) -> None:
+    with Session(any_engine) as session:
+        session.add(_ipo_row(ipo_status=status))
+        session.commit()
+
+
+def test_an_ipo_with_no_symbol_and_no_optional_fields_is_accepted(any_engine: Engine) -> None:
+    with Session(any_engine) as session:
+        session.add(
+            _ipo_row(
+                ticker=None,
+                title="SIYATA PTT",
+                vendor_id="name:siyata ptt",
+                exchange=None,
+                shares=None,
+                price_low=None,
+                price_high=None,
+                ipo_status="withdrawn",
+            )
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"exchange": "NYSE"}, id="exchange on earnings"),
+        pytest.param({"shares": 100}, id="shares on earnings"),
+        pytest.param(
+            {"price_low": Decimal("1"), "price_high": Decimal("1")}, id="price on earnings"
+        ),
+        pytest.param({"ipo_status": "filed"}, id="ipo_status on earnings"),
+    ],
+)
+def test_an_ipo_column_on_another_kind_is_refused(
+    any_engine: Engine, overrides: dict[str, Any]
+) -> None:
+    with Session(any_engine) as session:
+        session.add(_row(**overrides))
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"ipo_status": "postponed"}, id="unknown status"),
+        pytest.param({"ipo_status": "Expected"}, id="status in title case"),
+        pytest.param({"ipo_status": ""}, id="blank status"),
+        pytest.param({"exchange": ""}, id="blank exchange"),
+        pytest.param({"exchange": "  "}, id="whitespace exchange"),
+        pytest.param({"shares": 0}, id="zero shares"),
+        pytest.param({"shares": -1}, id="negative shares"),
+        pytest.param({"price_low": None}, id="high without low"),
+        pytest.param({"price_high": None}, id="low without high"),
+    ],
+)
+def test_a_bad_ipo_row_is_refused(any_engine: Engine, overrides: dict[str, Any]) -> None:
+    with Session(any_engine) as session:
+        session.add(_ipo_row(**overrides))
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+@pytest.mark.parametrize(
+    ("column", "stored"),
+    [
+        ("shares", "9.4M"),  # numeric-looking text is coerced by INTEGER affinity; this is not
+        ("shares", 9375000.5),
+        ("price_low", "NaN"),
+        ("price_low", "15.00-17.00"),
+        ("price_high", "1E+2"),
+        ("price_high", "abc"),
+    ],
+)
+def test_an_ipo_column_refuses_the_wrong_storage_shape(
+    any_engine: Engine, column: str, stored: object
+) -> None:
+    with Session(any_engine) as session:
+        session.add(_ipo_row())
+        session.commit()
+    with any_engine.connect() as conn:
+        with pytest.raises(IntegrityError):
+            conn.execute(text(f"UPDATE calendar_event SET {column} = :v"), {"v": stored})
+
+
+def test_an_ipo_column_cannot_be_written_onto_an_earnings_row_by_update(
+    any_engine: Engine,
+) -> None:
+    with Session(any_engine) as session:
+        session.add(_row())
+        session.commit()
+    with any_engine.connect() as conn:
+        with pytest.raises(IntegrityError):
+            conn.execute(text("UPDATE calendar_event SET exchange = 'NYSE'"))

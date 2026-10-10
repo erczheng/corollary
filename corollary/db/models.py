@@ -59,10 +59,12 @@ from sqlalchemy.orm import (
 )
 
 from corollary.data.calendar_event import (
+    IPO_FIELDS,
     KIND_SOURCE,
     CalendarKind,
     CalendarSource,
     EarningsSession,
+    IpoStatus,
 )
 from corollary.data.news.article import FEED_VENDOR, NewsFeed
 from corollary.db.types import ActivityId, Money, UtcDateTime
@@ -75,6 +77,7 @@ __all__ = [
     "CalendarEvent",
     "Base",
     "EARNINGS_SESSIONS",
+    "IPO_STATUSES",
     "CLOSE_KINDS",
     "DataFeed",
     "EngineState",
@@ -1686,6 +1689,15 @@ CALENDAR_EVENT_SOURCES: tuple[str, ...] = tuple(source.value for source in Calen
 #: ``calendar_event.session``'s CHECK set, derived from :class:`EarningsSession`.
 EARNINGS_SESSIONS: tuple[str, ...] = tuple(s.value for s in EarningsSession)
 
+#: ``calendar_event.ipo_status``'s CHECK set, derived from :class:`IpoStatus`.
+IPO_STATUSES: tuple[str, ...] = tuple(s.value for s in IpoStatus)
+
+
+def _calendar_ipo_fields_only() -> str:
+    """A CHECK that Q15's IPO columns are NULL on every row that is not an IPO."""
+    nulls = " AND ".join(f"{name} IS NULL" for name in IPO_FIELDS)
+    return f"kind = 'ipo' OR ({nulls})"
+
 
 def _calendar_kind_source_pairing() -> str:
     """A CHECK that each kind is stored under the one producer the spec gives it.
@@ -1734,6 +1746,14 @@ class CalendarEvent(Base):
     every other kind -- both CHECK-enforced. It is not a time: an earnings row
     with a session keeps ``at`` NULL rather than a placeholder instant.
 
+    ``exchange``, ``shares``, ``price_low``, ``price_high`` and
+    ``ipo_status`` are Q15's IPO fields: NULL on every other kind
+    (CHECK-enforced), and each nullable on an IPO, since Finnhub leaves most
+    of them null on a ``filed`` row. ``shares`` is an INTEGER and positive.
+    ``price_low <= price_high`` is **not** a CHECK -- the columns are
+    ``Money`` TEXT, which compares lexicographically -- and is enforced by
+    :class:`~corollary.data.calendar_event.CalendarEventInput` instead.
+
     ``deleted_at`` is not restricted to manual rows: the seed import also
     withdraws a seeded decision a corrected seed no longer lists, and revives
     it if a later file restores it. The API's refusal to edit a non-manual row
@@ -1779,6 +1799,26 @@ class CalendarEvent(Base):
         CheckConstraint(
             _money_shape("actual", nullable=True), name="ck_calendar_event_actual"
         ),
+        CheckConstraint(_calendar_ipo_fields_only(), name="ck_calendar_event_ipo_fields"),
+        CheckConstraint(
+            "exchange IS NULL OR trim(exchange) <> ''", name="ck_calendar_event_exchange"
+        ),
+        CheckConstraint(
+            "shares IS NULL OR (typeof(shares) = 'integer' AND shares > 0)",
+            name="ck_calendar_event_shares",
+        ),
+        CheckConstraint(
+            _money_shape("price_low", nullable=True), name="ck_calendar_event_price_low"
+        ),
+        CheckConstraint(
+            _money_shape("price_high", nullable=True), name="ck_calendar_event_price_high"
+        ),
+        CheckConstraint(
+            "(price_low IS NULL) = (price_high IS NULL)", name="ck_calendar_event_price_pair"
+        ),
+        CheckConstraint(
+            _in_list_or_null("ipo_status", IPO_STATUSES), name="ck_calendar_event_ipo_status"
+        ),
         UniqueConstraint("source", "kind", "vendor_id", name="uq_calendar_event_vendor_key"),
         Index("ix_calendar_event_date", "date"),
     )
@@ -1800,6 +1840,15 @@ class CalendarEvent(Base):
     #: Earnings only: ``bmo``/``amc``/``dmh``, or NULL when the vendor gave none.
     #: Not a time -- ``at`` stays NULL beside it (decision 7).
     session: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    #: IPO only (Q15): the listing venue as the vendor names it.
+    exchange: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: IPO only: shares offered, a positive integer.
+    shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: IPO only: the offer range; a single price is low == high.
+    price_low: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    price_high: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: IPO only: ``expected``/``filed``/``priced``/``withdrawn``, or NULL.
+    ipo_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     #: The producer's stable key for the event; NULL exactly on manual rows.
     vendor_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

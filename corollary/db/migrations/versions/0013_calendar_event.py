@@ -20,6 +20,17 @@ event stored as a midnight instant groups under the previous day in New York.
 when unknown and NULL on every other kind; it is not a time, so ``at`` stays
 NULL beside it.
 
+``exchange``, ``shares``, ``price_low``, ``price_high`` and ``ipo_status`` are
+Q15's IPO fields, NULL on every other kind. ``price_low <= price_high`` is not
+a CHECK (``Money`` TEXT compares lexicographically); ``CalendarEventInput``
+enforces it.
+
+**Amended in-branch (unit 7.2b-F).** The IPO columns were added to this
+revision after it was committed on ``phase3-step7``, rather than in a 0014 of
+their own. That is correct only because 0013 has not merged anywhere -- no
+database outside this branch's tests has ever run it -- and Q22 renumbers it
+at merge regardless. Once it has merged, a change here is a new revision.
+
 **The number is provisional (Q22).** Steps 5 and 7 each add a revision on
 ``0012``. Whichever merges second renumbers its revision to the next free
 number and re-points ``down_revision`` at the head it lands on; no merge
@@ -82,6 +93,11 @@ def upgrade() -> None:
         sa.Column("actual", sa.String(length=_MONEY_TEXT_WIDTH), nullable=True),
         sa.Column("unit", sa.String(length=32), nullable=True),
         sa.Column("session", sa.String(length=8), nullable=True),
+        sa.Column("exchange", sa.String(length=64), nullable=True),
+        sa.Column("shares", sa.Integer(), nullable=True),
+        sa.Column("price_low", sa.String(length=_MONEY_TEXT_WIDTH), nullable=True),
+        sa.Column("price_high", sa.String(length=_MONEY_TEXT_WIDTH), nullable=True),
+        sa.Column("ipo_status", sa.String(length=16), nullable=True),
         sa.Column("vendor_id", sa.String(length=128), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
@@ -138,6 +154,31 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             _money_shape("actual", nullable=True), name="ck_calendar_event_actual"
+        ),
+        sa.CheckConstraint(
+            "kind = 'ipo' OR (exchange IS NULL AND shares IS NULL AND price_low IS NULL "
+            "AND price_high IS NULL AND ipo_status IS NULL)",
+            name="ck_calendar_event_ipo_fields",
+        ),
+        sa.CheckConstraint(
+            "exchange IS NULL OR trim(exchange) <> ''", name="ck_calendar_event_exchange"
+        ),
+        sa.CheckConstraint(
+            "shares IS NULL OR (typeof(shares) = 'integer' AND shares > 0)",
+            name="ck_calendar_event_shares",
+        ),
+        sa.CheckConstraint(
+            _money_shape("price_low", nullable=True), name="ck_calendar_event_price_low"
+        ),
+        sa.CheckConstraint(
+            _money_shape("price_high", nullable=True), name="ck_calendar_event_price_high"
+        ),
+        sa.CheckConstraint(
+            "(price_low IS NULL) = (price_high IS NULL)", name="ck_calendar_event_price_pair"
+        ),
+        sa.CheckConstraint(
+            "ipo_status IS NULL OR ipo_status IN ('expected', 'filed', 'priced', 'withdrawn')",
+            name="ck_calendar_event_ipo_status",
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("source", "kind", "vendor_id", name="uq_calendar_event_vendor_key"),

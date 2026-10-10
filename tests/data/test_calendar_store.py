@@ -17,7 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session
 
 from corollary.data.calendar import (
@@ -41,6 +41,7 @@ from corollary.data.calendar_event import (
     CalendarKind,
     CalendarSource,
     EarningsSession,
+    IpoStatus,
 )
 from corollary.data.seeds.calendar_seeds import (
     Bank,
@@ -569,3 +570,139 @@ def test_stored_event_is_detached_from_the_session(session: Session) -> None:
     session.close()
     assert isinstance(event, StoredCalendarEvent)
     assert event.title == "AAPL ex-dividend"
+
+
+# --- unit 7.2b-F: ``now`` is stored as UTC before any reload ------------------
+
+#: The same instant as ``T0``, stated in New York. Equal to ``T0``; a
+#: different zone, which is what the audit caught leaking through.
+T0_ET = T0.astimezone(ET)
+
+
+def _is_utc(value: datetime | None) -> bool:
+    return value is not None and value.tzinfo is UTC
+
+
+def _hold_flushed(session: Session) -> list[CalendarEvent]:
+    """Keep a strong reference to every object each flush writes.
+
+    The identity map holds persistent objects **weakly**: once ``upsert_events``
+    returns, nothing references the row it built, it is collected, and the
+    next query reloads it from the database -- through ``UtcDateTime``, so in
+    UTC whatever ``now`` was. A test that queried afterwards would pass
+    against the bug. Holding the objects is what lets the test see the
+    in-memory value a caller still holding the row would see.
+    """
+    held: list[CalendarEvent] = []
+
+    def keep(sess: Session, _ctx: object) -> None:
+        held.extend(obj for obj in (*sess.new, *sess.dirty) if isinstance(obj, CalendarEvent))
+
+    event.listen(session, "after_flush", keep)
+    return held
+
+
+def test_an_upsert_insert_stamps_utc_from_an_eastern_now(session: Session) -> None:
+    held = _hold_flushed(session)
+    upsert_events(session, [_earnings()], now=T0_ET)
+    (row,) = held
+    assert _is_utc(row.created_at) and _is_utc(row.updated_at)
+    assert row.created_at == T0
+
+
+def test_an_upsert_update_stamps_utc_from_an_eastern_now(session: Session) -> None:
+    upsert_events(session, [_earnings()], now=T0)
+    held = _hold_flushed(session)
+    upsert_events(session, [_earnings(estimate=Decimal("1.30"))], now=T1.astimezone(ET))
+    (row,) = held
+    assert _is_utc(row.updated_at) and row.updated_at == T1
+
+
+def test_a_seed_withdrawal_stamps_utc_from_an_eastern_now(session: Session) -> None:
+    seed = load_central_bank_seed(2026)
+    assert seed is not None
+    import_central_bank_seed(session, seed, now=T0)
+    fomc = [d for d in seed.decisions if d.bank is Bank.FOMC]
+    trimmed = replace(seed, decisions=tuple(d for d in seed.decisions if d is not fomc[-1]))
+    held = _hold_flushed(session)
+    counts = import_central_bank_seed(session, trimmed, now=T1.astimezone(ET))
+    assert counts.withdrawn == 1
+    (withdrawn,) = [row for row in held if row.deleted_at is not None]
+    assert _is_utc(withdrawn.deleted_at) and _is_utc(withdrawn.updated_at)
+    assert withdrawn.deleted_at == T1
+
+
+def test_manual_rows_stamp_utc_from_an_eastern_now(session: Session) -> None:
+    created = create_manual(session, title="Summit", date=date(2026, 10, 14), now=T0_ET)
+    assert _is_utc(created.created_at) and _is_utc(created.updated_at)
+    updated = update_manual(
+        session, created.id, title="Summit, moved", date=date(2026, 10, 15), now=T1.astimezone(ET)
+    )
+    assert _is_utc(updated.updated_at) and updated.updated_at == T1
+    delete_manual(session, created.id, now=T1.astimezone(ET))
+    (row,) = _rows(session)
+    assert _is_utc(row.deleted_at) and _is_utc(row.updated_at)
+
+
+# --- unit 7.2b-F: the IPO fields go through the upsert ------------------------
+
+
+def _ipo(**overrides: object) -> CalendarEventInput:
+    base = CalendarEventInput(
+        kind=CalendarKind.IPO,
+        source=CalendarSource.FINNHUB,
+        vendor_id="symbol:IAM",
+        title="Iambic Therapeutics, Inc.",
+        date=date(2026, 10, 15),
+        ticker="IAM",
+        exchange="NASDAQ Global Select",
+        shares=9375000,
+        price_low=Decimal("15.00"),
+        price_high=Decimal("17.00"),
+        ipo_status=IpoStatus.EXPECTED,
+    )
+    return replace(base, **overrides)  # type: ignore[arg-type]
+
+
+def test_an_ipo_round_trips_through_the_store(session: Session) -> None:
+    upsert_events(session, [_ipo()], now=T0)
+    (stored,) = read_range(session, date(2026, 10, 15), date(2026, 10, 15))
+    assert stored.kind is CalendarKind.IPO
+    assert (stored.exchange, stored.shares, stored.ipo_status) == (
+        "NASDAQ Global Select",
+        9375000,
+        IpoStatus.EXPECTED,
+    )
+    assert (stored.price_low, stored.price_high) == (Decimal("15.00"), Decimal("17.00"))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param({"ipo_status": IpoStatus.PRICED}, id="status"),
+        pytest.param({"exchange": "NYSE"}, id="exchange"),
+        pytest.param({"shares": 10_000_000}, id="shares"),
+        pytest.param({"price_low": Decimal("16.00"), "price_high": Decimal("16.00")}, id="price"),
+        pytest.param({"price_low": Decimal("15.0")}, id="price spelling"),
+        pytest.param({"date": date(2026, 10, 22)}, id="date moved"),
+    ],
+)
+def test_a_changed_ipo_field_is_an_update_in_place(
+    session: Session, change: dict[str, object]
+) -> None:
+    upsert_events(session, [_ipo()], now=T0)
+    counts = upsert_events(session, [_ipo(**change)], now=T1)
+    assert counts == UpsertCounts(inserted=0, updated=1, unchanged=0)
+    (row,) = _rows(session)
+    for name, value in change.items():
+        stored = getattr(row, name)
+        assert (stored.value if isinstance(stored, IpoStatus) else stored) == (
+            value.value if isinstance(value, IpoStatus) else value
+        )
+    if "price_low" in change:
+        assert format(row.price_low, "f") == format(change["price_low"], "f")
+
+
+def test_an_unchanged_ipo_is_unchanged(session: Session) -> None:
+    upsert_events(session, [_ipo()], now=T0)
+    assert upsert_events(session, [_ipo()], now=T1) == UpsertCounts(0, 0, 1)

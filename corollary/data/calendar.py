@@ -24,7 +24,9 @@ Phase 3 step 7, unit 7.2a. Four jobs, and nothing else:
 Every function flushes and none commits: the caller owns the transaction, as
 in :mod:`corollary.data.news.ingest`. Every timestamp is passed in (``now``)
 and must be aware, so the tests and the scheduler say what time it is rather
-than this module asking the clock.
+than this module asking the clock. ``now`` is converted to UTC on the way in
+(:func:`_utc_now`), so a row a caller still holds reads back in the zone it
+is stored in -- not in the caller's zone until the next reload.
 
 Reads return :class:`StoredCalendarEvent`, a frozen value detached from the
 session, so a route can serialise it after the session closes.
@@ -49,6 +51,7 @@ from corollary.data.calendar_event import (
     CalendarKind,
     CalendarSource,
     EarningsSession,
+    IpoStatus,
     check_title,
     check_when,
 )
@@ -83,7 +86,7 @@ __all__ = [
 ]
 
 #: The ``Money`` columns an upsert writes.
-_MONEY_FIELDS: Final = ("estimate", "prior", "actual")
+_MONEY_FIELDS: Final = ("estimate", "prior", "actual", "price_low", "price_high")
 
 #: How each seeded bank is named in a row's title.
 _BANK_LABEL: Final = {
@@ -145,6 +148,12 @@ class StoredCalendarEvent:
     actual: Decimal | None
     unit: str | None
     session: EarningsSession | None
+    #: Q15's IPO-only fields; ``None`` on every other kind.
+    exchange: str | None
+    shares: int | None
+    price_low: Decimal | None
+    price_high: Decimal | None
+    ipo_status: IpoStatus | None
     vendor_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -185,9 +194,16 @@ class SeedImport:
 # --- helpers ----------------------------------------------------------------
 
 
-def _require_aware(now: datetime) -> None:
+def _utc_now(now: datetime) -> datetime:
+    """``now`` as UTC, refused if naive.
+
+    Every function here stamps rows with ``now``. Stamped as given, a caller
+    passing an Eastern ``now`` held rows reading back in Eastern until the
+    session reloaded them; converting once on the way in is the fix.
+    """
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError(f"now must be a timezone-aware datetime, got {now!r}")
+    return now.astimezone(UTC)
 
 
 def _utc(at: datetime | None) -> datetime | None:
@@ -209,6 +225,11 @@ def _stored(row: CalendarEvent) -> StoredCalendarEvent:
         actual=row.actual,
         unit=row.unit,
         session=None if row.session is None else EarningsSession(row.session),
+        exchange=row.exchange,
+        shares=row.shares,
+        price_low=row.price_low,
+        price_high=row.price_high,
+        ipo_status=None if row.ipo_status is None else IpoStatus(row.ipo_status),
         vendor_id=row.vendor_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -231,6 +252,11 @@ def _stored_form(
     actual: Decimal | None,
     unit: str | None,
     session: str | None,
+    exchange: str | None,
+    shares: int | None,
+    price_low: Decimal | None,
+    price_high: Decimal | None,
+    ipo_status: str | None,
 ) -> tuple[object, ...]:
     """Everything an upsert may change, as the database would hold it."""
     return (
@@ -243,6 +269,11 @@ def _stored_form(
         _money_text(actual),
         unit,
         session,
+        exchange,
+        shares,
+        _money_text(price_low),
+        _money_text(price_high),
+        ipo_status,
     )
 
 
@@ -257,6 +288,11 @@ def _form_of_input(event: CalendarEventInput) -> tuple[object, ...]:
         actual=event.actual,
         unit=event.unit,
         session=None if event.session is None else event.session.value,
+        exchange=event.exchange,
+        shares=event.shares,
+        price_low=event.price_low,
+        price_high=event.price_high,
+        ipo_status=None if event.ipo_status is None else event.ipo_status.value,
     )
 
 
@@ -271,6 +307,11 @@ def _form_of_row(row: CalendarEvent) -> tuple[object, ...]:
         actual=row.actual,
         unit=row.unit,
         session=row.session,
+        exchange=row.exchange,
+        shares=row.shares,
+        price_low=row.price_low,
+        price_high=row.price_high,
+        ipo_status=row.ipo_status,
     )
 
 
@@ -281,6 +322,9 @@ def _apply(row: CalendarEvent, event: CalendarEventInput) -> None:
     row.at = _utc(event.at)
     row.unit = event.unit
     row.session = None if event.session is None else event.session.value
+    row.exchange = event.exchange
+    row.shares = event.shares
+    row.ipo_status = None if event.ipo_status is None else event.ipo_status.value
     for name in _MONEY_FIELDS:
         old: Decimal | None = getattr(row, name)
         new: Decimal | None = getattr(event, name)
@@ -307,7 +351,7 @@ def upsert_events(
     again. One batch naming one key twice is refused rather than resolved by
     order -- that is a fetcher bug, and last-wins would hide it.
     """
-    _require_aware(now)
+    now = _utc_now(now)
     by_key: dict[tuple[CalendarSource, CalendarKind, str], CalendarEventInput] = {}
     for event in events:
         key = (event.source, event.kind, event.vendor_id)
@@ -460,7 +504,7 @@ def import_central_bank_seed(
     outside that window is left alone: a file covering March onward says
     nothing about February. An ``unpublished`` bank claims nothing.
     """
-    _require_aware(now)
+    now = _utc_now(now)
     inputs = central_bank_inputs(seed)
     counts = upsert_events(session, inputs, now=now)
 
@@ -541,7 +585,7 @@ def create_manual(
     session: Session, *, title: str, date: date, at: datetime | None = None, now: datetime
 ) -> StoredCalendarEvent:
     """Add a geopolitical note (decision 9). Not audit-logged."""
-    _require_aware(now)
+    now = _utc_now(now)
     check_title(title)
     check_when(date, at)
     row = CalendarEvent(
@@ -576,7 +620,7 @@ def update_manual(
     now: datetime,
 ) -> StoredCalendarEvent:
     """Replace a manual row's title, date and time. Vendor and seed rows are refused."""
-    _require_aware(now)
+    now = _utc_now(now)
     row = _live_manual_row(session, event_id)
     check_title(title)
     check_when(date, at)
@@ -591,7 +635,7 @@ def update_manual(
 
 def delete_manual(session: Session, event_id: int, *, now: datetime) -> None:
     """Soft-delete a manual row. Vendor and seed rows are refused."""
-    _require_aware(now)
+    now = _utc_now(now)
     row = _live_manual_row(session, event_id)
     row.deleted_at = now
     row.updated_at = now

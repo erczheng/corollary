@@ -268,11 +268,25 @@ def test_0013_downgrades_to_0012_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     indexes = {ix["name"] for ix in inspect(eng).get_indexes("calendar_event")}
     columns = {c["name"]: c for c in inspect(eng).get_columns("calendar_event")}
+    checks = {ck["name"] for ck in inspect(eng).get_check_constraints("calendar_event")}
     eng.dispose()
     assert EXPECTED_TABLES <= tables
     assert "ix_calendar_event_date" in indexes
     # Decision 7's earnings session survives the round trip, nullable.
     assert columns["session"]["nullable"] is True
+    # Q15's IPO-only columns (amended into 0013 in-branch, unit 7.2b-F) come
+    # back too, every one nullable.
+    for name in ("exchange", "shares", "price_low", "price_high", "ipo_status"):
+        assert columns[name]["nullable"] is True, name
+    assert {
+        "ck_calendar_event_ipo_fields",
+        "ck_calendar_event_exchange",
+        "ck_calendar_event_shares",
+        "ck_calendar_event_price_low",
+        "ck_calendar_event_price_high",
+        "ck_calendar_event_price_pair",
+        "ck_calendar_event_ipo_status",
+    } <= checks
 
 
 # Autogenerate does not compare CHECK constraints; run the same rows against
