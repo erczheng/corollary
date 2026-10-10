@@ -10,7 +10,6 @@
 
 import {
   MACRO_SECTOR,
-  type CalendarEvent,
   type NewsItem,
   type SectorConsensus,
   type SentimentComponent,
@@ -287,55 +286,4 @@ export function consensusNet(c: SectorConsensus): number {
 
 export function sortConsensus(rows: SectorConsensus[]): SectorConsensus[] {
   return [...rows].sort((a, b) => consensusNet(b) - consensusNet(a))
-}
-
-// ---------------------------------------------------------------------- //
-// Market calendar
-// ---------------------------------------------------------------------- //
-
-export interface CalendarDay {
-  /** `YYYY-MM-DD`, Eastern. */
-  date: string
-  events: CalendarEvent[]
-}
-
-/** Forward-looking only, grouped by session.
- *
- * PRD.md §8.3 says forward-looking, and this enforces it against the clock
- * rather than trusting the fixture to stay ahead of one — a hardcoded list
- * silently becomes a list of things that already happened, and a calendar
- * of the past is worse than no calendar because it still looks like a
- * warning.
- *
- * An all-day event (`at === null`) counts as upcoming for the whole of its
- * date: an ex-dividend date does not stop mattering at 9am. A timed event
- * drops off once its instant has passed.
- *
- * Within a day, timed events sort by time and all-day events lead — they
- * apply to the session as a whole, so filing them at midnight would both
- * imply a time they do not have and, in ET, put them on the wrong day. */
-export function upcomingEvents(events: CalendarEvent[], now: string): CalendarDay[] {
-  const today = etDate(now)
-  const nowMs = Date.parse(now)
-
-  const upcoming = events.filter((e) => (e.at === null ? e.date >= today : Date.parse(e.at) >= nowMs))
-
-  const byDate = new Map<string, CalendarEvent[]>()
-  for (const e of upcoming) {
-    const day = byDate.get(e.date)
-    if (day) day.push(e)
-    else byDate.set(e.date, [e])
-  }
-
-  return [...byDate.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, day]) => ({
-      date,
-      events: [...day].sort((a, b) => {
-        if (a.at === null && b.at === null) return a.title.localeCompare(b.title)
-        if (a.at === null) return -1
-        if (b.at === null) return 1
-        return a.at.localeCompare(b.at)
-      }),
-    }))
 }

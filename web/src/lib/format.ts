@@ -264,3 +264,25 @@ export function formatMarketCapCell(dollars: number | null, isFund: boolean): st
 export function formatIv(iv: number): string {
   return `${(iv * 100).toFixed(1)}%`
 }
+
+/** A reported figure the API serves as a **decimal string** — a calendar
+ * estimate, prior or actual — with its unit.
+ *
+ * **Verbatim, never parsed.** The digits are the fact: `Number('1.2350')`
+ * prints `1.235` and loses the precision the source reported, and a CPI
+ * print of `3.10` is not the same statement as `3.1`. `%` attaches to the
+ * number; any other unit follows it after a space ("227 K", "1.2 USD"). */
+export function formatDecimalFigure(value: string, unit: string | null = null): string {
+  if (unit === null || unit === '') return value
+  if (unit === '%') return `${value}%`
+  return `${value} ${unit}`
+}
+
+/** An IPO's offer range from two decimal strings, verbatim: "$14.00–$16.00",
+ * one figure when the two match or only one is known, null when neither is. */
+export function formatPriceRange(low: string | null, high: string | null): string | null {
+  if (low !== null && high !== null) return low === high ? `$${low}` : `$${low}–$${high}`
+  if (low !== null) return `from $${low}`
+  if (high !== null) return `up to $${high}`
+  return null
+}

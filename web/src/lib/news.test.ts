@@ -16,18 +16,16 @@ import {
   sortAttention,
   sortConsensus,
   sortNews,
-  upcomingEvents,
   orderSectors,
 } from './news'
 import {
-  CALENDAR_EVENTS,
   NEWS_INCOMING,
   NEWS_ITEMS,
   SECTOR_CONSENSUS,
   SENTIMENT_COMPONENTS,
   SOCIAL_ATTENTION,
 } from './mockData'
-import { MACRO_SECTOR, type CalendarEvent, type NewsItem } from './types'
+import { MACRO_SECTOR, type NewsItem } from './types'
 
 /** The feed's own clock. Every lookback and the calendar are measured
  * against this, never the wall clock — see the note in `News.tsx`. */
@@ -349,77 +347,6 @@ describe('sector consensus', () => {
     const before = [...SECTOR_CONSENSUS]
     sortConsensus(SECTOR_CONSENSUS)
     expect(SECTOR_CONSENSUS).toEqual(before)
-  })
-})
-
-describe('upcomingEvents', () => {
-  /** The fixture's own trap, pinned: `2026-08-12T00:00:00Z` is 8pm ET on
-   * August *11*. Any event whose `date` is derived from a UTC instant lands
-   * on the wrong day, which is why `date` is stored rather than computed. */
-  it('files every timed event under its own Eastern date', () => {
-    for (const e of CALENDAR_EVENTS) {
-      if (e.at !== null) expect(etDate(e.at)).toBe(e.date)
-    }
-  })
-
-  it('is forward-looking only', () => {
-    const days = upcomingEvents(CALENDAR_EVENTS, '2026-08-13T16:00:00Z')
-    expect(days.length).toBeGreaterThan(0)
-    expect(days.every((d) => d.date >= '2026-08-13')).toBe(true)
-  })
-
-  /** An ex-dividend date does not stop mattering at 9am — an all-day event
-   * stands for the whole of its session. */
-  it('keeps an all-day event for the rest of its own day', () => {
-    const allDay = CALENDAR_EVENTS.find((e) => e.at === null && e.date === '2026-08-13')!
-    const lateThatDay = upcomingEvents(CALENDAR_EVENTS, '2026-08-13T23:00:00Z')
-    expect(lateThatDay[0].events.map((e) => e.id)).toContain(allDay.id)
-  })
-
-  it('drops a timed event once its instant has passed', () => {
-    const before = upcomingEvents(CALENDAR_EVENTS, '2026-08-11T17:00:00Z')
-    const after = upcomingEvents(CALENDAR_EVENTS, '2026-08-11T19:00:00Z')
-    const ids = (days: { events: CalendarEvent[] }[]) => days.flatMap((d) => d.events.map((e) => e.id))
-    expect(ids(before)).toContain('cal-4')
-    expect(ids(after)).not.toContain('cal-4')
-  })
-
-  it('groups by day, in order, with all-day events leading', () => {
-    const days = upcomingEvents(CALENDAR_EVENTS, '2026-08-09T12:00:00Z')
-    expect(days.map((d) => d.date)).toEqual([...days.map((d) => d.date)].sort())
-
-    for (const day of days) {
-      const timed = day.events.map((e) => e.at)
-      const firstTimed = timed.findIndex((t) => t !== null)
-      // Every null precedes every instant, and the instants ascend.
-      if (firstTimed !== -1) {
-        expect(timed.slice(firstTimed).every((t) => t !== null)).toBe(true)
-        const instants = timed.slice(firstTimed) as string[]
-        expect(instants).toEqual([...instants].sort())
-      }
-    }
-  })
-
-  it('covers every event type across the calendar', () => {
-    const seen = new Set(CALENDAR_EVENTS.map((e) => e.type))
-    expect(seen).toEqual(
-      new Set(['earnings', 'economic', 'central-bank', 'dividend', 'geopolitical']),
-    )
-  })
-
-  it('carries both timed and all-day events', () => {
-    expect(CALENDAR_EVENTS.some((e) => e.at === null)).toBe(true)
-    expect(CALENDAR_EVENTS.some((e) => e.at !== null)).toBe(true)
-  })
-
-  it('returns nothing rather than throwing once the window is behind it', () => {
-    expect(upcomingEvents(CALENDAR_EVENTS, '2027-01-01T00:00:00Z')).toEqual([])
-  })
-
-  it('does not mutate the fixture', () => {
-    const before = JSON.stringify(CALENDAR_EVENTS)
-    upcomingEvents(CALENDAR_EVENTS, NOW)
-    expect(JSON.stringify(CALENDAR_EVENTS)).toBe(before)
   })
 })
 

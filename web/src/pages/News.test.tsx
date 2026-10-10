@@ -5,7 +5,7 @@ import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
 import { SECTOR_CONSENSUS, SENTIMENT_COMPONENTS, SOCIAL_ATTENTION } from '../lib/mockData'
 import { compositeScore } from '../lib/news'
-import type { NewsFeed, NewsItem, WatchList } from '../lib/types'
+import type { CalendarRange, NewsFeed, NewsItem, WatchList } from '../lib/types'
 
 /** The feed and the watch list are the engine's since Phase 3 step 4, so
  * every test here answers `GET /api/news` and `/api/news/watch` from a
@@ -74,6 +74,49 @@ function feed(overrides: Partial<NewsFeed> = {}): NewsFeed {
   }
 }
 
+/** `GET /api/calendar`, one manual row. The panel's own states are tested
+ * in `components/MarketCalendar.test.tsx`; this only proves the page
+ * composes the real panel. */
+const CALENDAR: CalendarRange = {
+  start: '2026-10-12',
+  end: '2026-11-08',
+  maxSpanDays: 92,
+  days: [
+    {
+      date: '2026-10-16',
+      events: [
+        {
+          id: '9',
+          date: '2026-10-16',
+          at: null,
+          type: 'geopolitical',
+          title: 'G20 summit',
+          ticker: null,
+          source: 'manual',
+          editable: true,
+          session: null,
+          estimate: null,
+          prior: null,
+          actual: null,
+          consensus: null,
+          unit: null,
+          exchange: null,
+          shares: null,
+          priceLow: null,
+          priceHigh: null,
+          ipoStatus: null,
+        },
+      ],
+    },
+  ],
+  total: 1,
+  notices: {
+    seedGaps: [],
+    jobs: [],
+    releaseFigures: { state: 'pending_owner_decision', reason: 'Pending an owner decision.' },
+  },
+}
+
 function watchList(overrides: Partial<WatchList> = {}): WatchList {
   return {
     manual: [
@@ -109,6 +152,7 @@ function stubFetch(stub: Stub = {}) {
     const path = url.pathname
     calls.push({ method, path, params: url.searchParams })
 
+    if (path.endsWith('/calendar')) return Promise.resolve(jsonResponse(200, CALENDAR))
     if (path.endsWith('/news')) {
       return Promise.resolve(stub.news ? stub.news(url.searchParams) : jsonResponse(200, feed()))
     }
@@ -518,24 +562,12 @@ describe('top rated by sector', () => {
 })
 
 describe('the market calendar', () => {
-  /** An ex-dividend date has no 8:30am. Printing a placeholder midnight
-   * would invent one and, in ET, put it on the previous evening. */
-  it('reads All day for an event that never had a time', () => {
-    render(<App />)
-    expect(within(section('Market calendar')).getAllByText('All day').length).toBeGreaterThan(0)
-  })
-
-  it('carries timed events too', () => {
+  /** Step 7: the panel reads `GET /api/calendar`, not the fixture. */
+  it('renders the engine’s rows', async () => {
     render(<App />)
     const panel = section('Market calendar')
-    expect(within(panel).getAllByText(/\d{1,2}:\d{2}\s?(AM|PM)/).length).toBeGreaterThan(0)
-  })
-
-  it('labels each event with its type', () => {
-    render(<App />)
-    const panel = section('Market calendar')
-    expect(within(panel).getAllByText('Earnings').length).toBeGreaterThan(0)
-    expect(within(panel).getAllByText('Central bank').length).toBeGreaterThan(0)
+    expect(await within(panel).findByText('G20 summit')).toBeInTheDocument()
+    expect(calls.some((c) => c.method === 'GET' && c.path.endsWith('/calendar'))).toBe(true)
   })
 })
 
@@ -554,6 +586,8 @@ describe('the fixture markers', () => {
     expect(within(title.parentElement!).queryByText(MARKER)).not.toBeInTheDocument()
     expect(within(feedSection()).queryByText(MARKER)).not.toBeInTheDocument()
     expect(within(section('Watch list')).queryByText(MARKER)).not.toBeInTheDocument()
+    await within(section('Market calendar')).findByText('G20 summit')
+    expect(within(section('Market calendar')).queryByText(MARKER)).not.toBeInTheDocument()
   })
 
   it('marks each panel that is still sample data', () => {
@@ -563,7 +597,6 @@ describe('the fixture markers', () => {
       'Market Sentiment',
       'Social Attention',
       'Top rated by sector',
-      'Market calendar',
     ]) {
       expect(within(section(name)).getByText(MARKER)).toBeInTheDocument()
     }

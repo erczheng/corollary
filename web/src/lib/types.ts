@@ -544,7 +544,13 @@ export interface SectorConsensus {
   asOf: string
 }
 
-export type CalendarEventType = 'earnings' | 'economic' | 'central-bank' | 'dividend' | 'geopolitical'
+export type CalendarEventType =
+  | 'earnings'
+  | 'economic'
+  | 'central-bank'
+  | 'dividend'
+  | 'geopolitical'
+  | 'ipo'
 
 export const CALENDAR_TYPE_LABEL: Record<CalendarEventType, string> = {
   earnings: 'Earnings',
@@ -552,6 +558,7 @@ export const CALENDAR_TYPE_LABEL: Record<CalendarEventType, string> = {
   'central-bank': 'Central bank',
   dividend: 'Dividend',
   geopolitical: 'Geopolitical',
+  ipo: 'IPO',
 }
 
 export interface CalendarEvent {
@@ -575,7 +582,129 @@ export interface CalendarEvent {
   at: string | null
   type: CalendarEventType
   title: string
-  ticker?: string
+  ticker: string | null
+  /** Where the row came from. Only `manual` rows are `editable`. */
+  source: CalendarSource
+  /** True only for `source === 'manual'` (decision 9): the only rows
+   * `PUT`/`DELETE /api/calendar/manual/{id}` accept. */
+  editable: boolean
+  /** Earnings only: a **session**, never a time (decision 7). Rendered
+   * "Before open" / "After close" / "During market hours". */
+  session: EarningsSession | null
+  /** The figures are **decimal strings** — the reported digits are the
+   * fact, so they render verbatim and are never parsed to float for
+   * display. `estimate` is the earnings consensus (Finnhub's). */
+  estimate: string | null
+  prior: string | null
+  actual: string | null
+  /** `'unavailable'` on every economic row and `null` on every other kind
+   * (Q3): no free source sells a release consensus, and the panel says so
+   * in words rather than leaving a blank. */
+  consensus: 'unavailable' | null
+  unit: string | null
+  /** IPO only (Q15). Each may be null — a `filed` row is mostly empty. */
+  exchange: string | null
+  shares: number | null
+  priceLow: string | null
+  priceHigh: string | null
+  ipoStatus: IpoStatus | null
+}
+
+export type CalendarSource = 'finnhub' | 'alpaca' | 'fred' | 'seed' | 'manual'
+
+export type EarningsSession = 'bmo' | 'amc' | 'dmh'
+
+export type IpoStatus = 'expected' | 'filed' | 'priced' | 'withdrawn'
+
+/** One Eastern date of `GET /api/calendar`, events in the server's display
+ * order (all-day rows first). */
+export interface CalendarRangeDay {
+  date: string
+  events: CalendarEvent[]
+}
+
+export type CalendarSeedGapKind = 'no_file' | 'unpublished' | 'partial' | 'unreadable'
+
+/** Something the panel must say about one central bank in one year
+ * (decision 8). `bank` is null on `unreadable`: the whole year's file
+ * failed validation. `reason` is the server's sentence, shown as is. */
+export interface CalendarSeedGap {
+  bank: string | null
+  year: number
+  kind: CalendarSeedGapKind
+  reason: string
+  /** `partial` only: the first date the seed covers. */
+  coversFrom: string | null
+}
+
+export type CalendarJobName =
+  | 'calendar_earnings'
+  | 'calendar_ipo'
+  | 'calendar_dividends'
+  | 'calendar_releases'
+  | 'calendar_central_banks'
+
+export type CalendarJobState =
+  | 'scheduler_not_running'
+  | 'not_scheduled'
+  | 'never_run'
+  | 'ok'
+  | 'fresh_at_start'
+  | 'skipped'
+  | 'failing'
+  | 'access_denied'
+
+/** One calendar job's freshness. Instants are UTC; `message` is one
+ * sentence written for the panel, its times already in ET. */
+export interface CalendarJobNotice {
+  job: CalendarJobName
+  kinds: CalendarEventType[]
+  state: CalendarJobState
+  accessDenied: boolean
+  lastSuccess: string | null
+  lastFailure: string | null
+  lastErrorType: string | null
+  lastSkipped: string | null
+  lastSkipReason: string | null
+  freshAsOf: string | null
+  nextRun: string | null
+  /** The last Eastern date the newest known fetch asked about. Dates after
+   * it are **not covered** — an empty day there is "not asked", never
+   * "nothing scheduled". */
+  coveredThrough: string | null
+  rowsInRange: number
+  message: string
+}
+
+/** Why an economic row's `prior` and `actual` are null (unit 7.2b-R). */
+export interface CalendarReleaseFigures {
+  state: 'pending_owner_decision'
+  reason: string
+}
+
+export interface CalendarNotices {
+  seedGaps: CalendarSeedGap[]
+  jobs: CalendarJobNotice[]
+  releaseFigures: CalendarReleaseFigures
+}
+
+/** `GET /api/calendar?from&to`: the live rows of an Eastern date range. */
+export interface CalendarRange {
+  start: string
+  end: string
+  maxSpanDays: number
+  /** Only dates with at least one event, ascending. */
+  days: CalendarRangeDay[]
+  total: number
+  notices: CalendarNotices
+}
+
+/** The body of `POST`/`PUT /api/calendar/manual`. `at` carries an offset
+ * and its Eastern date must be `date`; omitted, the row is date-only. */
+export interface ManualCalendarEntry {
+  title: string
+  date: string
+  at?: string | null
 }
 
 export interface OptionContract {

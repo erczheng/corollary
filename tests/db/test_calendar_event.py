@@ -7,6 +7,7 @@ autogenerate comparison does not compare CHECK constraint text (see
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -100,11 +101,14 @@ def test_the_kinds_carry_the_frontends_spellings() -> None:
     types_ts = (Path(__file__).resolve().parents[2] / "web/src/lib/types.ts").read_text(
         encoding="utf-8"
     )
-    line = next(l for l in types_ts.splitlines() if l.startswith("export type CalendarEventType"))
-    frontend = {part.strip().strip("'") for part in line.split("=", 1)[1].split("|")}
-    # Every frontend kind is a stored kind; ``ipo`` is the one the panel gains (Q15).
-    assert frontend <= set(CALENDAR_EVENT_KINDS)
-    assert set(CALENDAR_EVENT_KINDS) - frontend == {"ipo"}
+    # The union may span lines (one ``| 'kind'`` per line), so read every
+    # literal between the opener and the blank line that ends it.
+    opener = "export type CalendarEventType ="
+    start = types_ts.index(opener) + len(opener)
+    end = types_ts.index("\n\n", start)
+    frontend = set(re.findall(r"'([^']*)'", types_ts[start:end]))
+    # The panel declares every stored kind, ``ipo`` included (Q15).
+    assert frontend == set(CALENDAR_EVENT_KINDS)
 
 
 def test_a_good_row_round_trips(any_engine: Engine) -> None:

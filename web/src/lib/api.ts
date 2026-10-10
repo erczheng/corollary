@@ -45,11 +45,14 @@ import type {
   ApiErrorBody,
   ApiKeyPresence,
   AuditLogEntry,
+  CalendarEvent,
+  CalendarRange,
   ChartRange,
   DataFeed,
   DataSourceStatus,
   EngineStateResponse,
   FeedKey,
+  ManualCalendarEntry,
   NewsFeed,
   NewsLookback,
   NewsScope,
@@ -248,6 +251,9 @@ async function request<T>(path: string, init: FetchInit = {}): Promise<T> {
     })
   }
   if (!response.ok) throw await errorFor(response, url)
+  // A 204 has no body by definition, and `json()` on it throws: a
+  // successful delete would otherwise surface as a failure.
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
@@ -1353,6 +1359,64 @@ export function addWatch(ticker: string, options: RequestOptions = {}): Promise<
 /** Remove a manual watch. Nothing already stored is deleted server-side. */
 export function removeWatch(ticker: string, options: RequestOptions = {}): Promise<WatchList> {
   return request<WatchList>(`/news/watch/${encodeURIComponent(ticker)}`, {
+    method: 'DELETE',
+    ...options,
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * Calendar (Phase 3 step 7)
+ * ---------------------------------------------------------------------- */
+
+/** An Eastern date range, both ends inclusive, as `YYYY-MM-DD`. The server
+ * bounds it (`maxSpanDays`, 92) and answers 422 past that. */
+export interface CalendarWindow {
+  from: string
+  to: string
+}
+
+/** `GET /api/calendar`: the rows of an Eastern date range, grouped by the
+ * served `date`, plus every notice the panel has to say aloud. */
+export function fetchCalendar(
+  window: CalendarWindow,
+  options: RequestOptions = {},
+): Promise<CalendarRange> {
+  return request<CalendarRange>('/calendar', {
+    params: { from: window.from, to: window.to },
+    ...options,
+  })
+}
+
+/** A vendor or seed row: only manual geopolitical rows can be changed. */
+export const CALENDAR_EVENT_NOT_EDITABLE = 'calendar_event_not_editable'
+
+/** Add a manual geopolitical entry. **The server validates** the title, the
+ * date and the instant (its Eastern date must be `date`); a refusal is a
+ * 422 whose message is the server's own sentence. */
+export function addCalendarEntry(
+  entry: ManualCalendarEntry,
+  options: RequestOptions = {},
+): Promise<CalendarEvent> {
+  return request<CalendarEvent>('/calendar/manual', { method: 'POST', body: entry, ...options })
+}
+
+/** Replace a manual entry's title, date and time. An omitted `at` makes the
+ * row date-only. A non-manual row answers 409. */
+export function editCalendarEntry(
+  id: string,
+  entry: ManualCalendarEntry,
+  options: RequestOptions = {},
+): Promise<CalendarEvent> {
+  return request<CalendarEvent>(`/calendar/manual/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: entry,
+    ...options,
+  })
+}
+
+/** Remove a manual entry (a soft delete server-side). Answers 204. */
+export function removeCalendarEntry(id: string, options: RequestOptions = {}): Promise<void> {
+  return request<void>(`/calendar/manual/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     ...options,
   })

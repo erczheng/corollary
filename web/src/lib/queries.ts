@@ -58,12 +58,17 @@ import {
   fetchWatchList,
   addWatch,
   removeWatch,
+  fetchCalendar,
+  addCalendarEntry,
+  editCalendarEntry,
+  removeCalendarEntry,
   updateDataFeeds,
   updateNotificationRoutes,
   updateRiskLimits,
 } from './api'
 import type {
   ActivityQuery,
+  CalendarWindow,
   ChainQuery,
   DataFeedUpdate,
   HistoryWindow,
@@ -74,7 +79,7 @@ import type {
   SeriesWindow,
 } from './api'
 import { useUIStore } from './store'
-import type { AccountMode, Notification, StockQuote } from './types'
+import type { AccountMode, ManualCalendarEntry, Notification, StockQuote } from './types'
 
 /* -------------------------------------------------------------------------
  * Keys
@@ -166,6 +171,10 @@ export const queryKeys = {
       query.offset ?? null,
     ] as const,
   watchList: () => ['news', 'watch'] as const,
+
+  /** The range is part of the key; `['calendar']` is the prefix every
+   * manual-entry mutation invalidates. */
+  calendar: (window: CalendarWindow) => ['calendar', window.from, window.to] as const,
 }
 
 /** Which book a hook is asking about: the caller's, or the selected one.
@@ -638,5 +647,54 @@ export function useRemoveWatch() {
       client.setQueryData(queryKeys.watchList(), list)
       onWatchChanged(client)
     },
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * Calendar (Phase 3 step 7)
+ * ---------------------------------------------------------------------- */
+
+/** How often the calendar re-reads. A minute: its jobs run daily, so this
+ * is not about new rows arriving — it is about a job's notice moving from
+ * "never run" to "ok" (or "failing") without the reader having to reload,
+ * and about a manual entry made in another tab showing up. */
+export const CALENDAR_POLL_MS = 60_000
+
+export function useCalendar(window: CalendarWindow) {
+  return useQuery({
+    queryKey: queryKeys.calendar(window),
+    queryFn: ({ signal }) => fetchCalendar(window, { signal }),
+    refetchInterval: CALENDAR_POLL_MS,
+  })
+}
+
+/** Every manual-entry change refreshes **every** cached range: the row may
+ * have moved into or out of any of them. */
+function onCalendarChanged(client: QueryClient) {
+  void client.invalidateQueries({ queryKey: ['calendar'] })
+}
+
+export function useAddCalendarEntry() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (entry: ManualCalendarEntry) => addCalendarEntry(entry),
+    onSuccess: () => onCalendarChanged(client),
+  })
+}
+
+export function useEditCalendarEntry() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, entry }: { id: string; entry: ManualCalendarEntry }) =>
+      editCalendarEntry(id, entry),
+    onSuccess: () => onCalendarChanged(client),
+  })
+}
+
+export function useRemoveCalendarEntry() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => removeCalendarEntry(id),
+    onSuccess: () => onCalendarChanged(client),
   })
 }

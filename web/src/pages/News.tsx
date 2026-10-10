@@ -2,21 +2,19 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import { LiveStatus } from '../components/LiveStatus'
 import { Pagination } from '../components/Pagination'
 import { FixtureMarker } from '../components/FixtureMarker'
+import { MarketCalendar } from '../components/MarketCalendar'
+import { SectionLabel } from '../components/SectionLabel'
 import { RequestFailed } from '../components/RequestFailed'
 import { SentimentGauge } from '../components/SentimentGauge'
 import { TableSkeleton } from '../components/Skeleton'
-import { useUIStore } from '../lib/store'
 import { useAddWatch, useNewsFeed, useRemoveWatch, useWatchList } from '../lib/queries'
-import { CALENDAR_EVENTS, SECTOR_CONSENSUS, SOCIAL_ATTENTION, SOCIAL_AS_OF } from '../lib/mockData'
+import { SECTOR_CONSENSUS, SOCIAL_ATTENTION, SOCIAL_AS_OF } from '../lib/mockData'
 import {
-  CALENDAR_TYPE_LABEL,
   SENTIMENT_CLASS,
   SENTIMENT_LABEL,
   SENTIMENT_SHORT,
   SENTIMENT_TIER_DETAIL,
   SENTIMENT_TIER_LABEL,
-  type CalendarEvent,
-  type CalendarEventType,
   type NewsItem,
   type NewsScope,
   type Sentiment,
@@ -32,7 +30,6 @@ import {
   orderSectors,
   sortAttention,
   sortConsensus,
-  upcomingEvents,
   type NewsFilter,
   type NewsSort,
 } from '../lib/news'
@@ -45,7 +42,9 @@ import { formatCompactNumber, formatDateOnly, formatPct, formatTimeET, formatDat
 const PAGE_SIZE = 25
 
 /** The page is mixed since Phase 3 step 4: the feed and the watch list are
- * the engine's, the rest is still sample data. So the marker sits on each
+ * the engine's, and since step 7 so is the market calendar
+ * (`components/MarketCalendar.tsx`, unmarked); the composite, social and
+ * consensus panels are still sample data. So the marker sits on each
  * fixture panel rather than on the title — the Settings precedent, where a
  * marker over the page would label real data as invented, which is worse
  * than no marker at all. */
@@ -56,8 +55,6 @@ const FIXTURE_DETAIL = {
     'Sample data. Social attention is not wired to StockTwits yet — these velocities and message counts are invented.',
   consensus:
     'Sample data. Analyst consensus by sector is not wired to a provider yet — these ratings are invented.',
-  calendar:
-    'Sample data. The market calendar is not wired to a provider yet — these events are invented.',
 } as const
 
 /** Dense table chrome, one step tighter than Activity's ledger.
@@ -74,29 +71,6 @@ const SELECT =
   'rounded border border-outline bg-surface px-2 py-1 text-caption text-on-surface focus:border-primary'
 
 const SENTIMENTS: Sentiment[] = ['bullish', 'bearish', 'neutral', 'unclassified']
-
-/** A section label in the main column — small, uppercase, no card around
- * it. The feed and the calendar are the page's subject rather than panels
- * on it, so boxing them would add a border for nothing; the rail's cards
- * are what they sit beside. */
-function SectionLabel({
-  id,
-  children,
-  aside,
-}: {
-  id: string
-  children: ReactNode
-  aside?: ReactNode
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-warm pb-2">
-      <h2 id={id} className="text-label-md uppercase tracking-wide text-on-surface-variant">
-        {children}
-      </h2>
-      {aside}
-    </div>
-  )
-}
 
 /** A card in the left rail. */
 function RailCard({
@@ -785,107 +759,6 @@ function TopRatedBySector() {
 }
 
 // ---------------------------------------------------------------------- //
-// Market calendar
-// ---------------------------------------------------------------------- //
-
-/** The order event types read best in within a day. */
-const TYPE_ORDER: CalendarEventType[] = [
-  'economic',
-  'central-bank',
-  'earnings',
-  'dividend',
-  'geopolitical',
-]
-
-/** Groups a day's events by type.
- *
- * The type is printed once per group rather than as a mark on every row,
- * which is what lets a day fit in a card — three earnings calls under one
- * EARNINGS heading, not three rows each carrying the same word. */
-function groupByType(events: CalendarEvent[]): [CalendarEventType, CalendarEvent[]][] {
-  return TYPE_ORDER.map(
-    (type) => [type, events.filter((e) => e.type === type)] as [CalendarEventType, CalendarEvent[]],
-  ).filter(([, group]) => group.length > 0)
-}
-
-const DAY_HEADER = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'UTC',
-  weekday: 'short',
-  month: 'short',
-  day: 'numeric',
-})
-
-/** A day's heading. Formatted in **UTC** because `date` is a bare
- * `YYYY-MM-DD` — rendered in ET it would show the day before, the same trap
- * `formatExpiry` documents. */
-function dayHeading(date: string): string {
-  return DAY_HEADER.format(new Date(`${date}T00:00:00Z`)).toUpperCase()
-}
-
-function MarketCalendar({ now }: { now: string }) {
-  const days = upcomingEvents(CALENDAR_EVENTS, now)
-
-  return (
-    <section aria-labelledby="market-calendar-heading" className="mt-8">
-      <SectionLabel
-        id="market-calendar-heading"
-        aside={
-          <span className="flex flex-wrap items-center gap-2">
-            <span className="text-caption text-on-surface-variant">
-              Scheduled ahead, forward-looking only
-            </span>
-            <FixtureMarker detail={FIXTURE_DETAIL.calendar} />
-          </span>
-        }
-      >
-        Market calendar
-      </SectionLabel>
-
-      {days.length === 0 ? (
-        <p className="py-6 text-body-md text-on-surface-variant">
-          Nothing scheduled ahead. This calendar is forward-looking only, so an empty panel means
-          the next event is beyond the loaded window rather than that the week is quiet.
-        </p>
-      ) : (
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {days.map((day) => (
-            <div
-              key={day.date}
-              className="rounded-lg border border-outline-warm bg-surface-container-lowest p-3"
-            >
-              <p className="text-caption uppercase tracking-wide text-on-surface">
-                {dayHeading(day.date)}
-              </p>
-              <div className="mt-2 space-y-2">
-                {groupByType(day.events).map(([type, group]) => (
-                  <div key={type}>
-                    <p className="text-caption uppercase tracking-wide text-on-surface-variant">
-                      {CALENDAR_TYPE_LABEL[type]}
-                    </p>
-                    {group.map((e) => (
-                      <p key={e.id} className="text-caption text-on-surface">
-                        {/* An all-day event never had a time. Printing a
-                            placeholder midnight would both invent one and,
-                            in ET, put it on the previous evening. */}
-                        <span className="text-on-surface-variant">
-                          {e.at === null ? 'All day' : formatTimeET(e.at)}
-                        </span>{' '}
-                        {e.ticker ? <span className="font-semibold">{e.ticker}</span> : null}{' '}
-                        {e.title}
-                      </p>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-// ---------------------------------------------------------------------- //
 
 export function News() {
   // The feed is the only live thing on this page, so the freshness pill
@@ -893,12 +766,6 @@ export function News() {
   // panels refresh daily or monthly, or are still fixtures.
   const [feedAt, setFeedAt] = useState<string | null>(null)
   const onFeedUpdated = useCallback((at: string | null) => setFeedAt(at), [])
-
-  // The calendar is still a fixture and runs off the fixture's clock:
-  // MARKET_TODAY is the fixture's today, and measured against the wall
-  // clock "forward-looking only" would quietly empty the panel.
-  const fixtureFeed = useUIStore((s) => s.newsFeed)
-  const now = fixtureFeed[0]?.time ?? new Date().toISOString()
 
   return (
     <div className="mx-auto max-w-[1425px] px-4 py-12 lg:px-12">
@@ -927,7 +794,7 @@ export function News() {
 
         <div>
           <LiveFeed onUpdatedAt={onFeedUpdated} />
-          <MarketCalendar now={now} />
+          <MarketCalendar />
         </div>
       </div>
     </div>
