@@ -2848,8 +2848,27 @@ discovery panel.**
 
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
-- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 0, 2,
-  3, all done, so it runs in parallel with step 5 under Q22's migration rule.
+- *Status:* **code landed 2026-10-10; one done-criterion waits on the owner.**
+  Commits: df39145 probes, e910173 seeds, 17a602e seed-test baselines,
+  2298e11 `calendar_event` (migration 0013, provisional under Q22), 67afd97
+  Finnhub earnings and IPOs, 3fe10c1 Alpaca dividends, 48b507c FRED release
+  dates, 0eb299f and 2bdbb21 window replacement and row hygiene, e739926 the
+  five scheduler jobs, c3aa8eb `GET /api/calendar` and manual CRUD, 9c982df
+  the panel.
+  **Q15's probe:** Finnhub `/calendar/ipo` answers HTTP 200 on the free key,
+  so `ipo` rows land daily. **Dividends:** Alpaca lists announced cash
+  dividends ahead of their ex-date (median 13 days, p99 157 over a +365-day
+  probe). The endpoint filters on process/payable date, so the job requests
+  +180 days and keeps ex-dates within +90.
+  **Open:** *"actuals filled after release"* is not met. The spec does not
+  say which FRED series and transform is each release's headline figure
+  (CPI as level, MoM or YoY; Employment Situation as the `PAYEMS` change or
+  `UNRATE`). That is with the owner, so prior and actual are served empty
+  with that reason stated. **Seeds to verify by hand:** ECB 2026 is seeded
+  only from 2026-10-10, because its calendar no longer lists earlier
+  meetings. ECB "14:15 CET" is read as Frankfurt local time. BoE and BoJ rows
+  are date-only, shown as the bank's local date. *Depends on:* 0, 2, 3, all
+  done, so it runs in parallel with step 5 under Q22's migration rule.
 - *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
   project's key first**: its swagger flags are null, and a premium 403 goes
   back to the owner before any of the IPO work is built.
