@@ -131,11 +131,14 @@ from corollary.engine.runtime import (
     LoggingNotifier,
     OperatorNotice,
 )
+from corollary.data.calendar_dividends import CashDividendSource
+from corollary.data.calendar_releases import ReleaseDatesSource
 from corollary.engine.scheduler import (
     AlpacaContextSource,
     ContextNotices,
     ContextServices,
     ContextSessions,
+    FinnhubCalendarSource,
     HeldPositionUnderlyings,
     FinnhubNewsSource,
     Scheduler,
@@ -486,6 +489,10 @@ def no_socket_supervisor(
 #: (which declares none of them) and a test registry's double may offer none.
 _ALPACA_CONTEXT_METHODS: Final = ("news", "active_equities", "has_standard_root", "adv_daily_bars")
 _FINNHUB_NEWS_METHODS: Final = ("company_news", "market_news", "ipo_date")
+#: What the step 7 calendar jobs call, checked the same way.
+_FINNHUB_CALENDAR_METHODS: Final = ("earnings_calendar", "ipo_calendar")
+_DIVIDEND_METHODS: Final = ("cash_dividends",)
+_RELEASE_DATES_METHODS: Final = ("release_dates",)
 
 
 def _offers(service: object, methods: Sequence[str]) -> bool:
@@ -556,6 +563,42 @@ def _finnhub_news_source(registry: ServiceRegistry) -> FinnhubNewsSource | None:
         )
         return None
     return cast(FinnhubNewsSource, fundamentals)
+
+
+def _finnhub_calendar_source(registry: ServiceRegistry) -> FinnhubCalendarSource | None:
+    """The registry's one Finnhub client, as the calendar jobs use it -- or ``None``.
+
+    The same instance :func:`_finnhub_news_source` hands the news jobs, so
+    ``finnhub.io``'s 60/min is counted once. Without ``FINNHUB_API_KEY`` the
+    registry holds ``UnavailableFundamentals``, which offers no calendar, and
+    the earnings and IPO jobs skip. Never raises; that case was already
+    logged by :func:`_finnhub_news_source`.
+    """
+    try:
+        fundamentals = registry.fundamentals
+    except Exception:
+        return None
+    if not _offers(fundamentals, _FINNHUB_CALENDAR_METHODS):
+        return None
+    return cast(FinnhubCalendarSource, fundamentals)
+
+
+def _dividend_source(provider: AlpacaContextSource | None) -> CashDividendSource | None:
+    """The market-data provider's corporate-actions read, for the dividends job -- or ``None``.
+
+    The same provider object the other Alpaca jobs hold, so ``data.``'s
+    bucket is counted once. Market data, never the broker.
+    """
+    if provider is None or not _offers(provider, _DIVIDEND_METHODS):
+        return None
+    return cast(CashDividendSource, provider)
+
+
+def _release_dates_source(fred: object | None) -> ReleaseDatesSource | None:
+    """FRED's release calendar, for the releases job -- the one ``FredProvider``, or ``None``."""
+    if fred is None or not _offers(fred, _RELEASE_DATES_METHODS):
+        return None
+    return cast(ReleaseDatesSource, fred)
 
 
 def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
@@ -654,10 +697,11 @@ def _context_services(
     registry: ServiceRegistry = app.state.registry
     holder: AssetDirectoryHolder = app.state.asset_directory
     alpaca = _alpaca_context_source(registry)
+    # ``None`` when FRED_API_KEY is unset -- said once, inside.
+    fred = registry.fred_provider()
     return ContextServices(
         session_factory=sessions,
-        # ``None`` when FRED_API_KEY is unset -- said once, inside.
-        fred=registry.fred_provider(),
+        fred=fred,
         rates=registry.rates,
         assets=holder,
         news_store=NewsStore(session_factory=sessions, assets=holder),
@@ -678,6 +722,12 @@ def _context_services(
         # The outbox the lifespan drains into the runtime's notification
         # path; the jobs hold only this, never the runtime (decision 1).
         notices=notices,
+        # The step 7 calendar jobs: the same Finnhub, Alpaca and FRED
+        # instances as above, so every host's budget is counted once. Each is
+        # ``None`` when its vendor is unconfigured, and its job skips.
+        finnhub_calendar=_finnhub_calendar_source(registry),
+        dividends=_dividend_source(alpaca),
+        fred_releases=_release_dates_source(fred),
     )
 
 

@@ -25,7 +25,7 @@ import importlib.util
 import inspect
 import logging
 import threading
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -71,6 +71,18 @@ from corollary.engine.scheduler import (
     trading_days,
 )
 from corollary.data.macro.risk_free import store_observations
+from corollary.data.calendar_dividends import CashDividendRead
+from corollary.db.models import CalendarEvent
+from sqlalchemy import select
+from tests.engine.test_calendar_jobs import (
+    FakeDividends,
+    FakeFinnhubCalendar,
+    FakeReleases,
+    _cpi,
+    _dividend,
+    _earning,
+    _ipo,
+)
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.news.pollers import NewsStore, watch_interval
 from corollary.data.providers.interface import AssetDirectory
@@ -713,7 +725,48 @@ _SHIPPED_NAMES = [
     "tradeability_cache",
     "news_prune",
     "spdr_holdings",
+    "calendar_earnings",
+    "calendar_ipo",
+    "calendar_dividends",
+    "calendar_releases",
+    "calendar_central_banks",
 ]
+
+
+#: Step 7's calendar jobs (unit 7.2c-2), and the slot each runs at.
+_CALENDAR_JOBS = (
+    "calendar_earnings",
+    "calendar_ipo",
+    "calendar_dividends",
+    "calendar_releases",
+    "calendar_central_banks",
+)
+
+
+@pytest.mark.risk
+def test_the_shipped_job_set_carries_the_five_calendar_jobs_at_their_cadences() -> None:
+    """The rule 9 isolation tests below run whatever ``context_jobs`` ships.
+
+    So the calendar jobs being *in* that set is what puts them under the
+    isolation tests at all -- pinned here, with the clocks the feeds table
+    gives them: earnings 07:00 ET daily, the IPO and dividends reads on the
+    next two five-minute slots, FRED's release dates with the FRED row at
+    10:00 ET on trading days, the central-bank seed at 06:45 ET. Every one
+    catches up at start.
+    """
+    jobs = context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+    by_name = {job.name: job for job in jobs}
+    assert set(_CALENDAR_JOBS) <= set(by_name)
+    assert {name: by_name[name].schedule for name in _CALENDAR_JOBS} == {
+        "calendar_earnings": AtTime(time(7, 0), every_day),
+        "calendar_ipo": AtTime(time(7, 5), every_day),
+        "calendar_dividends": AtTime(time(7, 10), every_day),
+        "calendar_releases": AtTime(time(10, 0), trading_days),
+        "calendar_central_banks": AtTime(time(6, 45), every_day),
+    }
+    for name in _CALENDAR_JOBS:
+        assert by_name[name].catch_up is not None, name
+        assert by_name[name].rule.strip(), name
 
 
 def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
@@ -759,7 +812,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
     assert by_name["asset_directory"].catch_up is not None
     assert by_name["news_watch_tier"].catch_up is not None
     for name in _SHIPPED_NAMES[2:]:
-        if name not in ("asset_directory", "news_watch_tier", "spdr_holdings"):
+        if name not in ("asset_directory", "news_watch_tier", "spdr_holdings", *_CALENDAR_JOBS):
             assert by_name[name].catch_up is None, name
     # The SPDR sector seed (unit 4SEC-B2): weekly, Monday 09:00 ET, plus a
     # start-up catch-up when no attempt was ever recorded or the last is old.
@@ -782,6 +835,11 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
         "tradeability_cache": ALPACA_DATA_HOST,
         "news_prune": "local",
         "spdr_holdings": SEC_DATA_HOST,
+        "calendar_earnings": FINNHUB_HOST,
+        "calendar_ipo": FINNHUB_HOST,
+        "calendar_dividends": ALPACA_DATA_HOST,
+        "calendar_releases": FRED_HOST,
+        "calendar_central_banks": "local",
     }
     for job in jobs:
         assert job.rule.strip(), job.name
@@ -1649,6 +1707,12 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         alpaca = FailingAlpacaNews() if mode == "alpaca_news_fails" else FakeAlpacaContext()
         finnhub, massive = FakeFinnhubNews(), FakeMassive()
         cusips = FakeResolver()
+        # Step 7's calendar vendors, answering rows inside each window, so
+        # every calendar body fetches and writes. The held-positions holder
+        # here is older than HELD_POSITIONS_STALE_AFTER at this clock, so
+        # earnings and dividends take the upsert-only path; IPO, releases and
+        # central banks write through ``replace_window`` / the seed import.
+        calendar_finnhub, dividends, releases = _calendar_fakes()
         services = _news_services(
             db_engine,
             alpaca=alpaca,
@@ -1659,6 +1723,9 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             sec=sec,
             cusips=cusips,
             openfigi=openfigi,
+            finnhub_calendar=calendar_finnhub,
+            dividends=dividends,
+            fred_releases=releases,
         )
         assert isinstance(services.position_underlyings, HeldPositionUnderlyings)
         # The scheduler's own sleeper: the SPDR catch-up waits on the fake
@@ -1722,9 +1789,182 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     assert cusips.calls and openfigi_fake.requests
     attempt = nport.latest_snapshot_attempt(lambda: Session(db_engine))
     assert attempt is not None and (attempt.status, attempt.rule) == ("refused", "weight_band")
+    # The calendar bodies really ran (step 7): every vendor was asked, and
+    # each kind landed through the writable session.
+    assert {call[0] for call in calendar_finnhub.calls} == {"earnings", "ipo"}
+    assert dividends.calls and releases.calls
+    with Session(db_engine) as session:
+        kinds = set(session.scalars(select(CalendarEvent.kind).distinct()))
+    assert kinds == {"earnings", "ipo", "dividend", "economic", "central-bank"}
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
+
+
+def _calendar_fakes() -> tuple[FakeFinnhubCalendar, FakeDividends, FakeReleases]:
+    """The step 7 calendar vendors, with one row each inside a late-November window."""
+    finnhub = FakeFinnhubCalendar(
+        earnings=[_earning(symbol="AAPL", date="2026-12-10")],
+        ipos=[_ipo(date="2026-12-01")],
+    )
+    dividends = FakeDividends(
+        CashDividendRead(dividends=(_dividend(ex_date=date(2026, 12, 15)),), skipped=())
+    )
+    releases = FakeReleases([_cpi(date(2026, 12, 10))])
+    return finnhub, dividends, releases
+
+
+#: How often the stand-in risk manager heartbeats in the hang test: well
+#: inside the 90 s watchdog window, so one missed beat is not yet a halt.
+_HEARTBEAT_EVERY = timedelta(seconds=30)
+#: Fri 27 Nov 2026 02:55 ET (the half-day): every shipped job reaches its
+#: body inside the hang test's window -- the catch-ups at once, the 03:00
+#: prune, the slow grids, the 07:30 directory, the 09:30 open's probe.
+_HANG_FROM = datetime(2026, 11, 27, 7, 55, tzinfo=UTC)
+_HANG_UNTIL = datetime(2026, 11, 27, 14, 40, tzinfo=UTC)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hang", ["awaiting", "in_a_worker_thread"])
+async def test_shipped_context_jobs_hanging_past_the_watchdog_window_never_halt_or_delay_the_heartbeat(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, hang: str
+) -> None:
+    """Decision 1 for a job that never comes back, not only one that raises.
+
+    Every shipped job -- the calendar jobs included -- has its run and its
+    catch-up replaced by a body that never returns: ``awaiting`` a vendor
+    that never answers, or ``in_a_worker_thread``, a blocking call stuck off
+    the loop. The schedules, names, rules and inputs are the shipped ones.
+    Beside them runs a stand-in for the risk manager on the same loop and
+    the same clock, heartbeating an **armed** watchdog every 30 s and asking
+    it after every beat, for over six hours of calendar -- far past the 90 s
+    window -- with every job hung.
+
+    It must come out un-halted, with the halt row as it went in, no watchdog
+    input touched by anything but the stand-in, every heartbeat recorded at
+    the instant it was due, and the loop never stalled in real time. The
+    control: the watchdog really was armed, and ninety seconds past the last
+    beat it would have halted.
+    """
+    clock = FakeClock(_HANG_FROM, stop_at=_HANG_UNTIL)
+    notifier = SpyNotifier()
+    runtime = EngineRuntime(
+        session_factory=lambda: Session(db_engine),
+        notifier=notifier,
+        now=clock,
+        heartbeat_armed=True,
+    )
+    runtime.start()
+    resume_engine(db_engine)
+    state_before = _state_snapshot(db_engine)
+    assert state_before[0] is False
+    # The stand-in's own handles, taken before the spies go on: anything
+    # else that reaches a watchdog input is recorded as touching it.
+    beat, check = runtime.record_heartbeat, runtime.check_watchdog
+    touched: list[str] = []
+    for name in _WATCHDOG_INPUTS:
+        original = getattr(runtime, name)
+
+        def spy(*args: object, _name: str = name, _orig: object = original,
+                **kwargs: object) -> object:
+            touched.append(_name)
+            return _orig(*args, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr(runtime, name, spy)
+
+    calendar_finnhub, dividends, releases = _calendar_fakes()
+    services = _news_services(
+        db_engine,
+        alpaca=FakeAlpacaContext(),
+        finnhub=FakeFinnhubNews(),
+        massive=FakeMassive(),
+        finnhub_calendar=calendar_finnhub,
+        dividends=dividends,
+        fred_releases=releases,
+    )
+    shipped = context_jobs(services, clock=clock, sleep=clock.sleep)
+    assert set(_CALENDAR_JOBS) <= {job.name for job in shipped}
+
+    entered: list[str] = []
+    never = asyncio.Event()
+    release = threading.Event()
+
+    def hung(job_name: str) -> Callable[[], Awaitable[None]]:
+        async def body() -> None:
+            entered.append(job_name)
+            if hang == "awaiting":
+                await never.wait()
+            else:
+                await asyncio.to_thread(release.wait)
+
+        return body
+
+    jobs = [
+        dataclasses.replace(
+            job,
+            run=hung(job.name),
+            catch_up=None if job.catch_up is None else hung(job.name),
+        )
+        for job in shipped
+    ]
+    scheduler = Scheduler(jobs, secrets=no_secrets, clock=clock, sleep=clock.sleep)
+
+    beats: list[tuple[datetime, datetime]] = []
+    decisions: list[object] = []
+
+    async def risk_manager() -> None:
+        due = clock()
+        while True:
+            due = due + _HEARTBEAT_EVERY
+            await clock.sleep((due - clock()).total_seconds())
+            # Asked *before* the beat, so the watchdog judges the gap since
+            # the previous one -- a late beat would be a halt here.
+            decision = check()
+            if decision is not None:
+                decisions.append(decision)
+            beats.append((due, clock()))
+            beat(clock())
+
+    loop = asyncio.get_running_loop()
+    stalls: list[float] = []
+
+    async def loop_monitor() -> None:
+        while True:
+            started = loop.time()
+            await asyncio.sleep(0.005)
+            stalls.append(loop.time() - started)
+
+    heart = loop.create_task(risk_manager(), name="risk-manager-stand-in")
+    monitor = loop.create_task(loop_monitor(), name="loop-monitor")
+    try:
+        await run_until_parked(scheduler, clock, timeout=60)
+    finally:
+        release.set()
+        heart.cancel()
+        monitor.cancel()
+        await asyncio.gather(heart, monitor, return_exceptions=True)
+
+    # Every shipped job really hung -- the calendar five among them.
+    assert set(entered) == {job.name for job in shipped}
+    status = scheduler.status()
+    for job in shipped:
+        assert status[job.name].runs == 0 and status[job.name].failures == 0, job.name
+
+    # The heartbeat was never late: one beat per 30 s for the whole window,
+    # each recorded at the instant it was due, and the armed watchdog never
+    # answered.
+    assert len(beats) == (_HANG_UNTIL - _HANG_FROM) // _HEARTBEAT_EVERY
+    assert all(due == at for due, at in beats)
+    assert decisions == []
+    # Nor did the loop stall in real time while the jobs hung.
+    assert stalls and max(stalls) < 1.0, max(stalls)
+
+    assert _state_snapshot(db_engine) == state_before
+    assert touched == []
+    assert notifier.sent == []
+    # The control: armed, ninety seconds after the last beat, it would halt.
+    assert runtime.watchdog.evaluate(beats[-1][1] + timedelta(seconds=90)) is not None
 
 
 #: What no context job's code may import, directly or through another
