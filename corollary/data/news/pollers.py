@@ -674,7 +674,10 @@ class WatchTierPoller:
         self._last = symbol
 
         # Finnhub's from/to are UTC days. An ET "today" would miss the UTC day
-        # that has already begun after 20:00 EDT / 19:00 EST.
+        # that has already begun after 20:00 EDT / 19:00 EST. Benzinga rows are
+        # filtered on their ET date instead (Finnhub stores their wall time as
+        # UTC); yesterday+today UTC still covers them, because an instant's ET
+        # date is never later than its UTC date.
         to_date = now.astimezone(timezone.utc).date()
         from_date = to_date - timedelta(days=1)
         try:
