@@ -26,6 +26,7 @@ import type {
   DataPlan,
   DataSourceStatus,
   NewsItem,
+  NewsLabel,
   Notification,
   NotificationRoute,
   OptionContract,
@@ -1000,6 +1001,43 @@ function previousSessions(fromDate: string, count: number): string[] {
 
 const newsRand = mulberry32(20264001)
 
+/** The provenance fields `GET /api/news` serves beside a label (Q22).
+ *
+ * Derived from the tier and the story's minute-of-day rather than from new
+ * PRNG draws: an extra `rand()` here would shift every later draw and move
+ * every headline in the corpus. The server's invariants hold — `source` and
+ * `sourceStatus` are null exactly when the item is unclassified, and every
+ * source is `unaudited`, because no audit has run (step 6). Some rules items
+ * carry Massive's disagreeing label as `otherLabel`, and some are filed
+ * under a ticker only because the headline names it, so both states are
+ * reachable from the fixtures. */
+function labelProvenance(
+  tier: SentimentTier | null,
+  sentiment: Sentiment,
+  minutes: number,
+): Pick<NewsItem, 'source' | 'sourceStatus' | 'otherLabel' | 'attributedBy'> {
+  if (tier === null) {
+    return { source: null, sourceStatus: null, otherLabel: null, attributedBy: 'tag' }
+  }
+  const otherLabel: NewsLabel | null =
+    tier === 'rules' && minutes % 7 === 0
+      ? {
+          sentiment: sentiment === 'bullish' ? 'bearish' : 'bullish',
+          tier: 'vendor',
+          source: 'massive',
+          sourceStatus: 'unaudited',
+          ruleId: null,
+          reasoning: 'Massive read the same story the other way.',
+        }
+      : null
+  return {
+    source: tier === 'rules' ? 'rules' : 'massive',
+    sourceStatus: 'unaudited',
+    otherLabel,
+    attributedBy: tier === 'rules' && minutes % 11 === 0 ? 'headline' : 'tag',
+  }
+}
+
 /** One story, filed against a session and a time of day. */
 function buildItem(id: string, date: string, rand: () => number): NewsItem {
   // 10:05 to 20:55 UTC — 6:05am to 4:55pm ET. News runs well before the
@@ -1028,8 +1066,7 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
       // `.example` is a reserved TLD — a fixture link that can never
       // resolve to somebody's real article.
       url: `https://news.example/${id}`,
-      source: null,
-      demoted: false,
+      ...labelProvenance(story.tier, story.sentiment, minutes),
     }
   }
 
@@ -1048,8 +1085,7 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
     sector: name.sector,
     tier: story.tier,
     url: `https://news.example/${id}`,
-    source: null,
-    demoted: false,
+    ...labelProvenance(story.tier, story.sentiment, minutes),
   }
 }
 

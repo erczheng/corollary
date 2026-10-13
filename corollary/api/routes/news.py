@@ -802,6 +802,7 @@ def _mover(candidate: Candidate, seed: SpdrSeed | None) -> NewsMover:
         NewsMoverReason(
             source=_wire_source(reason.source),
             tier="rules" if reason.tier is SentimentTier.RULES else "vendor",
+            source_status=SOURCE_STATUS[reason.source],
             rule_id=reason.rule_id,
             family=None if reason.family is None else reason.family.value,
             direction=_mover_direction(reason.direction),

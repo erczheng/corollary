@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react'
 import { LiveStatus } from '../components/LiveStatus'
 import { Pagination } from '../components/Pagination'
 import { FixtureMarker } from '../components/FixtureMarker'
@@ -6,7 +14,13 @@ import { RequestFailed } from '../components/RequestFailed'
 import { SentimentGauge } from '../components/SentimentGauge'
 import { TableSkeleton } from '../components/Skeleton'
 import { useUIStore } from '../lib/store'
-import { useAddWatch, useNewsFeed, useRemoveWatch, useWatchList } from '../lib/queries'
+import {
+  useAddWatch,
+  useNewsFeed,
+  useNewsMovers,
+  useRemoveWatch,
+  useWatchList,
+} from '../lib/queries'
 import { CALENDAR_EVENTS, SECTOR_CONSENSUS, SOCIAL_ATTENTION, SOCIAL_AS_OF } from '../lib/mockData'
 import {
   CALENDAR_TYPE_LABEL,
@@ -17,7 +31,13 @@ import {
   SENTIMENT_TIER_LABEL,
   type CalendarEvent,
   type CalendarEventType,
+  type MoverDirection,
   type NewsItem,
+  type NewsLabelSource,
+  type NewsLookback,
+  type NewsMover,
+  type NewsMoverReason,
+  type NewsMovers,
   type NewsScope,
   type Sentiment,
 } from '../lib/types'
@@ -27,16 +47,36 @@ import {
   LOOKBACK_LABEL,
   LOOKBACK_PHRASE,
   NEWS_SORT_LABEL,
+  NEWS_SOURCE_LABEL,
   attentionVelocity,
   labeledShare,
+  evaluationStuckLine,
+  moverArticleTime,
+  moverReasonName,
+  moversEmptyState,
   orderSectors,
+  sincePhrase,
+  sourceStatusSentence,
+  staleLine,
   sortAttention,
   sortConsensus,
+  unauditedCaption,
+  unauditedMoverSources,
+  unauditedSources,
   upcomingEvents,
   type NewsFilter,
   type NewsSort,
 } from '../lib/news'
-import { formatCompactNumber, formatDateOnly, formatPct, formatTimeET, formatDateTimeET } from '../lib/format'
+import {
+  formatCompactNumber,
+  formatDateOnly,
+  formatDateTimeET,
+  formatInteger,
+  formatPct,
+  formatSessionDay,
+  formatTimeET,
+  formatUsdDecimalString,
+} from '../lib/format'
 
 /** Deeper than the Markets tables, because the feed is now the tall column
  * of a two-column page rather than one panel among five stacked ones —
@@ -145,7 +185,7 @@ function RailCard({
  * is unclassified (decision 17), and a tag reading "undefined" — or a
  * guessed tier — would name a source that produced nothing. */
 function TierTag({ item }: { item: NewsItem }) {
-  if (item.tier === null) {
+  if (item.tier === null || item.source === null) {
     return (
       <span title="No source labelled this item" className="ml-2 text-caption text-on-surface-variant">
         <span aria-hidden="true">—</span>
@@ -153,14 +193,78 @@ function TierTag({ item }: { item: NewsItem }) {
       </span>
     )
   }
+  // The tier says what kind of source; the source says which one. For the
+  // rules tier they are the same thing, so the source is named once, in the
+  // title — "Rules · Corollary rules" in a packed cell would be noise.
+  const tier = SENTIMENT_TIER_LABEL[item.tier]
+  const source = NEWS_SOURCE_LABEL[item.source]
+  // A null or unrecognised status says nothing — never a guessed "passed".
+  const status = sourceStatusSentence(item.sourceStatus)
   return (
     <span
-      title={SENTIMENT_TIER_DETAIL[item.tier]}
+      title={`${SENTIMENT_TIER_DETAIL[item.tier]} Source: ${source}.${status ? ` ${status}` : ''}`}
       className="ml-2 text-caption text-on-surface-variant"
     >
-      {SENTIMENT_TIER_LABEL[item.tier]}
-      {item.demoted ? ' (demoted)' : null}
+      {tier}
+      {item.source === 'massive' ? ` · ${source}` : <span className="sr-only"> · {source}</span>}
+      {/* Q22: keyed on `demoted` alone. `unaudited` is not "not demoted"
+          and is not "demoted" either — it says nothing, because nothing
+          has been measured yet. */}
+      {item.sourceStatus === 'demoted' ? ' (demoted · display only)' : null}
     </span>
+  )
+}
+
+/** The label that lost display, when both sources labelled the item.
+ *
+ * A button rather than a bare tooltip, so the disagreement is reachable
+ * from the keyboard and on touch — `title` alone is mouse-only. It expands
+ * a line under the row rather than replacing the sentiment: decision 4 picks
+ * the rules label, and this is evidence about that pick, not a second
+ * verdict competing with it. */
+function OtherLabelToggle({
+  item,
+  open,
+  onToggle,
+}: {
+  item: NewsItem
+  open: boolean
+  onToggle: () => void
+}) {
+  const other = item.otherLabel
+  if (other === null) return null
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-controls={`other-label-${item.id}`}
+      title={`${NEWS_SOURCE_LABEL[other.source]} labelled this ${SENTIMENT_LABEL[other.sentiment]}${
+        other.reasoning ? `: ${other.reasoning}` : ''
+      }`}
+      className="ml-2 rounded text-caption text-on-surface-variant underline decoration-dotted underline-offset-2 hover:text-on-surface"
+    >
+      also{' '}
+      <span className={SENTIMENT_CLASS[other.sentiment]}>{SENTIMENT_SHORT[other.sentiment]}</span>
+      <span className="sr-only">
+        {' '}
+        — {NEWS_SOURCE_LABEL[other.source]}&rsquo;s label, not displayed
+      </span>
+    </button>
+  )
+}
+
+function OtherLabelDetail({ item }: { item: NewsItem }) {
+  const other = item.otherLabel
+  if (other === null) return null
+  return (
+    <p id={`other-label-${item.id}`} className="text-caption text-on-surface-variant">
+      {NEWS_SOURCE_LABEL[other.source]} ({SENTIMENT_TIER_LABEL[other.tier]}) labelled this{' '}
+      <span className={SENTIMENT_CLASS[other.sentiment]}>{SENTIMENT_LABEL[other.sentiment]}</span>
+      {other.reasoning ? <> — &ldquo;{other.reasoning}&rdquo;</> : null}. Not displayed: the{' '}
+      {item.tier === null ? 'other' : SENTIMENT_TIER_LABEL[item.tier].toLowerCase()} label wins
+      when both sources speak.
+    </p>
   )
 }
 
@@ -212,9 +316,12 @@ function EmptyFeed({
   if (filter.sentiment !== null && filter.sentiment !== 'unclassified') {
     return (
       <p className="py-6 text-body-md text-on-surface-variant">
-        Nothing is labelled {SENTIMENT_LABEL[filter.sentiment]} yet. Every headline reads{' '}
-        <span className={SENTIMENT_CLASS.unclassified}>Unclassified</span> until sentiment
-        labelling lands, so this filter matches nothing — it is not that the tape is quiet.
+        No headlines labelled {SENTIMENT_LABEL[filter.sentiment]}{' '}
+        {LOOKBACK_PHRASE[filter.lookback]}
+        {scope === 'watch' ? ' on your watch list' : ''}. Most stories match no rules pattern
+        and carry no vendor insight, so{' '}
+        <span className={SENTIMENT_CLASS.unclassified}>Unclassified</span> is the common case —
+        widen the lookback or clear the filter.
       </p>
     )
   }
@@ -250,11 +357,47 @@ function EmptyFeed({
   )
 }
 
-function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void }) {
-  const [filter, setFilter] = useState<NewsFilter>(DEFAULT_NEWS_FILTER)
+/** Sectors come from the SPDR holdings seed; without it every name files as
+ * Other. One sentence for the feed and the movers panel, which both read the
+ * same seed. */
+const SECTORS_PENDING_CAPTION =
+  'Sectors appear once the SPDR holdings seed is built — shown as Other for now, with market-wide stories under Macro.'
+
+/** The visible "unaudited" line — the `title` on a tier tag reaches neither
+ * keyboard, touch nor screen-reader users. Rendered only while a served
+ * label reports `unaudited`, so it leaves on its own once step 6 audits. */
+function UnauditedCaption({ sources }: { sources: NewsLabelSource[] }) {
+  const caption = unauditedCaption(sources)
+  if (caption === null) return null
+  return <p className="mt-1 text-caption text-on-surface-variant">{caption}</p>
+}
+
+function LiveFeed({
+  lookback,
+  onLookbackChange,
+  onUpdatedAt,
+}: {
+  /** Owned by the page: the movers panel follows the same control (spec,
+   * decision 21), so the two cannot answer for different windows. */
+  lookback: NewsLookback
+  onLookbackChange: (l: NewsLookback) => void
+  onUpdatedAt: (at: string | null) => void
+}) {
+  const [narrowing, setNarrowing] = useState<NewsFilter>(DEFAULT_NEWS_FILTER)
+  const filter: NewsFilter = { ...narrowing, lookback }
   const [scope, setScope] = useState<NewsScope>('watch')
   const [sort, setSort] = useState<NewsSort>('newest')
   const [page, setPage] = useState(1)
+  // Which rows have their non-displayed label expanded. Keyed by id, so a
+  // poll that inserts rows above does not move the expansion to another one.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
+  const toggleExpanded = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   // Every filter goes to the server. It is the one filter and the one sort:
   // nothing below narrows or re-orders `items`.
@@ -275,6 +418,11 @@ function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void })
   const updatedAt = feed.dataUpdatedAt > 0 ? new Date(feed.dataUpdatedAt).toISOString() : null
   useEffect(() => onUpdatedAt(updatedAt), [updatedAt, onUpdatedAt])
 
+  // This feed's own caption only. The movers panel reads its own reasons'
+  // statuses (`unauditedMoverSources`): this page is a different set of
+  // articles, and can carry no label at all while every mover rests on one.
+  const unaudited = unauditedSources(data?.items ?? [])
+
   // `GET /api/news` serves a page, not the set of values a filter could
   // take, so the dropdowns offer what this session has seen — and always
   // the current selection, so narrowing never empties its own dropdown.
@@ -291,7 +439,9 @@ function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void })
   // Written once so every control resets the page. Narrowing while deep in
   // the feed otherwise lands past the end of a shorter result set.
   const update = (patch: Partial<NewsFilter>) => {
-    setFilter({ ...filter, ...patch })
+    const { lookback: nextLookback, ...rest } = patch
+    if (nextLookback !== undefined) onLookbackChange(nextLookback)
+    setNarrowing({ ...narrowing, ...rest })
     setPage(1)
   }
   const changeScope = (next: NewsScope) => {
@@ -396,11 +546,9 @@ function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void })
       ) : null}
 
       {data && !data.sectorsAvailable ? (
-        <p className="mt-1 text-caption text-on-surface-variant">
-          Sectors appear once the SPDR holdings seed is built — shown as Other for now, with
-          market-wide stories under Macro.
-        </p>
+        <p className="mt-1 text-caption text-on-surface-variant">{SECTORS_PENDING_CAPTION}</p>
       ) : null}
+      {data ? <UnauditedCaption sources={unaudited} /> : null}
       {scope === 'watch' && watch.data?.seedMissing ? (
         <p className="mt-1 text-caption text-on-surface-variant">
           The watch list does not yet include the sector leaders — they join once the SPDR
@@ -442,63 +590,359 @@ function LiveFeed({ onUpdatedAt }: { onUpdatedAt: (at: string | null) => void })
             </thead>
             <tbody>
               {data.items.map((item) => (
-                <tr
-                  key={item.id}
-                  className="h-8 border-t border-outline/10 hover:bg-surface-container-low"
-                >
-                  <td className={`${TD} whitespace-nowrap text-data-md text-on-surface-variant`}>
-                    {formatDateTimeET(item.time)}
-                  </td>
-                  <td className={`${TD} whitespace-nowrap text-label-md text-on-surface`}>
-                    {/* MARKET is not a ticker and should not read as one —
-                        it is the bucket for a story about no single name. */}
-                    {item.ticker === 'MARKET' ? (
-                      <span className="text-on-surface-variant">MARKET</span>
-                    ) : (
-                      item.ticker
-                    )}
-                  </td>
-                  <td className={`${TD} max-w-0 text-body-sm text-on-surface`} title={item.headline}>
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block truncate rounded hover:underline"
-                    >
-                      {item.headline}
-                    </a>
-                  </td>
-                  <td className={`${TD} whitespace-nowrap text-caption text-on-surface-variant`}>
-                    {item.sector}
-                  </td>
-                  {/* Small coloured text, not a pill — the convention
-                      ExecutionsTable set for a status in a packed table.
-                      Unclassified is `caution`, never `error`: nothing
-                      having labelled a headline is the system working. */}
-                  <td className={`${TD} whitespace-nowrap`}>
-                    <span
-                      title={SENTIMENT_LABEL[item.sentiment]}
-                      className={`text-caption ${SENTIMENT_CLASS[item.sentiment]}`}
-                    >
-                      {SENTIMENT_SHORT[item.sentiment]}
-                    </span>
-                    <TierTag item={item} />
-                  </td>
-                  <td
-                    className={`${TD} whitespace-nowrap text-right text-caption uppercase text-on-surface-variant`}
-                  >
-                    {item.publisher ?? (
-                      <span title="The source named no publisher">
-                        <span aria-hidden="true">—</span>
-                        <span className="sr-only">No publisher named</span>
+                <Fragment key={item.id}>
+                  <tr className="h-8 border-t border-outline/10 hover:bg-surface-container-low">
+                    <td className={`${TD} whitespace-nowrap text-data-md text-on-surface-variant`}>
+                      {formatDateTimeET(item.time)}
+                    </td>
+                    <td className={`${TD} whitespace-nowrap text-label-md text-on-surface`}>
+                      {/* MARKET is not a ticker and should not read as one —
+                          it is the bucket for a story about no single name. */}
+                      {item.ticker === 'MARKET' ? (
+                        <span className="text-on-surface-variant">MARKET</span>
+                      ) : (
+                        item.ticker
+                      )}
+                      {/* No vendor filed the story here; the rules tier did,
+                          from a company the headline names. Quiet, because it
+                          is provenance, not a warning — but said, because the
+                          vendor's tags and ours are different claims. */}
+                      {item.attributedBy === 'headline' ? (
+                        <span
+                          title={`No source tagged this story to ${item.ticker}; the rules tier matched a company the headline names.`}
+                          className="ml-1.5 text-caption font-normal text-on-surface-variant"
+                        >
+                          named in headline
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className={`${TD} max-w-0 text-body-sm text-on-surface`} title={item.headline}>
+                      <a
+                        href={item.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block truncate rounded hover:underline"
+                      >
+                        {item.headline}
+                      </a>
+                    </td>
+                    <td className={`${TD} whitespace-nowrap text-caption text-on-surface-variant`}>
+                      {item.sector}
+                    </td>
+                    {/* Small coloured text, not a pill — the convention
+                        ExecutionsTable set for a status in a packed table.
+                        Unclassified is `caution`, never `error`: nothing
+                        having labelled a headline is the system working. */}
+                    <td className={`${TD} whitespace-nowrap`}>
+                      <span
+                        title={SENTIMENT_LABEL[item.sentiment]}
+                        className={`text-caption ${SENTIMENT_CLASS[item.sentiment]}`}
+                      >
+                        {SENTIMENT_SHORT[item.sentiment]}
                       </span>
-                    )}
-                  </td>
-                </tr>
+                      <TierTag item={item} />
+                      <OtherLabelToggle
+                        item={item}
+                        open={expanded.has(item.id)}
+                        onToggle={() => toggleExpanded(item.id)}
+                      />
+                    </td>
+                    <td
+                      className={`${TD} whitespace-nowrap text-right text-caption uppercase text-on-surface-variant`}
+                    >
+                      {item.publisher ?? (
+                        <span title="The source named no publisher">
+                          <span aria-hidden="true">—</span>
+                          <span className="sr-only">No publisher named</span>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                  {expanded.has(item.id) && item.otherLabel !== null ? (
+                    <tr>
+                      <td />
+                      <td colSpan={5} className={`${TD} pb-2`}>
+                        <OtherLabelDetail item={item} />
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
               ))}
             </tbody>
           </table>
           <Pagination page={page} pageCount={pageCount} onChange={setPage} />
+        </>
+      )}
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------- //
+// Movers in the news — real since Phase 3 step 5 (decision 21)
+// ---------------------------------------------------------------------- //
+
+/** A direction, as a status pill. Direction is the one thing on this panel
+ * `bullish`/`bearish` may colour; the word carries it too, for grayscale. */
+function DirectionPill({ direction }: { direction: MoverDirection }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-label-sm ${
+        direction === 'bullish'
+          ? 'bg-bullish-container text-on-bullish-container'
+          : 'bg-bearish-container text-on-bearish-container'
+      }`}
+    >
+      {SENTIMENT_LABEL[direction]}
+    </span>
+  )
+}
+
+function MoverReasonLine({ reason }: { reason: NewsMoverReason }) {
+  // Massive's own text is the reason, published as-is (decision 17); a
+  // rules reason's evidence is the matched phrase, which the family name
+  // already summarises, so it rides in the title.
+  const quote = reason.source === 'massive' ? reason.evidence[0]?.reasoning ?? null : null
+  const matched = reason.evidence.map((e) => e.reasoning).filter((r): r is string => r !== null)
+  return (
+    <li
+      className="text-caption text-on-surface"
+      title={reason.source === 'rules' && matched.length > 0 ? `Matched: ${matched.join(' · ')}` : undefined}
+    >
+      <span className="font-semibold">{moverReasonName(reason)}</span>{' '}
+      <span className={SENTIMENT_CLASS[reason.direction]}>{SENTIMENT_LABEL[reason.direction]}</span>
+      <span className="text-on-surface-variant">
+        {' '}
+        · <span className="font-mono tabular-nums">{reason.articleIds.length}</span>{' '}
+        {reason.articleIds.length === 1 ? 'article' : 'articles'}
+      </span>
+      {quote ? <span className="text-on-surface-variant"> — &ldquo;{quote}&rdquo;</span> : null}
+    </li>
+  )
+}
+
+function MoverRow({
+  mover,
+  lookback,
+  watching,
+  failed,
+  onWatch,
+}: {
+  mover: NewsMover
+  /** Decides whether an article time needs its date (`moverArticleTime`). */
+  lookback: NewsLookback
+  watching: boolean
+  failed: unknown
+  onWatch: () => void
+}) {
+  const conflicting = mover.directions.length > 1
+  return (
+    <li className="py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-label-md text-on-surface">{mover.ticker}</span>
+        <span className="text-caption text-on-surface-variant">{mover.sector}</span>
+        {/* Side by side, never netted: a name flagged both ways is a name
+            the news disagrees about, and one "mixed" chip would hide which
+            reason says what. `role="group"` so the label is announced — an
+            `aria-label` on a bare span is ignored by screen readers. */}
+        <span
+          className="flex items-center gap-1"
+          role={conflicting ? 'group' : undefined}
+          aria-label={
+            conflicting
+              ? `Reasons disagree: ${mover.directions.map((d) => SENTIMENT_LABEL[d]).join(' and ')}`
+              : undefined
+          }
+        >
+          {mover.directions.map((d) => (
+            <DirectionPill key={d} direction={d} />
+          ))}
+        </span>
+        {/* No confirm: a watch is additive and reversible, and a dialog on
+            the safe direction trains the reflex that dismisses the one that
+            matters. */}
+        <button
+          type="button"
+          onClick={onWatch}
+          disabled={watching}
+          aria-label={`Watch ${mover.ticker}`}
+          className="ml-auto rounded bg-primary px-2 py-0.5 text-label-sm text-on-primary disabled:opacity-50"
+        >
+          {watching ? 'Adding…' : 'Watch'}
+        </button>
+      </div>
+
+      <ul aria-label={`Why ${mover.ticker} was flagged`} className="mt-1 space-y-0.5">
+        {mover.reasons.map((r) => (
+          <MoverReasonLine
+            key={`${r.source}:${r.ruleId ?? ''}:${r.direction}`}
+            reason={r}
+          />
+        ))}
+      </ul>
+
+      <p className="mt-1 text-caption text-on-surface-variant">
+        ADV{' '}
+        <span
+          className="font-mono tabular-nums text-on-surface"
+          title={`${formatInteger(mover.avgVolume)} shares a day`}
+        >
+          {formatCompactNumber(mover.avgVolume)}
+        </span>{' '}
+        over <span className="font-mono tabular-nums">{mover.advSessions}</span>{' '}
+        {mover.advSessions === 1 ? 'session' : 'sessions'} · last close{' '}
+        {/* The server's decimal string, verbatim — never parsed to a float.
+            The title keeps the raw value reachable when it renders as —. */}
+        <span className="font-mono tabular-nums text-on-surface" title={mover.lastClose}>
+          {formatUsdDecimalString(mover.lastClose)}
+        </span>{' '}
+        · checked for {formatSessionDay(mover.tradeabilitySessionDate)}
+      </p>
+
+      <ul aria-label={`Articles on ${mover.ticker}`} className="mt-1 space-y-0.5">
+        {mover.articles.map((a) => (
+          <li key={a.id} className="truncate text-caption" title={a.headline}>
+            {/* The only place a row says when its news ran. Under a
+                multi-day lookback the clock alone would date a nine-day-old
+                article to this morning. */}
+            <span className="text-on-surface-variant">{moverArticleTime(a.time, lookback)} </span>
+            <a
+              href={a.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded text-on-surface hover:underline"
+            >
+              {a.headline}
+            </a>
+            {a.publisher !== null ? (
+              <span className="uppercase text-on-surface-variant"> · {a.publisher}</span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {mover.articleCount > mover.articles.length ? (
+        <p className="text-caption text-on-surface-variant">
+          and <span className="font-mono tabular-nums">{mover.articleCount - mover.articles.length}</span>{' '}
+          more
+        </p>
+      ) : null}
+
+      {failed ? (
+        <div className="mt-1">
+          <RequestFailed error={failed} what="the watch list" />
+        </div>
+      ) : null}
+    </li>
+  )
+}
+
+/** Why the list is empty, from the server's own counts. */
+function NonePassed({ movers }: { movers: NewsMovers }) {
+  const { signalled, failedTradeability, awaitingCheck, watchedExcluded } = movers
+  const why =
+    signalled === 0
+      ? `No off-watch-list name carried a directional rules or vendor label${
+          watchedExcluded > 0
+            ? `; ${watchedExcluded} watched ${watchedExcluded === 1 ? 'name' : 'names'} did, and ${
+                watchedExcluded === 1 ? 'is' : 'are'
+              } in the feed instead`
+            : ''
+        }.`
+      : `${signalled} signalled: ${failedTradeability} failed the tradeability filter${
+          awaitingCheck > 0 ? `, ${awaitingCheck} awaiting a first check` : ''
+        }.`
+  // A stuck job is a degraded input, not a failed request: `caution`, never
+  // `error`. Without this line "awaiting a first check" reads as a queue
+  // that will drain, when nothing is draining it.
+  const stuck = evaluationStuckLine(movers.evaluation)
+  return (
+    <div className="mt-3">
+      <p className="text-body-sm text-on-surface">
+        No off-watch-list name passed the filter {sincePhrase(movers.since)}.
+      </p>
+      <p className="mt-1 text-caption text-on-surface-variant">{why}</p>
+      {stuck !== null ? <p className="mt-1 text-caption text-caution">{stuck}</p> : null}
+    </div>
+  )
+}
+
+function MoversInTheNews({ lookback }: { lookback: NewsLookback }) {
+  const movers = useNewsMovers(lookback)
+  const add = useAddWatch()
+  const data = movers.data
+  const empty = data ? moversEmptyState(data) : null
+  // From the panel's own reasons, never the feed's page (Q22): the feed can
+  // carry no label, or only the other source's, while these rows rest on
+  // unaudited ones.
+  const unaudited = unauditedMoverSources(data?.items ?? [])
+
+  return (
+    <section
+      aria-labelledby="movers-heading"
+      className="rounded-lg border border-outline-warm bg-surface-container-lowest p-4"
+    >
+      <h2 id="movers-heading" className="text-title-lg text-on-surface">
+        Movers in the news
+      </h2>
+      <p className="mt-0.5 text-caption text-on-surface-variant">
+        Flagged by news, not confirmed by price. Off-watch-list names, {LOOKBACK_PHRASE[lookback]}.
+      </p>
+      <UnauditedCaption sources={unaudited} />
+      {data && !data.sectorsAvailable ? (
+        <p className="mt-1 text-caption text-on-surface-variant">{SECTORS_PENDING_CAPTION}</p>
+      ) : null}
+
+      {movers.isError && data ? (
+        // A failed refetch over rows already on screen keeps them, and says
+        // what they are now: the last answer, not the current one.
+        <div className="mt-2">
+          <RequestFailed error={movers.error} what="the movers list" />
+          <p className="mt-0.5 text-caption text-on-surface-variant">
+            These rows may be stale — last evaluated {formatDateTimeET(data.evaluatedAt)} ET.
+          </p>
+        </div>
+      ) : null}
+
+      {movers.isPending ? (
+        <div className="mt-3">
+          <TableSkeleton rows={4} columns={2} label="Loading movers in the news" />
+        </div>
+      ) : !data ? (
+        <div className="mt-3">
+          <RequestFailed error={movers.error} what="the movers list" />
+        </div>
+      ) : (
+        <>
+          {data.feedsStale ? (
+            // Stale is a degraded input, not a failed request: `caution`,
+            // the same reason Unclassified is never `error`.
+            <p className="mt-3 text-body-sm text-caution">
+              {staleLine(data)}
+              {empty === null ? ' — this list may be missing names.' : '.'}
+            </p>
+          ) : null}
+          {empty === 'none-passed' ? <NonePassed movers={data} /> : null}
+          {empty === 'stale' ? (
+            <p className="mt-1 text-caption text-on-surface-variant">
+              An empty list says nothing while a feed is down: the names that would have passed
+              may not have arrived.
+            </p>
+          ) : null}
+          {empty === null ? (
+            <ol aria-label="Movers" className="mt-1 divide-y divide-outline-variant">
+              {/* The server's order, exactly. Rules rows rank first and the
+                  client never re-ranks — the one-sort rule markets.ts keeps. */}
+              {data.items.map((m) => (
+                <MoverRow
+                  key={m.ticker}
+                  mover={m}
+                  lookback={lookback}
+                  watching={add.isPending && add.variables === m.ticker}
+                  failed={add.isError && add.variables === m.ticker ? add.error : null}
+                  onWatch={() => add.mutate(m.ticker)}
+                />
+              ))}
+            </ol>
+          ) : null}
         </>
       )}
     </section>
@@ -901,6 +1345,9 @@ export function News() {
   // panels refresh daily or monthly, or are still fixtures.
   const [feedAt, setFeedAt] = useState<string | null>(null)
   const onFeedUpdated = useCallback((at: string | null) => setFeedAt(at), [])
+  // One lookback for the feed and the movers panel (decision 21: the panel
+  // follows the page's control).
+  const [lookback, setLookback] = useState<NewsLookback>(DEFAULT_NEWS_FILTER.lookback)
 
   // The calendar is still a fixture and runs off the fixture's clock:
   // MARKET_TODAY is the fixture's today, and measured against the wall
@@ -934,7 +1381,17 @@ export function News() {
         </aside>
 
         <div>
-          <LiveFeed onUpdatedAt={onFeedUpdated} />
+          {/* The movers panel sits beside the feed from `2xl` up and stacks
+              under it below that — the feed's headline column is the one
+              that cannot give up width. */}
+          <div className="grid items-start gap-6 2xl:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
+            <LiveFeed
+              lookback={lookback}
+              onLookbackChange={setLookback}
+              onUpdatedAt={onFeedUpdated}
+            />
+            <MoversInTheNews lookback={lookback} />
+          </div>
           <MarketCalendar now={now} />
         </div>
       </div>

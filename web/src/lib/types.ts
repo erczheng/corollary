@@ -455,9 +455,154 @@ export interface NewsItem {
   /** The article itself. Opens in a new tab. */
   url: string
   /** The labelling source that produced `sentiment`; `null` with no label. */
-  source: string | null
-  /** Whether that source is demoted. `false` with no source. */
-  demoted: boolean
+  source: NewsLabelSource | null
+  /** That source's audit status (Q22); `null` with no label. **Every source
+   * is `unaudited` until step 6's audit runs** — never read that as "not
+   * demoted". The feed's *display only* suffix keys on `'demoted'` alone. */
+  sourceStatus: NewsSourceStatus | null
+  /** The label that did **not** win display, when both sources labelled the
+   * item; `null` otherwise. Shown on hover, never folded into `sentiment`. */
+  otherLabel: NewsLabel | null
+  /** `tag`: a vendor tagged some copy of the story to `ticker`. `headline`:
+   * none did, and a rules label on a company the headline names did — the
+   * feed says so, since the vendor never filed it there. */
+  attributedBy: NewsAttribution
+}
+
+/** `sentiment_label.source` — the two Phase 3 labelling sources. */
+export type NewsLabelSource = 'rules' | 'massive'
+
+/** A labelling source's audit status (Q22). `unaudited` until step 6. */
+export type NewsSourceStatus = 'unaudited' | 'active' | 'demoted'
+
+/** Why a feed item is filed under its ticker. */
+export type NewsAttribution = 'tag' | 'headline'
+
+/** One stored label, as `NewsItem.otherLabel` carries it. A stored label
+ * always has a direction — `unclassified` is the absence of one. */
+export interface NewsLabel {
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+  tier: SentimentTier
+  source: NewsLabelSource
+  sourceStatus: NewsSourceStatus
+  /** The pattern that fired, for a rules label; `null` for Massive. */
+  ruleId: string | null
+  /** The rules tier's matched phrase, or Massive's own text verbatim. */
+  reasoning: string | null
+}
+
+/** A discovery reason's direction. `neutral` never qualifies (decision 21). */
+export type MoverDirection = 'bullish' | 'bearish'
+
+/** `rules`: at least one rules reason; `massive_only`: none. Rules rows rank
+ * first — the server's order, which the panel never re-sorts. */
+export type MoverRankGroup = 'rules' | 'massive_only'
+
+/** The three discovery firehoses `/movers` reports freshness for. */
+export type DiscoveryFeedName = 'alpaca_news' | 'finnhub_market' | 'massive_news'
+
+/** One article a reason rests on, with that label's own text. */
+export interface NewsMoverEvidence {
+  articleId: number
+  time: string
+  reasoning: string | null
+}
+
+/** One (source, rule, direction) a mover was flagged by. Conflicting
+ * directions are separate reasons, side by side, never netted. */
+export interface NewsMoverReason {
+  source: NewsLabelSource
+  /** That source's audit status (Q22), from the same table `/api/news`
+   * serves. The Movers panel's "unaudited" caption reads **this**, never the
+   * feed's page: the feed can show no labelled item, or only the other
+   * source's, while every row here rests on an unaudited label. */
+  sourceStatus: NewsSourceStatus
+  tier: SentimentTier
+  ruleId: string | null
+  /** `earnings`, `guidance`, … for a rules reason; `null` for Massive. */
+  family: string | null
+  direction: MoverDirection
+  /** Newest first. Never empty. */
+  articleIds: number[]
+  evidence: NewsMoverEvidence[]
+  latestAt: string
+}
+
+export interface NewsMoverArticle {
+  id: number
+  time: string
+  headline: string
+  url: string
+  /** `null` when the vendor named none; never substituted. */
+  publisher: string | null
+}
+
+/** One *Movers in the news* row, in the server's rank order. */
+export interface NewsMover {
+  ticker: string
+  sector: string
+  rankGroup: MoverRankGroup
+  /** Rules first, then Massive; newest first within a source. */
+  reasons: NewsMoverReason[]
+  /** Distinct directions among the reasons, sorted. Two means they disagree. */
+  directions: MoverDirection[]
+  /** Newest first. */
+  articles: NewsMoverArticle[]
+  articleCount: number
+  latestAt: string
+  /** Average daily volume, shares, over `advSessions` completed sessions. */
+  avgVolume: number
+  advSessions: number
+  /** **A decimal string** (`"41.20"`) — displayed verbatim, never parsed. */
+  lastClose: string
+  /** Date-only — format in UTC. */
+  tradeabilitySessionDate: string
+  tradeabilityCheckedAt: string
+}
+
+export interface DiscoveryFeedFreshness {
+  feed: DiscoveryFeedName
+  job: string
+  scheduled: boolean
+  lastSuccess: string | null
+  lastFailure: string | null
+  failing: boolean
+  lastIngestedAt: string | null
+  stale: boolean
+  /** Last time the feed was known good; `null` when not stale, or stale and
+   * never delivered. */
+  staleSince: string | null
+}
+
+export interface DiscoveryEvaluation {
+  job: string
+  scheduled: boolean
+  lastSuccess: string | null
+  lastFailure: string | null
+  failing: boolean
+  lastCheckedAt: string | null
+}
+
+/** `GET /api/news/movers`. Two empty states, told apart by `feedsStale`. */
+export interface NewsMovers {
+  items: NewsMover[]
+  lookback: NewsLookback
+  /** The lookback's first instant; `null` for `all`. */
+  since: string | null
+  evaluatedAt: string
+  /** Off-watch tickers with a qualifying signal in the lookback. */
+  signalled: number
+  watchedExcluded: number
+  failedTradeability: number
+  /** Signalled tickers with no cached tradeability verdict yet. */
+  awaitingCheck: number
+  feeds: DiscoveryFeedFreshness[]
+  feedsStale: boolean
+  /** Earliest `staleSince` among stale feeds that have delivered; `null`
+   * when none is stale, or every stale feed never delivered. */
+  staleSince: string | null
+  evaluation: DiscoveryEvaluation
+  sectorsAvailable: boolean
 }
 
 /** `?lookback` on `GET /api/news` — calendar days in ET, never a trailing

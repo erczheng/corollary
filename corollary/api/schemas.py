@@ -1684,6 +1684,10 @@ class NewsMoverReason(ApiModel):
 
     source: NewsLabelSource
     tier: NewsSentimentTier
+    #: The source's audit status (Q22), served per reason so the Movers panel
+    #: states its own sources' status rather than borrowing the feed's.
+    #: ``unaudited`` for both sources until step 6.
+    source_status: NewsSourceStatus
     #: The pattern that fired, for a rules reason; ``None`` for Massive.
     rule_id: str | None
     #: The pattern's family (``earnings``, ``guidance``, ...); ``None`` for Massive.

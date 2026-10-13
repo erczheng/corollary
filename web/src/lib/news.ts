@@ -11,11 +11,20 @@
 import {
   MACRO_SECTOR,
   type CalendarEvent,
+  type DiscoveryEvaluation,
+  type DiscoveryFeedName,
   type NewsItem,
+  type NewsLabelSource,
+  type NewsLookback,
+  type NewsMover,
+  type NewsMovers,
+  type NewsMoverReason,
+  type NewsSourceStatus,
   type SectorConsensus,
   type SentimentComponent,
   type SocialAttentionItem,
 } from './types'
+import { formatDateTimeET, formatSessionDateTimeET, formatTimeET } from './format'
 
 // ---------------------------------------------------------------------- //
 // Market sentiment composite
@@ -338,4 +347,179 @@ export function upcomingEvents(events: CalendarEvent[], now: string): CalendarDa
         return a.at.localeCompare(b.at)
       }),
     }))
+}
+
+// ---------------------------------------------------------------------- //
+// Label provenance and discovery (Phase 3 step 5)
+// ---------------------------------------------------------------------- //
+
+/** A labelling source, named. The tier (`SENTIMENT_TIER_LABEL`) says what
+ * *kind* of source; this says which one. */
+export const NEWS_SOURCE_LABEL: Record<NewsLabelSource, string> = {
+  rules: 'Corollary rules',
+  massive: 'Massive',
+}
+
+/** The rules tier's pattern families (`corollary/data/news/rules.py`'s
+ * `RuleFamily`), in words. */
+export const RULE_FAMILY_LABEL: Record<string, string> = {
+  earnings: 'Earnings',
+  guidance: 'Guidance',
+  analyst_rating: 'Analyst rating',
+  mna: 'M&A',
+  secondary_offering: 'Secondary offering',
+  buyback: 'Buyback',
+  executive_departure: 'Executive departure',
+  fda: 'FDA',
+}
+
+/** What flagged a mover, in words: the rule family for a rules reason, the
+ * vendor for a Massive one. An unknown family — one the engine added after
+ * this map — is spelled from its id rather than dropped, because a reason
+ * with no name is a row nobody can evaluate. */
+export function moverReasonName(reason: NewsMoverReason): string {
+  if (reason.source === 'massive' || reason.family === null) {
+    return NEWS_SOURCE_LABEL[reason.source]
+  }
+  const known = RULE_FAMILY_LABEL[reason.family]
+  if (known !== undefined) return known
+  const spelled = reason.family.replace(/_/g, ' ')
+  return spelled.charAt(0).toUpperCase() + spelled.slice(1)
+}
+
+/** Which of the two empty states applies, or `null` when there are rows.
+ *
+ * A stale feed outranks an empty filter: with a firehose down, "nothing
+ * passed" is not a finding — the names that would have passed may simply
+ * not have arrived. */
+export function moversEmptyState(movers: NewsMovers): 'stale' | 'none-passed' | null {
+  if (movers.items.length > 0) return null
+  return movers.feedsStale ? 'stale' : 'none-passed'
+}
+
+/** What a source's audit status says, as a sentence (Q22).
+ *
+ * **Keyed by every status, with `active` spelled out**, rather than an
+ * if/else whose last branch is "passed". That fall-through used to tell the
+ * reader any value it did not recognise — a status the engine added later, a
+ * malformed payload — was an audit pass. */
+export const SOURCE_STATUS_SENTENCE: Record<NewsSourceStatus, string> = {
+  unaudited: 'No accuracy audit has run on this source yet.',
+  active: 'This source passed its accuracy audit.',
+  demoted: 'This source is demoted: its labels are shown for display only.',
+}
+
+/** The status sentence, or `null` for a null or unrecognised status — say
+ * nothing rather than guess. A `Record` lookup alone is not enough: a value
+ * outside the union arrives at runtime whatever the type says. */
+export function sourceStatusSentence(status: string | null): string | null {
+  if (status === null || !Object.prototype.hasOwnProperty.call(SOURCE_STATUS_SENTENCE, status)) {
+    return null
+  }
+  return SOURCE_STATUS_SENTENCE[status as NewsSourceStatus]
+}
+
+/** The sources the served items report as `unaudited` — the displayed label
+ * and the non-displayed one both — in `NEWS_SOURCE_LABEL`'s order.
+ *
+ * Read from what the server sent, never assumed: once step 6 audits a
+ * source it drops out of this list, and the page's "unaudited" caption with
+ * it. An item with no label reports nothing. */
+export function unauditedSources(items: NewsItem[]): NewsLabelSource[] {
+  const found = new Set<NewsLabelSource>()
+  for (const item of items) {
+    if (item.source !== null && item.sourceStatus === 'unaudited') found.add(item.source)
+    const other = item.otherLabel
+    if (other !== null && other.sourceStatus === 'unaudited') found.add(other.source)
+  }
+  return inSourceOrder(found)
+}
+
+/** The sources the Movers panel's **own** reasons report as `unaudited`, in
+ * `NEWS_SOURCE_LABEL`'s order.
+ *
+ * Read from `/movers`, never borrowed from the feed. The feed's page is a
+ * different set of articles: under the Unclassified filter, on a quiet watch
+ * list, or after a feed error it carries no label at all, and the caption
+ * would vanish over rows that all rest on unaudited labels; carrying only
+ * rules labels beside a Massive-only mover, it would name rules alone and
+ * imply Massive had passed an audit (Q22). */
+export function unauditedMoverSources(movers: NewsMover[]): NewsLabelSource[] {
+  const found = new Set<NewsLabelSource>()
+  for (const mover of movers) {
+    for (const reason of mover.reasons) {
+      if (reason.sourceStatus === 'unaudited') found.add(reason.source)
+    }
+  }
+  return inSourceOrder(found)
+}
+
+function inSourceOrder(found: Set<NewsLabelSource>): NewsLabelSource[] {
+  return (Object.keys(NEWS_SOURCE_LABEL) as NewsLabelSource[]).filter((s) => found.has(s))
+}
+
+/** The visible "unaudited" caption, or `null` when no served label is
+ * unaudited. Names the source when only one of them is, so a source a later
+ * audit passed is never swept into the claim. */
+export function unauditedCaption(sources: NewsLabelSource[]): string | null {
+  if (sources.length === 0) return null
+  if (sources.length === Object.keys(NEWS_SOURCE_LABEL).length) {
+    return 'Labels are unaudited: no accuracy audit has run yet.'
+  }
+  return `${sources.map((s) => NEWS_SOURCE_LABEL[s]).join(' and ')} labels are unaudited: no accuracy audit has run on ${
+    sources.length === 1 ? 'that source' : 'those sources'
+  } yet.`
+}
+
+/** The three discovery firehoses, named. */
+export const DISCOVERY_FEED_LABEL: Record<DiscoveryFeedName, string> = {
+  alpaca_news: 'Alpaca news',
+  finnhub_market: 'Finnhub market news',
+  massive_news: 'Massive news',
+}
+
+/** "since Sep 25, 12:00 AM ET", or the stored history for `all`. */
+export function sincePhrase(since: string | null): string {
+  return since === null ? 'in the stored history' : `since ${formatDateTimeET(since)} ET`
+}
+
+/** The feeds-stale line. A stale feed that never delivered has no instant
+ * to quote, so it is named instead of dated. */
+export function staleLine(movers: NewsMovers): string {
+  if (movers.staleSince !== null) {
+    return `Discovery feeds stale since ${formatDateTimeET(movers.staleSince)} ET`
+  }
+  const never = movers.feeds.filter((f) => f.stale).map((f) => DISCOVERY_FEED_LABEL[f.feed])
+  return `Discovery feeds stale — ${never.join(', ') || 'a feed'} has not delivered yet`
+}
+
+/** A mover's article time. Under `today` the clock alone is unambiguous;
+ * under any longer lookback it is not — an article from nine days ago would
+ * read "9:42 AM" — so the date rides with it, as `sincePhrase` does. Under
+ * `all` the year rides too: labelled articles are retained indefinitely, so
+ * "Sep 16" could be any September. The bounded lookbacks reach two weeks at
+ * most, where the month and day cannot be ambiguous. */
+export function moverArticleTime(time: string, lookback: NewsLookback): string {
+  if (lookback === 'today') return formatTimeET(time)
+  if (lookback === 'all') return formatSessionDateTimeET(time)
+  return formatDateTimeET(time)
+}
+
+/** Why the tradeability check is not advancing, or `null` while it is.
+ *
+ * Said because the none-passed state otherwise implies the signalled names
+ * are merely waiting their turn: with the job failing or never scheduled,
+ * "awaiting a first check" waits forever. */
+export function evaluationStuckLine(evaluation: DiscoveryEvaluation): string | null {
+  if (!evaluation.scheduled) {
+    return `The tradeability check (${evaluation.job}) is not scheduled, so signalled names are not being checked.`
+  }
+  if (evaluation.failing) {
+    const last =
+      evaluation.lastSuccess === null
+        ? 'it has never succeeded'
+        : `it last succeeded ${formatDateTimeET(evaluation.lastSuccess)} ET`
+    return `The tradeability check (${evaluation.job}) is failing — ${last} — so signalled names are not being checked.`
+  }
+  return null
 }

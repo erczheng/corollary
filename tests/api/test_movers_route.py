@@ -144,6 +144,7 @@ def test_a_mover_carries_its_reasons_articles_adv_close_and_session_date(
         {
             "source": "rules",
             "tier": "rules",
+            "sourceStatus": "unaudited",
             "ruleId": "earnings_beat",
             "family": "earnings",
             "direction": "bullish",
@@ -191,6 +192,8 @@ def test_conflicting_directions_are_served_side_by_side(
         ("rules", "bearish"),
         ("massive", "bullish"),
     ]
+    # Q22: each reason states its own source's audit status; none has run.
+    assert [r["sourceStatus"] for r in item["reasons"]] == ["unaudited", "unaudited"]
 
 
 def test_two_copies_of_one_story_are_one_article(movers: TestClient, db_engine: Engine) -> None:
@@ -480,3 +483,38 @@ def test_the_feed_jobs_named_here_are_the_shipped_scheduler_jobs() -> None:
     jobs = context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     names = {j.name for j in jobs}
     assert set(DISCOVERY_FEED_JOBS.values()) | {TRADEABILITY_JOB} <= names
+
+
+def test_both_routes_read_the_one_source_status_table(
+    movers: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The feed and Movers state a source's audit status from one table.
+
+    Pinning the string ``"unaudited"`` alone would pass a route that hardcoded
+    it -- and the day step 6 marks a source ``active`` on the feed, Movers
+    would go on saying ``unaudited``. So the table is changed here and both
+    routes must follow it.
+    """
+    from corollary.api.routes import news as news_routes
+    from corollary.data.news.labels import LabelSource
+
+    monkeypatch.setitem(news_routes.SOURCE_STATUS, LabelSource.MASSIVE, "active")
+    _signal(db_engine, "a1", "ACME", direction="bearish", rule_id="analyst_downgrade")
+    _signal(db_engine, "m1", "ACME", source="massive", vendor="massive", direction="bullish")
+    add_verdict(db_engine, ticker="ACME", session_date=TODAY)
+
+    (item,) = _body(movers)["items"]
+    assert [(r["source"], r["sourceStatus"]) for r in item["reasons"]] == [
+        ("rules", "unaudited"),
+        ("massive", "active"),
+    ]
+
+    feed = movers.get("/api/news", params={"scope": "all", "lookback": "all"})
+    assert feed.status_code == 200, feed.text
+    served = {
+        (row["source"], row["sourceStatus"])
+        for row in feed.json()["items"]
+        if row["source"] is not None
+    }
+    assert ("massive", "active") in served
+    assert ("massive", "unaudited") not in served

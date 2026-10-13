@@ -37,8 +37,6 @@ from corollary.data.seeds import SeedError
 
 from .news_support import SEED_AS_OF, add_article, add_manual_watches, make_seed
 from .test_schema_contract import (
-    DELIBERATE_ADDITIONS,
-    DELIBERATE_RETIREMENTS,
     ts_interface_fields,
     ts_union_members,
     wire_fields,
@@ -547,26 +545,19 @@ def test_no_news_route_depends_on_a_broker_or_a_provider(path: str, method: str)
 
 
 def test_the_item_serves_every_field_of_the_frontends_news_item() -> None:
-    """Equal up to the two listed, temporary differences, both ways.
+    """Equal, both ways, with nothing listed.
 
-    Step 5 adds ``sourceStatus`` and ``otherLabel`` and retires ``demoted``
-    (Q22) before the frontend unit declares them, so each difference is listed
-    in ``test_schema_contract.py`` rather than tolerated. Once ``types.ts``
-    catches up, the listing is what fails, naming the stale side.
+    Step 5 added ``sourceStatus``, ``otherLabel`` and ``attributedBy`` and
+    retired ``demoted`` (Q22) server-side first, listed in
+    ``test_schema_contract.py`` until the News frontend unit (5.F2) declared
+    them. It has, so the listings are gone and any difference is a drift.
     """
     ts = ts_interface_fields("NewsItem")
     wire = wire_fields(schemas.NewsItem)
-    added = DELIBERATE_ADDITIONS["NewsItem"]
-    retired = DELIBERATE_RETIREMENTS["NewsItem"]
 
-    assert wire - ts == added, (
-        f"NewsItem sends {sorted(wire - ts - added)} undeclared; DELIBERATE_ADDITIONS "
-        f"still lists {sorted(added - (wire - ts))}, which types.ts now declares"
-    )
-    assert ts - wire == retired, (
-        f"types.ts declares {sorted(ts - wire - retired)} the server does not send; "
-        f"DELIBERATE_RETIREMENTS still lists {sorted(retired - (ts - wire))}, which "
-        "types.ts no longer declares"
+    assert wire - ts == frozenset(), f"NewsItem sends {sorted(wire - ts)} undeclared"
+    assert ts - wire == frozenset(), (
+        f"types.ts declares {sorted(ts - wire)} the server does not send"
     )
 
 
