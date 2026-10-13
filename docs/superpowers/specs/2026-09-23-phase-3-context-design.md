@@ -2799,7 +2799,34 @@ tradeability and the watch list.**
 
 **5. Sentiment labelling: rules and Massive; `SentimentTier` resolved; the
 discovery panel.**
-- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 4.
+- *Status:* **code landed 2026-10-13; the re-measurement is borderline and
+  with the owner.** Commits: 80775f6 and 65e5512 `SentimentTier`
+  `rules|vendor`, c03b4d2 and 67a1c0a the Massive labeller, 400aff1 the rules
+  labeller, 9ae662d `sentiment_label` (migration 0013, provisional under
+  Q22) with labels at ingest, 5f14d6c the earnings single-tag exclusion,
+  27df165 discovery, `GET /api/news/movers` and feed labels, 9194e6e the feed
+  labels and the panel, 07e27fa Finnhub's Benzinga clock, and the
+  re-measurement script in the commit before this status. Every source is
+  served `unaudited` (Q22).
+  **The re-measurement** (`scripts/measure_phase3_rules.py`, ten sessions
+  2026-09-28..10-09, 67-symbol watch universe, real patterns and NameBook):
+  watch-universe rules directional labels, deduplicated by canonical group,
+  **mean 2.4 a session, median 1.5, range 0-9; 5 of 10 sessions below 1.5**,
+  the last six averaging 1.17; distinct (ticker, direction) 1.3. Per vendor:
+  Finnhub 2.4, Alpaca 0.8, Massive 0.2. Including off-watch: 29.8. Massive's
+  watch directional labels: 120.6 a session, neutral share 0.441. Against
+  step 0's draft (4.2 deduplicated; 3.7 / 1.2 / 0.2) the narrowed patterns
+  label less, by design (silence beats a wrong label). **By the mean the
+  gate holds (>= 1.5), so step 6's transitions are not blocked by the letter
+  of Q22; by the median it sits exactly on the line.** Which statistic
+  governs is the owner's call.
+  **Found on the way:** Finnhub stamped Benzinga stories in Eastern wall time
+  as UTC, four hours early, which defeated decision 3's cross-vendor dedup
+  (07e27fa; linked duplicates in the measurement went 569 -> 1950). A second
+  constant offset remains: Finnhub "Yahoo" against Massive "The Motley Fool"
+  twins sit exactly 20 minutes apart (575 pairs a fortnight, no third vendor
+  to say which is right), outside the +/-10 minute window. It does not move
+  the watch figure. *Depends on:* 4.
 - *Files:* `corollary/data/news/{rules,vendor,discovery}.py`,
   `corollary/data/providers/massive.py` (insights), migration for
   `sentiment_label`, `GET /api/news/movers`, the *Movers in the news* panel,
