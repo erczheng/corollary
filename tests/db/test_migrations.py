@@ -69,10 +69,24 @@ EXPECTED_TABLES = {
     "isin_ticker",
     # 0013 -- step 5: one label per (article, ticker, source)
     "sentiment_label",
+    # 0014 -- step 6: the self-audit's runs, grades, counts and per-source state
+    "audit_run",
+    "label_outcome",
+    "sentiment_accuracy",
+    "sentiment_source_status",
 }
 
-#: Everything 0013 created.
-_0013_TABLES = {"sentiment_label"}
+#: Everything 0014 created.
+_0014_TABLES = {
+    "audit_run",
+    "label_outcome",
+    "sentiment_accuracy",
+    "sentiment_source_status",
+}
+
+#: Everything 0013 created -- and 0014's tables with it, which revise it, so
+#: every downgrade below 0013 that subtracts this subtracts both.
+_0013_TABLES = {"sentiment_label"} | _0014_TABLES
 
 #: Everything 0012 created.
 _0012_TABLES = {"isin_ticker"}
@@ -158,7 +172,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0013"]
+    assert script.get_heads() == ["0014"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -366,9 +380,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     assert len(routes) == 16  # 0001's table, untouched
 
     command.upgrade(cfg, "head")
-    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows and
-    # 0011's two ``spdr_seed_amended`` rows.
-    assert len(_route_rows(url)) == 30
+    # 0006's ten back, plus 0008's two ``watchlist_changed`` rows,
+    # 0011's two ``spdr_seed_amended`` rows and 0014's four sentiment rows.
+    assert len(_route_rows(url)) == 34
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:

@@ -1126,9 +1126,14 @@ export interface RiskLimit {
  * `watchlist` (Phase 3 decision 21) is a manual watch added or removed via
  * `POST`/`DELETE /api/news/watch/{ticker}`. It belongs here rather than
  * beside calendar notes because a watch changes what is polled and graded,
- * and grading governs what the scanner may read. Mirrors `AuditCategory` in
- * `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in `db/models.py`. */
-export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist'
+ * and grading governs what the scanner may read.
+ *
+ * `sentiment` (Phase 3 decision 13) is a source's audit status changing —
+ * `field` the source, the two values its old and new status. Only the weekly
+ * audit run writes it; there is no human route to change a status. Mirrors
+ * `AuditCategory` in `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in
+ * `db/models.py`. */
+export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist' | 'sentiment'
 
 export interface AuditLogEntry {
   id: string
@@ -1143,9 +1148,12 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The routable events: PRD.md §10's eight, six operator events, and one engine record
+/** The routable events: PRD.md §10's eight, six operator events, one engine record
  * (`spdr_seed_amended`, owner decision 2026-09-30: an NPORT-P/A adopted into the
- * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action).
+ * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action),
+ * and the self-audit's two transitions (`sentiment_demoted`,
+ * `sentiment_repromoted`, Phase 3 decisions 13 and 14 — emitted by the weekly
+ * audit run when a source's status changes).
  *
  * The owner's call: "any action i do should be put into the discord". So a
  * human halt or resume, and every change to risk limits, data feeds or the
@@ -1175,6 +1183,8 @@ export type NotificationEvent =
   | 'notification_routes_changed'
   | 'watchlist_changed'
   | 'spdr_seed_amended'
+  | 'sentiment_demoted'
+  | 'sentiment_repromoted'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -1192,6 +1202,8 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   notification_routes_changed: 'Notification routing changed',
   watchlist_changed: 'News watchlist changed',
   spdr_seed_amended: 'SPDR seed amended',
+  sentiment_demoted: 'Sentiment source demoted',
+  sentiment_repromoted: 'Sentiment source re-promoted',
 }
 
 /** Routing per channel.

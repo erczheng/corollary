@@ -110,7 +110,10 @@ def test_vendor_vocabulary_is_the_feed_vendor_map() -> None:
 
 
 def test_audit_categories_gain_watchlist_only() -> None:
-    assert AUDIT_CATEGORIES == ("risk", "feed", "notification", "watchlist")
+    """0008 added ``watchlist`` and nothing else; step 6's ``sentiment`` (0014)
+    is the only category since, and is tested in test_sentiment_audit.py."""
+    assert AUDIT_CATEGORIES[:4] == ("risk", "feed", "notification", "watchlist")
+    assert AUDIT_CATEGORIES[4:] == ("sentiment",)
 
 
 # --------------------------------------------------------------- news_article
@@ -516,7 +519,9 @@ def test_a_watchlist_audit_row_is_accepted(any_engine: Engine) -> None:
 
 def test_an_unknown_audit_category_is_refused(any_engine: Engine) -> None:
     with Session(any_engine) as sess:
-        sess.add(AuditLog(at=T0, category="sentiment", field="x",
+        # ``sentiment`` was the stand-in here until 0014 made it a category;
+        # a typo of it is the case the CHECK exists for.
+        sess.add(AuditLog(at=T0, category="sentimnet", field="x",
                           previous_value="", new_value=""))
         with pytest.raises(IntegrityError, match="ck_audit_log_category"):
             sess.commit()

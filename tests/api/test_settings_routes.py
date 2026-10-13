@@ -681,6 +681,8 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "notification_routes_changed",
         "watchlist_changed",
         "spdr_seed_amended",
+        "sentiment_demoted",
+        "sentiment_repromoted",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -702,6 +704,11 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "bell": False,
         "discord": True,
     }
+    # Phase 3 decision 14 (migration 0014): both audit transitions ring the
+    # bell *and* reach Discord, so a withdrawal and its restoration arrive on
+    # the same channels.
+    for event in ("sentiment_demoted", "sentiment_repromoted"):
+        assert routed[event] == {"event": event, "bell": True, "discord": True}
 
 
 def test_every_seeded_route_event_is_one_the_contract_declares(

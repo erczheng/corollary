@@ -188,6 +188,19 @@ describe('auditFieldLabel', () => {
     )
   })
 
+  /** Decision 13: a status transition is keyed by the source it moved. */
+  it('names a sentiment row by the source whose status changed', () => {
+    expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'sentiment', field: 'massive' })).toBe(
+      'Sentiment source — Massive',
+    )
+    expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'sentiment', field: 'rules' })).toBe(
+      'Sentiment source — Corollary rules',
+    )
+    expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'sentiment', field: 'llm' })).toBe(
+      'Sentiment source — llm',
+    )
+  })
+
   it('falls back to the raw key rather than rendering nothing', () => {
     expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'risk', field: 'who_knows' })).toBe('who_knows')
   })

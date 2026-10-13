@@ -1824,6 +1824,9 @@ export const AUDIT_LOG: AuditLogEntry[] = [
   // Phase 3 decision 21: a manual news watch. Present so the `watchlist`
   // branch of `auditFieldLabel` is reachable on screen, not only in a test.
   { id: 'audit-4', time: '2026-05-04T13:20:00Z', category: 'watchlist', field: 'PLTR', previousValue: 'not watched', newValue: 'watched' },
+  // Phase 3 decision 13: the Saturday audit moving a source. Present so the
+  // `sentiment` branch of `auditFieldLabel` is reachable on screen.
+  { id: 'audit-5', time: '2026-04-25T14:05:00Z', category: 'sentiment', field: 'massive', previousValue: 'unaudited', newValue: 'active' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -1848,6 +1851,10 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   // Owner decision 2026-09-30, migration 0011: decision 20's info defaults
   // (a parent-session assumption).
   { event: 'spdr_seed_amended', bell: false, discord: true },
+  // Phase 3 decision 14, migration 0014: both audit transitions on both
+  // channels, so a withdrawal and its restoration arrive the same way.
+  { event: 'sentiment_demoted', bell: true, discord: true },
+  { event: 'sentiment_repromoted', bell: true, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

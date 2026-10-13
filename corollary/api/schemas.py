@@ -279,8 +279,12 @@ RiskLimitUnit: TypeAlias = Literal["%", "count"]
 #: ``db.models.AUDIT_CATEGORIES`` value for value -- every category
 #: ``ck_audit_log_category`` admits, or the first row of a new one fails
 #: validation and 500s every audit page holding it. ``watchlist`` is Phase 3
-#: decision 21's (migration 0008). ``test_settings_routes.py`` pins the two.
-AuditCategory: TypeAlias = Literal["risk", "feed", "notification", "watchlist"]
+#: decision 21's (migration 0008); ``sentiment`` is decision 13's, a source's
+#: audit status changing (migration 0014). ``test_settings_routes.py`` pins
+#: the two.
+AuditCategory: TypeAlias = Literal[
+    "risk", "feed", "notification", "watchlist", "sentiment"
+]
 
 #: Exactly the events ``db.seed.NOTIFICATION_ROUTE_DEFAULTS`` routes. An event
 #: seeded there but missing here is dropped from the Settings matrix with a
@@ -307,6 +311,12 @@ NotificationEvent: TypeAlias = Literal[
     # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
     # 2026-09-30, migration 0011), emitted by the ``spdr_holdings`` job.
     "spdr_seed_amended",
+    # The self-audit's transitions (Phase 3 decisions 13 and 14, migration
+    # 0014): a source demoted (``warning`` -- the audit working as designed,
+    # not a failure) or re-promoted (``info``). No emitter until step 6's
+    # transition unit lands.
+    "sentiment_demoted",
+    "sentiment_repromoted",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]

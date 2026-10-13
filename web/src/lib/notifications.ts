@@ -46,7 +46,12 @@ export type { NotificationSeverity }
  * added or removed, which belongs to no book (`account: null`, so it shows
  * in both bells). `spdr_seed_amended` (owner decision 2026-09-30) is `info`
  * too: an NPORT-P/A adopted into the sector seed after passing the same
- * validation as an original — a record, also `account: null`. */
+ * validation as an original — a record, also `account: null`.
+ *
+ * `sentiment_demoted` (Phase 3 decision 14) is a **warning, not critical**:
+ * the audit withdrawing a source is the audit working as designed — a
+ * degradation report, the same reasoning that makes `stop_loss_hit` one.
+ * `sentiment_repromoted` is `info`: nothing is wrong. Both `account: null`. */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -63,6 +68,8 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   notification_routes_changed: 'info',
   watchlist_changed: 'info',
   spdr_seed_amended: 'info',
+  sentiment_demoted: 'warning',
+  sentiment_repromoted: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

@@ -1,4 +1,5 @@
 import { DATA_FEEDS, RISK_LIMITS } from './mockData'
+import { NEWS_SOURCE_LABEL } from './news'
 import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
@@ -6,6 +7,7 @@ import {
   type DataFeed,
   type DataPlan,
   type FeedKey,
+  type NewsLabelSource,
   type NotificationEvent,
   type RiskLimit,
   type RiskLimitKey,
@@ -177,6 +179,13 @@ export function auditFieldLabel(entry: AuditLogEntry, catalog: AuditCatalog = {}
   // them otherwise, the label still carries the raw field, never a blank.
   if (entry.category === 'watchlist') {
     return `News watchlist — ${entry.field}`
+  }
+
+  // A status transition is keyed by the source it moved (decision 13). An
+  // unknown source keeps its raw key, never a blank.
+  if (entry.category === 'sentiment') {
+    const source = NEWS_SOURCE_LABEL[entry.field as NewsLabelSource] ?? entry.field
+    return `Sentiment source — ${source}`
   }
 
   const [event, channel] = entry.field.split('.')
