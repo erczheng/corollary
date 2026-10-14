@@ -41,6 +41,14 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     # Phase 3 step 5: the feed's labels and decision 21's movers panel.
     "NewsLabel": schemas.NewsLabel,
     "NewsMover": schemas.NewsMover,
+    "AuditRunSummary": schemas.AuditRunSummary,
+    "SentimentAuditStarted": schemas.SentimentAuditStarted,
+    "SentimentAuditStatus": schemas.SentimentAuditStatus,
+    "SentimentCounts": schemas.SentimentCounts,
+    "SentimentEligibility": schemas.SentimentEligibility,
+    "SentimentSourceAudit": schemas.SentimentSourceAudit,
+    "SentimentWindowAccuracy": schemas.SentimentWindowAccuracy,
+    "SentimentWindowProgress": schemas.SentimentWindowProgress,
     "NewsMoverArticle": schemas.NewsMoverArticle,
     "NewsMoverEvidence": schemas.NewsMoverEvidence,
     "NewsMoverReason": schemas.NewsMoverReason,
@@ -104,6 +112,11 @@ MIRRORED_UNIONS: Mapping[str, object] = {
     "DiscoveryFeedName": schemas.DiscoveryFeedName,
     "MoverRankGroup": schemas.MoverRankGroup,
     "MoverDirection": schemas.MoverDirection,
+    "SentimentWindow": schemas.SentimentWindow,
+    "SentimentAccuracyBasis": schemas.SentimentAccuracyBasis,
+    "AuditRunTrigger": schemas.AuditRunTrigger,
+    "AuditRunStatus": schemas.AuditRunStatus,
+    "SentimentEligibilityKind": schemas.SentimentEligibilityKind,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)

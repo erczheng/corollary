@@ -38,8 +38,10 @@ selector Movers and the tradeability refresh also read). The displayed label is 
 Massive's, else ``unclassified`` with no tier, no source and no status
 (decision 17). The other label, when both sources labelled, is served as
 ``otherLabel``. The ``sentiment`` filter applies to the *displayed* label, in
-SQL, so ``total`` and the pages agree with it. Each source's status is
-``unaudited`` (Q22) until step 6's ``sentiment_source_status`` exists.
+SQL, so ``total`` and the pages agree with it. Each source's status is its
+``sentiment_source_status`` row (decision 13), read once per request by
+:func:`read_source_statuses` -- the same reader Movers uses, so the two
+routes cannot state different statuses for one source.
 
 ``GET /api/news/movers``
 ------------------------
@@ -204,6 +206,7 @@ from corollary.db.models import (
     AuditLog,
     NewsArticle,
     NewsArticleTicker,
+    SentimentSourceStatus,
     TickerTradeability,
     WatchSymbol,
 )
@@ -215,11 +218,11 @@ __all__ = [
     "MACRO_SECTOR",
     "NOT_WATCHED",
     "OTHER_SECTOR",
-    "SOURCE_STATUS",
     "STALE_AFTER_SLOTS",
     "TRADEABILITY_JOB",
     "WATCHED",
     "lookback_start",
+    "read_source_statuses",
     "request_now",
     "router",
 ]
@@ -240,13 +243,50 @@ OTHER_SECTOR: Final = "Other"
 #: Decision 4: no source labelled the item for that ticker.
 _UNLABELLED: Final[NewsSentiment] = "unclassified"
 
-#: Each labelling source's audit status (Q22). **``unaudited`` for both until
-#: step 6**, which replaces this table with ``sentiment_source_status``. Never
-#: ``active`` before an audit has run: that would claim a pass nobody graded.
-SOURCE_STATUS: Final[dict[LabelSource, NewsSourceStatus]] = {
-    LabelSource.RULES: "unaudited",
-    LabelSource.MASSIVE: "unaudited",
-}
+#: What a source with **no** ``sentiment_source_status`` row is shown as.
+#: Both rows are seeded (migration 0014, ``db.seed``), so this is a damaged
+#: database, logged as one. ``unaudited`` claims nothing -- never ``active``,
+#: which would claim a pass nobody graded (Q22).
+_MISSING_SOURCE_STATUS: Final[NewsSourceStatus] = "unaudited"
+
+
+def read_source_statuses(
+    session: Session, correlation_id: str
+) -> dict[LabelSource, NewsSourceStatus]:
+    """Each labelling source's audit status, from ``sentiment_source_status``.
+
+    Read **once per request**, so every label in one response states the same
+    status for the same source. The audit run is the only writer (decision
+    13); this only reads.
+    """
+    stored: dict[str, str] = {
+        row.source: row.status for row in session.scalars(select(SentimentSourceStatus))
+    }
+    statuses: dict[LabelSource, NewsSourceStatus] = {}
+    for source in LabelSource:
+        status = stored.get(source.value)
+        if status == "active":
+            statuses[source] = "active"
+        elif status == "demoted":
+            statuses[source] = "demoted"
+        elif status == "unaudited":
+            statuses[source] = "unaudited"
+        else:
+            logger.error(
+                "a labelling source has no readable audit status; shown as unaudited",
+                extra={
+                    "event": "sentiment_source_status_missing",
+                    "rule": (
+                        "every source has one seeded sentiment_source_status row; "
+                        "a missing one is shown as unaudited, never active"
+                    ),
+                    "source": source.value,
+                    "stored": status,
+                    "correlation_id": correlation_id,
+                },
+            )
+            statuses[source] = _MISSING_SOURCE_STATUS
+    return statuses
 
 #: Decision 21's three discovery firehoses and the scheduler job polling each.
 #: ``test_movers_route.py`` pins these names against the shipped job set.
@@ -494,13 +534,17 @@ def _feed_query(
 
 
 def _label(
-    source: LabelSource, direction: str, rule_id: str | None, reasoning: str | None
+    source: LabelSource,
+    direction: str,
+    rule_id: str | None,
+    reasoning: str | None,
+    statuses: Mapping[LabelSource, NewsSourceStatus],
 ) -> NewsLabel:
     return NewsLabel(
         sentiment=_direction(direction),
         tier="rules" if SOURCE_TIER[source] is SentimentTier.RULES else "vendor",
         source=_wire_source(source),
-        source_status=SOURCE_STATUS[source],
+        source_status=statuses[source],
         rule_id=rule_id,
         reasoning=reasoning,
     )
@@ -516,17 +560,25 @@ def _direction(stored: str) -> NewsDirection:
     return "neutral"
 
 
-def _feed_item(row: Any, seed: SpdrSeed | None) -> NewsItem:
+def _feed_item(
+    row: Any, seed: SpdrSeed | None, statuses: Mapping[LabelSource, NewsSourceStatus]
+) -> NewsItem:
     """One feed row, its displayed label by precedence rules -> vendor."""
     rules = (
         None
         if row.rules_direction is None
-        else _label(LabelSource.RULES, row.rules_direction, row.rules_rule_id, row.rules_reasoning)
+        else _label(
+            LabelSource.RULES,
+            row.rules_direction,
+            row.rules_rule_id,
+            row.rules_reasoning,
+            statuses,
+        )
     )
     vendor = (
         None
         if row.vendor_direction is None
-        else _label(LabelSource.MASSIVE, row.vendor_direction, None, row.vendor_reasoning)
+        else _label(LabelSource.MASSIVE, row.vendor_direction, None, row.vendor_reasoning, statuses)
     )
     shown = rules if rules is not None else vendor
     other = vendor if rules is not None else None
@@ -588,7 +640,8 @@ def read_news(
         ordering = (canonical.published_at.asc(), canonical.id.asc(), ticker_col.asc())
     rows = session.execute(stmt.order_by(*ordering).offset(offset).limit(limit)).all()
 
-    items = [_feed_item(row, seed) for row in rows]
+    statuses = read_source_statuses(session, correlation_id)
+    items = [_feed_item(row, seed, statuses) for row in rows]
     return NewsFeed(
         items=items,
         total=total,
@@ -732,12 +785,16 @@ def _wire_source(source: LabelSource) -> NewsLabelSource:
     return "rules" if source is LabelSource.RULES else "massive"
 
 
-def _mover(candidate: Candidate, seed: SpdrSeed | None) -> NewsMover:
+def _mover(
+    candidate: Candidate,
+    seed: SpdrSeed | None,
+    statuses: Mapping[LabelSource, NewsSourceStatus],
+) -> NewsMover:
     reasons = [
         NewsMoverReason(
             source=_wire_source(reason.source),
             tier="rules" if reason.tier is SentimentTier.RULES else "vendor",
-            source_status=SOURCE_STATUS[reason.source],
+            source_status=statuses[reason.source],
             rule_id=reason.rule_id,
             family=None if reason.family is None else reason.family.value,
             direction=_mover_direction(reason.direction),
@@ -804,6 +861,7 @@ def read_movers(
     found = discover(signals, watched=universe, verdicts=verdicts, since=since)
     feeds = _feed_freshness(session, status, now)
     stale = [feed for feed in feeds if feed.stale]
+    statuses = read_source_statuses(session, correlation_id)
     known_good = [feed.stale_since for feed in stale if feed.stale_since is not None]
 
     logger.info(
@@ -825,7 +883,7 @@ def read_movers(
         },
     )
     return NewsMovers(
-        items=[_mover(candidate, seed) for candidate in found.candidates],
+        items=[_mover(candidate, seed, statuses) for candidate in found.candidates],
         lookback=lookback,
         since=since,
         evaluated_at=now,

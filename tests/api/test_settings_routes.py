@@ -683,6 +683,7 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "spdr_seed_amended",
         "sentiment_demoted",
         "sentiment_repromoted",
+        "sentiment_audit_requested",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -709,6 +710,13 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
     # the same channels.
     for event in ("sentiment_demoted", "sentiment_repromoted"):
         assert routed[event] == {"event": event, "bell": True, "discord": True}
+    # Step 6's manual audit trigger (migration 0015): an operator action on
+    # decision 20's config-event terms -- a record for Discord, not a bell.
+    assert routed["sentiment_audit_requested"] == {
+        "event": "sentiment_audit_requested",
+        "bell": False,
+        "discord": True,
+    }
 
 
 def test_every_seeded_route_event_is_one_the_contract_declares(

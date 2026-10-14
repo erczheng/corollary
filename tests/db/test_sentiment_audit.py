@@ -817,6 +817,10 @@ def test_the_sentiment_routes_are_seeded_bell_on_discord_on(any_engine: Engine) 
         ("sentiment_demoted", "discord"): True,
         ("sentiment_repromoted", "bell"): True,
         ("sentiment_repromoted", "discord"): True,
+        # 6.4b: a manual audit run started -- decision 20's operator-action
+        # defaults, a record for Discord, not worth the bell.
+        ("sentiment_audit_requested", "bell"): False,
+        ("sentiment_audit_requested", "discord"): True,
     }
     assert {(e, c): v for e, c, v in NOTIFICATION_ROUTE_DEFAULTS if e.startswith("sentiment_")} == routes
 

@@ -124,6 +124,11 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     ("sentiment_demoted", "discord", True),
     ("sentiment_repromoted", "bell", True),
     ("sentiment_repromoted", "discord", True),
+    # A manual sentiment audit run started (step 6, migration 0014): an
+    # operator action on decision 20's config-event terms -- ``info``, bell
+    # off, Discord on.
+    ("sentiment_audit_requested", "bell", False),
+    ("sentiment_audit_requested", "discord", True),
 )
 
 #: Decision 13: every sentiment source starts ``unaudited``. Seeded here as

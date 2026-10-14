@@ -51,7 +51,9 @@ export type { NotificationSeverity }
  * `sentiment_demoted` (Phase 3 decision 14) is a **warning, not critical**:
  * the audit withdrawing a source is the audit working as designed — a
  * degradation report, the same reasoning that makes `stop_loss_hit` one.
- * `sentiment_repromoted` is `info`: nothing is wrong. Both `account: null`. */
+ * `sentiment_repromoted` is `info`: nothing is wrong. Both `account: null`.
+ * `sentiment_audit_requested` — an audit run started by hand — is `info`, on
+ * the config events' terms (decision 20). */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -70,6 +72,7 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   spdr_seed_amended: 'info',
   sentiment_demoted: 'warning',
   sentiment_repromoted: 'info',
+  sentiment_audit_requested: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

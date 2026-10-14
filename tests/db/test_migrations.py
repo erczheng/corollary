@@ -195,6 +195,29 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
 
 
 
+def test_0014_seeds_the_sentiment_audit_requested_routes_and_downgrades_to_0013(
+    db_path: Path,
+) -> None:
+    """Bell off, Discord on (decision 20's info defaults), folded into 0014."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("sentiment_audit_requested", "bell")] is False
+    assert routes[("sentiment_audit_requested", "discord")] is True
+    at_head = len(routes)
+
+    command.downgrade(cfg, "0013")
+    routes = _route_rows(url)
+    assert not {event for event, _channel in routes} & {
+        "sentiment_audit_requested", "sentiment_demoted", "sentiment_repromoted"
+    }
+    assert len(routes) == at_head - 6
+
+    command.upgrade(cfg, "head")
+    assert _route_rows(url)[("sentiment_audit_requested", "discord")] is True
+
+
 def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     db_path: Path,
 ) -> None:
@@ -381,8 +404,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
 
     command.upgrade(cfg, "head")
     # 0006's ten back, plus 0008's two ``watchlist_changed`` rows,
-    # 0011's two ``spdr_seed_amended`` rows and 0014's four sentiment rows.
-    assert len(_route_rows(url)) == 34
+    # 0011's two ``spdr_seed_amended`` rows, and 0014's four sentiment rows
+    # plus its two ``sentiment_audit_requested`` rows.
+    assert len(_route_rows(url)) == 36
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:

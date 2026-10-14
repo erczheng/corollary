@@ -100,7 +100,11 @@ and 14, and the design's *Database* section):
   copied across.
 * ``notification_route`` gains ``sentiment_demoted`` and
   ``sentiment_repromoted``, **bell on, Discord on** for both (decision 14),
-  insert-if-missing exactly as 0006/0008/0011 -- a human's edit stands.
+  insert-if-missing exactly as 0006/0008/0011 -- a human's edit stands. It
+  also gains ``sentiment_audit_requested`` (a manual audit run started:
+  decision 20's operator-action defaults, **bell off, Discord on**), folded
+  in here rather than shipped as 0015 because this revision is provisional
+  (Q22) and step 6 carries one migration to renumber at merge.
   ``notification_route.event`` carries no CHECK (0005/0006), so the routes are
   rows, not a constraint change. ``watchlist`` and ``watchlist_changed``
   already exist (0008).
@@ -182,6 +186,8 @@ _ROUTES: tuple[tuple[str, str, bool], ...] = (
     ("sentiment_demoted", "discord", True),
     ("sentiment_repromoted", "bell", True),
     ("sentiment_repromoted", "discord", True),
+    ("sentiment_audit_requested", "bell", False),
+    ("sentiment_audit_requested", "discord", True),
 )
 
 _notification_route = sa.table(
