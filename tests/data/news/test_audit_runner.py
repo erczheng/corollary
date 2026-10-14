@@ -1081,3 +1081,84 @@ def test_a_cancellation_while_recording_a_failure_is_not_swallowed(
         run = session.scalars(select(AuditRun)).one()
         assert run.status == "failed"
         assert json.loads(run.detail or "{}")["error_type"] == "RuntimeError"
+
+
+# ---------------------------- follow-up F1: a cancel during step a leaves no row
+
+
+def test_a_cancellation_while_opening_closes_the_runs_own_row(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_on_worker`` waits for ``_open_run``'s thread, which commits the
+    ``running`` row, and then re-raises: that row must be closed, or it
+    refuses every run for :data:`ABANDONED_RUN_AFTER`."""
+    _the_week(db_engine)
+    entered, release = _blocking(monkeypatch, "_open_run")
+    asyncio.run(_cancel_while_blocked(_deps(db_engine), entered, release))
+    with Session(db_engine) as session:
+        rows = session.scalars(select(AuditRun)).all()
+        assert [r.status for r in rows] == ["failed"]
+        (run,) = rows
+        assert run.finished_at is not None
+        detail = json.loads(run.detail or "{}")
+        assert (detail["stage"], detail["error_type"]) == ("open", "CancelledError")
+    assert _count(db_engine, LabelOutcome) == 0
+    # Nothing blocks the next run.
+    monkeypatch.undo()
+    later = _run(_deps(db_engine, clock=TickingClock(SATURDAY_10 + timedelta(minutes=1))))
+    assert later.detail["graded"] == 4 * LABELS_PER_SOURCE
+
+
+# ------------- follow-up F2: the hold-back bound releases only attempted faults
+
+#: Wednesday 2026-11-18 10:00 ET.
+WEDNESDAY_10 = datetime(2026, 11, 18, 15, 0, tzinfo=UTC)
+
+
+def _outcomes_of(engine: Engine, label_id: int) -> dict[str, str | None]:
+    with Session(engine) as session:
+        return {
+            o.window: o.skip_reason
+            for o in session.scalars(select(LabelOutcome).where(LabelOutcome.label_id == label_id))
+        }
+
+
+def test_an_abort_releases_attempted_old_windows_and_holds_unrequested_ones(
+    db_engine: Engine,
+) -> None:
+    """Past the hold-back bound, a window whose missing bars an *attempted*
+    transient request explains is released ``price_unavailable``; one that
+    only an unrequested pair explains was never tried, and stays pending."""
+    assert audit_runner.FETCH_ABORT_AFTER == 5
+    with Session(db_engine) as session:
+        monday = _label(session, ticker="AAPL", source="rules", direction="bullish", at=MONDAY_10)
+        wednesday = _label(
+            session, ticker="AAPL", source="rules", direction="bullish", at=WEDNESDAY_10
+        )
+        session.commit()
+    bars = FakeBars(outage=ProviderError("GET /v2/stocks/bars returned 503"))
+    # Every window, Wednesday's included, ended more than TRAILING_WINDOW ago.
+    run_at = WEDNESDAY_10 + TRAILING_WINDOW + timedelta(days=2)
+    result = _run(_deps(db_engine, bars=bars, clock=TickingClock(run_at)))
+
+    tuesday_open = _EPOCH + timedelta(days=1)
+    # Monday's batch, its two retries, Tuesday's batch, AAPL's retry: stop.
+    assert [(symbols, start) for symbols, _, start, _ in bars.calls] == [
+        (("AAPL", "SPY"), _EPOCH),
+        (("AAPL",), _EPOCH),
+        (("SPY",), _EPOCH),
+        (("AAPL", "SPY"), tuesday_open),
+        (("AAPL",), tuesday_open),
+    ]
+    # Monday's 1h reads Monday only and 1d Monday and Tuesday: each window
+    # includes an attempted transient fault, so both are released.
+    assert _outcomes_of(db_engine, monday) == {"1h": "price_unavailable", "1d": "price_unavailable"}
+    # Wednesday's windows read Wednesday and Thursday, never requested: held.
+    assert _outcomes_of(db_engine, wednesday) == {}
+    assert result.detail["released_past_hold_bound"] == 2
+    assert result.detail["held_for_transient_fetch_failure"] == 2
+    assert result.detail["fetch_aborted"] == {
+        "after_consecutive_transient_failures": 5,
+        "last_error_type": "ProviderError",
+        "unrequested_symbol_sessions": 5,
+    }

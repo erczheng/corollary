@@ -1056,7 +1056,11 @@ def _held_positions() -> HeldPositionUnderlyings:
     the lifespan hands the jobs.
     """
     holder = PositionUnderlyings()
-    holder.replace({"TSLA"}, at=datetime(2026, 11, 25, 15, 0, tzinfo=UTC))
+    # Stamped at the Saturday audit slot (10:00 ET is 15:00 UTC in November):
+    # the audit skips on positions older than three refresh intervals, and
+    # the rule 9 test needs it to run. An as_of ahead of an earlier job's
+    # clock reads as fresh, which is all the other jobs ask of it.
+    holder.replace({"TSLA"}, at=datetime(2026, 11, 28, 15, 0, tzinfo=UTC))
     return HeldPositionUnderlyings(holder)
 
 

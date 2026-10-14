@@ -16,9 +16,13 @@ a. **Open.** Close any ``running`` row older than
    younger one raises :class:`AuditAlreadyRunning` -- then insert this run's
    ``running`` row, both on the one start reading -- so the next run's
    ``started_at`` is never before the closed row's ``finished_at``
-   (``models.AuditRun``).
+   (``models.AuditRun``). A cancellation that arrives while this commits
+   closes the row it committed ``failed`` (``detail.stage = "open"``)
+   before re-raising, so on a single cancellation it does not block the
+   next run for :data:`ABANDONED_RUN_AFTER`; a second cancellation during
+   that wait leaves the row to that bound (:func:`_open`).
 b. **Plan.** The labels with an unwritten window, the keys already written,
-   the duplicate groups already claimed, the watch universe, and each
+   the duplicate groups already claimed, step 0's watch universe, and each
    off-watch ticker's cached tradeability verdict history
    (:func:`~corollary.data.news.signals.verdict_histories`, through the same
    fail-closed row read Movers uses) go to :func:`~audit.plan_audit`. Each
@@ -76,7 +80,8 @@ Decisions this module takes (flagged in the unit's report)
    rate-limit refusal -- would be recorded permanently ungradable over a
    blip, so its record is held back (it stays pending and the next run
    retries) -- **but only while** ``run_at - outcome_at <=``
-   :data:`~audit.TRAILING_WINDOW`. Past that it is written
+   :data:`~audit.TRAILING_WINDOW`. Past that, a window one of whose
+   (symbol, session) pairs was **actually requested** and failed is written
    ``price_unavailable`` whatever the fault (``detail.released_past_hold_bound``):
    a fault that fails identically every week -- a 422, a bar missing a field
    -- would otherwise be re-requested forever, and the provider raises those
@@ -112,7 +117,12 @@ Decisions this module takes (flagged in the unit's report)
    session). After :data:`FETCH_ABORT_AFTER` consecutive transient failures
    (batches and retries alike; a success or a data fault resets the count)
    the stage stops: everything not yet requested is held back as transient
-   -- still subject to decision 3's bound -- and ``detail.fetch_aborted``
+   -- and, never having been tried, is **not** subject to decision 3's
+   bound: a window only an unrequested pair explains is held at any age
+   (follow-up F2), since releasing it would write ``price_unavailable``
+   without one attempt. The pairs of a batch that failed just before the
+   stop count as unrequested too: no per-symbol retry ever attributed a
+   fault to them. ``detail.fetch_aborted``
    records the count, the last error's type and how many (symbol, session)
    pairs went unrequested.
 """
@@ -294,7 +304,9 @@ class AuditRunResult:
 @dataclass(frozen=True, slots=True)
 class _FetchFault:
     fault: BarFault
-    #: A vendor-data fault (``WireFormatError``) rather than a transient one.
+    #: A vendor-data fault -- a ``WireFormatError`` (bare, or as the provider
+    #: error's cause) or a bare ``KeyError`` (:func:`_is_data_fault`) --
+    #: rather than a transient one.
     data_fault: bool
 
 
@@ -770,10 +782,15 @@ class _Fetched:
     #: The last transient failure's type name when the stage stopped early.
     abort_error_type: str | None
 
-    def transient(self) -> set[tuple[str, date]]:
-        """Every (symbol, session) whose missing bars a transient cause explains."""
-        failed = {(f.fault.symbol, f.fault.session_date) for f in self.faults if not f.data_fault}
-        return failed | set(self.unrequested)
+    def attempted_transient(self) -> frozenset[tuple[str, date]]:
+        """Every (symbol, session) actually requested whose request raised transiently.
+
+        :attr:`unrequested` is deliberately not here: those were never tried,
+        and :func:`_to_write` holds them at any age (decision 3).
+        """
+        return frozenset(
+            (f.fault.symbol, f.fault.session_date) for f in self.faults if not f.data_fault
+        )
 
 
 def _batches(requests: Sequence[BarRequest]) -> list[list[BarRequest]]:
@@ -900,17 +917,28 @@ async def _fetch(bars: MinuteBarSource, plan: AuditPlan, correlation_id: str) ->
 
 
 def _to_write(
-    plan: AuditPlan, result: GradeResult, transient: Collection[tuple[str, date]]
+    plan: AuditPlan,
+    result: GradeResult,
+    attempted: Collection[tuple[str, date]],
+    unrequested: Collection[tuple[str, date]],
 ) -> tuple[list[LabelOutcomeRecord], list[tuple[int, str]], list[tuple[int, str]]]:
     """Decision 3 above: hold back a ``price_unavailable`` a transient failure
-    explains -- but only while the window ended no more than
-    :data:`~audit.TRAILING_WINDOW` before the run.
+    explains -- an ``attempted`` request that raised, or a pair left
+    ``unrequested`` by decision 6's abort.
 
-    Returns the records to write, the keys held back, and the keys
-    *released*: explained by a transient failure, but too old to hold any
-    longer, so written ``price_unavailable`` like any other missing price.
+    While the window ended no more than :data:`~audit.TRAILING_WINDOW`
+    before the run, either kind holds it. Past that, it is *released* --
+    written ``price_unavailable`` like any other missing price -- only when
+    one of its needed pairs is in ``attempted``: a fault that recurs
+    identically every week must not be re-requested forever. A window that
+    only ``unrequested`` pairs explain was never tried, and is held at any
+    age (follow-up F2).
+
+    Returns the records to write, the keys held back, and the keys released.
     """
-    if not transient:
+    attempted_pairs = set(attempted)
+    unrequested_pairs = set(unrequested)
+    if not attempted_pairs and not unrequested_pairs:
         return list(result.records), [], []
     windows = {(g.label.label_id, g.window): g for g in plan.to_grade}
     kept: list[LabelOutcomeRecord] = []
@@ -919,15 +947,15 @@ def _to_write(
     for record in result.records:
         key = (record.label_id, record.window)
         item = windows.get(key)
-        if (
-            record.skip_reason is SkipReason.PRICE_UNAVAILABLE
-            and item is not None
-            and _needed_sessions(item) & set(transient)
-        ):
-            if plan.run_at - item.outcome_at <= TRAILING_WINDOW:
-                held.append(key)
-                continue
-            released.append(key)
+        if record.skip_reason is SkipReason.PRICE_UNAVAILABLE and item is not None:
+            needed = _needed_sessions(item)
+            tried = bool(needed & attempted_pairs)
+            untried = bool(needed & unrequested_pairs)
+            if tried or untried:
+                if plan.run_at - item.outcome_at <= TRAILING_WINDOW or not tried:
+                    held.append(key)
+                    continue
+                released.append(key)
         kept.append(record)
     return kept, held, released
 
@@ -1048,11 +1076,53 @@ async def run_sentiment_audit(
 async def _open(
     deps: SentimentAuditDeps, started_at: datetime, trigger: AuditTrigger, correlation_id: str
 ) -> int:
-    """Step a, logged either way."""
+    """Step a, logged either way.
+
+    A cancellation here arrives after :func:`_on_worker` has waited for
+    ``_open_run``'s thread -- which may well have committed this run's
+    ``running`` row. Left open, that row would refuse every run for
+    :data:`ABANDONED_RUN_AFTER`, so the id is noted as the thread commits it
+    and, on the cancel path, that row is closed ``failed`` (``stage =
+    "open"``) before the cancellation propagates: only this run's own row,
+    by its id. A *second* cancellation during ``_on_worker``'s wait returns
+    before the thread does; the row, if it then lands, is left for the
+    abandonment bound to close -- shutdown is not held hostage.
+    """
+    opened: list[int] = []
+
+    def open_and_note(
+        session_factory: Callable[[], Session],
+        at: datetime,
+        run_trigger: AuditTrigger,
+        cid: str,
+    ) -> int:
+        new_id = _open_run(session_factory, at, run_trigger, cid)
+        opened.append(new_id)  # after the commit: this id names a row that exists
+        return new_id
+
     try:
         run_id = await _on_worker(
-            _open_run, deps.session_factory, started_at, trigger, correlation_id
+            open_and_note, deps.session_factory, started_at, trigger, correlation_id
         )
+    except asyncio.CancelledError as exc:
+        if not opened:
+            logger.error(
+                "sentiment audit run cancelled before its row was confirmed "
+                "written; a row that lands later is closed by the "
+                "ABANDONED_RUN_AFTER bound",
+                extra={
+                    "event": "sentiment_audit_not_started",
+                    "row_confirmed": False,
+                    "trigger": trigger,
+                    "error_type": type(exc).__name__,
+                    "started_at": started_at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )
+            raise
+        # Closes the row and logs; it re-raises only a further cancellation.
+        await _record_failure(deps, opened[0], started_at, "open", exc, correlation_id)
+        raise
     except Exception as exc:
         logger.error(
             "sentiment audit run could not start",
@@ -1136,7 +1206,9 @@ async def _run_locked(deps: SentimentAuditDeps, trigger: AuditTrigger) -> AuditR
 
         stage = "grade"
         result = grade(plan, fetched.bars)
-        to_write, held, released = _to_write(plan, result, fetched.transient())
+        to_write, held, released = _to_write(
+            plan, result, fetched.attempted_transient(), fetched.unrequested
+        )
         if released:
             logger.warning(
                 "windows a transient fetch failure explains are past the hold-back "

@@ -6,19 +6,21 @@ runs to Saturday 10:00 ET so this job's real body runs there with the rest.
 """
 
 import asyncio
-from collections.abc import Iterator
-from datetime import datetime, time, timezone
+from collections.abc import Callable, Iterator
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from corollary.api.deps import POSITION_UNDERLYINGS_TTL
 from corollary.data.news import audit_runner
 from corollary.data.seeds import SeedError
 from corollary.db.models import AuditRun, Base, LabelOutcome
 from corollary.db.seed import seed
 from corollary.db.session import create_db_engine, sqlite_url
+from corollary.engine import scheduler
 from corollary.engine.scheduler import (
     SENTIMENT_AUDIT_AT,
     SENTIMENT_AUDIT_DAYS,
@@ -62,7 +64,9 @@ def _services(engine: Engine, bars: object | None, **overrides: object) -> Conte
     return ContextServices(**fields)  # type: ignore[arg-type]
 
 
-def _audit_job(services: ContextServices, clock: TickingClock | None = None) -> ScheduledJob:
+def _audit_job(
+    services: ContextServices, clock: Callable[[], datetime] | None = None
+) -> ScheduledJob:
     jobs = {
         job.name: job
         for job in context_jobs(services, clock=clock or TickingClock(SATURDAY_10))
@@ -136,10 +140,10 @@ def test_a_run_in_progress_makes_the_scheduled_slot_a_skip(db_engine: Engine) ->
 # ------------------------------------- fix B: a degraded universe never runs
 
 
-def _held(refreshed: bool) -> HeldPositionUnderlyings:
+def _held(refreshed: bool, *, at: datetime = SATURDAY_10) -> HeldPositionUnderlyings:
     holder = PositionUnderlyings()
     if refreshed:
-        holder.replace({"TSLA"}, at=datetime(2026, 11, 20, 15, 0, tzinfo=UTC))
+        holder.replace({"TSLA"}, at=at)
     return HeldPositionUnderlyings(holder)
 
 
@@ -192,3 +196,48 @@ def test_a_refreshed_holder_runs(db_engine: Engine) -> None:
     with Session(db_engine) as session:
         runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
     assert runs == [("scheduled", "succeeded")]
+
+
+# ------------------------------- follow-up F3: stale positions stop the run too
+
+
+def _frozen() -> datetime:
+    """Every reading the same instant -- the runner bumps ``finished_at`` itself."""
+    return SATURDAY_10
+
+
+def test_the_staleness_bound_is_three_of_the_refreshers_intervals() -> None:
+    """The scheduler may not import ``corollary.api`` (the context jobs' import
+    scan), so it mirrors the refresher's interval; this pins the mirror."""
+    assert scheduler._SENTIMENT_AUDIT_POSITIONS_REFRESH == POSITION_UNDERLYINGS_TTL
+    assert scheduler._SENTIMENT_AUDIT_POSITIONS_STALE_AFTER == 3 * POSITION_UNDERLYINGS_TTL
+
+
+def test_positions_exactly_at_the_staleness_bound_still_run(db_engine: Engine) -> None:
+    _the_week(db_engine)
+    as_of = SATURDAY_10 - 3 * POSITION_UNDERLYINGS_TTL
+    services = _services(db_engine, FakeBars(), position_underlyings=_held(True, at=as_of))
+    assert asyncio.run(_audit_job(services, _frozen).run()) is None
+    with Session(db_engine) as session:
+        runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
+    assert runs == [("scheduled", "succeeded")]
+
+
+def test_positions_past_the_staleness_bound_skip_and_write_no_run(db_engine: Engine) -> None:
+    """A holder whose refresher has failed since Tuesday would classify
+    Saturday's labels against Tuesday's positions, permanently."""
+    _the_week(db_engine)
+    as_of = SATURDAY_10 - 3 * POSITION_UNDERLYINGS_TTL - timedelta(microseconds=1)
+    services = _services(db_engine, FakeBars(), position_underlyings=_held(True, at=as_of))
+    bars = services.alpaca
+    assert isinstance(bars, FakeBars)
+    reason = "the paper positions were last read more than"
+
+    outcome = asyncio.run(_audit_job(services, _frozen).run())
+    assert isinstance(outcome, JobSkipped) and reason in outcome.reason
+    with pytest.raises(SentimentAuditUnavailable, match=reason):
+        asyncio.run(run_sentiment_audit_now(services, trigger="manual", clock=_frozen))
+    with Session(db_engine) as session:
+        assert session.scalars(select(AuditRun)).all() == []
+        assert session.scalars(select(LabelOutcome)).all() == []
+    assert bars.calls == []

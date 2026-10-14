@@ -2076,6 +2076,25 @@ _SENTIMENT_AUDIT_POSITIONS_NEVER_READ = (
     "universe has no position underlyings yet; a label on a held name would "
     "be graded as off-watch permanently. Nothing graded; the next run retries"
 )
+#: The paper positions refresher's interval -- ``POSITION_UNDERLYINGS_TTL`` in
+#: ``corollary.api.deps``, **mirrored** rather than imported: no module that
+#: contributes a context job may import ``corollary.api`` (this module's
+#: docstring), and ``tests/engine/test_scheduler_audit.py`` pins the two equal.
+_SENTIMENT_AUDIT_POSITIONS_REFRESH: Final = timedelta(minutes=5)
+#: Older than this, the holder has missed at least two refreshes in a row and
+#: its positions are not this run's: the audit does not run (follow-up F3).
+#: At exactly this age it still runs.
+# Three intervals, not two: ``as_of`` is stamped when a read starts and the
+# loop reads then sleeps, so a healthy holder runs about one interval plus
+# two read latencies old, and one failed read just before Saturday 10:00
+# would otherwise cost the week's audit.
+_SENTIMENT_AUDIT_POSITIONS_STALE_AFTER: Final = 3 * _SENTIMENT_AUDIT_POSITIONS_REFRESH
+_SENTIMENT_AUDIT_POSITIONS_STALE = (
+    "the paper positions were last read more than three refresh intervals ago, "
+    "so the watch universe's position underlyings may no longer be held; a "
+    "label would be classified against them permanently. Nothing graded; "
+    "the next run retries"
+)
 _SENTIMENT_AUDIT_POSITIONS_FAILED = (
     "the position underlyings could not be read this cycle, so the watch "
     "universe is missing them; nothing graded, the next run retries"
@@ -2139,8 +2158,14 @@ def sentiment_audit_deps(
         # finding 3). ``as_of`` exists only on production's holder view; any
         # other source is taken at its word, and its raise is
         # ``positions_error`` below.
-        if isinstance(positions, HeldPositionUnderlyings) and positions.holder.as_of is None:
-            raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_NEVER_READ)
+        if isinstance(positions, HeldPositionUnderlyings):
+            as_of = positions.holder.as_of
+            if as_of is None:
+                raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_NEVER_READ)
+            # Stale is degraded too (follow-up F3): a refresher failing since
+            # Tuesday leaves Tuesday's positions, read here as Saturday's.
+            if _require_utc(clock()) - as_of > _SENTIMENT_AUDIT_POSITIONS_STALE_AFTER:
+                raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_STALE)
         built = await build_watch_universe(
             markets=services.markets,
             position_underlyings=positions,
