@@ -36,6 +36,19 @@ and 14, and the design's *Database* section):
   ``Money`` -- TEXT, exact, shape-CHECKed, prices non-negative. See
   ``models.LabelOutcome`` for why the returns are ``Money`` too, and why the
   grader must quantize them to fit 40 characters.
+
+  **Amended in place for unit 6.3: ``label_outcome.scope``** (``watch |
+  discovery``), an orchestrator decision extending the spec's column list.
+  ``sentiment_accuracy``'s watch/discovery splits are recomputed every run
+  from past outcome rows, so each row keeps the classification the run that
+  graded it made; recomputing it from today's watch universe would let
+  membership drift rewrite history. ``ck_label_outcome_scope``: NULL exactly
+  when ``skip_reason`` is ``off_watch_untradeable`` or ``discovery_cap``, NOT
+  NULL otherwise -- graded and ``price_unavailable`` rows both. Amended
+  rather than added as 0015 because this revision is provisional (Q22) and
+  unmerged, and step 6 should carry one migration to renumber at merge; a
+  database already at an unamended 0014 must be downgraded to 0013 and
+  upgraded again (it holds no graded rows yet -- the runner is unit 6.4).
 * ``sentiment_accuracy(audit_run_id, source, window, basis, scope, graded,
   correct, neutral)``, primary key on the first five -- the spec's UNIQUE.
   Counts only, whole and non-negative, ``correct <= graded``.
@@ -62,10 +75,12 @@ and 14, and the design's *Database* section):
   before inserting the next -- and the half-open interval keeps the spans
   disjoint even when the two instants are equal. ``audit_log`` has
   no reason column; those accuracy rows are the history's reason.
-  **Unit 6.3 commits its ``audit_log`` rows and status updates in the same
-  transaction that sets the run's terminal ``status`` and ``finished_at``**;
-  otherwise a crash after committing a transition leaves it under a run with
-  no ``finished_at``, and the join finds zero runs. See
+  **Unit 6.4 (the runner) commits its ``audit_log`` rows and status updates
+  in the same transaction that sets the run's terminal ``status`` and
+  ``finished_at``**; otherwise a crash after committing a transition leaves
+  it under a run with no ``finished_at``, and the join finds zero runs. Its
+  ``audit_log.at`` is strictly after ``started_at`` -- the closing reading,
+  not a ``changed_at`` equal to ``started_at``. See
   ``models.SentimentSourceStatus``.
 * ``audit_log.category`` admits ``sentiment``, and ``audit_log`` gains
   ``ck_audit_log_sentiment_row``: a ``sentiment`` row has ``field`` in the
@@ -132,6 +147,8 @@ _BASES: tuple[str, ...] = ("trailing_28d", "since_demotion")
 _SCOPES: tuple[str, ...] = ("all", "watch", "discovery")
 _SOURCES: tuple[str, ...] = ("rules", "massive")
 _SOURCE_STATUSES: tuple[str, ...] = ("unaudited", "active", "demoted")
+_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = ("off_watch_untradeable", "discovery_cap")
+_OUTCOME_SCOPES: tuple[str, ...] = ("watch", "discovery")
 
 _AUDIT_CATEGORIES_BEFORE: tuple[str, ...] = (
     "risk",
@@ -213,6 +230,18 @@ _LABEL_OUTCOME_SHAPE = (
     "AND reference_at IS NOT NULL AND reference_price IS NOT NULL "
     "AND outcome_at IS NOT NULL AND outcome_price IS NOT NULL "
     "AND benchmark_return IS NOT NULL AND excess_return IS NOT NULL)"
+)
+
+# Every branch guarded with ``IS [NOT] NULL``: a CHECK evaluating to NULL
+# passes in SQLite, and ``scope IN (...)`` on a NULL scope is NULL.
+_LABEL_OUTCOME_SCOPE = (
+    "(skip_reason IS NOT NULL AND "
+    + _in_list("skip_reason", _MEMBERSHIP_SKIP_REASONS)
+    + " AND scope IS NULL) "
+    "OR ((skip_reason IS NULL OR skip_reason = 'price_unavailable') "
+    "AND scope IS NOT NULL AND "
+    + _in_list("scope", _OUTCOME_SCOPES)
+    + ")"
 )
 
 _AUDIT_LOG_SENTIMENT_ROW = (
@@ -351,6 +380,7 @@ def upgrade() -> None:
         ),
         sa.Column("correct", sa.Boolean(), nullable=True),
         sa.Column("skip_reason", sa.String(length=32), nullable=True),
+        sa.Column("scope", sa.String(length=16), nullable=True),
         sa.Column("audit_run_id", sa.Integer(), nullable=False),
         sa.CheckConstraint(
             _in_list('"window"', _WINDOWS), name="ck_label_outcome_window"
@@ -360,6 +390,7 @@ def upgrade() -> None:
             name="ck_label_outcome_skip_reason",
         ),
         sa.CheckConstraint(_LABEL_OUTCOME_SHAPE, name="ck_label_outcome_shape"),
+        sa.CheckConstraint(_LABEL_OUTCOME_SCOPE, name="ck_label_outcome_scope"),
         sa.CheckConstraint(
             _price_check("reference_price"), name="ck_label_outcome_reference_price"
         ),

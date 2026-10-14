@@ -1,4 +1,5 @@
-"""Decision 12's grading, pure -- ``corollary.data.news.audit`` (Phase 3 unit 6.2).
+"""Decisions 12 and 13, pure -- ``corollary.data.news.audit``: grading (Phase 3
+unit 6.2), then accuracy and transitions (unit 6.3).
 
 Every input is synthetic and every date a real 2026 NYSE session, read from
 the calendar rather than assumed. The bars are real :class:`Bar` instances,
@@ -17,22 +18,43 @@ import pytest
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
 from corollary.data.news.audit import (
     BENCHMARK_SYMBOL,
+    DEMOTE_BELOW_PCT,
+    DEMOTION_FLOOR,
     DISCOVERY_TICKER_CAP,
     FALLBACK_MAX_LAG,
     MATURITY_DELAY,
     PRICE_UNAVAILABLE_AFTER,
+    REPROMOTE_AT_PCT,
+    REPROMOTION_FLOOR,
     RETURN_EXPONENT,
+    SENTIMENT_AUDIT_CATEGORY,
+    TRAILING_WINDOW,
     VENDOR_STAMP_TOLERANCE,
     WINDOW_SESSION_MINUTES,
+    AccuracyBasis,
+    AccuracyRow,
+    AccuracyScope,
     AuditLabel,
+    AuditLogFields,
     AuditPlan,
     BarFault,
     BarRequest,
+    CurrentStatus,
+    GradedOutcome,
     GradeResult,
     LabelOutcomeRecord,
     Scope,
+    SentimentEvent,
     SkipReason,
+    SourceStatus,
+    Transition,
+    audit_source,
+    audit_sources,
+    compute_accuracy,
+    decide_transition,
+    earliest_reference_needed,
     grade,
+    graded_outcome,
     plan_audit,
     reference_at,
     reference_instant,
@@ -40,7 +62,15 @@ from corollary.data.news.audit import (
 )
 from corollary.data.news.labels import Direction
 from corollary.data.providers.interface import Bar
-from corollary.db.models import LABEL_SKIP_REASONS, SENTIMENT_WINDOWS
+from corollary.db.models import (
+    ACCURACY_BASES,
+    ACCURACY_SCOPES,
+    AUDIT_CATEGORIES,
+    LABEL_OUTCOME_SCOPES,
+    LABEL_SKIP_REASONS,
+    SENTIMENT_SOURCE_STATUSES,
+    SENTIMENT_WINDOWS,
+)
 
 BULL = Direction.BULLISH
 BEAR = Direction.BEARISH
@@ -1262,3 +1292,647 @@ def test_naive_instants_are_refused() -> None:
     # though published_at rarely moves the reference.
     with pytest.raises(ValueError, match="published_at must be timezone-aware"):
         run([label(1, "AAPL", BULL, datetime(2026, 10, 6, 14, 15), _TUESDAY_1015)], [])
+
+
+# --------------------------------------------------------------------- #
+# Accuracy and transitions (unit 6.3, decision 13) -- pure
+# --------------------------------------------------------------------- #
+
+#: Every transition test's demotion instant, comfortably inside the trailing
+#: window so trailing and since-demotion outcomes can be told apart.
+DEMOTED_AT = RUN_AT - timedelta(days=10)
+
+#: A reference instant inside both the trailing window and the since-demotion
+#: span.
+RECENT = RUN_AT - timedelta(days=2)
+
+
+def outcomes(
+    window: str,
+    graded: int,
+    correct: int,
+    *,
+    scope: Scope = Scope.WATCH,
+    at: datetime = RECENT,
+    neutral: int = 0,
+    source: str = "massive",
+) -> list[GradedOutcome]:
+    """``graded`` directional outcomes of which ``correct`` were right, plus
+    ``neutral`` neutral ones, all in one window, scope and instant."""
+    assert 0 <= correct <= graded
+    made = [
+        GradedOutcome(
+            source=source,
+            window=window,
+            scope=scope,
+            reference_at=at,
+            correct=i < correct,
+            neutral=False,
+        )
+        for i in range(graded)
+    ]
+    made += [
+        GradedOutcome(
+            source=source, window=window, scope=scope, reference_at=at, correct=None, neutral=True
+        )
+        for _ in range(neutral)
+    ]
+    return made
+
+
+def both(
+    graded: int,
+    correct_1h: int,
+    correct_1d: int | None = None,
+    *,
+    scope: Scope = Scope.WATCH,
+    at: datetime = RECENT,
+    neutral: int = 0,
+    source: str = "massive",
+) -> list[GradedOutcome]:
+    """The same sample size in both windows; ``correct_1d`` defaults to 1h's."""
+    c1d = correct_1h if correct_1d is None else correct_1d
+    return outcomes(
+        "1h", graded, correct_1h, scope=scope, at=at, neutral=neutral, source=source
+    ) + outcomes("1d", graded, c1d, scope=scope, at=at, neutral=neutral, source=source)
+
+
+def status(state: SourceStatus, source: str = "massive") -> CurrentStatus:
+    changed = None if state is SourceStatus.UNAUDITED else DEMOTED_AT
+    return CurrentStatus(source=source, status=state, changed_at=changed)
+
+
+def row(
+    rows: Iterable[AccuracyRow], window: str, basis: AccuracyBasis, scope: AccuracyScope
+) -> AccuracyRow:
+    found = [r for r in rows if (r.window, r.basis, r.scope) == (window, basis, scope)]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def counts(r: AccuracyRow) -> tuple[int, int, int]:
+    return (r.graded, r.correct, r.neutral)
+
+
+def transition(state: SourceStatus, made: list[GradedOutcome]) -> Transition | None:
+    return audit_source(status(state), made, RUN_AT).transition
+
+
+# ------------------------------------------------------- vocabulary
+
+
+def test_the_transition_constants_are_decision_13s() -> None:
+    assert DEMOTE_BELOW_PCT == 52
+    assert REPROMOTE_AT_PCT == 66
+    assert DEMOTION_FLOOR == 30
+    assert REPROMOTION_FLOOR == 100
+    assert TRAILING_WINDOW == timedelta(days=28)
+    assert SENTIMENT_AUDIT_CATEGORY == "sentiment"
+    assert SENTIMENT_AUDIT_CATEGORY in AUDIT_CATEGORIES
+
+
+def test_the_enums_spell_the_schemas_vocabularies() -> None:
+    assert tuple(SourceStatus) == SENTIMENT_SOURCE_STATUSES
+    assert tuple(AccuracyBasis) == ACCURACY_BASES
+    assert tuple(AccuracyScope) == ACCURACY_SCOPES
+    assert tuple(Scope) == LABEL_OUTCOME_SCOPES
+    assert {e.value for e in SentimentEvent} == {"sentiment_demoted", "sentiment_repromoted"}
+
+
+# ------------------------------------------------------- accuracy counts
+
+
+def test_every_window_basis_and_scope_gets_a_row_zeros_included() -> None:
+    rows = compute_accuracy(status(SourceStatus.DEMOTED), [], RUN_AT)
+    keys = [(r.window, r.basis, r.scope) for r in rows]
+    assert keys == [
+        (w, b, s) for w in SENTIMENT_WINDOWS for b in AccuracyBasis for s in AccuracyScope
+    ]
+    assert all(counts(r) == (0, 0, 0) and r.source == "massive" for r in rows)
+
+
+def test_since_demotion_is_computed_only_for_a_demoted_source() -> None:
+    for state in (SourceStatus.UNAUDITED, SourceStatus.ACTIVE):
+        rows = compute_accuracy(status(state), both(40, 20), RUN_AT)
+        assert {r.basis for r in rows} == {AccuracyBasis.TRAILING_28D}
+        assert len(rows) == 6
+
+
+def test_neutral_labels_are_excluded_from_graded_and_counted_in_neutral() -> None:
+    made = outcomes("1h", 30, 18, neutral=7) + outcomes("1d", 30, 18, neutral=2)
+    rows = compute_accuracy(status(SourceStatus.ACTIVE), made, RUN_AT)
+    assert counts(row(rows, "1h", AccuracyBasis.TRAILING_28D, AccuracyScope.ALL)) == (30, 18, 7)
+    assert counts(row(rows, "1d", AccuracyBasis.TRAILING_28D, AccuracyScope.ALL)) == (30, 18, 2)
+
+
+def test_neutral_labels_never_make_a_source_eligible() -> None:
+    """29 directional plus any number of neutral is still 29 for the floor."""
+    made = outcomes("1h", 29, 0, neutral=50) + outcomes("1d", 29, 0, neutral=50)
+    assert transition(SourceStatus.ACTIVE, made) is None
+
+
+def test_skipped_rows_count_nowhere() -> None:
+    for reason in LABEL_SKIP_REASONS:
+        assert (
+            graded_outcome(
+                source="massive",
+                window="1h",
+                scope=None if reason != "price_unavailable" else "watch",
+                reference_at=None,
+                correct=None,
+                skip_reason=reason,
+                direction=BULL,
+            )
+            is None
+        )
+    kept = graded_outcome(
+        source="massive",
+        window="1d",
+        scope="discovery",
+        reference_at=RECENT,
+        correct=False,
+        skip_reason=None,
+        direction=BEAR,
+    )
+    assert kept == GradedOutcome(
+        source="massive",
+        window="1d",
+        scope=Scope.DISCOVERY,
+        reference_at=RECENT,
+        correct=False,
+        neutral=False,
+    )
+    neutral = graded_outcome(
+        source="rules",
+        window="1h",
+        scope="watch",
+        reference_at=RECENT,
+        correct=None,
+        skip_reason=None,
+        direction=NEUTRAL,
+    )
+    assert neutral is not None and neutral.neutral and neutral.correct is None
+
+
+def test_scopes_split_and_all_is_their_sum() -> None:
+    made = (
+        outcomes("1h", 20, 15, scope=Scope.WATCH, neutral=1)
+        + outcomes("1h", 15, 2, scope=Scope.DISCOVERY, neutral=3)
+        + outcomes("1d", 20, 15, scope=Scope.WATCH)
+        + outcomes("1d", 15, 2, scope=Scope.DISCOVERY)
+    )
+    rows = compute_accuracy(status(SourceStatus.ACTIVE), made, RUN_AT)
+    t = AccuracyBasis.TRAILING_28D
+    assert counts(row(rows, "1h", t, AccuracyScope.WATCH)) == (20, 15, 1)
+    assert counts(row(rows, "1h", t, AccuracyScope.DISCOVERY)) == (15, 2, 3)
+    assert counts(row(rows, "1h", t, AccuracyScope.ALL)) == (35, 17, 4)
+    assert counts(row(rows, "1d", t, AccuracyScope.ALL)) == (35, 17, 0)
+
+
+def test_transitions_read_the_combined_scope() -> None:
+    """Neither split alone reaches the 30-label floor, and the watch split is
+    at 75% -- yet ``all`` is 35 labels at 48.6%, and ``all`` is what acts."""
+    made = (
+        outcomes("1h", 20, 15, scope=Scope.WATCH)
+        + outcomes("1h", 15, 2, scope=Scope.DISCOVERY)
+        + outcomes("1d", 20, 15, scope=Scope.WATCH)
+        + outcomes("1d", 15, 2, scope=Scope.DISCOVERY)
+    )
+    t = transition(SourceStatus.ACTIVE, made)
+    assert t is not None and t.new is SourceStatus.DEMOTED
+    assert {r.scope for r in t.acted_on} == {AccuracyScope.ALL}
+    assert [counts(r) for r in t.acted_on] == [(35, 17, 0), (35, 17, 0)]
+
+
+def test_the_trailing_window_is_open_at_28_days_and_closed_at_the_run() -> None:
+    edge = RUN_AT - TRAILING_WINDOW
+    made = (
+        outcomes("1h", 1, 1, at=edge)  # exactly 28 days: out
+        + outcomes("1h", 1, 1, at=edge + timedelta(microseconds=1))  # in
+        + outcomes("1h", 1, 0, at=RUN_AT)  # the run instant itself: in
+        + outcomes("1h", 1, 1, at=edge - timedelta(days=1))  # well out
+    )
+    rows = compute_accuracy(status(SourceStatus.ACTIVE), made, RUN_AT)
+    assert counts(row(rows, "1h", AccuracyBasis.TRAILING_28D, AccuracyScope.ALL)) == (2, 1, 0)
+
+
+def test_the_trailing_boundary_decides_eligibility() -> None:
+    """29 labels inside the window and one exactly 28 days old: ineligible.
+    Move that one a microsecond later and the source demotes."""
+    edge = RUN_AT - TRAILING_WINDOW
+    inside = both(29, 10)
+    assert transition(SourceStatus.ACTIVE, inside + both(1, 0, at=edge)) is None
+    moved = transition(
+        SourceStatus.ACTIVE, inside + both(1, 0, at=edge + timedelta(microseconds=1))
+    )
+    assert moved is not None and moved.new is SourceStatus.DEMOTED
+
+
+def test_since_demotion_counts_only_labels_referenced_after_the_demotion() -> None:
+    made = (
+        outcomes("1h", 5, 5, at=DEMOTED_AT - timedelta(days=1))  # before: out
+        + outcomes("1h", 3, 3, at=DEMOTED_AT)  # at the instant: out
+        + outcomes("1h", 4, 1, at=DEMOTED_AT + timedelta(microseconds=1))  # in
+    )
+    rows = compute_accuracy(status(SourceStatus.DEMOTED), made, RUN_AT)
+    since = AccuracyBasis.SINCE_DEMOTION
+    assert counts(row(rows, "1h", since, AccuracyScope.ALL)) == (4, 1, 0)
+    assert counts(row(rows, "1h", AccuracyBasis.TRAILING_28D, AccuracyScope.ALL)) == (12, 9, 0)
+
+
+def test_since_demotion_has_no_28_day_lookback() -> None:
+    long_ago = CurrentStatus(
+        source="massive", status=SourceStatus.DEMOTED, changed_at=RUN_AT - timedelta(days=200)
+    )
+    made = outcomes("1d", 3, 2, at=RUN_AT - timedelta(days=100))
+    rows = compute_accuracy(long_ago, made, RUN_AT)
+    assert counts(row(rows, "1d", AccuracyBasis.SINCE_DEMOTION, AccuracyScope.ALL)) == (3, 2, 0)
+    assert counts(row(rows, "1d", AccuracyBasis.TRAILING_28D, AccuracyScope.ALL)) == (0, 0, 0)
+
+
+def test_an_outcome_referenced_after_the_run_is_excluded_and_reported() -> None:
+    """Decision 21: no raise, in neither basis, and back on the audit."""
+    present = both(12, 7) + outcomes("1h", 3, 1, scope=Scope.DISCOVERY, neutral=2)
+    late_1d = outcomes("1d", 1, 0, at=RUN_AT + timedelta(days=2))
+    late_1h = outcomes("1h", 2, 2, at=RUN_AT + timedelta(microseconds=1), neutral=1)
+    for state in SourceStatus:
+        clean = audit_source(status(state), present, RUN_AT)
+        dirty = audit_source(status(state), late_1d + present + late_1h, RUN_AT)
+        assert dirty.accuracy == clean.accuracy  # every basis, scope and window
+        assert dirty.transition == clean.transition
+        assert dirty.future_referenced == tuple(late_1h + late_1d)  # by instant
+        assert clean.future_referenced == ()
+
+
+def test_since_demotion_is_closed_at_the_run() -> None:
+    made = outcomes("1h", 2, 1, at=RUN_AT) + outcomes(
+        "1h", 5, 5, at=RUN_AT + timedelta(microseconds=1)
+    )
+    rows = compute_accuracy(status(SourceStatus.DEMOTED), made, RUN_AT)
+    for basis in AccuracyBasis:
+        assert counts(row(rows, "1h", basis, AccuracyScope.ALL)) == (2, 1, 0)
+
+
+def test_a_future_outcome_never_completes_a_repromotion() -> None:
+    """99 since-demotion labels in each window plus one referenced after the
+    run: the floor is not met, so nothing re-promotes."""
+    made = both(99, 80) + both(1, 1, at=RUN_AT + _MINUTE)
+    audit = audit_source(status(SourceStatus.DEMOTED), made, RUN_AT)
+    assert audit.transition is None
+    assert len(audit.future_referenced) == 2
+    assert transition(SourceStatus.DEMOTED, both(99, 80) + both(1, 1)) is not None
+
+
+def test_a_future_outcome_never_completes_a_demotion() -> None:
+    made = both(29, 0) + both(1, 0, at=RUN_AT + _MINUTE)
+    assert transition(SourceStatus.ACTIVE, made) is None
+    assert transition(SourceStatus.ACTIVE, both(30, 0)) is not None
+
+
+def test_audit_sources_reports_future_outcomes_per_source() -> None:
+    late = outcomes("1d", 1, 1, at=RUN_AT + _MINUTE, source="rules")
+    audits = audit_sources(
+        [status(SourceStatus.ACTIVE), status(SourceStatus.ACTIVE, source="rules")],
+        both(5, 3) + both(5, 3, source="rules") + late,
+        RUN_AT,
+    )
+    assert [(a.source, a.future_referenced) for a in audits] == [
+        ("massive", ()),
+        ("rules", tuple(late)),
+    ]
+
+
+# ------------------------------------------------------- the runner's load bound
+
+
+def test_earliest_reference_needed_is_the_trailing_start_unless_demoted_earlier() -> None:
+    trailing_start = RUN_AT - TRAILING_WINDOW
+    for state in (SourceStatus.UNAUDITED, SourceStatus.ACTIVE):
+        assert earliest_reference_needed(status(state), RUN_AT) == trailing_start
+    # Demoted inside the trailing window: the trailing start is still earlier.
+    assert earliest_reference_needed(status(SourceStatus.DEMOTED), RUN_AT) == trailing_start
+    # Demoted long ago: since_demotion has no lookback, so the demotion is.
+    long_ago = RUN_AT - timedelta(days=200)
+    demoted = CurrentStatus(source="massive", status=SourceStatus.DEMOTED, changed_at=long_ago)
+    assert earliest_reference_needed(demoted, RUN_AT) == long_ago
+    with pytest.raises(ValueError, match="run_at must be timezone-aware"):
+        earliest_reference_needed(status(SourceStatus.ACTIVE), RUN_AT.replace(tzinfo=None))
+
+
+def test_loading_only_rows_after_the_earliest_reference_changes_nothing() -> None:
+    """The bound is exact: every row at or before it counts nowhere, and one
+    microsecond after it counts."""
+    long_ago = CurrentStatus(
+        source="massive", status=SourceStatus.DEMOTED, changed_at=RUN_AT - timedelta(days=200)
+    )
+    for st in (status(SourceStatus.ACTIVE), status(SourceStatus.DEMOTED), long_ago):
+        edge = earliest_reference_needed(st, RUN_AT)
+        made = [
+            o
+            for at in (
+                edge - timedelta(days=30),
+                edge,
+                edge + timedelta(microseconds=1),
+                RUN_AT,
+                RUN_AT + _MINUTE,
+            )
+            for o in both(2, 1, at=at)
+        ]
+        everything = audit_source(st, made, RUN_AT)
+        loaded = audit_source(st, [o for o in made if o.reference_at > edge], RUN_AT)
+        assert loaded == everything
+        # The row a microsecond after the edge is counted, so the bound is tight.
+        tight = audit_source(
+            st, [o for o in made if o.reference_at > edge + timedelta(microseconds=1)], RUN_AT
+        )
+        assert tight.accuracy != everything.accuracy
+
+
+def test_another_sources_outcome_is_refused() -> None:
+    with pytest.raises(ValueError, match="source"):
+        compute_accuracy(status(SourceStatus.ACTIVE), outcomes("1h", 1, 1, source="rules"), RUN_AT)
+
+
+def test_accuracy_is_deterministic_under_reordering() -> None:
+    made = both(40, 25, scope=Scope.WATCH) + both(12, 3, scope=Scope.DISCOVERY, neutral=2)
+    shuffled = list(made)
+    random.Random(7).shuffle(shuffled)
+    st = status(SourceStatus.DEMOTED)
+    assert compute_accuracy(st, made, RUN_AT) == compute_accuracy(st, shuffled, RUN_AT)
+
+
+# ------------------------------------------------------- the demotion side
+
+
+@pytest.mark.parametrize("state", [SourceStatus.UNAUDITED, SourceStatus.ACTIVE])
+def test_29_labels_at_40_percent_do_not_demote(state: SourceStatus) -> None:
+    assert transition(state, both(29, 12)) is None  # 41.4%, one short of the floor
+
+
+@pytest.mark.parametrize("state", [SourceStatus.UNAUDITED, SourceStatus.ACTIVE])
+def test_the_floor_is_per_window(state: SourceStatus) -> None:
+    """30 in 1h and 29 in 1d, both terrible: still ineligible."""
+    made = outcomes("1h", 30, 0) + outcomes("1d", 29, 0)
+    assert transition(state, made) is None
+
+
+@pytest.mark.parametrize("state", [SourceStatus.UNAUDITED, SourceStatus.ACTIVE])
+def test_30_labels_at_15_of_30_demote(state: SourceStatus) -> None:
+    t = transition(state, both(30, 15))
+    assert t is not None
+    assert (t.previous, t.new) == (state, SourceStatus.DEMOTED)
+    assert t.basis is AccuracyBasis.TRAILING_28D
+
+
+def test_an_active_source_at_16_of_30_is_not_demoted() -> None:
+    assert transition(SourceStatus.ACTIVE, both(30, 16)) is None  # 53.3%
+
+
+def test_an_unaudited_source_at_16_of_30_becomes_active_not_demoted() -> None:
+    t = transition(SourceStatus.UNAUDITED, both(30, 16))
+    assert t is not None and t.new is SourceStatus.ACTIVE
+
+
+@pytest.mark.parametrize("state", [SourceStatus.UNAUDITED, SourceStatus.ACTIVE])
+@pytest.mark.parametrize("bad", ["1h", "1d"])
+def test_below_52_in_one_window_alone_demotes(state: SourceStatus, bad: str) -> None:
+    good = "1d" if bad == "1h" else "1h"
+    made = outcomes(bad, 30, 15) + outcomes(good, 30, 30)
+    t = transition(state, made)
+    assert t is not None and t.new is SourceStatus.DEMOTED
+    assert f"below 52% in {bad}" in t.reason
+
+
+def test_exactly_52_percent_is_not_below_52() -> None:
+    """26/50 is 52% exactly -- permitted; 25/50 is not. Integer comparison,
+    so no float rounding can move the boundary."""
+    assert transition(SourceStatus.ACTIVE, both(50, 26)) is None
+    demoted = transition(SourceStatus.ACTIVE, both(50, 26, 25))
+    assert demoted is not None and demoted.new is SourceStatus.DEMOTED
+    promoted = transition(SourceStatus.UNAUDITED, both(50, 26))
+    assert promoted is not None and promoted.new is SourceStatus.ACTIVE
+
+
+def test_unaudited_becomes_active_at_52_or_better_in_both_windows() -> None:
+    t = transition(SourceStatus.UNAUDITED, both(30, 16, 29))
+    assert t is not None
+    assert (t.previous, t.new) == (SourceStatus.UNAUDITED, SourceStatus.ACTIVE)
+    assert t.notice is None  # "logged and emits nothing"
+    assert t.audit_log == AuditLogFields(
+        category="sentiment", field="massive", previous_value="unaudited", new_value="active"
+    )
+
+
+def test_a_demoting_source_is_judged_on_trailing_labels_only() -> None:
+    """Old disasters outside the window cannot demote a source doing fine now."""
+    old = both(200, 0, at=RUN_AT - timedelta(days=40))
+    assert transition(SourceStatus.ACTIVE, old + both(30, 20)) is None
+
+
+# ------------------------------------------------------- the re-promotion side
+
+
+def test_a_demoted_source_at_99_labels_and_80_percent_does_not_repromote() -> None:
+    assert transition(SourceStatus.DEMOTED, both(99, 79)) is None
+
+
+def test_the_repromotion_floor_is_per_window() -> None:
+    made = outcomes("1h", 100, 90) + outcomes("1d", 99, 90)
+    assert transition(SourceStatus.DEMOTED, made) is None
+
+
+def test_100_labels_at_66_of_100_in_both_windows_repromote() -> None:
+    t = transition(SourceStatus.DEMOTED, both(100, 66))
+    assert t is not None
+    assert (t.previous, t.new) == (SourceStatus.DEMOTED, SourceStatus.ACTIVE)
+    assert t.basis is AccuracyBasis.SINCE_DEMOTION
+    assert [counts(r) for r in t.acted_on] == [(100, 66, 0), (100, 66, 0)]
+
+
+@pytest.mark.parametrize(("c1h", "c1d"), [(66, 65), (65, 66)])
+def test_66_in_one_window_and_65_in_the_other_does_not_repromote(c1h: int, c1d: int) -> None:
+    assert transition(SourceStatus.DEMOTED, both(100, c1h, c1d)) is None
+
+
+def test_repromotion_counts_only_labels_graded_after_the_demotion() -> None:
+    """100 strong labels before the demotion and 99 after: not yet. One more
+    after the demotion and it re-promotes -- the pre-demotion labels never
+    counted, though every one of them is inside the trailing window."""
+    before = both(100, 100, at=DEMOTED_AT - timedelta(days=1))
+    after = both(99, 80)
+    assert transition(SourceStatus.DEMOTED, before + after) is None
+    t = transition(SourceStatus.DEMOTED, before + after + both(1, 1))
+    assert t is not None and t.new is SourceStatus.ACTIVE
+    assert [r.graded for r in t.acted_on] == [100, 100]
+
+
+def test_a_demoted_source_is_never_re_demoted() -> None:
+    """Terrible since-demotion labels change nothing: demoted stays demoted
+    and writes no row (``previous_value <> new_value``)."""
+    assert transition(SourceStatus.DEMOTED, both(200, 0)) is None
+
+
+# ------------------------------------------------------- the dead band
+
+
+@pytest.mark.parametrize("state", [SourceStatus.ACTIVE, SourceStatus.DEMOTED])
+def test_a_source_at_60_percent_stays_where_it_is(state: SourceStatus) -> None:
+    """Above the demotion bar and below the re-promotion bar, from both sides,
+    with every floor met."""
+    assert transition(state, both(150, 90)) is None
+
+
+def test_nothing_ever_transitions_into_unaudited() -> None:
+    for state in SourceStatus:
+        for made in (both(150, 0), both(150, 150), both(150, 90), []):
+            t = transition(state, made)
+            assert t is None or t.new is not SourceStatus.UNAUDITED
+
+
+# ------------------------------------------------------- the result
+
+
+def test_a_demotion_carries_the_audit_fields_and_a_warning() -> None:
+    t = transition(SourceStatus.ACTIVE, both(30, 15, 20))
+    assert t is not None
+    assert t.audit_log == AuditLogFields(
+        category="sentiment", field="massive", previous_value="active", new_value="demoted"
+    )
+    assert t.notice is not None
+    assert (t.notice.event, t.notice.severity) == (SentimentEvent.DEMOTED, "warning")
+    assert t.notice.body == t.reason
+    assert t.changed_at == RUN_AT and t.changed_at.tzinfo is timezone.utc
+
+
+def test_an_unaudited_demotion_also_warns() -> None:
+    t = transition(SourceStatus.UNAUDITED, both(30, 3))
+    assert t is not None and t.notice is not None
+    assert t.notice.event is SentimentEvent.DEMOTED
+
+
+def test_a_repromotion_carries_an_info_notice() -> None:
+    t = transition(SourceStatus.DEMOTED, both(100, 70))
+    assert t is not None and t.notice is not None
+    assert (t.notice.event, t.notice.severity) == (SentimentEvent.REPROMOTED, "info")
+    assert t.audit_log.previous_value == "demoted" and t.audit_log.new_value == "active"
+
+
+def test_the_reason_carries_both_accuracies_and_their_sample_sizes() -> None:
+    t = transition(SourceStatus.ACTIVE, both(30, 15, 20))
+    assert t is not None
+    assert "trailing_28d" in t.reason
+    assert "1h 50.0% (15/30)" in t.reason
+    assert "1d 66.6% (20/30)" in t.reason  # 66.67 truncated, never rounded up
+
+
+def test_the_reason_never_rounds_a_figure_across_its_threshold() -> None:
+    """1299/2500 is 51.96%: rounding would print 52.0% beside a demotion for
+    being below 52%. The figure is truncated, so it reads 51.9%."""
+    t = transition(SourceStatus.ACTIVE, both(2500, 1299))
+    assert t is not None and t.new is SourceStatus.DEMOTED
+    assert "51.9%" in t.reason and "52.0%" not in t.reason
+
+
+def test_the_acted_on_rows_are_the_stored_rows() -> None:
+    """The figure a transition acted on is the figure stored (decision 13)."""
+    result = audit_source(status(SourceStatus.DEMOTED), both(100, 66), RUN_AT)
+    assert result.transition is not None
+    for acted in result.transition.acted_on:
+        assert acted in result.accuracy
+
+
+def test_at_most_one_transition_per_source_per_run() -> None:
+    """Unaudited at 50% demotes, and the same run does not then judge the
+    demoted source for re-promotion on the same labels."""
+    result = audit_source(status(SourceStatus.UNAUDITED), both(300, 150), RUN_AT)
+    assert result.transition is not None and result.transition.new is SourceStatus.DEMOTED
+    # The accuracy is the pre-transition state's: trailing only.
+    assert {r.basis for r in result.accuracy} == {AccuracyBasis.TRAILING_28D}
+
+
+def test_audit_sources_runs_each_source_once_in_order() -> None:
+    statuses = [status(SourceStatus.ACTIVE, "rules"), status(SourceStatus.UNAUDITED, "massive")]
+    made = both(30, 10, source="rules") + both(30, 20, source="massive")
+    results = audit_sources(statuses, made, RUN_AT)
+    assert [r.source for r in results] == ["massive", "rules"]
+    by_source = {r.source: r.transition for r in results}
+    assert by_source["rules"] is not None and by_source["rules"].new is SourceStatus.DEMOTED
+    assert by_source["massive"] is not None and by_source["massive"].new is SourceStatus.ACTIVE
+
+
+def test_audit_sources_refuses_a_duplicate_status() -> None:
+    with pytest.raises(ValueError, match="more than once"):
+        audit_sources([status(SourceStatus.ACTIVE), status(SourceStatus.DEMOTED)], [], RUN_AT)
+
+
+def test_audit_sources_refuses_an_outcome_with_no_status_row() -> None:
+    with pytest.raises(ValueError, match="no status"):
+        audit_sources([status(SourceStatus.ACTIVE, "rules")], both(1, 1), RUN_AT)
+
+
+def test_decide_transition_refuses_missing_accuracy_rows() -> None:
+    trailing_only = compute_accuracy(status(SourceStatus.ACTIVE), both(100, 70), RUN_AT)
+    with pytest.raises(ValueError, match="since_demotion"):
+        decide_transition(status(SourceStatus.DEMOTED), trailing_only, RUN_AT)
+
+
+# ------------------------------------------------------- input validation
+
+
+def test_a_directional_outcome_without_a_grade_is_refused() -> None:
+    """It would drop out of every count silently (unit 6.1's warning)."""
+    with pytest.raises(ValueError, match="directional"):
+        GradedOutcome(
+            source="massive", window="1h", scope=Scope.WATCH, reference_at=RECENT,
+            correct=None, neutral=False,
+        )  # fmt: skip
+
+
+def test_a_neutral_outcome_with_a_grade_is_refused() -> None:
+    with pytest.raises(ValueError, match="neutral"):
+        GradedOutcome(
+            source="massive", window="1h", scope=Scope.WATCH, reference_at=RECENT,
+            correct=True, neutral=True,
+        )  # fmt: skip
+
+
+def test_an_unknown_window_is_refused() -> None:
+    with pytest.raises(ValueError, match="window"):
+        GradedOutcome(
+            source="massive", window="1w", scope=Scope.WATCH, reference_at=RECENT,
+            correct=True, neutral=False,
+        )  # fmt: skip
+
+
+def test_a_graded_row_without_scope_or_reference_is_refused() -> None:
+    for scope, ref in (
+        (None, RECENT),
+        ("watch", None),
+    ):
+        with pytest.raises(ValueError):
+            graded_outcome(
+                source="massive", window="1h", scope=scope, reference_at=ref,
+                correct=True, skip_reason=None, direction=BULL,
+            )  # fmt: skip
+
+
+def test_naive_instants_are_refused_by_accuracy() -> None:
+    naive = datetime(2026, 10, 1, 14, 0)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        GradedOutcome(
+            source="massive", window="1h", scope=Scope.WATCH, reference_at=naive,
+            correct=True, neutral=False,
+        )  # fmt: skip
+    with pytest.raises(ValueError, match="timezone-aware"):
+        CurrentStatus(source="massive", status=SourceStatus.DEMOTED, changed_at=naive)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_accuracy(status(SourceStatus.ACTIVE), [], naive)
+
+
+def test_a_status_row_must_match_its_state() -> None:
+    """The schema's ``ck_sentiment_source_status_transition``, restated: an
+    unaudited row has no ``changed_at`` and every other row has one."""
+    with pytest.raises(ValueError, match="unaudited"):
+        CurrentStatus(source="massive", status=SourceStatus.UNAUDITED, changed_at=DEMOTED_AT)
+    with pytest.raises(ValueError, match="changed_at"):
+        CurrentStatus(source="massive", status=SourceStatus.DEMOTED, changed_at=None)

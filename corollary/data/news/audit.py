@@ -1,11 +1,14 @@
-"""The sentiment self-audit's grading -- pure (Phase 3 step 6, decision 12).
+"""The sentiment self-audit's grading, accuracy and transitions -- pure
+(Phase 3 step 6, decisions 12 and 13).
 
 The design's layout reads "``audit.py`` -- grading and transitions, pure, plus
-a runner". This module is the **grading** half (unit 6.2). Transitions and
-accuracy are unit 6.3; the runner that fetches bars and writes
-``label_outcome`` rows is unit 6.4. Nothing here does I/O: no session, no
-HTTP, no clock, no scheduler, and no vendor import. The runner drives it in
-two calls:
+a runner". This module is the **grading** half (unit 6.2) and the
+**accuracy and transitions** (unit 6.3, at the end -- see *Decision 13*
+below); the runner that fetches bars and writes ``label_outcome``,
+``sentiment_accuracy``, ``sentiment_source_status``, ``audit_log`` and
+notification rows is unit 6.4. Nothing here does I/O: no session, no HTTP, no
+clock, no scheduler, and no vendor import. The runner drives grading in two
+calls:
 
 1. :func:`plan_audit` -- given the labels to consider, the watch universe,
    the tradeability verdicts, the ``(label_id, window)`` keys already written
@@ -20,7 +23,7 @@ Decision 12, as the spec states it
 
 * **What is graded.** Every directional label on a ticker in the watch
   universe, uncapped; plus *discovery* labels -- directional labels on
-  off-watch tickers that pass decision 21's tradeability filter -- for at most
+  off-watch tickers that pass the design's decision 21 tradeability filter -- for at most
   :data:`DISCOVERY_TICKER_CAP` tickers a run, taken in order of that run's
   directional label count, descending, ties broken by symbol.
 * **Skipped labels** get a row with a ``skip_reason``
@@ -39,6 +42,9 @@ Decision 12, as the spec states it
 
 Decisions the spec leaves open -- for the owner's review
 --------------------------------------------------------
+
+The numbers below are **this module's own list**. A design decision is
+always cited as "the design's decision N" to keep the two apart.
 
 Each was set by the orchestrator for unit 6.2 unless marked otherwise, and
 each is a parent-session assumption the owner can override.
@@ -149,7 +155,7 @@ orchestrator in the audit fix pass):
     :data:`PRICE_UNAVAILABLE_AFTER` past the end of its last unwritten
     window, and then every unwritten window is written
     ``off_watch_untradeable``: failing closed, since it was never shown to
-    pass decision 21's filter, and a label left pending forever is reloaded
+    pass the design's decision 21 filter, and a label left pending forever is reloaded
     by every run.
 15. **``MARKET`` is always watch**, whatever universe is passed: the spec
     lists it as a member, and it can never pass a tradeability filter, so a
@@ -195,6 +201,72 @@ fetch and with it every other ticker's grade.
 
 Bars are assumed ``1Min`` and stamped at their **opening** minute, the
 provider's convention (:class:`~corollary.data.providers.interface.Bar`).
+
+Decision 13 -- accuracy and transitions (unit 6.3)
+--------------------------------------------------
+
+After grading, the runner loads every graded ``label_outcome`` row (via
+:func:`graded_outcome`, which returns ``None`` for any skip, so skipped rows
+count nowhere) and each source's status row, and calls :func:`audit_sources`.
+Per source that returns every ``sentiment_accuracy`` row
+(:func:`compute_accuracy`) and at most one :class:`Transition`
+(:func:`decide_transition`), carrying the new status, its ``reason``, the
+``audit_log`` fields and the notification, or ``None`` when nothing changes.
+
+The table, exactly decision 13's, on ``scope = all`` only (decision 12:
+"Transitions act on the combined figure"; the watch/discovery splits are
+stored for display):
+
+* ``unaudited -> demoted`` -- eligible to demote and below 52% in either window.
+* ``unaudited -> active`` -- eligible to demote and at least 52% in both. Emits
+  no notification ("nothing was withdrawn or restored").
+* ``active -> demoted`` -- eligible to demote and below 52% in either window.
+* ``demoted -> active`` -- eligible to re-promote and at least 66% in both.
+* otherwise unchanged -- ineligible, the 52-66% dead band, or a demoted source
+  doing badly. Nothing transitions into ``unaudited``.
+
+*Eligible to demote*: at least :data:`DEMOTION_FLOOR` graded directional
+labels in **each** window over the trailing window. *Eligible to
+re-promote*: at least :data:`REPROMOTION_FLOOR` in **each** window since the
+demotion. Every comparison is integer cross-multiplication --
+``correct * 100 < 52 * graded`` -- so no float decides a boundary.
+
+Three definitions the spec leaves to this unit, **set by the orchestrator**:
+
+19. **``trailing_28d`` is outcomes with ``reference_at`` in ``(run_at - 28
+    days, run_at]``** -- open at 28 days, closed at the run. ``reference_at``
+    rather than the grading run's instant, because it is a fact about the
+    label that no later run can move.
+20. **``since_demotion`` is outcomes with ``reference_at`` in ``(changed_at,
+    run_at]``** -- labels produced after the demotion -- computed only for a
+    ``demoted`` source, with no lookback. A transition's ``changed_at`` is the run
+    instant, and every outcome a run counted had matured by it (its window
+    ended at least :data:`MATURITY_DELAY` earlier), so its ``reference_at``
+    is strictly before ``changed_at``: "counting from the demotion also keeps
+    the labels that caused it out of the evidence for undoing it". A label
+    published before the demotion but referenced after it (a Friday-evening
+    label whose reference is Monday's open) does count: it was not graded
+    when the demotion happened, so it was not evidence for it.
+
+21. **An outcome referenced after the run is excluded and reported, never
+    raised.** No window starting after the run can have matured by it, so one
+    is a defect upstream -- but raising would stop every source's run over
+    one bad row, the failure class decisions 16 and 18 removed. It is in
+    neither basis and comes back on :attr:`SourceAudit.future_referenced`
+    for the runner to put in ``audit_run.detail`` and the logs: the run
+    succeeds and says so loudly. A defect in *our own* writer -- a
+    directional row with no grade, a neutral row with one, a graded row with
+    no scope or reference -- still raises (:class:`GradedOutcome`,
+    :func:`graded_outcome`).
+
+And two taken in this unit:
+
+22. **A demoted source is never re-demoted.** Its since-demotion figures
+    can only re-promote it; a terrible week while demoted changes nothing,
+    and writes nothing (``ck_audit_log_sentiment_row`` refuses a no-op).
+23. **The reason's percentages are truncated to one place, never
+    rounded**, so 51.96% prints ``51.9%`` beside "below 52%" and never
+    ``52.0%``. Display only; the decision is the integer comparison.
 """
 
 from bisect import bisect_right
@@ -202,7 +274,15 @@ from collections import defaultdict
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import ROUND_HALF_EVEN, Context, Decimal, Inexact, InvalidOperation
+from decimal import (
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    Context,
+    Decimal,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+)
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -221,23 +301,46 @@ from corollary.data.providers.interface import Bar
 
 __all__ = [
     "BENCHMARK_SYMBOL",
+    "DEMOTE_BELOW_PCT",
+    "DEMOTION_FLOOR",
     "DISCOVERY_TICKER_CAP",
     "FALLBACK_MAX_LAG",
     "MATURITY_DELAY",
     "PRICE_UNAVAILABLE_AFTER",
+    "REPROMOTE_AT_PCT",
+    "REPROMOTION_FLOOR",
     "RETURN_EXPONENT",
+    "SENTIMENT_AUDIT_CATEGORY",
+    "TRAILING_WINDOW",
     "VENDOR_STAMP_TOLERANCE",
     "WINDOW_SESSION_MINUTES",
+    "AccuracyBasis",
+    "AccuracyRow",
+    "AccuracyScope",
     "AuditLabel",
+    "AuditLogFields",
     "AuditPlan",
     "BarFault",
     "BarRequest",
+    "CurrentStatus",
     "GradeResult",
+    "GradedOutcome",
     "GradingWindow",
     "LabelOutcomeRecord",
     "Scope",
+    "SentimentEvent",
     "SkipReason",
+    "SourceAudit",
+    "SourceStatus",
+    "Transition",
+    "TransitionNotice",
+    "audit_source",
+    "audit_sources",
+    "compute_accuracy",
+    "decide_transition",
+    "earliest_reference_needed",
     "grade",
+    "graded_outcome",
     "plan_audit",
     "reference_at",
     "reference_instant",
@@ -301,7 +404,10 @@ _DIRECTIONAL: Final = frozenset({Direction.BULLISH, Direction.BEARISH})
 
 
 class Scope(StrEnum):
-    """Which graded set a label is in this run (decision 12's splits)."""
+    """Which graded set a label is in this run (decision 12's splits).
+
+    Values equal ``LABEL_OUTCOME_SCOPES``: stored as ``label_outcome.scope``.
+    """
 
     WATCH = "watch"
     DISCOVERY = "discovery"
@@ -376,9 +482,14 @@ class BarRequest:
 class LabelOutcomeRecord:
     """One ``label_outcome`` row, less ``audit_run_id`` (the runner's).
 
-    ``scope`` is **not a column**: it is this run's classification, carried
-    for unit 6.3's watch/discovery splits. ``None`` on the two membership
-    skips, which belong to neither graded set.
+    ``scope`` is **stored** (``label_outcome.scope``, added to migration 0014
+    in place by unit 6.3): this run's classification, kept so the
+    watch/discovery splits recomputed from past rows every run read the
+    membership the label was graded under, never today's watch universe.
+    ``None`` exactly on the two membership skips (``off_watch_untradeable``,
+    ``discovery_cap``), which belong to neither graded set; set on every
+    graded row and on ``price_unavailable``, whose label was in a graded set
+    and only lacked a bar (``ck_label_outcome_scope``).
     """
 
     label_id: int
@@ -611,7 +722,7 @@ def plan_audit(
 
     ``labels`` are the candidates the runner loaded -- at least every label
     with an unwritten window; extra ones cost nothing. ``tradeable`` maps an
-    off-watch ticker to its decision 21 verdict. ``written`` holds the
+    off-watch ticker to its (design) decision 21 verdict. ``written`` holds the
     ``(label_id, window)`` keys already in ``label_outcome``. The result is
     independent of the order of every input.
     """
@@ -996,4 +1107,559 @@ def grade(plan: AuditPlan, bars: Iterable[Bar]) -> GradeResult:
         records=tuple(records),
         awaiting_bars=tuple(sorted(awaiting)),
         bar_faults=tuple(sorted(faults, key=lambda f: (f.symbol, f.session_date, f.reason))),
+    )
+
+
+# --------------------------------------------------------------------- #
+# Accuracy and transitions (unit 6.3, decision 13)
+# --------------------------------------------------------------------- #
+#
+# Pure, like the grading above: the runner (unit 6.4) loads the graded
+# outcomes and the status rows, calls :func:`audit_sources`, and writes what
+# comes back -- the ``sentiment_accuracy`` rows, the status update, the
+# ``audit_log`` row and the notification -- in the transaction that closes
+# the run (see ``models.SentimentSourceStatus``).
+
+#: Decision 13: below this percentage in **either** window demotes.
+DEMOTE_BELOW_PCT: Final = 52
+
+#: Decision 13: at or above this percentage in **both** windows re-promotes.
+REPROMOTE_AT_PCT: Final = 66
+
+#: Decision 13: graded directional labels needed in **each** window, over the
+#: trailing window, before a source may be demoted (or first promoted).
+DEMOTION_FLOOR: Final = 30
+
+#: Decision 13: graded directional labels needed in **each** window, since
+#: the demotion, before a source may be re-promoted. *(Parent-session
+#: assumption, Q6.)*
+REPROMOTION_FLOOR: Final = 100
+
+#: Decision 13's trailing window: 28 **calendar** days, not sessions.
+TRAILING_WINDOW: Final = timedelta(days=28)
+
+#: ``audit_log.category`` for a transition (decision 13).
+SENTIMENT_AUDIT_CATEGORY: Final = "sentiment"
+
+#: ``notification.severity`` values, spelled as ``NOTIFICATION_SEVERITIES``.
+_WARNING: Final = "warning"
+_INFO: Final = "info"
+
+#: The percentages in a transition's reason are **truncated** to one place,
+#: never rounded, so the printed figure is never above the true one and so
+#: never lands on the wrong side of a threshold the comparison used: 51.96%
+#: prints ``51.9%`` beside "below 52%", not ``52.0%``. Display only -- every
+#: decision is the integer comparison in :func:`_below`.
+_DISPLAY: Final = Context(prec=28, rounding=ROUND_DOWN, traps=[InvalidOperation, DivisionByZero])
+_ONE_PLACE: Final = Decimal("0.1")
+
+
+class SourceStatus(StrEnum):
+    """``sentiment_source_status.status``; values equal ``SENTIMENT_SOURCE_STATUSES``."""
+
+    UNAUDITED = "unaudited"
+    ACTIVE = "active"
+    DEMOTED = "demoted"
+
+
+class AccuracyBasis(StrEnum):
+    """``sentiment_accuracy.basis``; values equal ``ACCURACY_BASES``."""
+
+    TRAILING_28D = "trailing_28d"
+    SINCE_DEMOTION = "since_demotion"
+
+
+class AccuracyScope(StrEnum):
+    """``sentiment_accuracy.scope``; values equal ``ACCURACY_SCOPES``.
+
+    ``ALL`` is the sum of the two :class:`Scope` splits and is the only one a
+    transition reads (the design's decision 12: "Transitions act on the combined figure").
+    """
+
+    ALL = "all"
+    WATCH = "watch"
+    DISCOVERY = "discovery"
+
+
+class SentimentEvent(StrEnum):
+    """The notification events a transition raises (the design's decision 14 routes)."""
+
+    DEMOTED = "sentiment_demoted"
+    REPROMOTED = "sentiment_repromoted"
+
+
+_WINDOWS: Final = tuple(WINDOW_SESSION_MINUTES)
+
+
+@dataclass(frozen=True, slots=True)
+class GradedOutcome:
+    """One **graded** ``label_outcome`` row, as accuracy reads it.
+
+    ``source`` is the label's (``sentiment_label.source``); ``scope`` the
+    row's stored ``label_outcome.scope`` -- the classification the grading
+    run made, never re-derived from today's watch universe. A skipped row is
+    not a ``GradedOutcome`` at all: :func:`graded_outcome` returns ``None``
+    for one, which is how skipped rows count nowhere.
+
+    ``neutral`` is the label's direction being neutral. A neutral outcome has
+    ``correct`` ``None`` and a directional one never does; both are refused
+    here, because a directional row with no grade would drop out of every
+    count silently (``models._LABEL_OUTCOME_SHAPE``).
+    """
+
+    source: str
+    window: str
+    scope: Scope
+    reference_at: datetime
+    correct: bool | None
+    neutral: bool
+
+    def __post_init__(self) -> None:
+        if self.window not in WINDOW_SESSION_MINUTES:
+            raise ValueError(f"unknown window {self.window!r}")
+        _require_aware(self.reference_at, "reference_at")
+        if self.neutral and self.correct is not None:
+            raise ValueError("a neutral outcome carries no grade (correct must be None)")
+        if not self.neutral and self.correct is None:
+            raise ValueError("a directional outcome must carry correct=True or False")
+
+
+def graded_outcome(
+    *,
+    source: str,
+    window: str,
+    scope: str | None,
+    reference_at: datetime | None,
+    correct: bool | None,
+    skip_reason: str | None,
+    direction: Direction,
+) -> GradedOutcome | None:
+    """A stored outcome row (joined to its label's source and direction) as a
+    :class:`GradedOutcome`, or ``None`` when it was skipped.
+
+    Every skip -- membership or ``price_unavailable`` -- returns ``None``:
+    skipped rows are in none of the three counts (``models.SentimentAccuracy``).
+    A graded row missing its scope or reference instant raises; the schema
+    refuses both, so one here is a defect, not data.
+    """
+    if skip_reason is not None:
+        return None
+    if scope is None:
+        raise ValueError(f"a graded outcome must carry a scope ({source}, {window})")
+    if reference_at is None:
+        raise ValueError(f"a graded outcome must carry reference_at ({source}, {window})")
+    return GradedOutcome(
+        source=source,
+        window=window,
+        scope=Scope(scope),
+        reference_at=reference_at,
+        correct=correct,
+        neutral=direction is Direction.NEUTRAL,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentStatus:
+    """A source's ``sentiment_source_status`` row as the run found it.
+
+    ``changed_at`` is ``None`` exactly while ``unaudited`` -- the schema's
+    ``ck_sentiment_source_status_transition``, restated so a malformed row is
+    refused before it is reasoned about.
+    """
+
+    source: str
+    status: SourceStatus
+    changed_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if self.status is SourceStatus.UNAUDITED:
+            if self.changed_at is not None:
+                raise ValueError("an unaudited source has never changed: changed_at must be None")
+        elif self.changed_at is None:
+            raise ValueError(f"a {self.status} source must carry changed_at")
+        else:
+            _require_aware(self.changed_at, "changed_at")
+
+
+@dataclass(frozen=True, slots=True)
+class AccuracyRow:
+    """One ``sentiment_accuracy`` row, less ``audit_run_id`` (the runner's).
+
+    ``graded`` is graded **directional** labels, ``correct`` how many of them
+    were right, ``neutral`` graded neutral labels (in neither of the others).
+    """
+
+    source: str
+    window: str
+    basis: AccuracyBasis
+    scope: AccuracyScope
+    graded: int
+    correct: int
+    neutral: int
+
+
+@dataclass(frozen=True, slots=True)
+class AuditLogFields:
+    """The ``audit_log`` row a transition writes, less ``id`` and ``at``.
+
+    ``at`` is the runner's, and it must fall inside the run's half-open span,
+    ``started_at < at <= finished_at`` -- **strictly after** ``started_at`` --
+    for the history join in ``models.SentimentSourceStatus`` to find the run.
+    Use the clock reading that sets ``finished_at`` in the closing
+    transaction. **Never** :attr:`Transition.changed_at` when ``run_at`` was
+    the start reading: that equals ``started_at``, which the span excludes,
+    and the join then finds no run without any error.
+    """
+
+    category: str
+    field: str
+    previous_value: str
+    new_value: str
+
+
+@dataclass(frozen=True, slots=True)
+class TransitionNotice:
+    """The notification a transition emits. ``body`` is the transition's reason."""
+
+    event: SentimentEvent
+    severity: str
+    title: str
+    body: str
+
+
+@dataclass(frozen=True, slots=True)
+class Transition:
+    """One source's state change in one run.
+
+    * ``changed_at`` -- the run instant, UTC; the new
+      ``sentiment_source_status.changed_at``. A demotion's ``changed_at`` is
+      therefore the instant every outcome that caused it had already been
+      graded by: each was matured, so its ``reference_at`` is earlier still,
+      and :data:`AccuracyBasis.SINCE_DEMOTION`'s strict ``>`` leaves it out.
+      **It is not** ``audit_log.at``: when ``run_at`` is the reading that set
+      ``audit_run.started_at``, ``changed_at`` equals ``started_at`` and lies
+      outside the run's half-open span. ``audit_log.at`` is the reading that
+      sets ``finished_at`` (:class:`AuditLogFields`). ``changed_at`` stays
+      the run instant regardless: only ``since_demotion`` reads it.
+    * ``basis`` / ``acted_on`` -- the ``scope = all`` rows, one per window in
+      ``1h``, ``1d`` order, that the decision read; each is also among the
+      run's stored :class:`AccuracyRow` s.
+    * ``reason`` -- the two accuracies and their sample sizes; the new
+      ``sentiment_source_status.reason``.
+    * ``audit_log`` -- the row to write.
+    * ``notice`` -- ``None`` on ``unaudited -> active``: "logged and emits
+      nothing -- nothing was withdrawn or restored".
+    """
+
+    source: str
+    previous: SourceStatus
+    new: SourceStatus
+    changed_at: datetime
+    basis: AccuracyBasis
+    acted_on: tuple[AccuracyRow, ...]
+    reason: str
+    audit_log: AuditLogFields
+    notice: TransitionNotice | None
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAudit:
+    """One source's result for one run: every accuracy row, the transition or
+    ``None``, and the outcomes left out because they were referenced after the
+    run.
+
+    ``future_referenced`` is decision 21's report, sorted by ``reference_at``
+    then window: each is in neither basis, and the runner puts them (or their
+    count and earliest instant) in ``audit_run.detail`` and logs them. Empty
+    on a healthy run.
+    """
+
+    source: str
+    accuracy: tuple[AccuracyRow, ...]
+    transition: Transition | None
+    future_referenced: tuple[GradedOutcome, ...] = ()
+
+
+def _bases_for(status: CurrentStatus) -> tuple[AccuracyBasis, ...]:
+    """``since_demotion`` exists only while demoted: there is no demotion to count from otherwise."""
+    if status.status is SourceStatus.DEMOTED:
+        return (AccuracyBasis.TRAILING_28D, AccuracyBasis.SINCE_DEMOTION)
+    return (AccuracyBasis.TRAILING_28D,)
+
+
+def _in_basis(
+    basis: AccuracyBasis, reference: datetime, status: CurrentStatus, run_at: datetime
+) -> bool:
+    if basis is AccuracyBasis.TRAILING_28D:
+        return run_at - TRAILING_WINDOW < reference <= run_at
+    # since_demotion: labels whose reference instant is after the demotion
+    # and not after the run (decision 21). No lookback -- a source demoted
+    # months ago keeps every label since.
+    if status.changed_at is None:  # CurrentStatus refuses this; never reached
+        raise ValueError(f"{status.source} is {status.status} with no changed_at")
+    return status.changed_at < reference <= run_at
+
+
+def earliest_reference_needed(status: CurrentStatus, run_at: datetime) -> datetime:
+    """The oldest ``reference_at`` any basis can count for ``status`` at ``run_at``.
+
+    ``run_at - TRAILING_WINDOW`` for an unaudited or active source;
+    ``min(run_at - TRAILING_WINDOW, changed_at)`` for a demoted one, whose
+    ``since_demotion`` has no lookback. Both bases are open at this instant
+    (strict ``>``), so the runner may load only ``label_outcome`` rows with
+    ``reference_at > earliest`` (``>=`` costs at most the edge rows, which
+    count nowhere). Do **not** bound the load above at ``run_at``: rows
+    referenced after the run must still arrive, so that decision 21 can
+    report them.
+
+    **The filter may run in SQL.** ``label_outcome.reference_at`` is
+    ``corollary.db.types.UtcDateTime``, which -- unlike ``Money`` -- defines
+    no refusing comparator, and whose ordering is sound: every value is bound
+    through ``process_bind_param`` as naive UTC, and SQLAlchemy's SQLite
+    dialect stores ``DATETIME`` as fixed-width ISO text
+    (``YYYY-MM-DD HH:MM:SS.ffffff``), so SQLite's text comparison is
+    chronological. The bound parameter takes the same path, so an aware
+    instant in any zone compares correctly. ``ingest.py`` already filters
+    ``published_at`` (also ``UtcDateTime``) this way, in
+    ``corollary/data/news/ingest.py``.
+    """
+    _require_aware(run_at, "run_at")
+    trailing_start = run_at - TRAILING_WINDOW
+    if status.status is SourceStatus.DEMOTED:
+        if status.changed_at is None:  # CurrentStatus refuses this; never reached
+            raise ValueError(f"{status.source} is demoted with no changed_at")
+        return min(trailing_start, status.changed_at)
+    return trailing_start
+
+
+def compute_accuracy(
+    status: CurrentStatus, outcomes: Iterable[GradedOutcome], run_at: datetime
+) -> tuple[AccuracyRow, ...]:
+    """Every ``sentiment_accuracy`` row for one source and one run.
+
+    One row per (window, basis, scope), zeros included, ordered by window
+    (``1h``, ``1d``), then basis, then scope (``all``, ``watch``,
+    ``discovery``) -- so the result is the same whatever order the outcomes
+    arrive in. ``trailing_28d`` counts outcomes with ``reference_at`` in
+    ``(run_at - 28 days, run_at]``; ``since_demotion`` -- computed only for a
+    ``demoted`` source -- those in ``(changed_at, run_at]``. Both are
+    orchestrator decisions; see the module docstring.
+
+    An outcome referenced after ``run_at`` is therefore in neither basis:
+    counting it would be reading the future. It is left out here rather than
+    raised (decision 21), and :func:`audit_source` is what reports it -- the
+    runner calls that, never this alone. Another source's outcome is refused.
+    """
+    _require_aware(run_at, "run_at")
+    bases = _bases_for(status)
+    tally: dict[tuple[str, AccuracyBasis, AccuracyScope], list[int]] = {
+        (w, b, s): [0, 0, 0] for w in _WINDOWS for b in bases for s in AccuracyScope
+    }
+    for outcome in outcomes:
+        if outcome.source != status.source:
+            raise ValueError(
+                f"outcome for source {outcome.source!r} passed to {status.source!r}'s accuracy"
+            )
+        for basis in bases:
+            if not _in_basis(basis, outcome.reference_at, status, run_at):
+                continue
+            for scope in (AccuracyScope.ALL, AccuracyScope(outcome.scope.value)):
+                counts = tally[(outcome.window, basis, scope)]
+                if outcome.neutral:
+                    counts[2] += 1
+                else:
+                    counts[0] += 1
+                    if outcome.correct:
+                        counts[1] += 1
+    return tuple(
+        AccuracyRow(
+            source=status.source,
+            window=w,
+            basis=b,
+            scope=s,
+            graded=tally[(w, b, s)][0],
+            correct=tally[(w, b, s)][1],
+            neutral=tally[(w, b, s)][2],
+        )
+        for w in _WINDOWS
+        for b in bases
+        for s in AccuracyScope
+    )
+
+
+def _below(row: AccuracyRow, pct: int) -> bool:
+    """``correct / graded < pct%``, in integers: no float can move a boundary."""
+    return row.correct * 100 < pct * row.graded
+
+
+def _pct(row: AccuracyRow) -> str:
+    """The percentage for display only, truncated to one place (see ``_DISPLAY``)."""
+    value = _DISPLAY.divide(Decimal(row.correct * 100), Decimal(row.graded))
+    return f"{value.quantize(_ONE_PLACE, rounding=ROUND_DOWN, context=_DISPLAY)}%"
+
+
+def _acted_on(
+    status: CurrentStatus, accuracy: Iterable[AccuracyRow], basis: AccuracyBasis
+) -> tuple[AccuracyRow, ...]:
+    """The ``scope = all`` row for each window under ``basis``; exactly one each, or raise."""
+    rows = list(accuracy)
+    picked: list[AccuracyRow] = []
+    for window in _WINDOWS:
+        found = [
+            r
+            for r in rows
+            if r.source == status.source
+            and r.window == window
+            and r.basis is basis
+            and r.scope is AccuracyScope.ALL
+        ]
+        if len(found) != 1:
+            raise ValueError(
+                f"expected one {basis} / all row for {status.source} {window}, found {len(found)}"
+            )
+        picked.append(found[0])
+    return tuple(picked)
+
+
+def _reason(
+    previous: SourceStatus,
+    new: SourceStatus,
+    basis: AccuracyBasis,
+    acted_on: tuple[AccuracyRow, ...],
+    rule: str,
+) -> str:
+    figures = ", ".join(f"{r.window} {_pct(r)} ({r.correct}/{r.graded})" for r in acted_on)
+    return f"{previous} -> {new}: {rule}. {basis}, scope all: {figures}."
+
+
+def _transition(
+    status: CurrentStatus,
+    new: SourceStatus,
+    basis: AccuracyBasis,
+    acted_on: tuple[AccuracyRow, ...],
+    rule: str,
+    run_at: datetime,
+) -> Transition:
+    reason = _reason(status.status, new, basis, acted_on, rule)
+    notice: TransitionNotice | None
+    if new is SourceStatus.DEMOTED:
+        notice = TransitionNotice(
+            event=SentimentEvent.DEMOTED,
+            severity=_WARNING,
+            title=f"Sentiment source {status.source} demoted",
+            body=reason,
+        )
+    elif status.status is SourceStatus.DEMOTED:
+        notice = TransitionNotice(
+            event=SentimentEvent.REPROMOTED,
+            severity=_INFO,
+            title=f"Sentiment source {status.source} re-promoted",
+            body=reason,
+        )
+    else:
+        notice = None  # unaudited -> active: nothing was withdrawn or restored
+    return Transition(
+        source=status.source,
+        previous=status.status,
+        new=new,
+        changed_at=run_at.astimezone(timezone.utc),
+        basis=basis,
+        acted_on=acted_on,
+        reason=reason,
+        audit_log=AuditLogFields(
+            category=SENTIMENT_AUDIT_CATEGORY,
+            field=status.source,
+            previous_value=status.status.value,
+            new_value=new.value,
+        ),
+        notice=notice,
+    )
+
+
+def decide_transition(
+    status: CurrentStatus, accuracy: Iterable[AccuracyRow], run_at: datetime
+) -> Transition | None:
+    """Decision 13's table, on ``scope = all``, from the state the run found.
+
+    ``accuracy`` is :func:`compute_accuracy`'s output for this source and
+    run, so the figure acted on is the figure stored. Returns ``None`` when
+    the source is unchanged -- ineligible, in the 52-66% dead band, or a
+    demoted source doing badly -- so no row is written. One call decides one
+    transition from the state the run *found*; nothing re-evaluates the new
+    state, so a source moves at most once per run.
+    """
+    _require_aware(run_at, "run_at")
+    if status.status is SourceStatus.DEMOTED:
+        basis = AccuracyBasis.SINCE_DEMOTION
+        acted_on = _acted_on(status, accuracy, basis)
+        if all(r.graded >= REPROMOTION_FLOOR for r in acted_on) and not any(
+            _below(r, REPROMOTE_AT_PCT) for r in acted_on
+        ):
+            rule = (
+                f"at or above {REPROMOTE_AT_PCT}% in both windows, at least "
+                f"{REPROMOTION_FLOOR} graded directional labels each since the demotion"
+            )
+            return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
+        return None
+
+    basis = AccuracyBasis.TRAILING_28D
+    acted_on = _acted_on(status, accuracy, basis)
+    if not all(r.graded >= DEMOTION_FLOOR for r in acted_on):
+        return None
+    failing = [r.window for r in acted_on if _below(r, DEMOTE_BELOW_PCT)]
+    if failing:
+        rule = f"below {DEMOTE_BELOW_PCT}% in {' and '.join(failing)}"
+        return _transition(status, SourceStatus.DEMOTED, basis, acted_on, rule, run_at)
+    if status.status is SourceStatus.UNAUDITED:
+        rule = (
+            f"at or above {DEMOTE_BELOW_PCT}% in both windows, at least "
+            f"{DEMOTION_FLOOR} graded directional labels each over the trailing 28 days"
+        )
+        return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
+    return None
+
+
+def audit_source(
+    status: CurrentStatus, outcomes: Iterable[GradedOutcome], run_at: datetime
+) -> SourceAudit:
+    """:func:`compute_accuracy` then :func:`decide_transition`, for one source,
+    plus the outcomes referenced after ``run_at`` -- in neither basis, and
+    reported on :attr:`SourceAudit.future_referenced` (decision 21)."""
+    _require_aware(run_at, "run_at")
+    given = tuple(outcomes)
+    accuracy = compute_accuracy(status, given, run_at)
+    future = sorted(
+        (o for o in given if o.reference_at > run_at),
+        key=lambda o: (o.reference_at, _WINDOWS.index(o.window)),
+    )
+    return SourceAudit(
+        source=status.source,
+        accuracy=accuracy,
+        transition=decide_transition(status, accuracy, run_at),
+        future_referenced=tuple(future),
+    )
+
+
+def audit_sources(
+    statuses: Iterable[CurrentStatus], outcomes: Iterable[GradedOutcome], run_at: datetime
+) -> tuple[SourceAudit, ...]:
+    """Every source's audit for one run, sorted by source.
+
+    One status row per source, or raise -- two would be two transitions for
+    one source in one run, which the history join cannot tell apart. An
+    outcome whose source has no status row also raises rather than being
+    dropped: decision 12 forbids a label silently leaving the audit.
+    """
+    by_source: dict[str, CurrentStatus] = {}
+    for st in statuses:
+        if st.source in by_source:
+            raise ValueError(f"source {st.source!r} given more than once (one status row each)")
+        by_source[st.source] = st
+    grouped: dict[str, list[GradedOutcome]] = {source: [] for source in by_source}
+    for outcome in outcomes:
+        if outcome.source not in grouped:
+            raise ValueError(f"outcome for source {outcome.source!r}, which has no status row")
+        grouped[outcome.source].append(outcome)
+    return tuple(
+        audit_source(by_source[source], grouped[source], run_at) for source in sorted(by_source)
     )

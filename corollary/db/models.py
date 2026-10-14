@@ -80,6 +80,8 @@ __all__ = [
     "FredObservationRecord",
     "ISIN_TICKER_SOURCES",
     "IsinTicker",
+    "LABEL_MEMBERSHIP_SKIP_REASONS",
+    "LABEL_OUTCOME_SCOPES",
     "LABEL_SKIP_REASONS",
     "LabelOutcome",
     "LimitRange",
@@ -1842,6 +1844,16 @@ LABEL_SKIP_REASONS: tuple[str, ...] = (
     "price_unavailable",
 )
 
+#: The skips that are decided by **membership** -- the label is in neither
+#: graded set -- and so carry no ``scope``. ``price_unavailable`` is not one:
+#: its label was in a graded set and only the bar was missing.
+LABEL_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = ("off_watch_untradeable", "discovery_cap")
+
+#: Which graded set one outcome's label was in, **as classified by the run
+#: that wrote it** (``label_outcome.scope``, unit 6.3). Not ``ACCURACY_SCOPES``:
+#: ``all`` is an aggregate of these two, never one label's classification.
+LABEL_OUTCOME_SCOPES: tuple[str, ...] = ("watch", "discovery")
+
 #: What started an audit run (decision 12's *Schedule*):
 #:
 #: * ``scheduled`` -- the Saturday 10:00 ET job.
@@ -1919,6 +1931,24 @@ _LABEL_OUTCOME_SHAPE = (
     "AND reference_at IS NOT NULL AND reference_price IS NOT NULL "
     "AND outcome_at IS NOT NULL AND outcome_price IS NOT NULL "
     "AND benchmark_return IS NOT NULL AND excess_return IS NOT NULL)"
+)
+
+#: ``ck_label_outcome_scope``: ``label_outcome.scope`` is NULL **exactly** on
+#: the two membership skips (:data:`LABEL_MEMBERSHIP_SKIP_REASONS` -- the label
+#: was in neither graded set) and one of :data:`LABEL_OUTCOME_SCOPES` on every
+#: other row, graded and ``price_unavailable`` alike. Any other skip reason
+#: matches neither branch and is refused. Every comparison is guarded with an
+#: explicit ``IS [NOT] NULL``, because a CHECK that evaluates to NULL passes in
+#: SQLite: ``scope IN (...)`` on a NULL scope is NULL, not false, and without
+#: the guard a graded row with no scope would be admitted.
+_LABEL_OUTCOME_SCOPE = (
+    "(skip_reason IS NOT NULL AND "
+    + _in_list("skip_reason", LABEL_MEMBERSHIP_SKIP_REASONS)
+    + " AND scope IS NULL) "
+    "OR ((skip_reason IS NULL OR skip_reason = 'price_unavailable') "
+    "AND scope IS NOT NULL AND "
+    + _in_list("scope", LABEL_OUTCOME_SCOPES)
+    + ")"
 )
 
 #: ``detail`` is a JSON object or absent. ``CASE`` rather than ``AND`` because
@@ -2024,6 +2054,18 @@ class LabelOutcome(Base):
     label (Q5), and must not be NULL for a directional one -- see
     ``_LABEL_OUTCOME_SHAPE`` for why that is unit 6.2's rule to enforce.
 
+    **``scope`` extends the spec's column list** (orchestrator decision, unit
+    6.3; migration 0014 amended in place). ``sentiment_accuracy`` stores
+    watch/discovery splits, and its trailing-28-day figure is recomputed every
+    run from *past* outcome rows, so each row must keep the classification the
+    run that graded it made. Recomputing it from today's watch universe would
+    let membership drift rewrite history: a ticker added to the watch list
+    would move every one of its old discovery grades into the watch split.
+    ``scope`` is in :data:`LABEL_OUTCOME_SCOPES`, NULL **exactly** when
+    ``skip_reason`` is one of :data:`LABEL_MEMBERSHIP_SKIP_REASONS`, and NOT
+    NULL otherwise -- graded rows and ``price_unavailable`` rows both
+    (``ck_label_outcome_scope``).
+
     **Prices are** ``Money`` -- exact decimal TEXT, every SQL comparison
     refused. **So are the two returns**, deliberately. A return is a ratio of
     two ``Money`` prices, computed as ``Decimal`` in Python, and the rule is
@@ -2056,6 +2098,7 @@ class LabelOutcome(Base):
             name="ck_label_outcome_skip_reason",
         ),
         CheckConstraint(_LABEL_OUTCOME_SHAPE, name="ck_label_outcome_shape"),
+        CheckConstraint(_LABEL_OUTCOME_SCOPE, name="ck_label_outcome_scope"),
         CheckConstraint(
             _price_check("reference_price"), name="ck_label_outcome_reference_price"
         ),
@@ -2090,6 +2133,9 @@ class LabelOutcome(Base):
     excess_return: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
     correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     skip_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The graded set the label was in when this row was written; NULL on a
+    #: membership skip. See the class docstring for why it is stored.
+    scope: Mapped[str | None] = mapped_column(String(16), nullable=True)
     audit_run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("audit_run.id"), nullable=False
     )
@@ -2193,10 +2239,16 @@ class SentimentSourceStatus(Base):
        A source transitions **at most once per run**, so ``(run, source)``
        names at most one ``audit_log`` row and the selection is unambiguous.
 
-    Unit 6.3 must meet three requirements for that join to hold:
+    Unit 6.4 (the runner) must meet three requirements for that join to hold:
 
-    * it writes the ``audit_log`` row **inside the run's span** -- after
-      ``started_at``, and no later than ``finished_at``;
+    * it writes the ``audit_log`` row **inside the run's span** -- strictly
+      after ``started_at``, and no later than ``finished_at``. So
+      ``audit_log.at`` is the clock reading that sets ``finished_at`` in the
+      closing transaction, **never** the transition's ``changed_at`` when the
+      run took that from the same reading as ``started_at``: equal to
+      ``started_at``, ``at`` falls outside the half-open span and the join
+      finds no run, with no error (``audit.AuditLogFields``). ``changed_at``
+      itself stays the run instant -- only ``since_demotion`` reads it;
     * it commits the ``audit_log`` rows and the ``sentiment_source_status``
       updates **in the same transaction** that sets the run's terminal
       ``status`` and ``finished_at``. A run that crashes after committing a

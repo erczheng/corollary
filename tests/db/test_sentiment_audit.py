@@ -5,7 +5,8 @@ Design, *Database*, and decisions 12-14:
 * ``label_outcome(label_id, window, reference_at, reference_price,
   outcome_at, outcome_price, benchmark_return, excess_return, correct,
   skip_reason, audit_run_id)``, UNIQUE ``(label_id, window)``. A skipped row
-  carries no prices.
+  carries no prices. Plus ``scope`` (``watch | discovery``), an orchestrator
+  addition for unit 6.3: NULL exactly on the two membership skips.
 * ``audit_run(id, started_at, finished_at, trigger, status, detail)``.
 * ``sentiment_accuracy(audit_run_id, source, window, basis, scope, graded,
   correct, neutral)``, UNIQUE on everything but the counts. Counts only.
@@ -37,6 +38,7 @@ from corollary.db.models import (
     AUDIT_CATEGORIES,
     AUDIT_RUN_STATUSES,
     AUDIT_RUN_TRIGGERS,
+    LABEL_OUTCOME_SCOPES,
     LABEL_SKIP_REASONS,
     SENTIMENT_SOURCE_STATUSES,
     SENTIMENT_SOURCES,
@@ -147,6 +149,7 @@ def _graded(label_id: int, run_id: int, **overrides: object) -> LabelOutcome:
         "excess_return": Decimal("0.010245679012345679"),
         "correct": True,
         "skip_reason": None,
+        "scope": "watch",
         "audit_run_id": run_id,
     }
     fields.update(overrides)
@@ -165,6 +168,7 @@ def _skipped(label_id: int, run_id: int, **overrides: object) -> LabelOutcome:
         "excess_return": None,
         "correct": None,
         "skip_reason": "discovery_cap",
+        "scope": None,
         "audit_run_id": run_id,
     }
     fields.update(overrides)
@@ -201,6 +205,8 @@ def test_the_vocabularies_are_the_specs() -> None:
     assert AUDIT_RUN_STATUSES == ("running", "succeeded", "failed")
     assert ACCURACY_BASES == ("trailing_28d", "since_demotion")
     assert ACCURACY_SCOPES == ("all", "watch", "discovery")
+    # ``all`` is an accuracy aggregate, never one outcome's classification.
+    assert LABEL_OUTCOME_SCOPES == ("watch", "discovery")
     assert SENTIMENT_SOURCE_STATUSES == ("unaudited", "active", "demoted")
     assert AUDIT_CATEGORIES == ("risk", "feed", "notification", "watchlist", "sentiment")
 
@@ -220,7 +226,7 @@ def test_the_tables_have_exactly_the_specs_columns(any_engine: Engine) -> None:
         "label_outcome": {
             "label_id", "window", "reference_at", "reference_price", "outcome_at",
             "outcome_price", "benchmark_return", "excess_return", "correct",
-            "skip_reason", "audit_run_id",
+            "skip_reason", "scope", "audit_run_id",
         },
         "audit_run": {"id", "started_at", "finished_at", "trigger", "status", "detail"},
         "sentiment_accuracy": {
@@ -279,13 +285,17 @@ _GRADED_ACCEPTED: list[dict[str, object]] = [
     {"benchmark_return": Decimal("0.0021"), "excess_return": Decimal("0.0021")},
     {"benchmark_return": Decimal("0")},
     {"excess_return": Decimal("0")},
+    {"scope": "discovery"},
+    {"scope": "discovery", "correct": None, "window": "1d"},
 ]
 
 _SKIPPED_ACCEPTED: list[dict[str, object]] = [
     {},
     {"skip_reason": "off_watch_untradeable"},
-    {"skip_reason": "price_unavailable"},
-    {"skip_reason": "price_unavailable", "window": "1h"},
+    # ``price_unavailable`` is a label *in* a graded set -- its scope is known
+    # and kept, so a missing bar never moves a label out of its split.
+    {"skip_reason": "price_unavailable", "scope": "watch"},
+    {"skip_reason": "price_unavailable", "scope": "discovery", "window": "1h"},
     {"window": "1h"},
 ]
 
@@ -330,6 +340,24 @@ _OUTCOME_REFUSED: list[tuple[str, dict[str, object], str]] = [
     # Prices are non-negative.
     ("graded", {"reference_price": Decimal("-1")}, "ck_label_outcome_reference_price"),
     ("graded", {"outcome_price": Decimal("-0.01")}, "ck_label_outcome_outcome_price"),
+    # ``scope`` is NULL exactly on the two membership skips (unit 6.3): a
+    # graded row and a ``price_unavailable`` row carry it, the others do not.
+    ("graded", {"scope": None}, "ck_label_outcome_scope"),
+    ("graded", {"scope": "all"}, "ck_label_outcome_scope"),
+    ("graded", {"scope": "WATCH"}, "ck_label_outcome_scope"),
+    ("skipped", {"scope": "watch"}, "ck_label_outcome_scope"),
+    ("skipped", {"scope": "discovery"}, "ck_label_outcome_scope"),
+    (
+        "skipped",
+        {"skip_reason": "off_watch_untradeable", "scope": "discovery"},
+        "ck_label_outcome_scope",
+    ),
+    ("skipped", {"skip_reason": "price_unavailable"}, "ck_label_outcome_scope"),
+    (
+        "skipped",
+        {"skip_reason": "price_unavailable", "scope": "all"},
+        "ck_label_outcome_scope",
+    ),
 ]
 
 
@@ -372,9 +400,9 @@ def test_a_money_column_refuses_non_numeric_text(any_engine: Engine) -> None:
                 text(
                     "INSERT INTO label_outcome (label_id, \"window\", reference_at, "
                     "reference_price, outcome_at, outcome_price, benchmark_return, "
-                    "excess_return, correct, skip_reason, audit_run_id) VALUES "
+                    "excess_return, correct, skip_reason, scope, audit_run_id) VALUES "
                     "(:l, '1h', '2026-09-28 14:00:00.000000', '1', "
-                    "'2026-09-28 15:00:00.000000', '1', '0', 'NaN', 1, NULL, :r)"
+                    "'2026-09-28 15:00:00.000000', '1', '0', 'NaN', 1, NULL, 'watch', :r)"
                 ),
                 {"l": label_id, "r": run_id},
             )
@@ -959,6 +987,8 @@ def test_create_all_and_upgrade_head_write_the_same_0014_ddl(tmp_path: Path) -> 
     assert "'price_unavailable'" in skip_reason
     shape = next(c for c in label_outcome_clauses if "ck_label_outcome_shape" in c)
     assert "benchmark_return IS NOT NULL" in shape
+    scope = next(c for c in label_outcome_clauses if "ck_label_outcome_scope" in c)
+    assert "'discovery_cap'" in scope and "'price_unavailable'" in scope
     audit_log_clauses = from_models[("table", "audit_log")][1]
     assert any("ck_audit_log_sentiment_row" in c for c in audit_log_clauses)
     running = from_models[("index", "uq_audit_run_one_running")][0]
