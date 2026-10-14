@@ -34,7 +34,7 @@ from typing import get_type_hints
 
 import httpx
 import pytest
-from sqlalchemy import Engine, event, text
+from sqlalchemy import Engine, event, select, text
 from sqlalchemy.orm import Session
 
 from corollary.db.models import Base
@@ -97,7 +97,8 @@ from corollary.ratelimit import FRED_HOST, HostRateLimiter
 from tests.data.providers.test_fred_provider import FAKE_KEY, fixture_body_text
 from tests.engine.test_runtime import read_state, resume_engine
 from tests.data.seeds.test_nport_snapshot import FakeResolver, FakeSec, sec_provider
-from corollary.data.seeds import nport
+from corollary.data.seeds import SpdrSeed, nport
+from tests.api.news_support import make_seed
 from corollary.db.models import SpdrHoldingsSnapshot
 from corollary.ratelimit import SEC_DATA_HOST
 
@@ -114,6 +115,8 @@ HALF_DAY_CLOSE = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
 MONDAY_OPEN = datetime(2026, 11, 30, 14, 30, tzinfo=UTC)
 #: Thursday 26 Nov 2026, 20:00 ET (Friday 01:00 UTC): the holiday's evening.
 THANKSGIVING_EVENING = datetime(2026, 11, 27, 1, 0, tzinfo=UTC)
+#: Saturday 28 Nov 2026, 10:00 ET (15:00 UTC): the weekly sentiment audit.
+SATURDAY_AUDIT = datetime(2026, 11, 28, 15, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------
@@ -750,6 +753,7 @@ _SHIPPED_NAMES = [
     "tradeability_cache",
     "news_prune",
     "spdr_holdings",
+    "sentiment_audit",
 ]
 
 
@@ -819,6 +823,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
         "tradeability_cache": ALPACA_DATA_HOST,
         "news_prune": "local",
         "spdr_holdings": SEC_DATA_HOST,
+        "sentiment_audit": ALPACA_DATA_HOST,
     }
     for job in jobs:
         assert job.rule.strip(), job.name
@@ -986,6 +991,7 @@ class FakeAlpacaContext(FakeAlpaca):
 
     directory: AssetDirectory = DIRECTORY
     directory_calls: int = 0
+    minute_bar_calls: int = 0
 
     async def active_equities(self) -> AssetDirectory:
         self.directory_calls += 1
@@ -997,6 +1003,19 @@ class FakeAlpacaContext(FakeAlpaca):
     async def adv_daily_bars(
         self, symbols: object, *, session_date: date
     ) -> dict[str, list[object]]:
+        return {}
+
+    async def stock_bars(
+        self,
+        symbols: object,
+        *,
+        timeframe: object = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> dict[str, list[object]]:
+        """The sentiment audit's minute bars: none, so every window waits."""
+        self.minute_bar_calls += 1
         return {}
 
 
@@ -1044,6 +1063,7 @@ def _held_positions() -> HeldPositionUnderlyings:
 def _news_services(
     db_engine: Engine,
     *,
+    seed_loader: Callable[[], SpdrSeed | None] = lambda: None,
     alpaca: object | None = None,
     finnhub: object | None = None,
     massive: object | None = None,
@@ -1061,7 +1081,7 @@ def _news_services(
         massive=massive,  # type: ignore[arg-type]
         markets=("AAPL",),
         position_underlyings=_held_positions(),
-        seed_loader=lambda: None,
+        seed_loader=seed_loader,
         **extra,  # type: ignore[arg-type]
     )
 
@@ -1664,14 +1684,15 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     # Thanksgiving evening into Friday's half-day: every kind of slot a
     # shipped job has fires here -- the overnight slow grids, the 03:00 prune,
     # the 07:30 directory, the watch window opening at 06:00, the open's 60 s
-    # grid, 10:00 FRED, and the half-day's 13:00 switch back to the slow grid.
+    # grid, 10:00 FRED, and the half-day's 13:00 switch back to the slow grid
+    # -- and on to Saturday 10:00 ET, the weekly sentiment audit (unit 6.4a).
     # Not from Wednesday: at the Alpaca job's cadence that is ~2,500 SQLite
     # round trips on worker threads, ~7 s a run, six runs on every ``-m risk``
     # -- and the Wednesday session and the holiday itself are pinned by the
     # pure schedule tests above. See ``wait_for_threads`` for the threads.
     clock = FakeClock(
         THANKSGIVING_EVENING,
-        stop_at=HALF_DAY_CLOSE + timedelta(hours=1),
+        stop_at=SATURDAY_AUDIT + timedelta(hours=1),
         wait_for_threads=True,
     )
 
@@ -1690,6 +1711,9 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         cusips = FakeResolver()
         services = _news_services(
             db_engine,
+            # A built seed: the audit skips on a missing one (fix B), and this
+            # test needs every shipped job, the audit included, to run.
+            seed_loader=make_seed,
             alpaca=alpaca,
             finnhub=finnhub,
             massive=massive,
@@ -1761,6 +1785,14 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     assert cusips.calls and openfigi_fake.requests
     attempt = nport.latest_snapshot_attempt(lambda: Session(db_engine))
     assert attempt is not None and (attempt.status, attempt.rule) == ("refused", "weight_band")
+    # The sentiment audit body really ran on Saturday: one scheduled run,
+    # closed -- never left ``running`` -- and never a skip for want of bars.
+    from corollary.db.models import AuditRun
+
+    with Session(db_engine) as session:
+        runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
+    assert runs == [("scheduled", "succeeded")]
+    assert status["sentiment_audit"].skips == 0
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()

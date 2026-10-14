@@ -1838,16 +1838,31 @@ SENTIMENT_WINDOWS: tuple[str, ...] = ("1h", "1d")
 #: for example only once the window ended more than a week before the run, so
 #: a transient outage is retried next Saturday rather than recorded. The
 #: schema cannot tell a permanent gap from a transient one; the grader must.
+#:
+#: * ``duplicate_copy`` -- **also extends the spec** (orchestrator decision,
+#:   unit 6.4a's audit fix). One story stored twice -- an Alpaca and a Finnhub
+#:   copy linked into one canonical group by decision 3 -- is labelled once per
+#:   copy, but it is one event. The feed, Movers and the tradeability refresh
+#:   show one label per (group, ticker, source)
+#:   (:func:`corollary.data.news.signals.group_labels`), and the audit grades
+#:   that same one; every other copy gets this row, so it is recorded, never
+#:   counted toward a floor or an accuracy, and never reloaded.
 LABEL_SKIP_REASONS: tuple[str, ...] = (
     "off_watch_untradeable",
     "discovery_cap",
     "price_unavailable",
+    "duplicate_copy",
 )
 
 #: The skips that are decided by **membership** -- the label is in neither
 #: graded set -- and so carry no ``scope``. ``price_unavailable`` is not one:
 #: its label was in a graded set and only the bar was missing.
-LABEL_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = ("off_watch_untradeable", "discovery_cap")
+#: ``duplicate_copy`` is: the copy is in no graded set, its group's pick is.
+LABEL_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = (
+    "off_watch_untradeable",
+    "discovery_cap",
+    "duplicate_copy",
+)
 
 #: Which graded set one outcome's label was in, **as classified by the run
 #: that wrote it** (``label_outcome.scope``, unit 6.3). Not ``ACCURACY_SCOPES``:
@@ -1934,7 +1949,7 @@ _LABEL_OUTCOME_SHAPE = (
 )
 
 #: ``ck_label_outcome_scope``: ``label_outcome.scope`` is NULL **exactly** on
-#: the two membership skips (:data:`LABEL_MEMBERSHIP_SKIP_REASONS` -- the label
+#: the membership skips (:data:`LABEL_MEMBERSHIP_SKIP_REASONS` -- the label
 #: was in neither graded set) and one of :data:`LABEL_OUTCOME_SCOPES` on every
 #: other row, graded and ``price_unavailable`` alike. Any other skip reason
 #: matches neither branch and is refused. Every comparison is guarded with an

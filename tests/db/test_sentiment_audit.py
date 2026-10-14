@@ -38,6 +38,7 @@ from corollary.db.models import (
     AUDIT_CATEGORIES,
     AUDIT_RUN_STATUSES,
     AUDIT_RUN_TRIGGERS,
+    LABEL_MEMBERSHIP_SKIP_REASONS,
     LABEL_OUTCOME_SCOPES,
     LABEL_SKIP_REASONS,
     SENTIMENT_SOURCE_STATUSES,
@@ -200,6 +201,13 @@ def test_the_vocabularies_are_the_specs() -> None:
         "off_watch_untradeable",
         "discovery_cap",
         "price_unavailable",
+        # Unit 6.4a's audit fix: one grade per (group, ticker, source).
+        "duplicate_copy",
+    )
+    assert LABEL_MEMBERSHIP_SKIP_REASONS == (
+        "off_watch_untradeable",
+        "discovery_cap",
+        "duplicate_copy",
     )
     assert AUDIT_RUN_TRIGGERS == ("scheduled", "manual")
     assert AUDIT_RUN_STATUSES == ("running", "succeeded", "failed")
@@ -297,6 +305,9 @@ _SKIPPED_ACCEPTED: list[dict[str, object]] = [
     {"skip_reason": "price_unavailable", "scope": "watch"},
     {"skip_reason": "price_unavailable", "scope": "discovery", "window": "1h"},
     {"window": "1h"},
+    # A second stored copy of one story: no grade, no scope, no prices.
+    {"skip_reason": "duplicate_copy"},
+    {"skip_reason": "duplicate_copy", "window": "1h"},
 ]
 
 _OUTCOME_REFUSED: list[tuple[str, dict[str, object], str]] = [
@@ -353,6 +364,18 @@ _OUTCOME_REFUSED: list[tuple[str, dict[str, object], str]] = [
         "ck_label_outcome_scope",
     ),
     ("skipped", {"skip_reason": "price_unavailable"}, "ck_label_outcome_scope"),
+    # A duplicate copy is in no graded set, so it carries no scope...
+    (
+        "skipped",
+        {"skip_reason": "duplicate_copy", "scope": "watch"},
+        "ck_label_outcome_scope",
+    ),
+    # ...and no prices.
+    (
+        "skipped",
+        {"skip_reason": "duplicate_copy", "reference_price": Decimal("1")},
+        "ck_label_outcome_shape",
+    ),
     (
         "skipped",
         {"skip_reason": "price_unavailable", "scope": "all"},
@@ -989,6 +1012,7 @@ def test_create_all_and_upgrade_head_write_the_same_0014_ddl(tmp_path: Path) -> 
     assert "benchmark_return IS NOT NULL" in shape
     scope = next(c for c in label_outcome_clauses if "ck_label_outcome_scope" in c)
     assert "'discovery_cap'" in scope and "'price_unavailable'" in scope
+    assert "'duplicate_copy'" in skip_reason and "'duplicate_copy'" in scope
     audit_log_clauses = from_models[("table", "audit_log")][1]
     assert any("ck_audit_log_sentiment_row" in c for c in audit_log_clauses)
     running = from_models[("index", "uq_audit_run_one_running")][0]

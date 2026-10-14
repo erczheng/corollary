@@ -9,7 +9,7 @@ proven against the type the runner will actually pass.
 """
 
 import random
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -111,7 +111,11 @@ def label(
     published: datetime,
     labeled: datetime | None = None,
     source: str = "rules",
+    *,
+    group: int | None = None,
+    pick: bool = True,
 ) -> AuditLabel:
+    """A label; by default the only copy of its story -- its own group, and the pick."""
     return AuditLabel(
         label_id=label_id,
         ticker=ticker,
@@ -119,7 +123,14 @@ def label(
         direction=direction,
         published_at=published,
         labeled_at=published if labeled is None else labeled,
+        group_id=1000 + label_id if group is None else group,
+        group_pick=pick,
     )
+
+
+#: A session before every label here: a bare ``True``/``False`` verdict in a
+#: test means "this ticker's verdict, known well before the label".
+_LONG_AGO = date(2026, 1, 2)
 
 
 def run(
@@ -127,15 +138,21 @@ def run(
     bars: Iterable[Bar],
     *,
     watch: Collection[str] = ("AAPL", "MSFT", "SPY", "MARKET"),
-    tradeable: Mapping[str, bool] | None = None,
+    tradeable: Mapping[str, bool | Sequence[tuple[date, bool]]] | None = None,
     written: Collection[tuple[int, str]] = (),
+    claimed: Collection[tuple[int, str, str]] = (),
     run_at: datetime = RUN_AT,
 ) -> tuple[AuditPlan, GradeResult]:
+    history = {
+        ticker: ((_LONG_AGO, verdict),) if isinstance(verdict, bool) else tuple(verdict)
+        for ticker, verdict in ({} if tradeable is None else tradeable).items()
+    }
     plan = plan_audit(
         list(labels),
         watch_universe=watch,
-        tradeable={} if tradeable is None else tradeable,
+        tradeable=history,
         written=written,
+        claimed_groups=claimed,
         run_at=run_at,
     )
     return plan, grade(plan, list(bars))
@@ -1936,3 +1953,234 @@ def test_a_status_row_must_match_its_state() -> None:
         CurrentStatus(source="massive", status=SourceStatus.UNAUDITED, changed_at=DEMOTED_AT)
     with pytest.raises(ValueError, match="changed_at"):
         CurrentStatus(source="massive", status=SourceStatus.DEMOTED, changed_at=None)
+
+
+# --------------------------------------------------------------------- #
+# One grade per (group, ticker, source) -- unit 6.4a's audit fix
+# --------------------------------------------------------------------- #
+
+
+def _copies(*, canonical_pick: bool = True) -> list[AuditLabel]:
+    """One AAPL story stored twice (decision 3), each copy labelled by rules.
+
+    Label 1 sits on the canonical article, label 2 on the member; ``group_labels``
+    picks the canonical's, so by default label 1 is the pick.
+    """
+    return [
+        label(1, "AAPL", BULL, _TUESDAY_1015, group=77, pick=canonical_pick),
+        label(2, "AAPL", BULL, _TUESDAY_1015, group=77, pick=not canonical_pick),
+    ]
+
+
+def test_two_copies_of_one_story_yield_one_graded_label_and_one_duplicate() -> None:
+    bars = _two_point_bars("AAPL", "100", "102") + _two_point_bars("SPY", "500", "505")
+    plan, result = run(_copies(), bars)
+    assert {g.label.label_id for g in plan.to_grade} == {1}
+    records = by_key(result)
+    assert records[(1, "1h")].skip_reason is None and records[(1, "1h")].correct is True
+    for window in ("1h", "1d"):
+        dup = records[(2, window)]
+        assert dup.skip_reason is SkipReason.DUPLICATE_COPY
+        assert dup.scope is None and dup.reference_at is None and dup.reference_price is None
+        assert dup.outcome_price is None and dup.excess_return is None and dup.correct is None
+    # The duplicate's rows come with the plan, needing no bars, and are its only rows.
+    assert {(r.label_id, r.window) for r in plan.skipped} == {(2, "1h"), (2, "1d")}
+
+
+def test_the_pick_is_group_labels_pick_not_the_lowest_label_id() -> None:
+    """``group_pick`` is ``signals.group_labels``' choice, carried in; never re-derived."""
+    bars = _two_point_bars("AAPL", "100", "102") + _two_point_bars("SPY", "500", "505")
+    plan, result = run(_copies(canonical_pick=False), bars)
+    assert {g.label.label_id for g in plan.to_grade} == {2}
+    assert by_key(result)[(1, "1h")].skip_reason is SkipReason.DUPLICATE_COPY
+
+
+def test_a_duplicate_is_per_ticker_and_per_source() -> None:
+    """One group: another ticker, or another source's label, is its own pick."""
+    labels = [
+        *_copies(),
+        label(3, "MSFT", BULL, _TUESDAY_1015, group=77, pick=True),
+        label(4, "AAPL", BULL, _TUESDAY_1015, source="massive", group=77, pick=True),
+    ]
+    plan, result = run(labels, [])
+    assert {g.label.label_id for g in plan.to_grade} == {1, 3, 4}
+    assert _skips(result, SkipReason.DUPLICATE_COPY) == {2}
+
+
+def test_a_duplicate_is_written_before_its_windows_mature() -> None:
+    """It needs no bars and no schedule, so it is decided the first time it is seen."""
+    early = _TUESDAY_1015 + timedelta(minutes=5)
+    plan, result = run(_copies(), [], run_at=early)
+    assert plan.to_grade == ()
+    assert {(r.label_id, r.window, r.skip_reason) for r in result.records} == {
+        (2, "1h", SkipReason.DUPLICATE_COPY),
+        (2, "1d", SkipReason.DUPLICATE_COPY),
+    }
+
+
+def test_a_later_labelled_canonical_does_not_regrade_a_claimed_group() -> None:
+    """The member was graded first; the canonical copy's label arrives later.
+
+    ``group_labels`` now picks the canonical, but the group already holds an
+    outcome row, so the canonical copy is the duplicate and the choice stands.
+    """
+    canonical = label(5, "AAPL", BULL, _TUESDAY_1015, group=77, pick=True)
+    bars = _two_point_bars("AAPL", "100", "102") + _two_point_bars("SPY", "500", "505")
+    # The member's label is fully written and so not reloaded: only the claim says so.
+    plan, result = run([canonical], bars, claimed=[(77, "AAPL", "rules")])
+    assert plan.to_grade == ()
+    assert {(r.label_id, r.window) for r in result.records} == {(5, "1h"), (5, "1d")}
+    assert _skips(result, SkipReason.DUPLICATE_COPY) == {5}
+
+
+def test_a_partly_written_member_keeps_its_group_against_a_later_canonical() -> None:
+    """The member's 1h is written and its 1d pending: it is still the group's label."""
+    member = label(2, "AAPL", BULL, _TUESDAY_1015, group=77, pick=False)
+    canonical = label(5, "AAPL", BULL, _TUESDAY_1015, group=77, pick=True)
+    plan, result = run([member, canonical], [], written=[(2, "1h")])
+    assert {(g.label.label_id, g.window) for g in plan.to_grade} == {(2, "1d")}
+    assert _skips(result, SkipReason.DUPLICATE_COPY) == {5}
+    # A claim on the group does not demote the label that made it.
+    plan, _ = run([member, canonical], [], written=[(2, "1h")], claimed=[(77, "AAPL", "rules")])
+    assert {(g.label.label_id, g.window) for g in plan.to_grade} == {(2, "1d")}
+
+
+def test_a_claim_on_another_ticker_or_source_does_not_touch_the_group() -> None:
+    plan, result = run(
+        _copies(),
+        [],
+        claimed=[(77, "MSFT", "rules"), (77, "AAPL", "massive"), (78, "AAPL", "rules")],
+    )
+    assert {g.label.label_id for g in plan.to_grade} == {1}
+    assert _skips(result, SkipReason.DUPLICATE_COPY) == {2}
+
+
+def test_duplicates_count_nowhere_in_accuracy() -> None:
+    bars = _two_point_bars("AAPL", "100", "102") + _two_point_bars("SPY", "500", "505")
+    _, result = run(_copies(), bars)
+    made: list[GradedOutcome] = []
+    for r in result.records:
+        g = graded_outcome(
+            source="rules",
+            window=r.window,
+            scope=None if r.scope is None else r.scope.value,
+            reference_at=r.reference_at,
+            correct=r.correct,
+            skip_reason=None if r.skip_reason is None else r.skip_reason.value,
+            direction=BULL,
+        )
+        if g is not None:
+            made.append(g)
+    assert len(made) == 1
+    rows = compute_accuracy(status(SourceStatus.ACTIVE, source="rules"), made, RUN_AT)
+    trailing = AccuracyBasis("trailing_28d")
+    assert counts(row(rows, "1h", trailing, AccuracyScope("all"))) == (1, 1, 0)
+    assert counts(row(rows, "1d", trailing, AccuracyScope("all"))) == (0, 0, 0)
+
+
+def test_a_duplicate_takes_no_discovery_slot_and_no_unverdicted_count() -> None:
+    labels = [
+        label(1, "UNSEEN", BULL, _TUESDAY_1015, group=9, pick=True),
+        label(2, "UNSEEN", BULL, _TUESDAY_1015, group=9, pick=False),
+        label(3, "XYZ", BULL, _TUESDAY_1015, group=8, pick=True),
+        label(4, "XYZ", BULL, _TUESDAY_1015, group=8, pick=False),
+        label(5, "XYZ", BEAR, _TUESDAY_1015, group=7, pick=False),
+    ]
+    plan, result = run(labels, [], tradeable={"XYZ": True})
+    assert plan.unverdicted_label_counts == (("UNSEEN", 1),)
+    assert {g.label.label_id for g in plan.to_grade} == {3}
+    assert _skips(result, SkipReason.DUPLICATE_COPY) == {2, 4, 5}
+
+
+def test_a_group_with_two_picks_is_refused() -> None:
+    """``group_labels`` picks exactly one per (group, ticker, source)."""
+    labels = [
+        label(1, "AAPL", BULL, _TUESDAY_1015, group=77),
+        label(2, "AAPL", BULL, _TUESDAY_1015, group=77),
+    ]
+    with pytest.raises(ValueError, match="pick"):
+        run(labels, [])
+
+
+# --------------------------------------------------------------------- #
+# The verdict is the label's, not the run's (Q7) -- unit 6.4a's audit fix
+# --------------------------------------------------------------------- #
+
+#: The sessions around ``_TUESDAY_1015``'s.
+_MONDAY, _FRIDAY = date(2026, 10, 5), date(2026, 10, 9)
+
+
+def test_the_verdict_is_the_newest_on_or_before_the_labels_reference_session() -> None:
+    """Failing on the label's session, passing later: untradeable. And the reverse."""
+    bars = _two_point_bars("XYZ", "10", "11") + _two_point_bars("SPY", "500", "505")
+    xyz = [label(1, "XYZ", BULL, _TUESDAY_1015)]
+
+    _, result = run(xyz, bars, tradeable={"XYZ": [(_MONDAY, False), (_FRIDAY, True)]})
+    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == {1}
+
+    _, result = run(xyz, bars, tradeable={"XYZ": [(_MONDAY, True), (_FRIDAY, False)]})
+    record = by_key(result)[(1, "1h")]
+    assert record.skip_reason is None and record.scope is Scope.DISCOVERY
+
+
+def test_a_verdict_for_the_reference_session_itself_counts() -> None:
+    bars = _two_point_bars("XYZ", "10", "11") + _two_point_bars("SPY", "500", "505")
+    _, result = run(
+        [label(1, "XYZ", BULL, _TUESDAY_1015)], bars, tradeable={"XYZ": [(_TUESDAY, True)]}
+    )
+    assert by_key(result)[(1, "1h")].scope is Scope.DISCOVERY
+
+
+def test_the_reference_session_not_the_publication_date_picks_the_verdict() -> None:
+    """Published Saturday, referenced Monday's open: Monday's verdict applies."""
+    saturday = et(2026, 10, 3, 12, 0)
+    labels = [label(1, "XYZ", BULL, saturday)]
+    _, result = run(labels, [], tradeable={"XYZ": [(date(2026, 10, 2), True), (_MONDAY, False)]})
+    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == {1}
+
+
+def test_verdicts_only_after_the_label_leave_it_unverdicted() -> None:
+    """No verdict on or before its session: the wait-then-fail-closed path."""
+    labels = [label(1, "XYZ", BULL, _TUESDAY_1015)]
+    plan, result = run(labels, [], tradeable={"XYZ": [(_FRIDAY, True)]})
+    assert result.records == ()
+    assert plan.unverdicted_tickers == ("XYZ",)
+    last_end = window_end(_TUESDAY_1015, "1d")
+    after = last_end + PRICE_UNAVAILABLE_AFTER + timedelta(seconds=1)
+    _, result = run(labels, [], tradeable={"XYZ": [(_FRIDAY, True)]}, run_at=after)
+    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == {1}
+
+
+def test_two_labels_on_one_ticker_each_read_their_own_session() -> None:
+    labels = [
+        label(1, "XYZ", BULL, _TUESDAY_1015),
+        label(2, "XYZ", BULL, et(2026, 10, 9, 10, 15)),
+    ]
+    run_at = et(2026, 10, 13, 10, 0)
+    plan, result = run(
+        labels,
+        [],
+        tradeable={"XYZ": [(_MONDAY, False), (date(2026, 10, 8), True)]},
+        run_at=run_at,
+    )
+    assert {g.label.label_id for g in plan.to_grade} == {2}
+    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == {1}
+
+
+def test_a_verdict_history_is_read_in_any_order() -> None:
+    labels = [label(1, "XYZ", BULL, _TUESDAY_1015)]
+    history = [(_MONDAY, False), (_FRIDAY, True), (date(2026, 9, 1), True)]
+    first, _ = run(labels, [], tradeable={"XYZ": history})
+    second, _ = run(labels, [], tradeable={"XYZ": list(reversed(history))})
+    assert first == second
+    assert first.skipped and first.skipped[0].skip_reason is SkipReason.OFF_WATCH_UNTRADEABLE
+
+
+def test_two_verdicts_for_one_session_are_refused() -> None:
+    """``ticker_tradeability``'s primary key is ``(ticker, session_date)``."""
+    with pytest.raises(ValueError, match="XYZ"):
+        run(
+            [label(1, "XYZ", BULL, _TUESDAY_1015)],
+            [],
+            tradeable={"XYZ": [(_MONDAY, True), (_MONDAY, False)]},
+        )

@@ -178,12 +178,13 @@ from corollary.api.schemas import (
     WatchList,
 )
 from corollary.data.news.assets import AssetDirectoryHolder
-from corollary.data.news.discovery import CachedVerdict, Candidate, discover
+from corollary.data.news.discovery import Candidate, discover
 from corollary.data.news.labels import SOURCE_TIER, Direction, LabelSource, SentimentTier
 from corollary.data.news.signals import (
     EASTERN,
     LOOKBACK_DAYS,
     group_labels,
+    latest_verdicts,
     lookback_start,
     stored_signals,
 )
@@ -262,9 +263,6 @@ TRADEABILITY_JOB: Final = "tradeability_cache"
 #: measured on the job definition's schedule (``JobStatus.cadence``), so a
 #: two-rate job is judged at the rate it was actually meant to run at.
 STALE_AFTER_SLOTS: Final = 3
-
-#: Tickers per ``IN (...)`` when reading the tradeability cache.
-_VERDICT_CHUNK: Final = 500
 
 #: The audit values for a watch change. ``web/src/lib/settings.ts``'s
 #: ``auditFieldLabel`` and ``mockData.ts``'s audit fixture assume exactly
@@ -611,69 +609,6 @@ def read_news(
 # --------------------------------------------------------------------------
 
 
-def _verdict(row: TickerTradeability, correlation_id: str) -> CachedVerdict:
-    """A cache row as the read path needs it. An unreadable row fails closed, logged."""
-    failures = tuple(token for token in row.failures.split(",") if token)
-    try:
-        return CachedVerdict(
-            ticker=row.ticker,
-            session_date=row.session_date,
-            passes=row.passes,
-            avg_volume_20d=row.avg_volume_20d,
-            last_close=row.last_close,
-            sessions_available=row.sessions_available,
-            failures=failures,
-            checked_at=row.checked_at,
-        )
-    except ValueError as exc:
-        logger.error(
-            "a tradeability cache row cannot be read; the ticker is treated as failing",
-            extra={
-                "event": "discovery_verdict_unreadable",
-                "rule": "decision 21: a ticker is a candidate only on a verdict that passes",
-                "ticker": row.ticker,
-                "session_date": row.session_date.isoformat(),
-                "error": str(exc),
-                "correlation_id": correlation_id,
-            },
-        )
-        return CachedVerdict(
-            ticker=row.ticker,
-            session_date=row.session_date,
-            passes=False,
-            avg_volume_20d=None,
-            last_close=None,
-            sessions_available=row.sessions_available,
-            failures=("unreadable_cache_row",),
-            checked_at=row.checked_at,
-        )
-
-
-def _latest_verdicts(
-    session: Session, tickers: Iterable[str], today: date, correlation_id: str
-) -> dict[str, CachedVerdict]:
-    """Each ticker's newest cached verdict for a session on or before ``today``.
-
-    Read from ``ticker_tradeability`` only -- never a vendor. The newest row
-    is chosen in Python, by ``session_date``, which is a real ``Date``
-    column; nothing here compares ``Money``.
-    """
-    wanted = sorted(set(tickers))
-    newest: dict[str, TickerTradeability] = {}
-    for start in range(0, len(wanted), _VERDICT_CHUNK):
-        chunk = wanted[start : start + _VERDICT_CHUNK]
-        rows = session.scalars(
-            select(TickerTradeability)
-            .where(TickerTradeability.ticker.in_(chunk))
-            .where(TickerTradeability.session_date <= today)
-        )
-        for row in rows:
-            held = newest.get(row.ticker)
-            if held is None or row.session_date > held.session_date:
-                newest[row.ticker] = row
-    return {ticker: _verdict(row, correlation_id) for ticker, row in newest.items()}
-
-
 def _job_failing_or_skipped(status: JobStatus) -> bool:
     """The job's most recent completed outcome was a failure or a skip.
 
@@ -865,7 +800,7 @@ def read_movers(
     universe, _ = _universe(session, seed, positions, correlation_id)
     signals = stored_signals(session, since)
     off_watch = {s.ticker for s in signals if s.ticker not in universe}
-    verdicts = _latest_verdicts(session, off_watch, today, correlation_id)
+    verdicts = latest_verdicts(session, off_watch, today, correlation_id)
     found = discover(signals, watched=universe, verdicts=verdicts, since=since)
     feeds = _feed_freshness(session, status, now)
     stale = [feed for feed in feeds if feed.stale]

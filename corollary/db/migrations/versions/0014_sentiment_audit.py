@@ -49,6 +49,14 @@ and 14, and the design's *Database* section):
   unmerged, and step 6 should carry one migration to renumber at merge; a
   database already at an unamended 0014 must be downgraded to 0013 and
   upgraded again (it holds no graded rows yet -- the runner is unit 6.4).
+
+  **Amended in place again for unit 6.4a's audit fix: ``duplicate_copy``**,
+  a fourth ``skip_reason`` and a third membership skip (scope NULL, no
+  prices) -- an orchestrator decision extending the spec. One story stored
+  as two copies linked by decision 3 is labelled once per copy; the audit
+  grades the copy ``signals.group_labels`` picks and records each other copy
+  as ``duplicate_copy``, so one event is never counted twice. Amended in
+  place for the same reason as ``scope``.
 * ``sentiment_accuracy(audit_run_id, source, window, basis, scope, graded,
   correct, neutral)``, primary key on the first five -- the spec's UNIQUE.
   Counts only, whole and non-negative, ``correct <= graded``.
@@ -140,6 +148,7 @@ _SKIP_REASONS: tuple[str, ...] = (
     "off_watch_untradeable",
     "discovery_cap",
     "price_unavailable",
+    "duplicate_copy",
 )
 _TRIGGERS: tuple[str, ...] = ("scheduled", "manual")
 _RUN_STATUSES: tuple[str, ...] = ("running", "succeeded", "failed")
@@ -147,7 +156,11 @@ _BASES: tuple[str, ...] = ("trailing_28d", "since_demotion")
 _SCOPES: tuple[str, ...] = ("all", "watch", "discovery")
 _SOURCES: tuple[str, ...] = ("rules", "massive")
 _SOURCE_STATUSES: tuple[str, ...] = ("unaudited", "active", "demoted")
-_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = ("off_watch_untradeable", "discovery_cap")
+_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = (
+    "off_watch_untradeable",
+    "discovery_cap",
+    "duplicate_copy",
+)
 _OUTCOME_SCOPES: tuple[str, ...] = ("watch", "discovery")
 
 _AUDIT_CATEGORIES_BEFORE: tuple[str, ...] = (
