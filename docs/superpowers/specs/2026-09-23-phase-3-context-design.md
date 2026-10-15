@@ -2848,9 +2848,36 @@ discovery panel.**
     goes back to the owner.
 
 **6. The self-audit and the demotion state.**
-- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 1 (for
-  the two alerts), 5. Its transitions do not merge while a below-1.5 result
-  from step 5's re-measurement is still with the owner (Q22).
+- *Status:* **code landed 2026-10-15; "the run" waits on the first real
+  Saturday (2026-10-17 at the earliest).** Commits: 4ee9925 the schema
+  (migration 0014, provisional under Q22: `label_outcome`, `audit_run`,
+  `sentiment_accuracy`, `sentiment_source_status`, the `sentiment` category,
+  the two transition routes and `sentiment_audit_requested`), 8bf9fb1
+  session-minute arithmetic, 0df3f8f the pure grader, fde658f accuracy and
+  decision 13's transitions, 63a9b7e and 06e92e0 the Saturday 10:00 ET runner,
+  b0333b4 and e3797f2 `GET`/`POST /api/settings/sentiment` with the feed and
+  Movers reading the stored status, c576d67 and the commit after it the
+  Settings readout. **Done-criteria:** Settings, the transitions (every row
+  and boundary of decision 13's table, with its audit row and notice) and
+  the marker are met in code and test; *the run* is not, until a real
+  Saturday run writes its row. Step 5's re-measurement held the Q22 gate on
+  its mean (2.4 a session; median 1.5), so the transitions are not held
+  back by Q22's letter. **Decisions taken in this step, for the owner:**
+  `label_outcome.skip_reason` gained `price_unavailable` and
+  `duplicate_copy` beyond decision 12's two, and `label_outcome.scope`
+  (watch/discovery) is stored so a later watch-list change cannot rewrite
+  an old split; one label is graded per story, ticker and source, so a
+  syndicated story is not counted once per vendor; the reference instant is
+  `max(published_at, labeled_at)`, falling back to `labeled_at` when the
+  vendor stamp is over 15 minutes later; a fallback first trade is bounded
+  at 30 minutes and SPY is taken at that same instant; an exact-zero excess
+  is incorrect; a discovery label is graded on the tradeability verdict
+  dated on or before its own session; missing prices wait 7 days (28 for a
+  transient fetch failure) before `price_unavailable`; a degraded watch
+  universe (positions never or not recently read, seed missing or
+  malformed) skips the run; a manual run answers 202 and notifies Discord
+  (decision 20), limited to one an hour from the database. *Depends on:*
+  1 (for the two alerts), 5.
 - *Carries:* Q5 (excess-return scoring, neutral excluded), Q6 (per source,
   52/66 hysteresis, automatic re-promotion, ≥30 / ≥100 floors), Q7 (no
   backfill) — all decided. Q9 widens what is graded (decision 12: discovery
