@@ -968,10 +968,14 @@ def create_app(
             if refresher is not None:
                 await refresher.aclose()
             if context_scheduler is not None:
-                await context_scheduler.aclose()
-                # A manual audit run in flight is stopped like a job: its row
-                # stays ``running`` and the next run closes it as abandoned.
+                # No new manual run from here on: the route refuses without
+                # context services, so none can start while the jobs stop.
                 app.state.context_services = None
+                await context_scheduler.aclose()
+                # A manual audit run in flight is stopped like a job: the
+                # runner closes its row ``failed`` on the cancel; only a row
+                # whose commit it never saw is left ``running``, for the next
+                # run to close as abandoned past ``ABANDONED_RUN_AFTER``.
                 manual: asyncio.Task[object] | None = app.state.sentiment_audit_task
                 if manual is not None and not manual.done():
                     manual.cancel()

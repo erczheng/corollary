@@ -24,6 +24,7 @@ from corollary.engine import scheduler
 from corollary.engine.scheduler import (
     SENTIMENT_AUDIT_AT,
     SENTIMENT_AUDIT_DAYS,
+    SENTIMENT_AUDIT_JOB,
     AtTime,
     ContextServices,
     HeldPositionUnderlyings,
@@ -71,7 +72,7 @@ def _audit_job(
         job.name: job
         for job in context_jobs(services, clock=clock or TickingClock(SATURDAY_10))
     }
-    return jobs["sentiment_audit"]
+    return jobs[SENTIMENT_AUDIT_JOB]
 
 
 def test_the_audit_runs_saturday_at_1000_eastern(db_engine: Engine) -> None:
@@ -241,3 +242,57 @@ def test_positions_past_the_staleness_bound_skip_and_write_no_run(db_engine: Eng
         assert session.scalars(select(AuditRun)).all() == []
         assert session.scalars(select(LabelOutcome)).all() == []
     assert bars.calls == []
+
+
+# ------------------------------ unit 6.4b fix: on_opened, and one job name
+
+
+def test_run_now_threads_on_opened_and_calls_it_with_the_run_id(db_engine: Engine) -> None:
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    seen: list[tuple[int, str]] = []
+
+    def on_opened(run_id: int) -> None:
+        with Session(db_engine) as session:
+            row = session.get(AuditRun, run_id)
+            assert row is not None
+            seen.append((run_id, row.status))
+
+    result = asyncio.run(
+        run_sentiment_audit_now(
+            services, trigger="manual", clock=TickingClock(SATURDAY_10), on_opened=on_opened
+        )
+    )
+    assert seen == [(result.run_id, "running")]
+
+
+def test_run_now_never_calls_on_opened_for_a_run_that_never_opened(db_engine: Engine) -> None:
+    seen: list[int] = []
+    # No provider: refused before the runner.
+    with pytest.raises(SentimentAuditUnavailable):
+        asyncio.run(
+            run_sentiment_audit_now(
+                _services(db_engine, None), trigger="manual", on_opened=seen.append
+            )
+        )
+    # A degraded universe: refused before any row.
+    degraded = _services(db_engine, FakeBars(), seed_loader=_no_seed)
+    with pytest.raises(SentimentAuditUnavailable):
+        asyncio.run(run_sentiment_audit_now(degraded, trigger="manual", on_opened=seen.append))
+    assert seen == []
+
+
+def test_the_sentiment_audit_job_name_is_one_shipped_constant(db_engine: Engine) -> None:
+    """The route serves this job's next slot by name; a rename here must reach it."""
+    from corollary.api.routes import sentiment as sentiment_routes
+
+    names = [job.name for job in context_jobs(_services(db_engine, None))]
+    assert names.count(SENTIMENT_AUDIT_JOB) == 1
+    assert sentiment_routes.SENTIMENT_AUDIT_JOB is SENTIMENT_AUDIT_JOB
+    # ``is`` alone proves little -- CPython interns identifier-like literals --
+    # so the route must hold no copy of the name of its own.
+    import inspect
+    import re
+
+    source = inspect.getsource(sentiment_routes)
+    assert not re.search(rf"[\"']{SENTIMENT_AUDIT_JOB}[\"']", source)

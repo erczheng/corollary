@@ -6,17 +6,20 @@ become eligible."* And the design's *API*: the manual trigger is limited to
 once an hour, and there is **no reinstate route** -- the audit is the only
 writer of the status (Q6).
 
-The ``POST`` runs the real runner (``run_sentiment_audit``) over a database
-with no labels, so a run grades nothing and succeeds in milliseconds; only
-the scheduler's ``sentiment_audit_deps`` is replaced, because building real
+The ``POST`` runs the real entry point (the scheduler's
+``run_sentiment_audit_now``, over the real runner) on a database with no
+labels, so a run grades nothing and succeeds in milliseconds; only the
+scheduler's ``sentiment_audit_deps`` is replaced, because building real
 ``ContextServices`` would construct vendor clients.
 """
 
 import inspect
 import logging
+import re
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,14 +32,15 @@ from corollary.api import operator as operator_module
 from corollary.api.app import create_app, no_socket_supervisor
 from corollary.api.deps import ServiceRegistry, scheduler_status
 from corollary.api.routes import sentiment as sentiment_routes
-from corollary.api.routes.sentiment import MANUAL_AUDIT_INTERVAL, SENTIMENT_AUDIT_JOB, audit_now
+from corollary.api.routes.sentiment import MANUAL_AUDIT_INTERVAL, audit_now
 from corollary.data.news import audit_runner
 from corollary.data.news.audit import DEMOTION_FLOOR, REPROMOTION_FLOOR
 from corollary.data.news.audit_runner import SentimentAuditDeps, WatchUniverseUnavailable
 from corollary.data.providers.interface import Bar
 from corollary.db.models import AuditRun, SentimentSourceStatus
 from corollary.engine.runtime import OperatorNotice
-from corollary.engine.scheduler import JobStatus
+from corollary.engine import scheduler as scheduler_module
+from corollary.engine.scheduler import SENTIMENT_AUDIT_JOB, JobStatus
 
 from .news_support import add_accuracy, add_audit_run, set_source_status
 
@@ -91,9 +95,15 @@ def _arm(
     monkeypatch: pytest.MonkeyPatch,
     deps: SentimentAuditDeps | None,
 ) -> None:
-    """Give the app context services, and the audit the deps the test chose."""
+    """Give the app context services, and the audit the deps the test chose.
+
+    Patched on the scheduler, which ``run_sentiment_audit_now`` reads it
+    from -- the route composes nothing of its own.
+    """
     app.state.context_services = object()
-    monkeypatch.setattr(sentiment_routes, "sentiment_audit_deps", lambda services: deps)
+    monkeypatch.setattr(
+        scheduler_module, "sentiment_audit_deps", lambda services, clock=None: deps
+    )
 
 
 def _wait_for_run(app: FastAPI) -> None:
@@ -147,6 +157,7 @@ def test_unaudited_sources_say_never_audited_and_invent_no_date(
         assert source["status"] == "unaudited"
         assert source["changedAt"] is None
         assert source["neverAudited"] is True
+        assert source["statusMissing"] is False
         assert source["reason"] is None
         assert source["accuracy"] == []
         assert source["eligibility"] == {
@@ -304,6 +315,30 @@ def test_a_source_demoted_by_the_latest_run_has_counted_nothing_since(
     }
     # The figure that demoted it is still shown, on its own basis.
     assert [a["basis"] for a in rules["accuracy"]] == ["trailing_28d", "trailing_28d"]
+
+
+def test_a_missing_status_row_says_so_rather_than_reading_as_never_audited(
+    sentiment_client: TestClient, db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fix L6: a damaged database is not a clean slate. The display fallback
+    stays ``unaudited``, and ``statusMissing`` states that it is a fallback."""
+    with Session(db_engine) as session:
+        row = session.get(SentimentSourceStatus, "massive")
+        assert row is not None
+        session.delete(row)
+        session.commit()
+    with caplog.at_level(logging.ERROR):
+        body = sentiment_client.get(SENTIMENT).json()
+    massive = _source(body, "massive")
+    assert massive["statusMissing"] is True
+    assert massive["neverAudited"] is False  # missing is not "never audited"
+    assert massive["status"] == "unaudited"
+    assert _source(body, "rules")["statusMissing"] is False
+    assert [
+        r.__dict__["source"]
+        for r in caplog.records
+        if r.__dict__.get("event") == "sentiment_source_status_missing"
+    ] == ["massive"]
 
 
 def test_next_run_is_the_scheduled_jobs_next_slot_in_utc(
@@ -506,14 +541,16 @@ def test_a_manual_run_is_202_runs_in_the_background_and_notifies(
     _arm(app, monkeypatch, _deps(db_engine))
     response = sentiment_client.post(AUDIT)
     assert response.status_code == 202, response.text
-    assert response.json() == {
-        "status": "started",
-        "trigger": "manual",
-        "requestedAt": "2026-10-14T15:00:00Z",
-    }
     _wait_for_run(app)
     (run,) = _runs(db_engine)
     assert (run.trigger, run.status) == ("manual", "succeeded")
+    # The 202 names the row the run opened: it went out after that row existed.
+    assert response.json() == {
+        "status": "started",
+        "trigger": "manual",
+        "runId": run.id,
+        "requestedAt": "2026-10-14T15:00:00Z",
+    }
 
     (notice,) = delivered
     assert notice.event == "sentiment_audit_requested"
@@ -525,6 +562,83 @@ def test_a_manual_run_is_202_runs_in_the_background_and_notifies(
     assert body["lastRun"]["id"] == run.id
     assert body["lastRun"]["trigger"] == "manual"
     assert datetime.fromisoformat(body["manualAvailableAt"]) == NOW + MANUAL_AUDIT_INTERVAL
+
+
+def _notices(monkeypatch: pytest.MonkeyPatch) -> list[OperatorNotice]:
+    delivered: list[OperatorNotice] = []
+    monkeypatch.setattr(
+        operator_module, "deliver_notice", lambda runtime, notice: delivered.append(notice)
+    )
+    return delivered
+
+
+def test_a_row_landing_after_the_routes_check_is_a_409_not_a_202(
+    app: FastAPI,
+    sentiment_client: TestClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fix L1: the universe read returned, but another process's ``running``
+    row landed before this run's insert, so the runner refused at step a. The
+    run never opened a row: no 202, and no "started" notice."""
+    delivered = _notices(monkeypatch)
+    deps = _deps(db_engine)
+    original = deps.watch_universe
+
+    async def universe_then_a_rival_row() -> Collection[str]:
+        members = await original()
+        add_audit_run(db_engine, started_at=NOW - timedelta(seconds=1), finished_at=None,
+                      status="running", trigger="scheduled")
+        return members
+
+    _arm(app, monkeypatch, SentimentAuditDeps(
+        session_factory=deps.session_factory, bars=deps.bars,
+        watch_universe=universe_then_a_rival_row, emit=deps.emit, clock=deps.clock,
+    ))
+    with caplog.at_level(logging.INFO):
+        response = sentiment_client.post(AUDIT)
+    assert response.status_code == 409, response.text
+    assert delivered == []
+    assert [r.trigger for r in _runs(db_engine)] == ["scheduled"]  # the rival's only
+    _assert_logged(caplog, 409)
+    # Fix L3: already logged as a refusal, so never an ERROR "did not succeed".
+    assert not [
+        r for r in caplog.records
+        if r.__dict__.get("event") == "sentiment_audit_manual_failed"
+    ]
+    # Nor an ERROR from the runner's step a: a refusal is not a failure.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_a_run_that_fails_reading_its_universe_is_a_500_and_notifies_nothing(
+    app: FastAPI, sentiment_client: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its row is opened only to be closed ``failed``: it never started."""
+    delivered = _notices(monkeypatch)
+    _arm(app, monkeypatch, _deps(db_engine, universe_error=RuntimeError("SYNTHETIC")))
+    response = sentiment_client.post(AUDIT)
+    assert response.status_code == 500, response.text
+    assert "SYNTHETIC" not in response.text
+    assert delivered == []
+    assert [(r.trigger, r.status) for r in _runs(db_engine)] == [("manual", "failed")]
+
+
+def test_the_runners_lock_refusal_is_not_logged_as_a_failed_run(
+    app: FastAPI,
+    sentiment_client: TestClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _arm(app, monkeypatch, _deps(db_engine))
+    assert audit_runner._RUN_LOCK.acquire(blocking=False)
+    try:
+        with caplog.at_level(logging.INFO):
+            assert sentiment_client.post(AUDIT).status_code == 409
+    finally:
+        audit_runner._RUN_LOCK.release()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 def test_a_refusal_emits_no_notice(
@@ -626,18 +740,77 @@ def test_a_reinstate_request_changes_nothing(
         assert row is not None and row.status == "demoted"
 
 
-def test_no_api_module_writes_the_source_status() -> None:
-    """Nothing under ``corollary/api`` assigns a ``sentiment_source_status`` field."""
-    import re
-    from pathlib import Path
+#: An attribute assignment to a ``SentimentSourceStatus`` column -- only
+#: meaningful in a module that names the model.
+_STATUS_FIELD_WRITE = re.compile(r"\.(status|changed_at|audit_run_id|reason)\s*=(?!=)")
+#: A write through the model itself, anywhere: a bulk ``update``/``insert``/
+#: ``delete`` on it, or a row built to be added or merged.
+_STATUS_MODEL_WRITE = re.compile(
+    r"\b(update|insert|delete)\s*\(\s*(\w+\.)*SentimentSourceStatus\b"
+    r"|\bSentimentSourceStatus\s*\("
+    r"|\bSentimentSourceStatus\b[^\n]*\)\s*\.\s*(update|delete)\s*\("
+    r"|\bSentimentSourceStatus\s*\.\s*__table__\s*\.\s*(update|insert|delete)\b"
+)
+#: A raw SQL write to the table, which names no model at all.
+_STATUS_SQL_WRITE = re.compile(
+    r"\b(update|insert\s+(or\s+\w+\s+)?into|replace\s+into|delete\s+from)\s+"
+    r"(\w+\.)?[\"'`\[]?sentiment_source_status\b",
+    re.IGNORECASE,
+)
 
+
+def _writes_the_source_status(text: str) -> bool:
+    return bool(
+        ("SentimentSourceStatus" in text and _STATUS_FIELD_WRITE.search(text))
+        or _STATUS_MODEL_WRITE.search(text)
+        or _STATUS_SQL_WRITE.search(text)
+    )
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "row: SentimentSourceStatus\nrow.status = 'active'",
+        "row: SentimentSourceStatus\nrow.reason = 'by hand'",
+        "row: SentimentSourceStatus\nrow.changed_at = now",
+        "session.execute(update(SentimentSourceStatus).values(status='active'))",
+        "session.execute(insert( SentimentSourceStatus ).values(source='rules'))",
+        "session.add(SentimentSourceStatus(source='rules', status='active'))",
+        "session.execute(text(\"UPDATE sentiment_source_status SET status = 'active'\"))",
+        "conn.exec_driver_sql('insert or replace into sentiment_source_status VALUES (1)')",
+        "conn.execute(text('DELETE FROM \"sentiment_source_status\"'))",
+        "session.query(SentimentSourceStatus).update({'status': 'active'})",
+        "session.execute(update(models.SentimentSourceStatus).values(status='x'))",
+        "conn.execute(SentimentSourceStatus.__table__.update())",
+        "conn.execute(text('UPDATE main.sentiment_source_status SET status = 1'))",
+    ],
+)
+def test_the_source_status_write_scan_catches_each_form(snippet: str) -> None:
+    """The scan below is only as good as what it can see: prove each form fails it."""
+    assert _writes_the_source_status(snippet)
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "rows = session.scalars(select(SentimentSourceStatus))",
+        "row = session.get(SentimentSourceStatus, 'massive')\nif row.status == 'active': pass",
+        "text('SELECT status FROM sentiment_source_status')",
+    ],
+)
+def test_the_source_status_write_scan_passes_reads(snippet: str) -> None:
+    assert not _writes_the_source_status(snippet)
+
+
+def test_no_api_module_writes_the_source_status() -> None:
+    """Nothing under ``corollary/api`` writes ``sentiment_source_status`` --
+    by attribute, through the model, or in raw SQL."""
     package = Path(sentiment_routes.__file__).resolve().parents[1]
-    writes = re.compile(r"\.(status|changed_at|audit_run_id)\s*=(?!=)")
-    offenders = []
-    for path in sorted(package.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        if "SentimentSourceStatus" in text and writes.search(text):
-            offenders.append(path.name)
+    offenders = [
+        path.name
+        for path in sorted(package.rglob("*.py"))
+        if _writes_the_source_status(path.read_text(encoding="utf-8"))
+    ]
     assert offenders == [], offenders
 
 

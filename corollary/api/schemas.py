@@ -2299,7 +2299,11 @@ class SentimentSourceAudit(ApiModel):
 
     ``changedAt`` is ``null`` exactly while ``unaudited``: the source has
     **never been audited**, and ``neverAudited`` says so in words, rather
-    than a date anyone invented. ``reason`` is the latest transition's, as
+    than a date anyone invented. ``statusMissing`` is ``true`` when the
+    source has **no** ``sentiment_source_status`` row at all -- a damaged
+    database, since both are seeded. ``status``, ``changedAt`` and
+    ``neverAudited`` are then a display fallback (``unaudited``), not a
+    record, and claim nothing. ``reason`` is the latest transition's, as
     the run wrote it. ``accuracy`` is the latest **succeeded** run's rows for
     this source, every basis that run computed, ordered by window then basis;
     empty when no run has succeeded.
@@ -2309,6 +2313,7 @@ class SentimentSourceAudit(ApiModel):
     status: NewsSourceStatus
     changed_at: datetime | None
     never_audited: bool
+    status_missing: bool
     reason: str | None
     accuracy: list[SentimentWindowAccuracy]
     eligibility: SentimentEligibility
@@ -2345,11 +2350,13 @@ class SentimentAuditStatus(ApiModel):
 class SentimentAuditStarted(ApiModel):
     """``POST /api/settings/sentiment/audit``'s 202.
 
-    The run has read its watch universe and is grading on the engine's event
-    loop; it takes minutes, so its id and outcome are read from
-    ``GET /api/settings/sentiment``'s ``lastRun``, never waited for here.
+    The run has committed its ``running`` ``audit_run`` row -- ``runId`` is
+    that row's id -- and is grading on the engine's event loop; it takes
+    minutes, so its outcome is read from ``GET /api/settings/sentiment``'s
+    ``lastRun``, never waited for here.
     """
 
     status: Literal["started"] = "started"
     trigger: Literal["manual"] = "manual"
+    run_id: int
     requested_at: datetime

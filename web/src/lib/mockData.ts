@@ -1855,7 +1855,7 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   // channels, so a withdrawal and its restoration arrive the same way.
   { event: 'sentiment_demoted', bell: true, discord: true },
   { event: 'sentiment_repromoted', bell: true, discord: true },
-  // Step 6, migration 0015: a manual audit run, on decision 20's config terms.
+  // Step 6, migration 0014: a manual audit run, on decision 20's config terms.
   { event: 'sentiment_audit_requested', bell: false, discord: true },
 ]
 

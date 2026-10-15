@@ -258,6 +258,14 @@ def read_source_statuses(
     Read **once per request**, so every label in one response states the same
     status for the same source. The audit run is the only writer (decision
     13); this only reads.
+
+    A missing (or unreadable) row is returned as ``unaudited`` -- a
+    **display** fallback for the feed and Movers, logged as an error, and
+    only safe because nothing here acts on it. **Any future scanner caller
+    must not take this mapping as-is: it must treat a missing row as
+    ``demoted`` (fail closed)**, since a source whose audit record is gone
+    has no standing to feed a trade decision. Read the rows directly, or add
+    a fail-closed variant, rather than reusing this one.
     """
     stored: dict[str, str] = {
         row.source: row.status for row in session.scalars(select(SentimentSourceStatus))

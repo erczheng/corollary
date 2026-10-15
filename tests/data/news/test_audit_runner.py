@@ -39,6 +39,7 @@ from corollary.data.news.audit_runner import (
     ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
     SentimentAuditDeps,
+    WatchUniverseUnavailable,
     run_sentiment_audit,
 )
 from corollary.data.news.labels import Direction
@@ -1162,3 +1163,96 @@ def test_an_abort_releases_attempted_old_windows_and_holds_unrequested_ones(
         "last_error_type": "ProviderError",
         "unrequested_symbol_sessions": 5,
     }
+
+
+# ---------------------------- unit 6.4b fix L1: on_opened, once the row exists
+
+
+def _opened_recorder(
+    engine: Engine, seen: list[tuple[int, str | None]]
+) -> Callable[[int], None]:
+    """An ``on_opened`` hook that records the id and what the row says then."""
+
+    def on_opened(run_id: int) -> None:
+        with Session(engine) as session:
+            row = session.get(AuditRun, run_id)
+            seen.append((run_id, None if row is None else row.status))
+
+    return on_opened
+
+
+def test_on_opened_fires_once_with_the_run_id_after_the_running_row_commits(
+    db_engine: Engine,
+) -> None:
+    seen: list[tuple[int, str | None]] = []
+    result = asyncio.run(
+        run_sentiment_audit(
+            _deps(db_engine), trigger="manual", on_opened=_opened_recorder(db_engine, seen)
+        )
+    )
+    # The row was committed, and still running, when the hook saw it.
+    assert seen == [(result.run_id, "running")]
+
+
+def test_on_opened_never_fires_for_a_degraded_universe(db_engine: Engine) -> None:
+    async def degraded() -> tuple[str, ...]:
+        raise WatchUniverseUnavailable("the SPDR seed has never been built")
+
+    seen: list[tuple[int, str | None]] = []
+    with pytest.raises(WatchUniverseUnavailable):
+        asyncio.run(
+            run_sentiment_audit(
+                _deps(db_engine, universe=degraded),
+                trigger="manual",
+                on_opened=_opened_recorder(db_engine, seen),
+            )
+        )
+    assert seen == []
+    assert _count(db_engine, AuditRun) == 0
+
+
+def test_on_opened_never_fires_when_another_process_holds_a_live_row(
+    db_engine: Engine,
+) -> None:
+    """The universe read returned, but step a refused: no row of this run's exists."""
+    _running_row(db_engine, SATURDAY_10 - timedelta(minutes=5))
+    seen: list[tuple[int, str | None]] = []
+    with pytest.raises(AuditAlreadyRunning):
+        asyncio.run(
+            run_sentiment_audit(
+                _deps(db_engine), trigger="manual", on_opened=_opened_recorder(db_engine, seen)
+            )
+        )
+    assert seen == []
+
+
+def test_on_opened_never_fires_for_a_run_that_fails_reading_its_universe(
+    db_engine: Engine,
+) -> None:
+    """That run opens its row only to close it ``failed``: it never started."""
+
+    async def broken() -> tuple[str, ...]:
+        raise RuntimeError("SYNTHETIC universe failure")
+
+    seen: list[tuple[int, str | None]] = []
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            run_sentiment_audit(
+                _deps(db_engine, universe=broken),
+                trigger="manual",
+                on_opened=_opened_recorder(db_engine, seen),
+            )
+        )
+    assert seen == []
+    with Session(db_engine) as session:
+        assert [r.status for r in session.scalars(select(AuditRun))] == ["failed"]
+
+
+def test_a_raising_on_opened_hook_does_not_fail_the_run(db_engine: Engine) -> None:
+    def on_opened(run_id: int) -> None:
+        raise RuntimeError("SYNTHETIC hook failure")
+
+    result = asyncio.run(run_sentiment_audit(_deps(db_engine), trigger="manual", on_opened=on_opened))
+    with Session(db_engine) as session:
+        run = session.get(AuditRun, result.run_id)
+        assert run is not None and run.status == "succeeded"

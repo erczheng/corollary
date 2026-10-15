@@ -192,6 +192,7 @@ __all__ = [
     "AuditTrigger",
     "MinuteBarSource",
     "NoticeSink",
+    "OnOpened",
     "SentimentAuditDeps",
     "WatchUniverseSource",
     "WatchUniverseUnavailable",
@@ -1050,8 +1051,16 @@ def _emit_all(
             )
 
 
+#: Called with the run's id once its ``running`` row is committed and the
+#: run is going on to grade (unit 6.4b's readiness signal).
+OnOpened = Callable[[int], None]
+
+
 async def run_sentiment_audit(
-    deps: SentimentAuditDeps, *, trigger: AuditTrigger
+    deps: SentimentAuditDeps,
+    *,
+    trigger: AuditTrigger,
+    on_opened: OnOpened | None = None,
 ) -> AuditRunResult:
     """One sentiment self-audit run, end to end (the module docstring's a-g).
 
@@ -1062,15 +1071,41 @@ async def run_sentiment_audit(
     universe is degraded. Any failure after the run's row is inserted marks
     it ``failed`` -- ``detail`` names the stage and the exception's type,
     never its message -- and re-raises.
+
+    ``on_opened`` is called once, with the run's id, right after step a has
+    **committed** this run's ``running`` row -- so a caller that answers
+    "started" on it never does so for a run that was refused (the lock, a
+    degraded universe, another process's live row) or whose insert failed.
+    It is **not** called for a run whose universe read itself failed: that
+    run opens its row only to close it ``failed`` at once, so it never
+    started. A hook that raises is logged and ignored; the run goes on.
     """
     if trigger not in ("scheduled", "manual"):
         raise ValueError(f"unknown audit trigger {trigger!r}")
     if not _RUN_LOCK.acquire(blocking=False):
         raise AuditAlreadyRunning("a sentiment audit run is already in progress")
     try:
-        return await _run_locked(deps, trigger)
+        return await _run_locked(deps, trigger, on_opened)
     finally:
         _RUN_LOCK.release()
+
+
+def _call_on_opened(on_opened: OnOpened | None, run_id: int, correlation_id: str) -> None:
+    """The caller's readiness hook. Its failure is the caller's, not the run's."""
+    if on_opened is None:
+        return
+    try:
+        on_opened(run_id)
+    except Exception as exc:
+        logger.error(
+            "a sentiment audit run's on_opened hook raised; the run goes on",
+            extra={
+                "event": "sentiment_audit_on_opened_failed",
+                "audit_run_id": run_id,
+                "error_type": type(exc).__name__,
+                "correlation_id": correlation_id,
+            },
+        )
 
 
 async def _open(
@@ -1123,6 +1158,20 @@ async def _open(
         # Closes the row and logs; it re-raises only a further cancellation.
         await _record_failure(deps, opened[0], started_at, "open", exc, correlation_id)
         raise
+    except AuditAlreadyRunning:
+        # A refusal (another live run's row at step a), not a failure: the
+        # caller logs it as such, so it never leaves an ERROR line here.
+        logger.info(
+            "sentiment audit run refused: another run is live",
+            extra={
+                "event": "sentiment_audit_not_started",
+                "rule": "one sentiment audit run at a time",
+                "trigger": trigger,
+                "started_at": started_at.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+        raise
     except Exception as exc:
         logger.error(
             "sentiment audit run could not start",
@@ -1148,7 +1197,9 @@ async def _open(
     return run_id
 
 
-async def _run_locked(deps: SentimentAuditDeps, trigger: AuditTrigger) -> AuditRunResult:
+async def _run_locked(
+    deps: SentimentAuditDeps, trigger: AuditTrigger, on_opened: OnOpened | None
+) -> AuditRunResult:
     correlation_id = uuid.uuid4().hex
     started_at = _aware_utc(deps.clock(), "the clock's reading")
     # The universe first, before any row exists: a degraded one is a reason
@@ -1178,6 +1229,8 @@ async def _run_locked(deps: SentimentAuditDeps, trigger: AuditTrigger) -> AuditR
         await _record_failure(deps, run_id, started_at, "plan", exc, correlation_id)
         raise
     run_id = await _open(deps, started_at, trigger, correlation_id)
+    # The row is committed and the run goes on: the caller may now say so.
+    _call_on_opened(on_opened, run_id, correlation_id)
 
     stage = "plan"
     try:

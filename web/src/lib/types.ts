@@ -1665,12 +1665,16 @@ export interface SentimentEligibility {
 }
 
 /** One source. `changedAt` is `null` exactly while unaudited: say "never
- * audited" (`neverAudited`), never show a date. */
+ * audited" (`neverAudited`), never show a date. `statusMissing` is `true`
+ * when the source has no status row at all (a damaged database): `status`,
+ * `changedAt` and `neverAudited` are then a display fallback, not a record,
+ * so say the status is missing rather than "never audited". */
 export interface SentimentSourceAudit {
   source: NewsLabelSource
   status: NewsSourceStatus
   changedAt: string | null
   neverAudited: boolean
+  statusMissing: boolean
   reason: string | null
   accuracy: SentimentWindowAccuracy[]
   eligibility: SentimentEligibility
@@ -1695,10 +1699,11 @@ export interface SentimentAuditStatus {
   manualAvailableAt: string | null
 }
 
-/** `POST /api/settings/sentiment/audit`'s 202: the run started; read its
- * outcome from `lastRun`. */
+/** `POST /api/settings/sentiment/audit`'s 202: the run committed its
+ * `running` row (`runId`); read its outcome from `lastRun`. */
 export interface SentimentAuditStarted {
   status: 'started'
   trigger: 'manual'
+  runId: number
   requestedAt: string
 }

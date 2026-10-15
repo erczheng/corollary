@@ -21,6 +21,11 @@ came from, and no float exists anywhere on the path.
   (``SentimentSourceStatus``): seeding is not a change. It is served as
   ``null`` with ``neverAudited: true`` -- never the migration's date, the
   row's insert time or "now".
+* **A missing row** (both are seeded, so only a damaged database lacks one)
+  is shown as ``unaudited`` for display, and says so: ``statusMissing:
+  true``, so it never reads as a clean "never audited". That fallback is the
+  page's only; nothing that *acts* on a status may take it (see
+  ``routes.news.read_source_statuses``).
 * **Eligibility** is decision 13's, from the status: an ``unaudited`` or
   ``active`` source counts toward *demotion* (``DEMOTION_FLOOR`` per window,
   ``trailing_28d``), a ``demoted`` one toward *re-promotion*
@@ -37,45 +42,55 @@ came from, and no float exists anywhere on the path.
 --------------------------------------
 
 **202, never a wait for the run.** A run takes minutes, so it is a task on
-the engine's event loop, not the request. The route waits only for the run
-to *start* -- to read its watch universe -- because the two refusals that
-happen there (another run holds the lock; the universe is degraded) must
-reach the caller as a 409 and a 503, not as a 202 for a run that never was.
-Built from the scheduler's public ``sentiment_audit_deps`` and the runner's
-``run_sentiment_audit``, with the universe read wrapped to signal that it
-returned. That is exactly what ``run_sentiment_audit_now`` does, less the
-signal; the translation of ``WatchUniverseUnavailable`` into a 503 is here.
+the engine's event loop, not the request. The task is the scheduler's
+``run_sentiment_audit_now`` -- the one manual entry point, which composes the
+run's deps and translates a degraded universe into
+``SentimentAuditUnavailable``; nothing here composes a run. The route waits
+only for the run to **open its row**: the runner's ``on_opened`` hook fires
+once its ``running`` ``audit_run`` row is committed, and the 202 carries that
+row's id. Every refusal the run itself makes happens before that, so each
+reaches the caller as a 409 or a 503 -- never as a 202 for a run that never
+was.
 
-**The refusals, in order**, each logged with its rule, inputs and timestamp
-(CLAUDE.md rule 8's spirit: silent rejection is a bug):
+**The refusals, in the order they are checked**, each logged with its rule,
+inputs and timestamp (CLAUDE.md rule 8's spirit: silent rejection is a bug):
 
-1. **503** -- no context services (an app started without its scheduler), or
-   no market-data provider for the SIP minute bars, or a degraded watch
-   universe. Fixed text, never vendor text.
-2. **409** -- a run is live: this app's own manual task, or a ``running``
-   ``audit_run`` row no older than ``ABANDONED_RUN_AFTER`` (a scheduled run,
-   or another process's), or the runner's in-process lock.
-3. **429** -- a **manual** run started less than :data:`MANUAL_AUDIT_INTERVAL`
+1. **503** -- no context services (an app started without its scheduler).
+2. **409** -- this app's own manual task is still in flight.
+3. **409** -- a ``running`` ``audit_run`` row no older than
+   ``ABANDONED_RUN_AFTER`` (a scheduled run, or another process's).
+4. **429** -- a **manual** run started less than :data:`MANUAL_AUDIT_INTERVAL`
    ago, with ``Retry-After``. **The limit is read from ``audit_run``**, so a
    restart does not reset it (rule 4: enforced server-side, from stored
    state). Scheduled runs do not count against it: the limit is on the
    owner's button, and the unique index already stops two runs overlapping.
-   A refused request writes no row, so a 409 or a 503 costs no hour.
 
-**It notifies** (decision 20: every operator action notifies, and each one
-does once it gains an endpoint). ``sentiment_audit_requested``, ``info``,
-bell off and Discord on -- the config events' terms -- scheduled as a
-response background task after the run has started, so it never delays the
-202. A refusal emits nothing. A transition the run makes notifies on its own
-(``sentiment_demoted`` / ``sentiment_repromoted``), through the scheduler's
-outbox.
+Then the run starts, and refuses in its own order before it opens a row:
+
+5. **503** -- no market-data provider for the SIP minute bars
+   (``run_sentiment_audit_now``, before the runner).
+6. **409** -- the runner's in-process lock is held (a scheduled run here).
+7. **503** -- the watch universe is degraded. Fixed text, never vendor text.
+8. **409** -- another process's ``running`` row landed after check 3, and
+   the runner's own step a refused beside it.
+
+A refused request writes no row, so a 409 or a 503 costs no hour. A run whose
+universe read *fails* (rather than reporting degraded) opens its row only to
+close it ``failed``; that is a **500**, and the row does count.
+
+**It notifies** (decision 20: every operator action notifies, once the
+action has committed). ``sentiment_audit_requested``, ``info``, bell off and
+Discord on -- the config events' terms -- scheduled as a response background
+task only after ``on_opened``, so it never delays the 202 and never announces
+a run that did not open. A refusal emits nothing. A transition the run makes
+notifies on its own (``sentiment_demoted`` / ``sentiment_repromoted``),
+through the scheduler's outbox.
 """
 
 import asyncio
-import dataclasses
 import logging
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Final
 
@@ -107,9 +122,7 @@ from corollary.data.news.audit_runner import (
     ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
     AuditRunResult,
-    SentimentAuditDeps,
     WatchUniverseUnavailable,
-    run_sentiment_audit,
 )
 from corollary.db.models import (
     SENTIMENT_SOURCES,
@@ -118,11 +131,15 @@ from corollary.db.models import (
     SentimentAccuracy,
     SentimentSourceStatus,
 )
-from corollary.engine.scheduler import ContextServices, sentiment_audit_deps
+from corollary.engine.scheduler import (
+    SENTIMENT_AUDIT_JOB,
+    ContextServices,
+    SentimentAuditUnavailable,
+    run_sentiment_audit_now,
+)
 
 __all__ = [
     "MANUAL_AUDIT_INTERVAL",
-    "SENTIMENT_AUDIT_JOB",
     "audit_now",
     "router",
 ]
@@ -135,17 +152,11 @@ router = APIRouter(prefix="/api/settings/sentiment", tags=["settings"])
 #: from the last manual ``audit_run.started_at`` (design spec, *API*).
 MANUAL_AUDIT_INTERVAL: Final = timedelta(hours=1)
 
-#: The scheduler's job name for the Saturday run, whose next slot is served.
-SENTIMENT_AUDIT_JOB: Final = "sentiment_audit"
-
-#: The 503 bodies. Fixed text: what failed and what did not happen.
+#: The 503 body with no scheduler. Fixed text: what failed and what did not
+#: happen. The run's own 503s carry the scheduler's fixed text.
 _NO_SERVICES: Final = (
     "the sentiment audit runs on the context services, and this app was started "
     "without its scheduler; nothing was started"
-)
-_NO_PROVIDER: Final = (
-    "no market-data provider is configured for the audit's SIP minute bars; "
-    "nothing was started and no source's status changed"
 )
 
 _WIRE_SOURCE: Final[Mapping[str, NewsLabelSource]] = {"rules": "rules", "massive": "massive"}
@@ -348,7 +359,8 @@ def _source_audit(
 ) -> SentimentSourceAudit:
     if row is None:
         # Both rows are seeded (migration 0014, ``db.seed``): a missing one is
-        # a damaged database. Shown as never audited, which claims nothing.
+        # a damaged database. Shown as unaudited for display only, with
+        # ``status_missing`` saying so -- never as a clean "never audited".
         logger.error(
             "a labelling source has no sentiment_source_status row; shown as unaudited",
             extra={
@@ -374,7 +386,9 @@ def _source_audit(
         source=_WIRE_SOURCE[source],
         status=_WIRE_STATUS[status],
         changed_at=changed_at,
-        never_audited=changed_at is None,
+        # A missing row is not evidence of never having been audited.
+        never_audited=row is not None and changed_at is None,
+        status_missing=row is None,
         reason=reason,
         accuracy=accuracy,
         eligibility=_eligibility(status, cells, run),
@@ -442,22 +456,9 @@ def _refuse(
     return ApiError(status_code=status_code, code=code, message=message, headers=headers)
 
 
-def _signalling(deps: SentimentAuditDeps, read: "asyncio.Future[None]") -> SentimentAuditDeps:
-    """``deps`` whose universe read resolves ``read`` once it has returned.
-
-    The runner reads the universe before it inserts its ``running`` row, and
-    the lock is taken before either -- so ``read`` resolving means the run
-    passed both of the checks that refuse it in this process.
-    """
-    original = deps.watch_universe
-
-    async def watch_universe() -> Collection[str]:
-        members = await original()
-        if not read.done():
-            read.set_result(None)
-        return members
-
-    return dataclasses.replace(deps, watch_universe=watch_universe)
+#: What a run raises when it refuses before opening its row. The route logs
+#: each as a refusal (``_refuse``); the task's end is not a second failure.
+_START_REFUSALS: Final = (AuditAlreadyRunning, SentimentAuditUnavailable, WatchUniverseUnavailable)
 
 
 def _log_outcome(correlation_id: str, task: "asyncio.Task[AuditRunResult]") -> None:
@@ -465,12 +466,24 @@ def _log_outcome(correlation_id: str, task: "asyncio.Task[AuditRunResult]") -> N
     so asyncio never reports one as never retrieved."""
     if task.cancelled():
         logger.warning(
-            "manual sentiment audit run cancelled (shutdown); its row, if any, "
-            "is closed as abandoned by a later run",
+            "manual sentiment audit run cancelled (shutdown); the runner closes "
+            "its row failed on the cancel, and only a row whose commit it never "
+            "saw is left for a later run to close as abandoned",
             extra={"event": "sentiment_audit_manual_cancelled", "correlation_id": correlation_id},
         )
         return
     exc = task.exception()
+    if isinstance(exc, _START_REFUSALS):
+        # Already logged by the route as a refusal, with its rule and inputs.
+        logger.info(
+            "manual sentiment audit run refused before it opened a row",
+            extra={
+                "event": "sentiment_audit_manual_refused",
+                "error_type": type(exc).__name__,
+                "correlation_id": correlation_id,
+            },
+        )
+        return
     if exc is None:
         result = task.result()
         logger.info(
@@ -514,17 +527,6 @@ async def start_sentiment_audit(
             message=_NO_SERVICES,
             rule="a run needs the context services the lifespan builds with the scheduler",
             inputs={"context_services": None},
-            at=now,
-            correlation_id=correlation_id,
-        )
-    deps = sentiment_audit_deps(services)
-    if deps is None:
-        raise _refuse(
-            status_code=503,
-            code="sentiment_audit_unavailable",
-            message=_NO_PROVIDER,
-            rule="a run needs a market-data provider for its SIP minute bars",
-            inputs={"provider": None},
             at=now,
             correlation_id=correlation_id,
         )
@@ -581,37 +583,55 @@ async def start_sentiment_audit(
             headers={"Retry-After": str(retry_after)},
         )
 
-    read: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    opened: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+    def on_opened(run_id: int) -> None:
+        # Called on this loop, from inside the run's task, once its row is
+        # committed. Never raises: a resolved future is left as it is.
+        if not opened.done():
+            opened.set_result(run_id)
+
     task = asyncio.create_task(
-        run_sentiment_audit(_signalling(deps, read), trigger="manual"),
+        run_sentiment_audit_now(services, trigger="manual", on_opened=on_opened),
         name="sentiment_audit_manual",
     )
     state.sentiment_audit_task = task
     task.add_done_callback(lambda done: _log_outcome(correlation_id, done))
-    waiters: list[asyncio.Future[Any]] = [task, read]
+    waiters: list[asyncio.Future[Any]] = [task, opened]
     await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
 
-    if not read.done():
-        # The run ended before its universe was read: a refusal, or a failure.
-        read.cancel()
+    if not opened.done():
+        # The run ended without opening its row: a refusal, or a failure.
+        opened.cancel()
         exc = None if task.cancelled() else task.exception()
         if isinstance(exc, AuditAlreadyRunning):
             raise _refuse(
                 status_code=409,
                 code="sentiment_audit_running",
-                message="another sentiment audit run is in progress in this process",
-                rule="one audit run at a time (the runner's lock)",
-                inputs={"in_process_lock": True},
+                message="another sentiment audit run is in progress",
+                rule=(
+                    "one audit run at a time (the runner's in-process lock, or "
+                    "another process's running row at its step a)"
+                ),
+                inputs={"refused_by": "runner", "error_type": type(exc).__name__},
                 at=now,
                 correlation_id=correlation_id,
             )
-        if isinstance(exc, WatchUniverseUnavailable):
+        if isinstance(exc, (SentimentAuditUnavailable, WatchUniverseUnavailable)):
+            degraded = isinstance(exc, WatchUniverseUnavailable) or isinstance(
+                exc.__cause__, WatchUniverseUnavailable
+            )
             raise _refuse(
                 status_code=503,
                 code="sentiment_audit_unavailable",
+                # The scheduler's fixed text, never vendor text.
                 message=str(exc),
-                rule="a label classified against a degraded watch universe is written permanently",
-                inputs={"watch_universe": "degraded"},
+                rule=(
+                    "a label classified against a degraded watch universe is written permanently"
+                    if degraded
+                    else "a run needs a market-data provider for its SIP minute bars"
+                ),
+                inputs={"watch_universe": "degraded"} if degraded else {"provider": None},
                 at=now,
                 correlation_id=correlation_id,
             )
@@ -633,15 +653,18 @@ async def start_sentiment_audit(
             ),
         )
 
+    run_id = opened.result()
     logger.info(
         "manual sentiment audit run started",
         extra={
             "event": "sentiment_audit_manual_started",
+            "audit_run_id": run_id,
             "requested_at": now.isoformat(),
             "correlation_id": correlation_id,
         },
     )
+    # Decision 20: the notice follows the committed action -- the row exists.
     notify_after_response(
         request, background, sentiment_audit_notice(at=now, correlation_id=correlation_id)
     )
-    return SentimentAuditStarted(requested_at=now)
+    return SentimentAuditStarted(run_id=run_id, requested_at=now)

@@ -161,6 +161,7 @@ from corollary.data.news.audit_runner import (
     AuditTrigger,
     MinuteBarSource,
     NoticeSink,
+    OnOpened,
     SentimentAuditDeps,
     WatchUniverseUnavailable,
     run_sentiment_audit,
@@ -222,6 +223,7 @@ __all__ = [
     "SPDR_HOLDINGS_DAYS",
     "SENTIMENT_AUDIT_AT",
     "SENTIMENT_AUDIT_DAYS",
+    "SENTIMENT_AUDIT_JOB",
     "SentimentAuditUnavailable",
     "TRADEABILITY_EVERY",
     "AlpacaContextSource",
@@ -2061,6 +2063,10 @@ def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> Sch
 #: are free on Basic.
 SENTIMENT_AUDIT_AT = time(10, 0)
 SENTIMENT_AUDIT_DAYS: DayRule = on_weekdays(5)
+#: The Saturday run's job name -- the one copy. ``GET /api/settings/sentiment``
+#: imports it to serve this job's next slot; the scheduler never imports
+#: ``corollary.api``, so the dependency runs that way only.
+SENTIMENT_AUDIT_JOB: Final = "sentiment_audit"
 
 _SENTIMENT_AUDIT_NO_BARS = (
     "no market-data provider for the audit's SIP minute bars; nothing graded, "
@@ -2192,22 +2198,28 @@ def sentiment_audit_deps(
 
 
 async def run_sentiment_audit_now(
-    services: ContextServices, *, trigger: AuditTrigger, clock: UtcClock = _utc_now
+    services: ContextServices,
+    *,
+    trigger: AuditTrigger,
+    clock: UtcClock = _utc_now,
+    on_opened: OnOpened | None = None,
 ) -> AuditRunResult:
     """One audit run on demand -- what the manual ``POST`` (unit 6.4b) calls.
 
     The once-an-hour limit on the manual trigger is the route's, not this.
-    Raises :class:`SentimentAuditUnavailable` with no provider or a
-    degraded watch universe (no run row is written for either),
+    Raises :class:`SentimentAuditUnavailable` with no provider (checked
+    first, before the runner's lock) or a degraded watch universe -- no run
+    row is written for either -- then
     :class:`~corollary.data.news.audit_runner.AuditAlreadyRunning` while
     another run is live, and re-raises a run's own failure after recording
-    it ``failed``.
+    it ``failed``. ``on_opened`` is the runner's: called with the run id once
+    its ``running`` row is committed, never for a run refused above.
     """
     deps = sentiment_audit_deps(services, clock)
     if deps is None:
         raise SentimentAuditUnavailable(_SENTIMENT_AUDIT_NO_BARS)
     try:
-        return await run_sentiment_audit(deps, trigger=trigger)
+        return await run_sentiment_audit(deps, trigger=trigger, on_opened=on_opened)
     except WatchUniverseUnavailable as exc:
         raise SentimentAuditUnavailable(str(exc)) from exc
 
@@ -2231,7 +2243,7 @@ async def _sentiment_audit(services: ContextServices, clock: UtcClock) -> JobSki
 
 def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
     return ScheduledJob(
-        name="sentiment_audit",
+        name=SENTIMENT_AUDIT_JOB,
         schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
         run=functools.partial(_sentiment_audit, services, clock),
         rule=(
