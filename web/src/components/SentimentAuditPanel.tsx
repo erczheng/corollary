@@ -78,7 +78,13 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
           ? 'No status row is stored for this source. It is shown as unaudited for display only — this is not a record that it was never audited.'
           : kind === 'unaudited'
             ? source.changedAt === null
-              ? 'Never audited.'
+              ? // `neverAudited` means no status change was ever written, not
+                // that no run ever graded it: a source a run graded but left
+                // short of the floor keeps `changedAt` null. `asOfRunId` is
+                // what says whether its figures came from a run at all.
+                source.neverAudited && source.eligibility.asOfRunId !== null
+                ? 'Graded, but not yet on enough labels to be given a status.'
+                : 'Never audited.'
               : `Unaudited since ${formatDateTimeET(source.changedAt)}.`
             : source.changedAt === null
               ? `${pill.label}; the change has no recorded time.`
@@ -123,16 +129,32 @@ function Figure({ counts, floor }: { counts: SentimentCounts; floor: number }) {
 
 /** The watch/discovery split of one cell (decision 12). Display only: the
  * transitions act on the combined figure, and the label says so where the
- * split is read, not in a footnote. */
-function Split({ watch, discovery }: { watch: SentimentCounts; discovery: SentimentCounts }) {
+ * split is read, not in a footnote.
+ *
+ * **`short` withholds every percentage.** When the combined cell is below the
+ * sample floor it refuses to state a figure, and each scope is a subset of
+ * that same short sample — printing "Watch 69.2%" under "insufficient sample
+ * — 18 of 30" would state, one click down, the number the cell just declined
+ * to. Below the floor the split is counts only. */
+function Split({
+  watch,
+  discovery,
+  short,
+}: {
+  watch: SentimentCounts
+  discovery: SentimentCounts
+  short: boolean
+}) {
   const line = (label: string, counts: SentimentCounts) => {
     const tenths = accuracyTenths(counts)
     return (
       <div className="flex justify-end gap-2">
         <span className="text-caption text-on-surface-variant">{label}</span>
-        <span className="text-data-sm text-on-surface">
-          {tenths === null ? '—' : formatTenthsPct(tenths)}
-        </span>
+        {short ? null : (
+          <span className="text-data-sm text-on-surface">
+            {tenths === null ? '—' : formatTenthsPct(tenths)}
+          </span>
+        )}
         <span className="text-data-sm text-on-surface-variant">
           n {formatInteger(counts.graded)}
         </span>
@@ -144,7 +166,9 @@ function Split({ watch, discovery }: { watch: SentimentCounts; discovery: Sentim
       {line('Watch', watch)}
       {line('Discovery', discovery)}
       <p className="text-caption text-on-surface-variant">
-        display only — transitions act on the combined figure
+        {short
+          ? 'insufficient sample — counts only until the combined cell reaches the floor; transitions act on the combined figure'
+          : 'display only — transitions act on the combined figure'}
       </p>
     </div>
   )
@@ -170,20 +194,31 @@ function AccuracyCell({
       {cell === null || counts.graded + counts.neutral === 0 ? (
         <Figure counts={counts} floor={floor} />
       ) : (
+        // No `aria-label`: it would replace the visible figure as the
+        // button's name, so "61.7% n 212" would never be announced (WCAG
+        // 2.5.3). The figure is the name; the action rides along hidden.
         <button
           type="button"
           aria-expanded={expanded}
-          aria-label={`${label}: ${expanded ? 'hide' : 'show'} the watch and discovery split`}
           onClick={onToggle}
           className="rounded px-1 text-right hover:bg-surface-container"
         >
           <Figure counts={counts} floor={floor} />
+          <span className="sr-only">
+            {` — ${label}: ${expanded ? 'hide' : 'show'} the watch and discovery split`}
+          </span>
         </button>
       )}
       <div className="text-caption text-on-surface-variant">
         {BASIS_LABEL[source.eligibility.basis]}
       </div>
-      {expanded && cell !== null ? <Split watch={cell.watch} discovery={cell.discovery} /> : null}
+      {expanded && cell !== null ? (
+        <Split
+          watch={cell.watch}
+          discovery={cell.discovery}
+          short={isInsufficientSample(counts, floor)}
+        />
+      ) : null}
     </td>
   )
 }
@@ -274,12 +309,18 @@ export function SentimentAuditPanel() {
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span>, once each window
         has at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels over the trailing 28 days. A demoted source is re-promoted only when both windows
-        reach <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> or
-        better, with at least{' '}
+        labels over the trailing 28 days. An unaudited source becomes active when both windows are
+        at <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better,
+        with at least{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
+        labels each over the trailing 28 days. A demoted source is re-promoted only when both
+        windows reach <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span>{' '}
+        or better, with at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE_SAMPLE}</span> graded
-        labels each since the demotion. Between {SENTIMENT_FLOOR}% and {SENTIMENT_REPROMOTE}% a
-        source stays where it is: an active one is not demoted and a demoted one is not
+        labels each since the demotion. Between{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> and{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> an active or
+        demoted source stays where it is: an active one is not demoted and a demoted one is not
         re-promoted. Neutral labels count toward neither figure. Only the audit changes a status —
         there is no manual reinstatement.
       </p>
@@ -398,7 +439,11 @@ export function SentimentAuditPanel() {
         >
           {start.isPending ? 'Starting…' : 'Run audit now'}
         </button>
-        {start.isSuccess ? (
+        {/* Only while the run it names is open. Once the readout shows that
+            run closed, `Last run` states its outcome and "it takes a few
+            minutes" is no longer true. */}
+        {start.isSuccess &&
+        !(status.lastRun?.id === start.data.runId && status.lastRun.status !== 'running') ? (
           <p role="status" className="mt-2 max-w-prose text-caption text-on-surface-variant">
             Audit run {start.data.runId} started at {formatDateTimeET(start.data.requestedAt)}. It
             takes a few minutes; its outcome appears here when it finishes.

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
 import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
@@ -13,6 +13,7 @@ import type {
   NotificationRoute,
   Page,
   RiskLimit,
+  SentimentAuditStatus,
 } from '../lib/types'
 
 /** Settings reads seven endpoints and writes three of them. Every payload
@@ -251,6 +252,9 @@ let served: {
   feeds: DataFeed[]
   routes: NotificationRoute[]
   audit: AuditLogEntry[]
+  /** What `GET /settings/sentiment` answers. Mutable so a test can close a
+   * run between reads, the way the server would. */
+  sentiment: SentimentAuditStatus
 }
 
 let writes: { url: string; body: unknown }[] = []
@@ -352,7 +356,7 @@ function stubFetch(overrides: Overrides = {}) {
     }
     if (url.includes('/settings/sentiment')) {
       return Promise.resolve(
-        overrides.sentiment ?? jsonResponse(200, SENTIMENT_AUDIT_STATES.populated),
+        overrides.sentiment ?? jsonResponse(200, served.sentiment),
       )
     }
     if (url.includes('/settings/keys')) {
@@ -389,6 +393,7 @@ beforeEach(() => {
     feeds: FEEDS.map((f) => ({ ...f })),
     routes: ROUTES.map((r) => ({ ...r })),
     audit: [],
+    sentiment: SENTIMENT_AUDIT_STATES.populated,
   }
 })
 
@@ -929,6 +934,7 @@ describe('sentiment accuracy', () => {
 
     expect(within(row(table, 'Corollary rules')).getByText('Never audited.')).toBeInTheDocument()
     expect(within(row(table, 'Massive')).getByText('Never audited.')).toBeInTheDocument()
+    expect(within(table).queryByText(/Graded, but not yet/)).not.toBeInTheDocument()
     expect(within(table).getAllByText('insufficient sample — 0 of 30')).toHaveLength(4)
     expect(within(panel).getByText(/No audit has completed yet/)).toBeInTheDocument()
     expect(within(panel).getByText('No run has ever started.')).toBeInTheDocument()
@@ -981,6 +987,39 @@ describe('sentiment accuracy', () => {
     expect(rules.textContent).not.toContain('%')
   })
 
+  /** A run graded it (`asOfRunId` is set) but it is short of the floor, so
+   * no status change was written and `neverAudited` is still true. "Never
+   * audited." beside figures a run produced would contradict itself. */
+  it('says a graded-but-short source was graded, not that it was never audited', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.insufficientSample) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    expect(
+      within(rules).getByText('Graded, but not yet on enough labels to be given a status.'),
+    ).toBeInTheDocument()
+    expect(within(rules).queryByText('Never audited.')).not.toBeInTheDocument()
+  })
+
+  /** The cell refuses a percentage below the floor; one click down, the
+   * split must not state one either — watch alone is 9 of 13 = 69.2%. */
+  it('expands a short cell into counts only, with no percentage', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.insufficientSample) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const toggle = within(rules).getByRole('button', {
+      name: /^insufficient sample — 18 of 30\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+    })
+    fireEvent.click(toggle)
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(rules.textContent).toContain('n 13')
+    expect(rules.textContent).toContain('n 5')
+    expect(rules.textContent).not.toContain('69.2')
+    expect(rules.textContent).not.toContain('%')
+  })
+
   it('says a status row is missing, never that the source was never audited', async () => {
     stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.statusMissing) })
     render(<App />)
@@ -1002,7 +1041,26 @@ describe('sentiment accuracy', () => {
 
     expect(text).toMatch(/falls below\s*52%/)
     expect(text).toMatch(/reach\s*66%\s*or better/)
-    expect(text).toMatch(/Between 52% and 66% a source stays where it is/)
+    expect(text).toMatch(
+      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels each over the trailing 28 days/,
+    )
+    expect(text).toMatch(/Between\s*52%\s*and\s*66%\s*an active or demoted source stays where it is/)
+    expect(text).not.toMatch(/Between\s*52%\s*and\s*66%\s*a source stays/)
+  })
+
+  /** N3: every figure in the rule paragraph is set as data, including the
+   * dead band's two. */
+  it('sets the dead band figures in the data face', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+    const paragraph = within(section('Sentiment accuracy')).getByText(/Between/, {
+      selector: 'p',
+    })
+    const figures = Array.from(paragraph.querySelectorAll('span.text-data-sm')).map(
+      (el) => el.textContent,
+    )
+    expect(figures).toEqual(['52%', '30', '52%', '30', '66%', '100', '52%', '66%'])
   })
 
   it('expands a cell into its watch and discovery split, labelled display only', async () => {
@@ -1011,13 +1069,18 @@ describe('sentiment accuracy', () => {
     const rules = row(await sentimentTable(), 'Corollary rules')
 
     expect(within(rules).queryByText(/display only/)).not.toBeInTheDocument()
+    // The figure is the name (WCAG 2.5.3); the action follows it, hidden.
     const toggle = within(rules).getByRole('button', {
-      name: 'Corollary rules, 1 hour: show the watch and discovery split',
+      name: /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
     })
+    expect(toggle).not.toHaveAttribute('aria-label')
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     fireEvent.click(toggle)
 
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveAccessibleName(
+      /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
+    )
     expect(
       within(rules).getByText('display only — transitions act on the combined figure'),
     ).toBeInTheDocument()
@@ -1101,6 +1164,28 @@ describe('running the audit by hand', () => {
       )
       expect(reads.length).toBeGreaterThanOrEqual(2)
     })
+  })
+
+  /** "It takes a few minutes" is true only while the run it names is open.
+   * Once the readout shows run 8 closed, `Last run` carries its outcome. */
+  it('clears the started line once the readout shows that run closed', async () => {
+    served.sentiment = SENTIMENT_AUDIT_STATES.running
+    const { panel } = await run()
+
+    // Run 8 is still open: the line stays.
+    expect(await within(panel).findByText(/Audit run 8 started at/)).toBeInTheDocument()
+
+    const open = SENTIMENT_AUDIT_STATES.running.lastRun!
+    served.sentiment = {
+      ...SENTIMENT_AUDIT_STATES.running,
+      lastRun: { ...open, status: 'succeeded', finishedAt: '2026-10-14T15:26:00Z' },
+    }
+    await act(() => queryClient.invalidateQueries())
+
+    await waitFor(() => {
+      expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
+    })
+    expect(panel.textContent).toMatch(/started by hand, succeeded, finished/)
   })
 
   it('says when it is available again on a 429, from Retry-After', async () => {

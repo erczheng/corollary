@@ -299,13 +299,16 @@ export function isCriticalEvent(event: NotificationEvent): boolean {
 
 /** Decision 13 — below this percentage in **either** window demotes a source
  * (at the sample floor). Mirrors `DEMOTE_BELOW_PCT` in
- * `corollary/data/news/audit.py`; `settings.test.ts` reads that file and
- * fails if the two part. Display only: the engine applies it. */
+ * `corollary/data/news/audit.py`. The pin is
+ * `tests/api/test_schema_contract.py::test_sentiment_thresholds_match_the_engine`,
+ * which reads this file and fails if the two part (a `?raw` import of
+ * `audit.py` is refused by Vite's fs allow-list). Display only: the engine
+ * applies it. */
 export const SENTIMENT_FLOOR = 52
 
 /** Decision 13 — at or above this percentage in **both** windows re-promotes a
- * demoted source. Mirrors `REPROMOTE_AT_PCT` in `audit.py`, pinned the same
- * way. Between the two thresholds is a dead band: a source there stays where
+ * demoted source. Mirrors `REPROMOTE_AT_PCT` in `audit.py`, pinned by the same
+ * pytest. Between the two thresholds is a dead band: a source there stays where
  * it is, whichever side it came from. */
 export const SENTIMENT_REPROMOTE = 66
 
