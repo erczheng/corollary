@@ -1,18 +1,37 @@
 import { describe, it, expect } from 'vitest'
-import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_ACCURACY } from './mockData'
+import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_AUDIT_STATES } from './mockData'
 import { NOTIFICATION_EVENT_LABEL, type NotificationEvent, type RiskLimit } from './types'
 import {
+  ApiError,
+  NETWORK_UNREACHABLE,
+  SENTIMENT_AUDIT_RATE_LIMITED,
+  SENTIMENT_AUDIT_RUNNING,
+  SENTIMENT_AUDIT_UNAVAILABLE,
+} from './api'
+import { formatTenthsPct } from './format'
+import {
+  SENTIMENT_DEMOTE_SAMPLE,
   SENTIMENT_FLOOR,
+  SENTIMENT_REPROMOTE,
+  SENTIMENT_REPROMOTE_SAMPLE,
+  accuracyTenths,
+  actingCell,
   auditEntry,
   auditFieldLabel,
+  auditTriggerRefusal,
+  cellCounts,
   demotedSources,
   feedOptionsFor,
   feedWarning,
   isCriticalEvent,
+  isInsufficientSample,
   isRaise,
+  nothingAuditedYet,
   notificationAuditField,
+  repromotionProgress,
   riskDollars,
   riskLimitFor,
+  sourceStatusKind,
   validateRiskLimit,
 } from './settings'
 
@@ -297,30 +316,187 @@ describe('isCriticalEvent', () => {
   })
 })
 
-/** PRD.md §9: below 52% the source is demoted from a scanner input to
- * display-only. "Below" is strict — 52% exactly is not demoted, and an
- * off-by-one here silently drops a working signal out of the scanner. */
+/* ---------------------------------------------------------------------- *
+ * The sentiment self-audit. The status is the server's: nothing here may
+ * compute a demotion, so these pin display arithmetic, the mapping from a
+ * refused POST to what the page says, and that the thresholds the page
+ * states in words are the engine's.
+ * ---------------------------------------------------------------------- */
+
+/** These mirror `corollary/data/news/audit.py` (`DEMOTE_BELOW_PCT`,
+ * `REPROMOTE_AT_PCT`, `DEMOTION_FLOOR`, `REPROMOTION_FLOOR`). The
+ * cross-language pin is `test_sentiment_thresholds_match_the_engine` in
+ * `tests/api/test_schema_contract.py`, which reads `settings.ts`'s source —
+ * Vite's fs allow-list refuses a `?raw` import of a file outside `web/`. */
+describe('the thresholds the page states', () => {
+  it('are decision 13, with a dead band between them', () => {
+    expect(SENTIMENT_FLOOR).toBe(52)
+    expect(SENTIMENT_REPROMOTE).toBe(66)
+    expect(SENTIMENT_DEMOTE_SAMPLE).toBe(30)
+    expect(SENTIMENT_REPROMOTE_SAMPLE).toBe(100)
+    expect(SENTIMENT_REPROMOTE).toBeGreaterThan(SENTIMENT_FLOOR)
+  })
+})
+
+describe('accuracyTenths', () => {
+  it('is correct over graded, neutral in neither', () => {
+    expect(accuracyTenths({ graded: 200, correct: 123, neutral: 999 })).toBe(615)
+  })
+
+  it('is null with nothing graded — 0 of 0 is not 0%', () => {
+    expect(accuracyTenths({ graded: 0, correct: 0, neutral: 12 })).toBeNull()
+  })
+
+  /** The engine compares `correct * 100 < 52 * graded` in integers. A figure
+   * that rounded would print 52.0% beside a source just demoted for being
+   * under 52. */
+  it('truncates, so a figure never rounds across a threshold', () => {
+    const tenths = accuracyTenths({ graded: 25_000, correct: 12_999, neutral: 0 })
+    expect(tenths).toBe(519)
+    expect(formatTenthsPct(tenths!)).toBe('51.9%')
+    expect(formatTenthsPct(accuracyTenths({ graded: 50, correct: 33, neutral: 0 })!)).toBe('66.0%')
+  })
+})
+
+describe('isInsufficientSample', () => {
+  it('is below the floor, and the floor itself is enough', () => {
+    expect(isInsufficientSample({ graded: 29, correct: 20, neutral: 0 }, 30)).toBe(true)
+    expect(isInsufficientSample({ graded: 30, correct: 20, neutral: 0 }, 30)).toBe(false)
+  })
+})
+
+describe('actingCell', () => {
+  const { populated } = SENTIMENT_AUDIT_STATES
+
+  it('reads trailing_28d for a source counting toward demotion', () => {
+    const rules = populated.sources[0]
+    expect(actingCell(rules, '1h')?.basis).toBe('trailing_28d')
+    expect(cellCounts(actingCell(rules, '1h')).graded).toBe(212)
+  })
+
+  /** A demoted source is judged on what it has done since; its trailing rows
+   * are served too, and reading them would show the figure that demoted it. */
+  it('reads since_demotion for a demoted source', () => {
+    const massive = populated.sources[1]
+    expect(actingCell(massive, '1h')?.basis).toBe('since_demotion')
+    expect(cellCounts(actingCell(massive, '1h')).graded).toBe(41)
+  })
+
+  it('is null, and counts as zero, with no row on the basis', () => {
+    const rules = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
+    expect(actingCell(rules, '1d')).toBeNull()
+    expect(cellCounts(null)).toEqual({ graded: 0, correct: 0, neutral: 0 })
+  })
+})
+
 describe('demotedSources', () => {
-  it('demotes a source that is below the floor in either window', () => {
-    const demoted = demotedSources(SENTIMENT_ACCURACY)
-    expect(demoted.map((d) => d.source)).toEqual(['StockTwits'])
+  it('takes the server status, not the accuracy', () => {
+    expect(demotedSources(SENTIMENT_AUDIT_STATES.populated.sources).map((s) => s.source)).toEqual([
+      'massive',
+    ])
   })
 
-  it('treats the floor itself as passing, not failing', () => {
-    const at = [{ source: 'X', tier: 't', accuracy1h: SENTIMENT_FLOOR, accuracy1d: SENTIMENT_FLOOR }]
-    expect(demotedSources(at)).toEqual([])
-
-    const below = [{ source: 'X', tier: 't', accuracy1h: SENTIMENT_FLOOR - 1, accuracy1d: 90 }]
-    expect(demotedSources(below)).toHaveLength(1)
+  /** An active source whose figure is under 52% is still active until the
+   * engine says otherwise, and the banner says what the engine did, not what
+   * the page would have done. */
+  it('never demotes from a low figure on its own', () => {
+    const rules = SENTIMENT_AUDIT_STATES.populated.sources[0]
+    const low = {
+      ...rules,
+      accuracy: rules.accuracy.map((a) => ({
+        ...a,
+        combined: { graded: 300, correct: 30, neutral: 0 },
+      })),
+    }
+    expect(demotedSources([low])).toEqual([])
   })
 
-  it('demotes on a failing one-day figure too, not only the one-hour one', () => {
-    const rows = [{ source: 'X', tier: 't', accuracy1h: 90, accuracy1d: 40 }]
-    expect(demotedSources(rows)).toHaveLength(1)
+  it('does not read a missing status row as anything but missing', () => {
+    expect(demotedSources(SENTIMENT_AUDIT_STATES.statusMissing.sources)).toEqual([])
+  })
+})
+
+describe('sourceStatusKind', () => {
+  it('names missing ahead of the fallback it is served with', () => {
+    const [rules, massive] = SENTIMENT_AUDIT_STATES.statusMissing.sources
+    expect(sourceStatusKind(massive)).toBe('missing')
+    expect(sourceStatusKind(rules)).toBe('active')
   })
 
-  it('returns nothing when every source clears the floor', () => {
-    const rows = SENTIMENT_ACCURACY.filter((r) => r.source !== 'StockTwits')
-    expect(demotedSources(rows)).toEqual([])
+  it('reads never-audited and demoted', () => {
+    expect(sourceStatusKind(SENTIMENT_AUDIT_STATES.unaudited.sources[0])).toBe('unaudited')
+    expect(sourceStatusKind(SENTIMENT_AUDIT_STATES.populated.sources[1])).toBe('demoted')
+  })
+})
+
+describe('repromotionProgress', () => {
+  it('states each window against the re-promotion floor', () => {
+    expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[1])).toEqual([
+      'since demotion: 41 of 100 in the 1h window',
+      'since demotion: 37 of 100 in the 1d window',
+    ])
+  })
+
+  it('is empty for a source not counting toward re-promotion', () => {
+    expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[0])).toEqual([])
+  })
+})
+
+describe('nothingAuditedYet', () => {
+  it('is true only with no succeeded run', () => {
+    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.unaudited)).toBe(true)
+    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.populated)).toBe(false)
+  })
+})
+
+describe('auditTriggerRefusal', () => {
+  const url = '/api/settings/sentiment/audit'
+  const at = Date.parse('2026-10-14T15:30:00Z')
+  const err = (status: number, code: string, retryAfterSeconds: number | null = null) =>
+    new ApiError({ status, code, message: `server says ${status}`, url, retryAfterSeconds })
+
+  it('times a 429 from Retry-After, counted from when it was sent', () => {
+    const refusal = auditTriggerRefusal(err(429, SENTIMENT_AUDIT_RATE_LIMITED, 1800), {
+      requestedAt: at,
+      manualAvailableAt: '2026-10-14T17:00:00Z',
+    })
+    expect(refusal).toEqual({
+      kind: 'rate_limited',
+      availableAt: '2026-10-14T16:00:00.000Z',
+      message: 'server says 429',
+    })
+  })
+
+  it('falls back to manualAvailableAt with no Retry-After', () => {
+    const refusal = auditTriggerRefusal(err(429, SENTIMENT_AUDIT_RATE_LIMITED), {
+      requestedAt: at,
+      manualAvailableAt: '2026-10-14T16:20:00Z',
+    })
+    expect(refusal).toMatchObject({ kind: 'rate_limited', availableAt: '2026-10-14T16:20:00Z' })
+  })
+
+  it('sorts 409, 503 and 500 apart and keeps the server sentence', () => {
+    const ctx = { requestedAt: at, manualAvailableAt: null }
+    expect(auditTriggerRefusal(err(409, SENTIMENT_AUDIT_RUNNING), ctx)).toEqual({
+      kind: 'running',
+      message: 'server says 409',
+    })
+    expect(auditTriggerRefusal(err(503, SENTIMENT_AUDIT_UNAVAILABLE), ctx)).toEqual({
+      kind: 'unavailable',
+      message: 'server says 503',
+    })
+    expect(auditTriggerRefusal(err(500, 'internal_error'), ctx)).toEqual({
+      kind: 'failed',
+      message: 'server says 500',
+    })
+  })
+
+  it('says the engine did not answer when it did not', () => {
+    const refusal = auditTriggerRefusal(err(0, NETWORK_UNREACHABLE), {
+      requestedAt: at,
+      manualAvailableAt: null,
+    })
+    expect(refusal.kind).toBe('failed')
+    expect(refusal.message).toMatch(/did not answer/)
   })
 })

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatDateET,
+  formatTenthsPct,
   formatDateOnly,
   formatExpiry,
   formatMarketCap,
@@ -197,5 +198,17 @@ describe('formatMarketCapCell', () => {
   it('prints a figure whenever there is one', () => {
     expect(formatMarketCapCell(5_434_790_884_052, false)).toBe('$5.43T')
     expect(formatMarketCapCell(5_434_790_884_052, true)).toBe('$5.43T')
+  })
+})
+
+describe('formatTenthsPct', () => {
+  /** Only places the decimal point: the truncation happened upstream, in
+   * integers, so nothing here can round 51.96% up to a passing 52.0%. */
+  it('places the decimal point of an integer count of tenths', () => {
+    expect(formatTenthsPct(519)).toBe('51.9%')
+    expect(formatTenthsPct(660)).toBe('66.0%')
+    expect(formatTenthsPct(1000)).toBe('100.0%')
+    expect(formatTenthsPct(0)).toBe('0.0%')
+    expect(formatTenthsPct(7)).toBe('0.7%')
   })
 })

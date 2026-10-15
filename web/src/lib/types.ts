@@ -1330,13 +1330,6 @@ export interface DataFeed {
   help: string
 }
 
-export interface SentimentAccuracy {
-  source: string
-  tier: string
-  accuracy1h: number
-  accuracy1d: number
-}
-
 /** Presence of one credential, and nothing else about it.
  *
  * There is no `value`, no `masked`, and no last-four, deliberately: rule 6

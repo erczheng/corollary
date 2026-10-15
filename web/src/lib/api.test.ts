@@ -40,6 +40,9 @@ import {
   isApiError,
   isUnreachable,
   resumeEngine,
+  SENTIMENT_AUDIT_RATE_LIMITED,
+  fetchSentimentAudit,
+  startSentimentAudit,
   updateDataFeeds,
   updateNotificationRoutes,
   updateRiskLimits,
@@ -420,6 +423,58 @@ describe('the other settings writes', () => {
     expect(JSON.parse(String(calledInit(fetchMock).body))).toEqual({
       routes: [{ event: 'stop_loss_hit', bell: true, discord: false }],
     })
+  })
+})
+
+describe('the sentiment audit', () => {
+  it('reads the readout from /settings/sentiment', async () => {
+    const fetchMock = stubFetch(jsonResponse(200, { sources: [] }))
+
+    await fetchSentimentAudit()
+
+    expect(calledUrl(fetchMock)).toBe(`${API_BASE}/settings/sentiment`)
+    expect(calledInit(fetchMock).method).toBe('GET')
+  })
+
+  it('starts a run with a bodiless POST', async () => {
+    const fetchMock = stubFetch(
+      jsonResponse(202, { status: 'started', trigger: 'manual', runId: 8, requestedAt: 'x' }),
+    )
+
+    const started = await startSentimentAudit()
+
+    expect(calledUrl(fetchMock)).toBe(`${API_BASE}/settings/sentiment/audit`)
+    expect(calledInit(fetchMock).method).toBe('POST')
+    expect(calledInit(fetchMock).body).toBeUndefined()
+    expect(started.runId).toBe(8)
+  })
+
+  /** The hourly limit's 429 says when in a header, not the body. */
+  it('carries Retry-After on the error, as whole seconds', async () => {
+    stubFetch({
+      ...errorResponse(429, 'sentiment_audit_rate_limited', 'one an hour'),
+      headers: { get: (name: string) => (name === 'Retry-After' ? '1800' : null) },
+    } as unknown as Response)
+
+    const error = await startSentimentAudit().catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(429)
+    expect((error as ApiError).code).toBe(SENTIMENT_AUDIT_RATE_LIMITED)
+    expect((error as ApiError).retryAfterSeconds).toBe(1800)
+  })
+
+  it('leaves retryAfterSeconds null with no header, or one it cannot read as seconds', async () => {
+    stubFetch(errorResponse(409, 'sentiment_audit_running', 'busy'))
+    const bare = (await startSentimentAudit().catch((e: unknown) => e)) as ApiError
+    expect(bare.retryAfterSeconds).toBeNull()
+
+    stubFetch({
+      ...errorResponse(429, 'sentiment_audit_rate_limited', 'one an hour'),
+      headers: { get: () => 'Wed, 14 Oct 2026 16:00:00 GMT' },
+    } as unknown as Response)
+    const dated = (await startSentimentAudit().catch((e: unknown) => e)) as ApiError
+    expect(dated.retryAfterSeconds).toBeNull()
   })
 })
 
