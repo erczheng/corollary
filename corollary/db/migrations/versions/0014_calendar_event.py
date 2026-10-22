@@ -26,15 +26,8 @@ a CHECK (``Money`` TEXT compares lexicographically); ``CalendarEventInput``
 enforces it.
 
 **Amended in-branch (unit 7.2b-F).** The IPO columns were added to this
-revision after it was committed on ``phase3-step7``, rather than in a 0014 of
-their own. That is correct only because 0013 has not merged anywhere -- no
-database outside this branch's tests has ever run it -- and Q22 renumbers it
-at merge regardless. Once it has merged, a change here is a new revision.
-
-**The number is provisional (Q22).** Steps 5 and 7 each add a revision on
-``0012``. Whichever merges second renumbers its revision to the next free
-number and re-points ``down_revision`` at the head it lands on; no merge
-revision.
+revision after its first draft, before merge. Once this revision has merged, a
+schema change here is a new revision.
 
 **``calendar_changed`` routing (unit 7.3, amended in-branch on the same
 terms).** Decision 20 -- *"every operator action notifies"* -- reaches the
@@ -47,8 +40,8 @@ No CHECK to widen -- ``notification_route.event`` has none by design.
 The downgrade drops the table, discarding manual rows with it, and deletes
 the two route rows, discarding any edit made to them.
 
-Revision ID: 0013
-Revises: 0012
+Revision ID: 0014
+Revises: 0013
 Create Date: 2026-10-10
 
 """
@@ -58,8 +51,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013"
-down_revision: str | None = "0012"
+revision: str = "0014"
+down_revision: str | None = "0013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

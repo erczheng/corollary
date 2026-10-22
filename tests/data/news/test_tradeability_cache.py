@@ -29,7 +29,6 @@ from corollary.data.news.tradeability import (
     RefreshResult,
     TradeabilityFailure,
     TradeabilityResult,
-    recent_article_tickers,
     refresh_tradeability,
     store_tradeability,
     tickers_needing_check,
@@ -46,8 +45,6 @@ from corollary.data.providers.interface import (
 )
 from corollary.db.models import (
     Base,
-    NewsArticle,
-    NewsArticleTicker,
     TickerIpoDate,
     TickerTradeability,
 )
@@ -208,38 +205,6 @@ def test_a_ticker_cached_this_session_is_not_rechecked_but_is_next_session(sessi
         )
     assert same == ["ZZZZ"]
     assert nxt == ["ACME", "ZZZZ"]
-
-
-def _add_article(session: Session, vendor_id: str, published: datetime, *tickers: str) -> None:
-    article = NewsArticle(
-        vendor="alpaca", vendor_id=vendor_id, feed="alpaca_news",
-        url=f"https://example.com/{vendor_id}", url_key=f"example.com/{vendor_id}",
-        headline=f"story {vendor_id}", headline_key=f"story {vendor_id}",
-        summary=None, publisher="Benzinga", published_at=published, ingested_at=published,
-    )
-    session.add(article)
-    session.flush()
-    for ticker in tickers:
-        session.add(NewsArticleTicker(article_id=article.id, ticker=ticker))
-
-
-def test_recent_article_tickers_reads_tags_since_a_time_newest_first(sessions):
-    since = NOW - timedelta(days=1)
-    with sessions() as session:
-        _add_article(session, "old", since - timedelta(seconds=1), "OLDY")
-        _add_article(session, "a", since, "ACME", "BETA")
-        _add_article(session, "b", since + timedelta(hours=2), "BETA", "MARKET")
-        _add_article(session, "c", since + timedelta(hours=1), "CHAR")
-        session.commit()
-        found = recent_article_tickers(session, since)
-    # ``since`` is inclusive. Ordered by each ticker's latest article, newest
-    # first, ties by symbol -- so a capped run checks the freshest news first.
-    assert found == ["BETA", "MARKET", "CHAR", "ACME"]
-
-
-def test_recent_article_tickers_refuses_a_naive_since(sessions):
-    with sessions() as session, pytest.raises(ValueError):
-        recent_article_tickers(session, datetime(2026, 9, 24))
 
 
 # ------------------------------------------------------------------ refresh

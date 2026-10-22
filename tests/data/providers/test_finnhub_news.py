@@ -15,7 +15,7 @@ needs ~250 rows, and a recorded file that size is not worth its review.
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -30,9 +30,11 @@ from corollary.data.providers.finnhub import (
     COMPANY_NEWS_CAP_THRESHOLD,
     MARKET_NEWS_ID_PREFIX,
     MARKET_NEWS_PAGE_SIZE,
+    PUBLISHER_CLOCK_FUTURE_TOLERANCE,
     CompanyNews,
     FinnhubProvider,
     MarketNews,
+    correct_publisher_clock,
 )
 from corollary.ratelimit import FINNHUB_HOST, HostRateLimiter
 from tests.data.providers.test_finnhub_provider import (
@@ -625,6 +627,241 @@ async def test_a_skipped_row_is_logged_scrubbed_and_bounded(
             assert TEST_CREDENTIALS.token not in text
         assert len(record.getMessage()) < 1000
         assert all(len(text) < 400 for text in quoted[1:])
+
+
+# --------------------------------------------------------------------------
+# Benzinga's clock: Finnhub stamps its Eastern wall time as UTC
+# --------------------------------------------------------------------------
+#
+# Measured 2026-09-25 -> 2026-10-09 across all three vendors: 1390 of 1398
+# true twins of an Alpaca (Benzinga's own feed) story sat exactly 240 minutes
+# early on Finnhub when Finnhub's ``source`` was "Benzinga"; "Yahoo" rows
+# matched at 0. Every instant below is SYNTHETIC.
+
+
+def _utc(*fields: int) -> datetime:
+    return datetime(*fields, tzinfo=timezone.utc)
+
+
+def test_a_benzinga_stamp_in_edt_is_moved_four_hours_later() -> None:
+    """MEASURED: -240 min in EDT. 09:30 'UTC' as decoded is 09:30 ET = 13:30 UTC."""
+    assert correct_publisher_clock(_utc(2026, 9, 24, 9, 30), "Benzinga") == _utc(
+        2026, 9, 24, 13, 30
+    )
+
+
+def test_a_benzinga_stamp_in_est_is_moved_five_hours_later() -> None:
+    """PREDICTED, not measured: the fortnight measured lies wholly in EDT, so
+    the -300 min EST offset is what the wall-clock reading implies and is
+    unverified until November's data exists. Pinned so a change is deliberate."""
+    assert correct_publisher_clock(_utc(2026, 12, 1, 9, 30), "Benzinga") == _utc(
+        2026, 12, 1, 14, 30
+    )
+
+
+@pytest.mark.parametrize("publisher", ["Yahoo", None, "benzinga", "BENZINGA", " Benzinga"])
+def test_any_other_publisher_is_returned_unchanged(publisher: str | None) -> None:
+    """Yahoo matched the other vendors at 0. Case variants were never seen and
+    are not guessed at: only the exact measured value is corrected."""
+    stamp = _utc(2026, 9, 24, 9, 30)
+    assert correct_publisher_clock(stamp, publisher) == stamp
+
+
+def test_the_ambiguous_fall_back_hour_resolves_to_edt() -> None:
+    """01:30 on 2026-11-01 happens twice in New York. fold=0 takes the first,
+    EDT (-4h): 05:30 UTC, not EST's 06:30."""
+    corrected = correct_publisher_clock(_utc(2026, 11, 1, 1, 30), "Benzinga")
+    assert corrected == _utc(2026, 11, 1, 5, 30)
+
+
+def test_the_spring_forward_gap_hour_resolves_deterministically() -> None:
+    """02:30 on 2027-03-14 never happens in New York. zoneinfo with fold=0
+    applies the offset in force *before* the transition (EST, -5h), so it lands
+    on 07:30 UTC -- which is 03:30 EDT. Pinned as zoneinfo's answer, not as a
+    claim about what Benzinga meant: no real story is stamped in that hour."""
+    corrected = correct_publisher_clock(_utc(2027, 3, 14, 2, 30), "Benzinga")
+    assert corrected == _utc(2027, 3, 14, 7, 30)
+
+
+def test_the_correction_is_pure_and_keeps_the_result_aware_utc() -> None:
+    stamp = _utc(2026, 9, 24, 9, 30)
+    first = correct_publisher_clock(stamp, "Benzinga")
+    second = correct_publisher_clock(stamp, "Benzinga")
+    assert first == second
+    assert stamp == _utc(2026, 9, 24, 9, 30)  # the input is not touched
+    assert first.tzinfo is timezone.utc
+    assert correct_publisher_clock(stamp, "Yahoo").tzinfo is timezone.utc
+
+
+@pytest.mark.asyncio
+async def test_the_decoder_corrects_benzinga_rows_and_leaves_yahoo_alone(
+    make_provider: ProviderFactory,
+) -> None:
+    """SYNTHETIC body: two rows with one raw epoch, one per publisher."""
+    raw = int(_utc(2026, 9, 24, 9, 30).timestamp())
+    rows = json.loads(synthetic_rows(2, day=TODAY))
+    rows[0].update({"source": "Benzinga", "datetime": raw})
+    rows[1].update({"source": "Yahoo", "datetime": raw})
+    provider, _ = make_provider(lambda request: (200, json.dumps(rows)))
+    result = await provider.company_news("NVDA", TODAY, TODAY)
+
+    by_publisher = {a.publisher: a.published_at for a in result.articles}
+    assert by_publisher["Benzinga"] == _utc(2026, 9, 24, 13, 30)
+    assert by_publisher["Yahoo"] == _utc(2026, 9, 24, 9, 30)
+
+
+def test_the_last_edt_minute_of_fall_back_reads_as_edt() -> None:
+    """2026-11-01 01:59 wall time, fold=0: the first (EDT) occurrence, 05:59Z."""
+    assert correct_publisher_clock(_utc(2026, 11, 1, 1, 59), "Benzinga") == _utc(
+        2026, 11, 1, 5, 59
+    )
+
+
+def test_the_first_minute_after_fall_back_reads_as_est() -> None:
+    """2026-11-01 02:00 wall time is unambiguous EST: 07:00Z, an hour after 01:59's
+    05:59Z plus the minute -- the repeated hour has no stamp of its own."""
+    assert correct_publisher_clock(_utc(2026, 11, 1, 2, 0), "Benzinga") == _utc(
+        2026, 11, 1, 7, 0
+    )
+
+
+def test_a_non_utc_aware_input_is_read_as_its_utc_instant() -> None:
+    """The wall-clock fields read back are the UTC ones, whatever zone the
+    caller handed in: 05:30-04:00 is 09:30Z, which corrects to 13:30Z. Without
+    normalising first the fix would read 05:30 as Eastern and land on 09:30Z."""
+    eastern_offset = timezone(timedelta(hours=-4))
+    stamp = datetime(2026, 9, 24, 5, 30, tzinfo=eastern_offset)
+    assert stamp == _utc(2026, 9, 24, 9, 30)
+    assert correct_publisher_clock(stamp, "Benzinga") == _utc(2026, 9, 24, 13, 30)
+
+
+def test_any_publisher_comes_back_in_utc_even_from_a_non_utc_input() -> None:
+    stamp = datetime(2026, 9, 24, 5, 30, tzinfo=timezone(timedelta(hours=-4)))
+    unchanged = correct_publisher_clock(stamp, "Yahoo")
+    assert unchanged == stamp
+    assert unchanged.tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize("publisher", ["Benzinga", "Yahoo", None])
+def test_a_naive_input_is_refused_for_every_publisher(publisher: str | None) -> None:
+    """A naive stamp has no instant to correct: guessing UTC or local is the
+    silent multi-hour error the aware-datetime rule exists to stop."""
+    with pytest.raises(ValueError, match="aware"):
+        correct_publisher_clock(datetime(2026, 9, 24, 9, 30), publisher)
+
+
+@pytest.mark.asyncio
+async def test_a_benzinga_row_on_the_general_feed_is_not_corrected(
+    make_provider: ProviderFactory,
+) -> None:
+    """SYNTHETIC body. The skew was measured on ``/company-news`` only; the
+    general feed is excluded until it is measured, so its Benzinga row keeps the
+    epoch exactly as served -- a correctly stamped row pushed 4h forward would
+    sort above newer stories and break its link to the Alpaca twin."""
+    raw = int(_utc(2026, 9, 24, 9, 30).timestamp())
+    rows = json.loads(synthetic_market_rows(1))
+    rows[0].update({"source": "Benzinga", "datetime": raw})
+    provider, _ = make_provider(lambda request: (200, json.dumps(rows)))
+    result = await provider.market_news(None)
+
+    (only,) = result.articles
+    assert only.feed is NewsFeed.FINNHUB_MARKET
+    assert only.publisher == "Benzinga"
+    assert only.published_at == _utc(2026, 9, 24, 9, 30)
+
+
+def _benzinga_company_body(raw: datetime, *, vendor_id: int = 4242) -> str:
+    rows = json.loads(synthetic_rows(1, day=TODAY, first_id=vendor_id))
+    rows[0].update({"source": "Benzinga", "datetime": int(raw.timestamp())})
+    return json.dumps(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_correction_landing_past_now_keeps_the_raw_stamp_and_warns(
+    make_provider: ProviderFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """SYNTHETIC. The day Finnhub fixes the bug upstream, a true-UTC stamp is
+    pushed 4h into the future. A corrected stamp later than now plus the
+    tolerance is impossible for a published story, so that row keeps its raw
+    stamp and the event says which way the evidence points."""
+    raw = _utc(2026, 9, 24, 13, 30)  # already true UTC: Finnhub has fixed it
+    now = _utc(2026, 9, 24, 13, 35)
+    provider, _ = make_provider(
+        lambda request: (200, _benzinga_company_body(raw)), clock=lambda: now
+    )
+    with caplog.at_level(logging.WARNING, logger="corollary.data.providers.finnhub"):
+        result = await provider.company_news("NVDA", TODAY, TODAY)
+
+    (only,) = result.articles
+    assert only.published_at == raw
+    (record,) = events(caplog, "finnhub_publisher_clock_future")
+    assert record.levelno == logging.WARNING
+    fields: Any = record
+    assert fields.raw_published_at == "2026-09-24T13:30:00+00:00"
+    assert fields.corrected_published_at == "2026-09-24T17:30:00+00:00"
+    assert fields.now == "2026-09-24T13:35:00+00:00"
+    assert fields.vendor_id == "4242"
+    assert fields.symbol == "NVDA"
+    assert fields.publisher == "Benzinga"
+
+
+@pytest.mark.asyncio
+async def test_a_correction_exactly_at_the_tolerance_is_kept(
+    make_provider: ProviderFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The boundary permits: corrected == now + tolerance is a story that is
+    just fresh with a little clock drift, not evidence of an upstream fix."""
+    raw = _utc(2026, 9, 24, 9, 30)  # corrects to 13:30Z
+    now = _utc(2026, 9, 24, 13, 30) - PUBLISHER_CLOCK_FUTURE_TOLERANCE
+    provider, _ = make_provider(
+        lambda request: (200, _benzinga_company_body(raw)), clock=lambda: now
+    )
+    with caplog.at_level(logging.WARNING, logger="corollary.data.providers.finnhub"):
+        result = await provider.company_news("NVDA", TODAY, TODAY)
+
+    (only,) = result.articles
+    assert only.published_at == _utc(2026, 9, 24, 13, 30)
+    assert events(caplog, "finnhub_publisher_clock_future") == []
+
+
+@pytest.mark.asyncio
+async def test_one_second_past_the_tolerance_keeps_the_raw_stamp(
+    make_provider: ProviderFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw = _utc(2026, 9, 24, 9, 30)
+    now = _utc(2026, 9, 24, 13, 30) - PUBLISHER_CLOCK_FUTURE_TOLERANCE - timedelta(seconds=1)
+    provider, _ = make_provider(
+        lambda request: (200, _benzinga_company_body(raw)), clock=lambda: now
+    )
+    with caplog.at_level(logging.WARNING, logger="corollary.data.providers.finnhub"):
+        result = await provider.company_news("NVDA", TODAY, TODAY)
+
+    (only,) = result.articles
+    assert only.published_at == raw
+    assert len(events(caplog, "finnhub_publisher_clock_future")) == 1
+
+
+def test_the_future_tolerance_is_five_minutes() -> None:
+    assert PUBLISHER_CLOCK_FUTURE_TOLERANCE == timedelta(minutes=5)
+
+
+@pytest.mark.asyncio
+async def test_the_future_warning_never_quotes_the_token(
+    make_provider: ProviderFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The vendor id goes through the provider's redactor. A token can only
+    reach this log through vendor text, so the whole rendered record is checked."""
+    raw = _utc(2026, 9, 24, 13, 30)
+    now = _utc(2026, 9, 24, 13, 35)
+    provider, _ = make_provider(
+        lambda request: (200, _benzinga_company_body(raw)), clock=lambda: now
+    )
+    with caplog.at_level(logging.WARNING, logger="corollary.data.providers.finnhub"):
+        await provider.company_news("NVDA", TODAY, TODAY)
+
+    (record,) = events(caplog, "finnhub_publisher_clock_future")
+    rendered = record.getMessage() + repr(vars(record))
+    assert TEST_CREDENTIALS.token not in rendered
 
 
 def test_the_public_names_are_listed_alphabetically() -> None:

@@ -35,8 +35,17 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "ChainSpec": schemas.ChainSpec,
     "DataFeed": schemas.DataFeed,
     "DataSourceStatus": schemas.DataSourceStatus,
+    "DiscoveryEvaluation": schemas.DiscoveryEvaluation,
+    "DiscoveryFeedFreshness": schemas.DiscoveryFeedFreshness,
     "IntradayPoint": schemas.IntradayPoint,
     "ManagedExit": schemas.ManagedExit,
+    # Phase 3 step 5: the feed's labels and decision 21's movers panel.
+    "NewsLabel": schemas.NewsLabel,
+    "NewsMover": schemas.NewsMover,
+    "NewsMoverArticle": schemas.NewsMoverArticle,
+    "NewsMoverEvidence": schemas.NewsMoverEvidence,
+    "NewsMoverReason": schemas.NewsMoverReason,
+    "NewsMovers": schemas.NewsMovers,
     "Notification": schemas.NotificationItem,
     "NotificationRoute": schemas.NotificationRoute,
     "OptionContract": schemas.OptionContract,
@@ -67,6 +76,12 @@ DELIBERATE_ADDITIONS: Mapping[str, frozenset[str]] = {
     ),
 }
 
+#: Fields ``types.ts`` still declares that the server has deliberately
+#: stopped sending, with the reason -- the mirror of DELIBERATE_ADDITIONS for
+#: a retirement that lands server-side first. Same rule: listed, not
+#: tolerated, and the listing fails once ``types.ts`` drops the field.
+DELIBERATE_RETIREMENTS: Mapping[str, frozenset[str]] = {}
+
 #: Named TS unions this API reproduces. Values, not just names -- a dropped
 #: member is a value the server can send that the client will not narrow.
 MIRRORED_UNIONS: Mapping[str, object] = {
@@ -81,6 +96,15 @@ MIRRORED_UNIONS: Mapping[str, object] = {
     "NotificationEvent": schemas.NotificationEvent,
     "FeedKey": schemas.FeedKey,
     "SessionState": schemas.SessionState,
+    # Phase 3 step 5. All single-line declarations, so ``ts_union_members``
+    # (which reads to the next blank line) takes exactly the one union.
+    "NewsLabelSource": schemas.NewsLabelSource,
+    "NewsSourceStatus": schemas.NewsSourceStatus,
+    "NewsAttribution": schemas.NewsAttribution,
+    "NewsLookback": schemas.NewsLookback,
+    "DiscoveryFeedName": schemas.DiscoveryFeedName,
+    "MoverRankGroup": schemas.MoverRankGroup,
+    "MoverDirection": schemas.MoverDirection,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)

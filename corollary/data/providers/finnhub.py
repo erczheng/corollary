@@ -109,7 +109,11 @@ Measured against this project's key on 2026-09-24 and recorded under
 
 * **``from``/``to`` are UTC dates.** Every single-day NVDA response spanned
   00:0x -> 23:5x UTC. A caller computing "today" in New York asks for the
-  previous UTC day for the four evening hours after 20:00 ET.
+  previous UTC day for the four evening hours after 20:00 ET. A ``"Benzinga"``
+  row is the exception: Finnhub stores its Eastern wall time as UTC (see
+  :func:`correct_publisher_clock`), so the filter applies to that row's
+  **ET** date. A yesterday+today UTC window still covers it, because the ET
+  date of an instant is never later than its UTC date.
 * **The cap truncates the oldest rows.** Rows come back newest first; NVDA
   over 2026-09-23 -> 24 returned 248 rows (123 + 125), where 2026-09-23 alone
   holds 200. So a capped two-day window still carries all of today up to the
@@ -149,13 +153,14 @@ import logging
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Final
 
 import httpx
 
+from corollary.calendars import NYSE_TZ
 from corollary.data.news.article import (
     NewsAccessDenied,
     NewsArticle,
@@ -168,11 +173,13 @@ from corollary.data.providers.fundamentals import (
     MarketCap,
 )
 from corollary.ratelimit import FINNHUB_HOST, HostRateLimiter, default_limiter
+from corollary.sockets import utcnow
 from corollary.wire import (
     WireFormatError,
     as_decimal,
     clean_params,
     decode_json,
+    require_aware,
     translating,
     vendor_detail,
 )
@@ -193,6 +200,8 @@ __all__ = [
     "MARKET_NEWS_PAGE_SIZE",
     "MILLION",
     "MarketNews",
+    "PUBLISHER_CLOCK_FUTURE_TOLERANCE",
+    "correct_publisher_clock",
     "ipo_date_from_profile",
 ]
 
@@ -359,12 +368,17 @@ class FinnhubProvider(FundamentalsProvider):
         client: httpx.AsyncClient | None = None,
         limiter: HostRateLimiter | None = None,
         base_url: str = FINNHUB_BASE_URL,
+        clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._credentials = credentials
         self._client = client if client is not None else httpx.AsyncClient(timeout=15.0)
         self._owns_client = client is None
         self._limiter = limiter if limiter is not None else default_limiter()
         self._base_url = base_url.rstrip("/")
+        # Read once per company_news response, to disbelieve a clock
+        # correction that lands in the future. Injected so no test reads a
+        # real clock.
+        self._clock = clock
 
     @classmethod
     def from_env(
@@ -745,6 +759,9 @@ class FinnhubProvider(FundamentalsProvider):
         if overflow is not None:
             _log_company_overflow(wanted, overflow, retried, overflow_rows)
 
+        # After the requests, so the time they took counts in the row's favour.
+        now = self._clock()
+        require_aware(now, "clock()")
         articles: dict[str, NewsArticle] = {}
         skipped = 0
         for batch in batches:
@@ -759,6 +776,7 @@ class FinnhubProvider(FundamentalsProvider):
                 if article is None:
                     skipped += 1
                     continue
+                article = self._disbelieve_future_correction(article, row, wanted, now)
                 articles.setdefault(article.vendor_id, article)
         return CompanyNews(
             symbol=wanted,
@@ -769,6 +787,60 @@ class FinnhubProvider(FundamentalsProvider):
             overflow_date=overflow,
             skipped=skipped,
         )
+
+    def _disbelieve_future_correction(
+        self, article: NewsArticle, row: Any, symbol: str, now: datetime
+    ) -> NewsArticle:
+        """``article`` with its raw stamp back if the clock correction ran past now.
+
+        :func:`correct_publisher_clock` assumes Finnhub still writes Benzinga's
+        Eastern wall time as UTC. The day Finnhub fixes that upstream, every
+        corrected stamp moves 4-5h into the future. A published story cannot
+        postdate ``now`` by more than :data:`PUBLISHER_CLOCK_FUTURE_TOLERANCE`,
+        so such a row keeps the raw stamp and is logged as
+        ``finnhub_publisher_clock_future``.
+
+        This only catches rows published within the last ~4h; older rows of a
+        fixed feed still correct to a past instant and are shifted silently.
+        The poll window always carries recent rows, so the warning is the
+        signal to retire the correction, not a complete repair.
+
+        ``row`` has already decoded, so its ``datetime`` is a positive int.
+        """
+        raw = datetime.fromtimestamp(row["datetime"], timezone.utc)
+        corrected = article.published_at
+        if corrected == raw or corrected <= now + PUBLISHER_CLOCK_FUTURE_TOLERANCE:
+            return article
+        vendor_id = self._scrub(article.vendor_id)
+        logger.warning(
+            "finnhub corrected stamp lands in the future (%s, id %s): %s > now %s; "
+            "keeping the raw stamp %s",
+            symbol,
+            vendor_id,
+            corrected.isoformat(),
+            now.isoformat(),
+            raw.isoformat(),
+            extra={
+                "event": "finnhub_publisher_clock_future",
+                "rule": (
+                    "a clock correction that lands past now plus the tolerance "
+                    "is disbelieved: the row keeps its raw stamp"
+                ),
+                "feed": NewsFeed.FINNHUB_COMPANY.value,
+                "symbol": symbol,
+                "vendor_id": vendor_id,
+                "publisher": article.publisher,
+                "raw_published_at": raw.isoformat(),
+                "corrected_published_at": corrected.isoformat(),
+                "now": now.isoformat(),
+                "tolerance_seconds": int(PUBLISHER_CLOCK_FUTURE_TOLERANCE.total_seconds()),
+                "remedy": (
+                    "Finnhub may have fixed its Benzinga clock upstream; re-measure "
+                    "against Alpaca and retire correct_publisher_clock if so"
+                ),
+            },
+        )
+        return replace(article, published_at=raw)
 
     async def _company_rows(
         self, symbol: str, from_date: date, to_date: date
@@ -837,6 +909,62 @@ def _newest_first(articles: Iterable[NewsArticle]) -> tuple[NewsArticle, ...]:
     return tuple(sorted(articles, key=lambda a: (-a.published_at.timestamp(), a.vendor_id)))
 
 
+#: The one ``source`` value whose ``datetime`` Finnhub gets wrong. Exact
+#: match: case variants were never observed, so they are not guessed at.
+_EASTERN_CLOCK_PUBLISHER: Final = "Benzinga"
+
+#: How far past ``now`` a corrected stamp may land before it is disbelieved.
+#: A published story cannot be from the future; a few minutes covers clock
+#: drift between Finnhub, Benzinga and this machine. Past it, the correction
+#: is what is wrong -- the signature of Finnhub having fixed the bug upstream.
+PUBLISHER_CLOCK_FUTURE_TOLERANCE: Final = timedelta(minutes=5)
+
+
+def correct_publisher_clock(published_at: datetime, publisher: str | None) -> datetime:
+    """Undo Finnhub's clock error for a publisher it stamps in Eastern wall time.
+
+    ``published_at`` is the instant Finnhub's epoch decodes to. It must be
+    aware -- a naive value raises ``ValueError``, since there is no instant to
+    correct -- and any zone is accepted: it is normalised to UTC before its
+    wall-clock fields are read, and the result is always aware UTC.
+    Measured 2026-09-25 -> 2026-10-09: of 1398 true twins of an Alpaca story
+    (Alpaca's feed is Benzinga's own), 1390 Finnhub rows with ``source``
+    exactly ``"Benzinga"`` sat exactly 240 minutes early, the other 8 were
+    templated repeats also -240 modulo whole days, and ``"Yahoo"`` rows
+    matched Alpaca and Massive at 0. An ET hour-of-day histogram put the skew
+    on Finnhub's side. So Finnhub writes Benzinga's ``America/New_York`` wall
+    time as if it were UTC, and the fix reads those wall-clock fields back as
+    Eastern local time. Every other publisher, ``None`` included, is returned
+    as the same instant, in UTC.
+
+    **Measured on ``/company-news`` only.** :func:`_news_article` applies this
+    to the ``finnhub_company`` feed and deliberately not to ``finnhub_market``
+    (``/news?category=general``), where no twin was measured: a correctly
+    stamped Benzinga row there would be pushed hours into the future. Extend
+    it to the general feed only once that feed has been measured too.
+
+    The EDT offset (-240) is measured. The EST offset (-300) is *predicted* by
+    the same reading and unverified until November's data exists. At the DST
+    edges the reading uses ``fold=0``: the repeated fall-back hour resolves to
+    its first, EDT occurrence (2026-11-01 01:59 -> 05:59Z, then 02:00 ->
+    07:00Z), so a story really published in the *second* 01:xx hour comes out
+    one hour early -- unavoidable, because the stamp Finnhub writes for the
+    two hours is identical. A spring-forward gap time (which never happens in
+    New York) takes the pre-transition EST offset, landing an hour later on
+    the wall clock -- deterministic, and no measured story sat there.
+
+    There is no data migration: rows already stored keep the old stamp and
+    age out under retention. A correction that lands in the future is caught
+    one level up, in :meth:`FinnhubProvider.company_news`, which has a clock.
+    """
+    require_aware(published_at, "published_at")
+    as_utc = published_at.astimezone(timezone.utc)
+    if publisher != _EASTERN_CLOCK_PUBLISHER:
+        return as_utc
+    wall = as_utc.replace(tzinfo=None, fold=0)
+    return wall.replace(tzinfo=NYSE_TZ).astimezone(timezone.utc)
+
+
 def _news_article(
     row: Any,
     *,
@@ -869,6 +997,10 @@ def _news_article(
             raise ValueError(f"url is a {type(url).__name__}, not a string")
         summary = _optional_text(row, "summary")
         source = _optional_text(row, "source")
+        published_at = datetime.fromtimestamp(stamp, timezone.utc)
+        if feed is NewsFeed.FINNHUB_COMPANY:
+            # Only where the skew was measured; see correct_publisher_clock.
+            published_at = correct_publisher_clock(published_at, source)
         return NewsArticle(
             vendor="finnhub",
             vendor_id=f"{id_prefix}{raw_id}",
@@ -877,7 +1009,7 @@ def _news_article(
             headline=headline,
             summary=summary,
             publisher=source,
-            published_at=datetime.fromtimestamp(stamp, timezone.utc),
+            published_at=published_at,
             tickers=tickers,
         )
     except (ValueError, OverflowError, OSError) as exc:
