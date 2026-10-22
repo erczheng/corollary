@@ -130,6 +130,9 @@ def test_the_five_events_are_the_contract_the_web_codes_against() -> None:
         # Phase 3 decision 21, emitted by the watch routes; its own suite is
         # ``tests/api/test_watch_routes.py``.
         "watchlist_changed",
+        # Phase 3 step 6's manual audit trigger; its own suite is
+        # ``tests/api/test_sentiment_routes.py``.
+        "sentiment_audit_requested",
     }
 
 
@@ -604,11 +607,14 @@ def test_no_runtime_means_the_action_succeeds_and_the_log_says_so(
         for r in caplog.records
         if r.__dict__.get("event") == "operator_notice_not_emitted"
     ]
-    # ``_each_action`` drives the five engine and settings actions; the sixth
-    # event, ``watchlist_changed``, is the watch routes' and is exercised in
-    # ``tests/api/test_watch_routes.py``.
+    # ``_each_action`` drives the five engine and settings actions. The other
+    # two events have their own suites: ``watchlist_changed`` is the watch
+    # routes' (``tests/api/test_watch_routes.py``), and
+    # ``sentiment_audit_requested`` the manual audit trigger's
+    # (``tests/api/test_sentiment_routes.py``).
+    elsewhere = {OperatorEvent.WATCHLIST_CHANGED, OperatorEvent.SENTIMENT_AUDIT_REQUESTED}
     assert sorted(r.__dict__["notification_event"] for r in skipped) == sorted(
-        event.value for event in OperatorEvent if event is not OperatorEvent.WATCHLIST_CHANGED
+        event.value for event in OperatorEvent if event not in elsewhere
     )
     assert all(r.__dict__["correlation_id"] for r in skipped)
 

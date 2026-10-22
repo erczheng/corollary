@@ -389,6 +389,8 @@ SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/settings/keys",
     "/api/settings/limits",
     "/api/settings/routes",
+    "/api/settings/sentiment",
+    "/api/settings/sentiment/audit",
     "/api/settings/sources",
 )
 
