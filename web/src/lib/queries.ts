@@ -55,6 +55,7 @@ import {
   markNotificationRead,
   resumeEngine,
   fetchNews,
+  fetchNewsMovers,
   fetchWatchList,
   addWatch,
   removeWatch,
@@ -79,7 +80,14 @@ import type {
   SeriesWindow,
 } from './api'
 import { useUIStore } from './store'
-import type { AccountMode, ManualCalendarEntry, Notification, StockQuote } from './types'
+import type {
+  AccountMode,
+  ManualCalendarEntry,
+  NewsLookback,
+  NewsMovers,
+  Notification,
+  StockQuote,
+} from './types'
 
 /* -------------------------------------------------------------------------
  * Keys
@@ -171,10 +179,12 @@ export const queryKeys = {
       query.offset ?? null,
     ] as const,
   watchList: () => ['news', 'watch'] as const,
-
   /** The range is part of the key; `['calendar']` is the prefix every
    * manual-entry mutation invalidates. */
   calendar: (window: CalendarWindow) => ['calendar', window.from, window.to] as const,
+  /** Under `['news']`, so a watch change — which moves who is off-watch —
+   * invalidates it with the feed. */
+  newsMovers: (lookback: NewsLookback) => ['news', 'movers', lookback] as const,
 }
 
 /** Which book a hook is asking about: the caller's, or the selected one.
@@ -613,6 +623,44 @@ export function useNewsFeed(query: NewsQuery = {}) {
   })
 }
 
+/** *Movers in the news* for the page's lookback. Polled with the feed: the
+ * candidates are derived per request from what the feed ingested, so they
+ * move on the same cadence. A failed refetch keeps the last rows — the
+ * panel says they may be stale rather than blanking them. */
+export function useNewsMovers(lookback: NewsLookback) {
+  return useQuery({
+    queryKey: queryKeys.newsMovers(lookback),
+    queryFn: ({ signal }) => fetchNewsMovers(lookback, { signal }),
+    refetchInterval: NEWS_POLL_MS,
+  })
+}
+
+/** A watched name is not a mover by definition, so a successful add drops
+ * it from every cached movers list at once — the row leaves on success, not
+ * a poll later. The invalidation that follows (`['news']`) refetches the
+ * list, which reconciles with the server's own answer.
+ *
+ * **The counts move with the row.** A dropped mover was one of the
+ * `signalled` off-watch names and is now a watched one, so `signalled` falls
+ * and `watchedExcluded` rises by one. Leaving them, watching the last mover
+ * showed an empty state built from stale counts — "3 signalled: 1 failed"
+ * with a third name unaccounted for — until the refetch landed. A ticker not
+ * in the list changes nothing, counts included. */
+function dropFromMovers(client: QueryClient, ticker: string) {
+  const symbol = ticker.toUpperCase()
+  client.setQueriesData<NewsMovers>({ queryKey: ['news', 'movers'] }, (old) => {
+    if (old === undefined) return old
+    const items = old.items.filter((m) => m.ticker !== symbol)
+    if (items.length === old.items.length) return old
+    return {
+      ...old,
+      items,
+      signalled: Math.max(0, old.signalled - 1),
+      watchedExcluded: old.watchedExcluded + 1,
+    }
+  })
+}
+
 export function useWatchList() {
   return useQuery({
     queryKey: queryKeys.watchList(),
@@ -632,8 +680,9 @@ export function useAddWatch() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: (ticker: string) => addWatch(ticker),
-    onSuccess: (list) => {
+    onSuccess: (list, ticker) => {
       client.setQueryData(queryKeys.watchList(), list)
+      dropFromMovers(client, ticker)
       onWatchChanged(client)
     },
   })

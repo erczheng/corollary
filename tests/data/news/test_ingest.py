@@ -907,3 +907,40 @@ def test_recorded_page_repolls_idempotently(session: Session) -> None:
     assert second.unchanged == len(articles)
     for stored in all_rows(session):
         assert tickers(session, stored.id)  # every article carries a tag or MARKET
+
+
+def test_a_finnhub_benzinga_twin_four_hours_early_on_the_wire_now_links(
+    session: Session,
+) -> None:
+    """SYNTHETIC rows, through the Finnhub row decoder. Finnhub stamps Benzinga's
+    Eastern wall time as UTC, so its raw epoch for the story Alpaca carries sits
+    exactly 240 minutes early -- far outside the 10-minute headline window. The
+    decoder's clock correction is what puts the pair back inside decision 3."""
+    from corollary.data.providers.finnhub import _news_article
+
+    alpaca_at = T0  # 14:00 UTC, 10:00 EDT
+    finnhub_row = {
+        "category": "company",
+        "datetime": int((alpaca_at - timedelta(hours=4)).timestamp()),
+        "headline": "Nvidia Beats Estimates",
+        "id": 4242,
+        "image": "",
+        "related": "NVDA",
+        "source": "Benzinga",
+        "summary": "synthetic",
+        "url": "https://finnhub.io/api/news?id=synthetic4242",
+    }
+    decoded = _news_article(
+        finnhub_row,
+        feed=NewsFeed.FINNHUB_COMPANY,
+        tickers=("NVDA",),
+        id_prefix="",
+        scrub=lambda text: text,
+    )
+    assert decoded is not None
+    assert decoded.published_at == alpaca_at
+
+    store(session, article("alpaca", "1", headline="NVIDIA Beats Estimates", published_at=alpaca_at))
+    result = store(session, decoded)
+    assert result.duplicates_linked == 1
+    assert row(session, "finnhub", "4242").canonical_id == row(session, "alpaca", "1").id

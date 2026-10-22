@@ -8,6 +8,30 @@ export function formatUsd(value: number, opts: { signed?: boolean } = {}): strin
   return `${sign}$${abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+/** A dollar amount the server sent as a **decimal string** (`"41.200"`),
+ * laid out the way `formatUsd` lays out a number — thousands grouped, at
+ * least two decimals — by **string operations only**. It is displayed, never
+ * computed with, and parsing it to a float to print it is the one step that
+ * could change a digit. So `"1234.5"` reads `$1,234.50`, and a value with
+ * more than two decimals keeps every one of them (`"41.200"` stays
+ * `$41.200`, `"0.125"` is never rounded to `$0.13`). A leading `-` becomes
+ * the typographic minus, ahead of the dollar sign, as `formatUsd` prints it.
+ *
+ * Anything that is not a plain decimal renders `—`, never a `$`: a `$` in a
+ * mono price cell claims the text is a price, and `$4.12E+1` reads as $4.12
+ * when the close is $41.20. The caller keeps the raw string reachable (a
+ * `title`) so the odd value is still auditable. */
+export function formatUsdDecimalString(value: string): string {
+  const negative = value.startsWith('-')
+  const body = negative ? value.slice(1) : value
+  const sign = negative ? '−' : ''
+  const match = /^(\d+)(?:\.(\d*))?$/.exec(body)
+  if (match === null) return '—'
+  const whole = match[1].replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  const fraction = (match[2] ?? '').padEnd(2, '0')
+  return `${sign}$${whole}.${fraction}`
+}
+
 export function formatPct(value: number, opts: { signed?: boolean } = {}): string {
   const sign = opts.signed ? (value > 0 ? '+' : value < 0 ? '−' : '') : ''
   const abs = Math.abs(value)

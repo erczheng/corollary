@@ -51,7 +51,7 @@ from corollary.api.deps import (
     ServiceRegistry,
     position_underlying,
 )
-from corollary.api.routes.markets import UNIVERSE_SYMBOLS
+from corollary.api.routes.markets import UNIVERSE, UNIVERSE_FUND_SYMBOLS, UNIVERSE_SYMBOLS
 from corollary.api.schemas import AccountMode
 from corollary.data.providers.alpaca import (
     ALPACA_LIVE_KEY_ENV,
@@ -433,6 +433,15 @@ async def test_the_jobs_are_handed_the_app_state_the_routes_read(
         assert services.news_store.assets is app.state.asset_directory
         assert services.markets == UNIVERSE_SYMBOLS
         assert services.seed_loader is app.state.spdr_seed_loader
+        # Unit 5.2: the store labels at ingest, with funds read off the
+        # curated universe's ``fund`` flag -- never a hand-kept list.
+        flagged = frozenset(entry.symbol for entry in UNIVERSE if entry.fund)
+        assert flagged
+        assert services.funds == UNIVERSE_FUND_SYMBOLS
+        assert frozenset(services.funds) == flagged
+        books = services.news_store.books
+        assert books is not None
+        assert books.funds == flagged
         # No field of the services is a broker; positions are a holder view.
         for spec in dataclasses.fields(services):
             assert not isinstance(getattr(services, spec.name), BrokerAccount), spec.name
@@ -956,18 +965,20 @@ def test_the_graph_walk_finds_a_registry_behind_a_callable() -> None:
     )
     identities = {id(registry)}
     # Through a bound method's __self__, then a closure cell.
-    leaky = ContextServices(session_factory=lambda: None, position_underlyings=refresher.refresh)  # type: ignore[arg-type, return-value]
+    leaky = ContextServices(funds=(), session_factory=lambda: None, position_underlyings=refresher.refresh)  # type: ignore[arg-type, return-value]
     found = _forbidden_reachable(leaky, identities)
     assert any("ServiceRegistry" in line for line in found), found
     assert any(".__self__" in line and "__closure__" in line for line in found), found
     # Through a partial's keywords, into a lambda's closure.
     via_partial = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         position_underlyings=functools.partial(_no_positions, source=lambda: registry),
     )
     assert _forbidden_reachable(via_partial, identities)
     # And the production reader over the same holder reaches nothing forbidden.
     clean = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         position_underlyings=HeldPositionUnderlyings(holder),
     )
@@ -982,6 +993,7 @@ def test_the_graph_walk_finds_code_from_a_forbidden_module_behind_a_partial() ->
     app_module = importlib.import_module("corollary.api.app")
 
     probe = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         seed_loader=functools.partial(len, app_module._context_services),  # type: ignore[arg-type]
     )
@@ -1002,6 +1014,7 @@ def test_the_graph_walk_follows_a_live_weakref_to_the_registry() -> None:
     registry = ServiceRegistry.from_env({})
     ref = weakref.ref(registry)
     probe = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         seed_loader=functools.partial(len, ref),  # type: ignore[arg-type]
     )
@@ -1021,6 +1034,7 @@ def test_the_graph_walk_walks_a_class_reached_as_a_value() -> None:
     registry = ServiceRegistry.from_env({})
     books = type("Books", (), {"broker": registry})
     probe = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         seed_loader=functools.partial(len, books),  # type: ignore[arg-type]
     )
@@ -1031,6 +1045,7 @@ def test_the_graph_walk_walks_a_class_reached_as_a_value() -> None:
     try:
         derived = type("Derived", (_HoldsABrokerOnTheClass,), {})
         probe = ContextServices(
+            funds=(),
             session_factory=lambda: None,  # type: ignore[arg-type, return-value]
             seed_loader=functools.partial(len, derived),  # type: ignore[arg-type]
         )
@@ -1039,6 +1054,7 @@ def test_the_graph_walk_walks_a_class_reached_as_a_value() -> None:
         _HoldsABrokerOnTheClass.broker = None
     # A class from a forbidden module is itself flagged, identities or not.
     probe = ContextServices(
+        funds=(),
         session_factory=lambda: None,  # type: ignore[arg-type, return-value]
         seed_loader=functools.partial(len, ServiceRegistry),  # type: ignore[arg-type]
     )

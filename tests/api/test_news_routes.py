@@ -4,7 +4,8 @@ What is pinned, from the spec's *API* section and decisions 3, 4 and 21:
 
 * canonical rows only; a duplicate group is shown once, naming the canonical
   row's publisher, once per ticker the group is tagged to;
-* step 4 labels nothing: ``unclassified``, no tier, no source, not demoted;
+* an item no source labelled is ``unclassified``, with no tier, source or status
+  (labels themselves: ``test_news_labels.py``);
 * sector from the SPDR seed, ``Other`` outside it or with no seed (and the
   response says the seed is missing), ``MARKET`` under ``Macro``;
 * every lookback's boundary is the start of an ET calendar date, in both
@@ -35,7 +36,11 @@ from corollary.api.routes.news import router as news_router
 from corollary.data.seeds import SeedError
 
 from .news_support import SEED_AS_OF, add_article, add_manual_watches, make_seed
-from .test_schema_contract import ts_interface_fields, ts_union_members, wire_fields
+from .test_schema_contract import (
+    ts_interface_fields,
+    ts_union_members,
+    wire_fields,
+)
 
 UTC = timezone.utc
 
@@ -161,7 +166,9 @@ def test_market_files_under_macro_and_is_dropped_when_the_group_has_a_real_tag(
     assert macro["sector"] == "Macro"
 
 
-def test_step_four_labels_nothing_and_says_so(news: TestClient, db_engine: Engine) -> None:
+def test_an_item_no_source_labelled_is_unclassified_and_names_no_source(
+    news: TestClient, db_engine: Engine
+) -> None:
     add_article(
         db_engine,
         vendor="alpaca",
@@ -175,7 +182,10 @@ def test_step_four_labels_nothing_and_says_so(news: TestClient, db_engine: Engin
         assert item["sentiment"] == "unclassified"
         assert item["tier"] is None
         assert item["source"] is None
-        assert item["demoted"] is False
+        assert item["sourceStatus"] is None
+        assert item["otherLabel"] is None
+        # Q22: no ``demoted: false`` -- it would claim an audit that never ran.
+        assert "demoted" not in item
 
 
 def test_the_item_carries_url_and_an_aware_utc_time(news: TestClient, db_engine: Engine) -> None:
@@ -509,10 +519,12 @@ def _calls(dependant: Any) -> set[Any]:
     return found
 
 
+@pytest.mark.risk
 @pytest.mark.parametrize(
     ("path", "method"),
     [
         ("/api/news", "GET"),
+        ("/api/news/movers", "GET"),
         ("/api/news/watch", "GET"),
         ("/api/news/watch/{ticker}", "POST"),
         ("/api/news/watch/{ticker}", "DELETE"),
@@ -533,9 +545,20 @@ def test_no_news_route_depends_on_a_broker_or_a_provider(path: str, method: str)
 
 
 def test_the_item_serves_every_field_of_the_frontends_news_item() -> None:
-    # The frontend now reads url, source and demoted too, so the two field
-    # sets are the same set: any drift either way is a contract break.
-    assert ts_interface_fields("NewsItem") == wire_fields(schemas.NewsItem)
+    """Equal, both ways, with nothing listed.
+
+    Step 5 added ``sourceStatus``, ``otherLabel`` and ``attributedBy`` and
+    retired ``demoted`` (Q22) server-side first, listed in
+    ``test_schema_contract.py`` until the News frontend unit (5.F2) declared
+    them. It has, so the listings are gone and any difference is a drift.
+    """
+    ts = ts_interface_fields("NewsItem")
+    wire = wire_fields(schemas.NewsItem)
+
+    assert wire - ts == frozenset(), f"NewsItem sends {sorted(wire - ts)} undeclared"
+    assert ts - wire == frozenset(), (
+        f"types.ts declares {sorted(ts - wire)} the server does not send"
+    )
 
 
 def test_the_sentiment_and_tier_unions_match_types_ts() -> None:

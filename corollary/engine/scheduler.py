@@ -193,6 +193,7 @@ from corollary.data.news.pollers import (
     UniverseSource,
     WatchTierPoller,
     build_watch_universe,
+    news_name_books,
     prune_news,
     refresh_assets,
     refresh_tradeability_cache,
@@ -656,6 +657,11 @@ class JobStatus:
     name: str
     rule: str
     schedule: str
+    #: The job definition's own schedule -- what a reader measures "how many
+    #: runs should have happened since" against, never a re-typed interval.
+    cadence: Schedule
+    #: ``None`` before the job's loop first asks its schedule, and for good
+    #: once :attr:`stopped`.
     next_run: datetime | None
     last_started: datetime | None
     last_success: datetime | None
@@ -676,6 +682,10 @@ class JobStatus:
     #: overwrites as it begins: a calendar fetch takes "today" at its start,
     #: so this -- and only this -- dates what that success asked about.
     last_success_started: datetime | None = None
+    #: The job's task has ended and the job will not run again in this
+    #: process: it died (``context_job_task_died``) or its calendar ran out
+    #: (``context_job_unscheduled``). ``next_run`` is then ``None``.
+    stopped: bool = False
 
     @property
     def failing(self) -> bool:
@@ -705,6 +715,7 @@ class _JobRecord:
     last_skip_reason: str | None = None
     last_skip_fresh_as_of: datetime | None = None
     last_success_started: datetime | None = None
+    stopped: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -821,6 +832,12 @@ class Scheduler:
             exc = task.exception()
             if exc is None:
                 return  # ran out of calendar; context_job_unscheduled said so
+            # A page reading this job's status must see that it will not run
+            # again, not the slot it was sleeping toward when it died.
+            record = self._records.get(task.get_name().removeprefix("context-job:"))
+            if record is not None:
+                record.next_run = None
+                record.stopped = True
             logger.error(
                 "a context job's task died; that job will not run again until "
                 "the process restarts. The engine is not halted",
@@ -847,6 +864,7 @@ class Scheduler:
                 name=job.name,
                 rule=job.rule,
                 schedule=job.schedule.describe(),
+                cadence=job.schedule,
                 next_run=record.next_run,
                 last_started=record.last_started,
                 last_success=record.last_success,
@@ -859,6 +877,7 @@ class Scheduler:
                 last_skip_reason=record.last_skip_reason,
                 last_skip_fresh_as_of=record.last_skip_fresh_as_of,
                 last_success_started=record.last_success_started,
+                stopped=record.stopped,
             )
             for job in self._jobs
             for record in (self._records[job.name],)
@@ -947,6 +966,7 @@ class Scheduler:
                 continue
             record.next_run = upcoming
             if upcoming is None:
+                record.stopped = True
                 logger.error(
                     "a context job has no next run; the calendar has nothing "
                     "to say past its published range",
@@ -1480,6 +1500,14 @@ class ContextServices:
     #: The Markets page's universe -- the watch universe's ``markets`` members.
     #: Passed in, because this module may not import ``corollary.api``.
     markets: tuple[str, ...] = ()
+    #: The curated universe's funds (its ``fund`` flag), which the rules
+    #: tier's single-tag rule never lands on (AUDIT3-M1). Passed in, like
+    #: :attr:`markets`. Read only when the services build their own news
+    #: store; a store passed in brings its own name-book source. Required,
+    #: keyword-only, with no default: an empty default would quietly reopen
+    #: AUDIT3-M1 for a caller that forgot it -- the reason ``NameBook``
+    #: refuses to default it too. ``()`` must be said, not implied.
+    funds: tuple[str, ...] = field(kw_only=True)
     position_underlyings: PositionUnderlyingsSource = _no_position_underlyings
     #: The SPDR seed, for the sector leaders. The lifespan passes
     #: ``app.state.spdr_seed_loader`` so the jobs and the watch routes agree.
@@ -1597,7 +1625,7 @@ MASSIVE_NEWS_EVERY = timedelta(minutes=15)
 #: days only, because ``MAX_DIRECTORY_AGE`` is 26 h and a weekend would lapse
 #: it, and the tradeability job warns on a stale directory every run.
 ASSET_DIRECTORY_AT = time(7, 30)
-#: ADV / tradeability for off-watch tickers tagged today: every 15 min.
+#: ADV / tradeability for off-watch tickers carrying a qualifying news signal: every 15 min.
 TRADEABILITY_EVERY = timedelta(minutes=15)
 #: Retention: nightly at 03:00 ET. 03:00 exists exactly once on both DST
 #: change days -- spring forward skips 02:00-03:00 and lands *on* 03:00 EDT,
@@ -1700,11 +1728,25 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
     per feed. The cursors live in the pollers, in memory, recovered from the
     stored rows on each first run.
     """
+    seed_loader = services.seed_loader
+    assert seed_loader is not None  # filled by ContextServices.__post_init__
     store = (
         services.news_store
         if services.news_store is not None
-        else NewsStore(session_factory=services.session_factory, assets=services.assets)
+        else NewsStore(
+            session_factory=services.session_factory,
+            assets=services.assets,
+            books=news_name_books(
+                markets=services.markets,
+                position_underlyings=services.position_underlyings,
+                session_factory=services.session_factory,
+                seed_loader=seed_loader,
+                assets=services.assets,
+                funds=services.funds,
+            ),
+        )
     )
+    universe = _watch_universe_source(services)
     universe = _watch_universe_source(services)
     watch = WatchTierPoller(provider=services.finnhub, universe=universe, store=store)
     alpaca_news = AlpacaNewsPoller(provider=services.alpaca, store=store)
@@ -1781,8 +1823,9 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
             schedule=EveryInterval(TRADEABILITY_EVERY),
             run=functools.partial(_tradeability, services, universe, clock),
             rule=(
-                "decision 21's tradeability cache for off-watch tickers tagged "
-                "today (ADV, last close, has_options, standard root, IPO date); "
+                "decision 21's tradeability cache for off-watch tickers carrying "
+                "a qualifying news signal (ADV, last close, has_options, "
+                "standard root, IPO date); "
                 "when this fails those tickers stay unchecked and are asked "
                 "again next run"
             ),

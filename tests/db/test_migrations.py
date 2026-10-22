@@ -67,16 +67,20 @@ EXPECTED_TABLES = {
     "spdr_holding",
     # 0012 -- Q17: the OpenFIGI ISIN -> ticker cache
     "isin_ticker",
-    # 0013 -- step 7: the News calendar (provisional number, Q22: renumbered
-    # by whichever of steps 5 and 7 merges second)
+    # 0013 -- step 5: one label per (article, ticker, source)
+    "sentiment_label",
+    # 0014 -- step 7: the News calendar.
     "calendar_event",
 }
+
+#: Everything 0013 created.
+_0013_TABLES = {"sentiment_label"}
 
 #: Everything 0012 created.
 _0012_TABLES = {"isin_ticker"}
 
-#: Everything 0013 created.
-_0013_TABLES = {"calendar_event"}
+#: Everything 0014 created.
+_0014_TABLES = {"calendar_event"}
 
 #: Everything 0010 created.
 _0010_TABLES = {"spdr_holdings_snapshot", "spdr_holding"}
@@ -132,7 +136,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -159,7 +163,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0013"]
+    assert script.get_heads() == ["0014"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -172,10 +176,7 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert (
-        EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES
-        <= tables
-    )
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -203,7 +204,7 @@ def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables  # 0011 dropped nothing
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables  # 0011 dropped nothing
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
@@ -235,8 +236,8 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert tables & _0012_TABLES == set()
-    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    assert tables & (_0012_TABLES | _0013_TABLES | _0014_TABLES) == set()
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
 
     command.upgrade(cfg, "head")
@@ -246,10 +247,10 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     assert EXPECTED_TABLES <= tables
 
 
-def test_0013_seeds_the_calendar_changed_routes_and_downgrades_them(
+def test_0014_seeds_the_calendar_changed_routes_and_downgrades_them(
     db_path: Path,
 ) -> None:
-    """Unit 7.3, amended into 0013 in-branch: decision 20's info defaults."""
+    """Unit 7.3: decision 20's info defaults."""
     url = sqlite_url(db_path)
     cfg = _config(url)
     command.upgrade(cfg, "head")
@@ -257,7 +258,7 @@ def test_0013_seeds_the_calendar_changed_routes_and_downgrades_them(
     assert routes[("calendar_changed", "bell")] is False
     assert routes[("calendar_changed", "discord")] is True
 
-    command.downgrade(cfg, "0012")
+    command.downgrade(cfg, "0013")
     routes = _route_rows(url)
     assert not {event for event, _channel in routes} & {"calendar_changed"}
     assert len(routes) == 30
@@ -266,11 +267,11 @@ def test_0013_seeds_the_calendar_changed_routes_and_downgrades_them(
     assert _route_rows(url)[("calendar_changed", "discord")] is True
 
 
-def test_0013_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> None:
-    """``seed.py`` runs on every startup; an edited row must survive 0013."""
+def test_0014_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> None:
+    """``seed.py`` runs on every startup; an edited row must survive 0014."""
     url = sqlite_url(db_path)
     cfg = _config(url)
-    command.upgrade(cfg, "0012")
+    command.upgrade(cfg, "0013")
     eng = create_db_engine(url)
     with Session(eng) as sess:
         sess.add(NotificationRoute(event="calendar_changed", channel="discord", enabled=False))
@@ -283,22 +284,17 @@ def test_0013_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> No
     assert routes[("calendar_changed", "bell")] is False
 
 
-def test_0013_downgrades_to_0012_and_back(db_path: Path) -> None:
-    """``calendar_event`` comes and goes alone; 0012's cache stays.
-
-    Q22: 0013 is provisional. Whichever of steps 5 and 7 merges second
-    renumbers its revision, re-points ``down_revision`` and updates this test
-    and ``test_there_is_exactly_one_head``.
-    """
+def test_0014_downgrades_to_0013_and_back(db_path: Path) -> None:
+    """``calendar_event`` comes and goes alone; 0013's labels and 0012's cache stay."""
     url = sqlite_url(db_path)
     cfg = _config(url)
     command.upgrade(cfg, "head")
-    command.downgrade(cfg, "0012")
+    command.downgrade(cfg, "0013")
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert tables & _0013_TABLES == set()
-    assert EXPECTED_TABLES - _0013_TABLES <= tables
+    assert tables & _0014_TABLES == set()
+    assert EXPECTED_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -403,7 +399,7 @@ def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0010_TABLES == set()
-    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -489,6 +485,7 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
         - _0010_TABLES
         - _0012_TABLES
         - _0013_TABLES
+        - _0014_TABLES
         <= tables
     )
 

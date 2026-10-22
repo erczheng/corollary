@@ -68,7 +68,7 @@ from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 # Re-exported: the holder lives beside the jobs that read it, so the object a
 # job holds a view of is one the jobs' import scan may walk.
-from corollary.engine.scheduler import PositionUnderlyings
+from corollary.engine.scheduler import JobStatus, PositionUnderlyings, Scheduler
 from corollary.instruments import parse_occ_symbol
 from corollary.pricing.rates import RiskFreeRateSource
 from corollary.wire import require_aware
@@ -87,6 +87,7 @@ __all__ = [
     "PositionUnderlyingsDep",
     "ProviderDep",
     "ServiceRegistry",
+    "SchedulerStatusDep",
     "SeedLoader",
     "SessionDep",
     "SpdrSeedDep",
@@ -98,6 +99,7 @@ __all__ = [
     "market_data",
     "missing_live_credentials",
     "position_underlying",
+    "scheduler_status",
     "position_underlyings",
     "service_registry",
     "spdr_seed",
@@ -905,6 +907,22 @@ def spdr_seed(request: Request) -> SpdrSeed | None:
 
 
 
+def scheduler_status(request: Request) -> Mapping[str, JobStatus] | None:
+    """The context scheduler's job records, ``None`` when no scheduler is running.
+
+    Read-only snapshots (:meth:`Scheduler.status`): what a page turns into
+    *stale since HH:MM*. ``None`` is an app built with no scheduler, or one
+    whose scheduler could not start -- every feed it would poll then reads
+    stale, which is the honest answer. No vendor client is reached through
+    this: the scheduler holds its own, and only its status is returned.
+    """
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is None:
+        return None
+    assert isinstance(scheduler, Scheduler)
+    return scheduler.status()
+
+
 AccountModeDep = Annotated[AccountMode, Depends(account_mode)]
 BrokerDep = Annotated[BrokerAccount, Depends(broker_for_account)]
 ProviderDep = Annotated[MarketDataProvider, Depends(market_data)]
@@ -913,3 +931,4 @@ SessionDep = Annotated[Session, Depends(db_session)]
 AssetDirectoryDep = Annotated[AssetDirectoryHolder, Depends(asset_directory)]
 PositionUnderlyingsDep = Annotated[PositionUnderlyings, Depends(position_underlyings)]
 SpdrSeedDep = Annotated[SpdrSeed | None, Depends(spdr_seed)]
+SchedulerStatusDep = Annotated[Mapping[str, JobStatus] | None, Depends(scheduler_status)]

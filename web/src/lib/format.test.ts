@@ -8,7 +8,47 @@ import {
   formatSessionDateTimeET,
   formatSessionDay,
   formatSignedNumber,
+  formatUsd,
+  formatUsdDecimalString,
 } from './format'
+
+/** The server's decimal string, verbatim — a float round-trip would print
+ * '41.200' as 41.2. */
+describe('formatUsdDecimalString', () => {
+  it('keeps every digit the server sent, trailing zeros included', () => {
+    expect(formatUsdDecimalString('41.200')).toBe('$41.200')
+    expect(formatUsdDecimalString('9.70')).toBe('$9.70')
+  })
+
+  it('puts a typographic minus ahead of the dollar sign', () => {
+    expect(formatUsdDecimalString('-3.50')).toBe('−$3.50')
+    expect(formatUsdDecimalString('-1234.5')).toBe('−$1,234.50')
+  })
+
+  /** Laid out as `formatUsd` lays out a number, without ever becoming one. */
+  it('groups thousands and pads to two decimals, as formatUsd does', () => {
+    expect(formatUsdDecimalString('1234.5')).toBe('$1,234.50')
+    expect(formatUsdDecimalString('1234.5')).toBe(formatUsd(1234.5))
+    expect(formatUsdDecimalString('1234567')).toBe('$1,234,567.00')
+    expect(formatUsdDecimalString('999.9')).toBe('$999.90')
+    expect(formatUsdDecimalString('0.5')).toBe('$0.50')
+    expect(formatUsdDecimalString('12.')).toBe('$12.00')
+  })
+
+  /** More than two decimals is the server's precision, not noise: no rounding. */
+  it('keeps digits past the second decimal rather than rounding them', () => {
+    expect(formatUsdDecimalString('0.125')).toBe('$0.125')
+    expect(formatUsdDecimalString('1234.5678')).toBe('$1,234.5678')
+    // Past a float's precision: Number() would print 9007199254740993 as …992.
+    expect(formatUsdDecimalString('9007199254740993.1')).toBe('$9,007,199,254,740,993.10')
+  })
+
+  it('renders an em dash, never a dollar sign, for anything not a plain decimal', () => {
+    for (const odd of ['1e3', '4.12E+1', '', 'NaN', '--5', '-']) {
+      expect(formatUsdDecimalString(odd)).toBe('—')
+    }
+  })
+})
 
 /** A bare 'YYYY-MM-DD' is a calendar date, not an instant. It parses as UTC
  * midnight, and ET is behind UTC, so rendering one in ET shows the previous

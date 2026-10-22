@@ -54,6 +54,7 @@ import type {
   FeedKey,
   ManualCalendarEntry,
   NewsFeed,
+  NewsMovers,
   NewsLookback,
   NewsScope,
   Notification,
@@ -1420,4 +1421,14 @@ export function removeCalendarEntry(id: string, options: RequestOptions = {}): P
     method: 'DELETE',
     ...options,
   })
+}
+
+/** `GET /api/news/movers` — decision 21's discovery candidates, **ranked by
+ * the server**. The panel renders `items` in the order given; it never
+ * re-sorts them. Follows the page's lookback (server default `today`). */
+export function fetchNewsMovers(
+  lookback: NewsLookback,
+  options: RequestOptions = {},
+): Promise<NewsMovers> {
+  return request<NewsMovers>('/news/movers', { params: { lookback }, ...options })
 }
