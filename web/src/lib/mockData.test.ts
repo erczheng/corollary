@@ -336,6 +336,16 @@ describe('the stock universe covers what the Markets table renders', () => {
     expect(new Set(STOCKS.map((s) => s.symbol)).size).toBe(STOCKS.length)
   })
 
+  it('marks as funds exactly the symbols the server\'s curated universe does', () => {
+    // `UniverseEntry(..., fund=True)` in corollary/api/routes/markets.py.
+    // The fixture stands in for that wire, so it must classify the same way.
+    expect(STOCKS.filter((s) => s.isFund).map((s) => s.symbol).sort()).toEqual(
+      ['ARKK', 'IWM', 'QQQ', 'SPY', 'XLE'],
+    )
+    // Every fund here also carries a null market cap, never 0.
+    for (const s of STOCKS.filter((x) => x.isFund)) expect(s.marketCap).toBeNull()
+  })
+
   it('carries a fund with no market cap and a company with one', () => {
     // The em-dash branch and the null-sorts-last rule both need a fixture
     // that reaches them.

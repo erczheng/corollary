@@ -15,6 +15,8 @@ off-watch-list names in the news. Decision 21 carries it; decisions 3, 4, 12,
 labelled a parent-session assumption.
 **Paused 2026-09-30 (Q20)** after step 4's follow-ups: step 5 and beyond wait
 on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
+**Resumed 2026-10-10 (Q22) for steps 5, 6 and 7.** Steps 8 and 9 stay paused
+under Q20.
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -1100,6 +1102,46 @@ guard and provider done (synthetic tests; no live call yet).* The owner chose
   worst rolling minute `C + r·T` = 24 against the keyless 25; worst 6 s 13.2
   against the keyed 25. One bucket under whichever ceiling applies; the key
   buys batch size (100 jobs, not 10), not rate.
+
+**Q22 — Steps 5, 6 and 7 resume (2026-10-10); Q20 is lifted for them only.**
+The owner's answer, verbatim: *"yes start on all 3 steps."* Steps 8 and 9 stay
+paused under Q20 until the owner says otherwise.
+
+- **The four parent-session numbers step 6 and step 5 rest on were explained
+  to the owner the same day:** the 250-ticker discovery audit cap (decision
+  12), the ≥100 re-promotion floor (Q6), transitions acting on the combined
+  figure rather than the watch-only one (decision 12), and the Movers ranking
+  (decision 21). **The owner confirmed all four as written the same day**
+  (*"let them stay as written"*), so they are now owner decisions rather than
+  assumptions. Each one is a single constant or a single `scope` value, so a
+  change after step 6 lands is still cheap.
+- **Step 5 owns decision 13's second-risk check.** Its re-measurement is the
+  trigger. If the rules tier's watch-universe rate is below 1.5 directional
+  labels per session, step 5 still lands. The choice between a longer
+  demotion lookback and a permanently `unaudited` rules source goes to the
+  owner before step 6's transitions are merged.
+
+Two sequencing rules, supplied by this spec because steps 5 and 7 now run in
+parallel. Neither is an owner decision.
+
+- **Migration numbers are assigned when a step merges, not when it branches.**
+  Steps 5 and 7 each add a migration on `0012`, and two revisions sharing a
+  `down_revision` give Alembic two heads. Whichever step merges second
+  renumbers its migration to the next free number, re-points `down_revision`
+  at the head it lands on, and shows one head in `uv run alembic heads` before
+  merging. Step 6 follows the same rule. *Rejected:* an Alembic merge revision
+  (an empty revision whose only job is to hide that two branches raced), and
+  pre-assigning `0013` to step 5 and `0014` to step 7 (step 7 would then wait
+  on step 5's merge for no reason).
+- **Until step 6 exists, a label's source reports `unaudited`, never "not
+  demoted".** The API section's *"whether that source is demoted"* on
+  `GET /api/news` is carried as the source's status, `unaudited | active |
+  demoted`. Step 5 serves `unaudited` for both sources, and step 6 replaces it
+  with `sentiment_source_status`. The *display only* suffix keys on `demoted`,
+  so it cannot appear before step 6 runs a real audit. *Rejected:* a boolean
+  `demoted: false` in step 5. It would tell the page a source had passed an
+  audit that has never run, which is the claim Settings' *insufficient sample*
+  state exists to avoid.
 
 ---
 
@@ -2539,7 +2581,9 @@ company news covers the whole watch universe, and a discovery tier is added
 (decision 21). Step 5's re-measurement can still reopen it.
 *Since 2026-09-30 two things wait on the owner again:* step 4's sector leaders
 and sector column wait on Q17's guard decision, and Q20 pauses step 5 and
-everything after it until the owner says to go on.
+everything after it until the owner says to go on. *Since 2026-10-10 (Q22):*
+the sector leaders landed with step 4 (Q21, Q17), and steps 5, 6 and 7 are
+released. Steps 8 and 9 remain paused under Q20.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -2755,7 +2799,34 @@ tradeability and the watch list.**
 
 **5. Sentiment labelling: rules and Massive; `SentimentTier` resolved; the
 discovery panel.**
-- *Status:* not started. *Depends on:* 4.
+- *Status:* **code landed 2026-10-13; the re-measurement is borderline and
+  with the owner.** Commits: 80775f6 and 65e5512 `SentimentTier`
+  `rules|vendor`, c03b4d2 and 67a1c0a the Massive labeller, 400aff1 the rules
+  labeller, 9ae662d `sentiment_label` (migration 0013, provisional under
+  Q22) with labels at ingest, 5f14d6c the earnings single-tag exclusion,
+  27df165 discovery, `GET /api/news/movers` and feed labels, 9194e6e the feed
+  labels and the panel, 07e27fa Finnhub's Benzinga clock, and the
+  re-measurement script in the commit before this status. Every source is
+  served `unaudited` (Q22).
+  **The re-measurement** (`scripts/measure_phase3_rules.py`, ten sessions
+  2026-09-28..10-09, 67-symbol watch universe, real patterns and NameBook):
+  watch-universe rules directional labels, deduplicated by canonical group,
+  **mean 2.4 a session, median 1.5, range 0-9; 5 of 10 sessions below 1.5**,
+  the last six averaging 1.17; distinct (ticker, direction) 1.3. Per vendor:
+  Finnhub 2.4, Alpaca 0.8, Massive 0.2. Including off-watch: 29.8. Massive's
+  watch directional labels: 120.6 a session, neutral share 0.441. Against
+  step 0's draft (4.2 deduplicated; 3.7 / 1.2 / 0.2) the narrowed patterns
+  label less, by design (silence beats a wrong label). **By the mean the
+  gate holds (>= 1.5), so step 6's transitions are not blocked by the letter
+  of Q22; by the median it sits exactly on the line.** Which statistic
+  governs is the owner's call.
+  **Found on the way:** Finnhub stamped Benzinga stories in Eastern wall time
+  as UTC, four hours early, which defeated decision 3's cross-vendor dedup
+  (07e27fa; linked duplicates in the measurement went 569 -> 1950). A second
+  constant offset remains: Finnhub "Yahoo" against Massive "The Motley Fool"
+  twins sit exactly 20 minutes apart (575 pairs a fortnight, no third vendor
+  to say which is right), outside the +/-10 minute window. It does not move
+  the watch figure. *Depends on:* 4.
 - *Files:* `corollary/data/news/{rules,vendor,discovery}.py`,
   `corollary/data/providers/massive.py` (insights), migration for
   `sentiment_label`, `GET /api/news/movers`, the *Movers in the news* panel,
@@ -2777,7 +2848,9 @@ discovery panel.**
     goes back to the owner.
 
 **6. The self-audit and the demotion state.**
-- *Status:* not started. *Depends on:* 1 (for the two alerts), 5.
+- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 1 (for
+  the two alerts), 5. Its transitions do not merge while a below-1.5 result
+  from step 5's re-measurement is still with the owner (Q22).
 - *Carries:* Q5 (excess-return scoring, neutral excluded), Q6 (per source,
   52/66 hysteresis, automatic re-promotion, ≥30 / ≥100 floors), Q7 (no
   backfill) — all decided. Q9 widens what is graded (decision 12: discovery
@@ -2802,7 +2875,8 @@ discovery panel.**
 
 **7. Calendar: earnings, dividends, central banks, economic releases, manual
 geopolitical.**
-- *Status:* not started. *Depends on:* 0, 2, 3.
+- *Status:* not started; **released 2026-10-10 (Q22).** *Depends on:* 0, 2,
+  3, all done, so it runs in parallel with step 5 under Q22's migration rule.
 - *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
   project's key first**: its swagger flags are null, and a premium 403 goes
   back to the owner before any of the IPO work is built.

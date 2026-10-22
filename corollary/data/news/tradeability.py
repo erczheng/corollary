@@ -137,7 +137,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Final, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -146,7 +146,7 @@ from corollary.data.news.watchlist import MARKET_TICKER, WatchUniverse
 from corollary.data.providers.fundamentals import FundamentalsError
 from corollary.data.providers.interface import AssetDirectory, Bar, OptionContract, ProviderError
 from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
-from corollary.db.models import NewsArticle, NewsArticleTicker, TickerIpoDate, TickerTradeability
+from corollary.db.models import TickerIpoDate, TickerTradeability
 from corollary.instruments import is_adjusted_root
 from corollary.wire import require_aware
 
@@ -176,7 +176,6 @@ __all__ = [
     "is_adjusted_root_ticker",
     "nyse_is_session",
     "partial_window_first_session",
-    "recent_article_tickers",
     "refresh_tradeability",
     "store_tradeability",
     "tickers_needing_check",
@@ -757,27 +756,6 @@ class RefreshResult:
 def _ordered_unique(tickers: Iterable[str]) -> list[str]:
     """Normalised, blanks dropped, first occurrence kept."""
     return list(dict.fromkeys(t for t in (normalize_symbol(raw) for raw in tickers) if t))
-
-
-def recent_article_tickers(session: Session, since: datetime) -> list[str]:
-    """Every ticker tagged on an article published at or after ``since``.
-
-    Step 4's candidate set: a tag is the only signal before step 5's labels.
-    Ordered by each ticker's latest article, newest first, ties by symbol, so
-    a run bounded by :data:`MAX_TICKERS_PER_RUN` checks the freshest news
-    first. ``MARKET`` is returned like any other tag;
-    :func:`tickers_needing_check` is what excludes it.
-    """
-    require_aware(since, "since")
-    latest = func.max(NewsArticle.published_at).label("latest")
-    statement = (
-        select(NewsArticleTicker.ticker, latest)
-        .join(NewsArticle, NewsArticle.id == NewsArticleTicker.article_id)
-        .where(NewsArticle.published_at >= since)
-        .group_by(NewsArticleTicker.ticker)
-        .order_by(latest.desc(), NewsArticleTicker.ticker)
-    )
-    return [row.ticker for row in session.execute(statement)]
 
 
 def tickers_needing_check(

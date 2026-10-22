@@ -59,6 +59,7 @@ from sqlalchemy.orm import (
 )
 
 from corollary.data.news.article import FEED_VENDOR, NewsFeed
+from corollary.data.news.labels import SOURCE_TIER, Direction, LabelSource, SentimentTier
 from corollary.db.types import ActivityId, Money, UtcDateTime
 
 __all__ = [
@@ -93,6 +94,10 @@ __all__ = [
     "RiskLimit",
     "RISK_LIMIT_ABSOLUTE_MAX",
     "RISK_LIMIT_RANGES",
+    "SENTIMENT_DIRECTIONS",
+    "SENTIMENT_SOURCES",
+    "SENTIMENT_TIERS",
+    "SentimentLabelRow",
     "TickerIpoDate",
     "TickerTradeability",
     "WatchSymbol",
@@ -1352,6 +1357,94 @@ class NewsArticleTicker(Base):
         primary_key=True,
     )
     ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+
+#: ``sentiment_label.direction``'s CHECK set, from :class:`Direction`.
+SENTIMENT_DIRECTIONS: tuple[str, ...] = tuple(d.value for d in Direction)
+
+#: ``sentiment_label.tier``'s CHECK set, from :class:`SentimentTier`.
+SENTIMENT_TIERS: tuple[str, ...] = tuple(t.value for t in SentimentTier)
+
+#: ``sentiment_label.source``'s CHECK set, from :class:`LabelSource`.
+SENTIMENT_SOURCES: tuple[str, ...] = tuple(s.value for s in LabelSource)
+
+
+def _source_tier_pairing() -> str:
+    """A CHECK that each source is stored under its tier (:data:`SOURCE_TIER`)."""
+    return " OR ".join(
+        f"(source = '{source.value}' AND tier = '{tier.value}')"
+        for source, tier in SOURCE_TIER.items()
+    )
+
+
+class SentimentLabelRow(Base):
+    """One label on one ticker of one article, by one source (Phase 3 decision 4).
+
+    Design, *Database*: ``sentiment_label(id, article_id, ticker, source, tier,
+    direction, reasoning, rule_id, labeled_at)``, UNIQUE ``(article_id,
+    ticker, source)``. **No ``confidence`` column.** An item with no row
+    displays ``Unclassified``: the table stores labels, never their absence.
+
+    ``direction``, ``tier`` and ``source`` are CHECK-constrained to the enums
+    in :mod:`corollary.data.news.labels`, and the source/tier pairing to
+    :data:`~corollary.data.news.labels.SOURCE_TIER`. ``rule_id`` is non-null
+    (and non-blank) exactly when ``source = 'rules'``. ``ticker`` is
+    non-blank uppercase, as ``news_article_ticker``'s tags are.
+
+    **The article FK has no ``ON DELETE`` action, deliberately.** Decision 21
+    keeps labels and every labelled article's headline, URL, publisher and
+    time indefinitely, and the retention prune deletes only groups of which
+    no member carries a label (``retention.prune`` is passed
+    :func:`corollary.data.news.labelling.labelled_article_ids`, read under
+    the write lock the prune takes first, and the prune shares the news
+    store's lock with every label write). So the prune never deletes a
+    labelled article, and if anything ever tried, SQLite's statement-end
+    check refuses it. ``CASCADE`` was rejected because it would turn a wrong
+    retention predicate into labels silently destroyed; ``SET NULL`` because
+    a label with no article is an orphan. Named ``...Row`` because
+    :class:`~corollary.data.news.labels.SentimentLabel` is the labeller's
+    record of the same thing.
+    """
+
+    __tablename__ = "sentiment_label"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("direction", SENTIMENT_DIRECTIONS), name="ck_sentiment_label_direction"
+        ),
+        CheckConstraint(_in_list("tier", SENTIMENT_TIERS), name="ck_sentiment_label_tier"),
+        CheckConstraint(
+            _in_list("source", SENTIMENT_SOURCES), name="ck_sentiment_label_source"
+        ),
+        CheckConstraint(_source_tier_pairing(), name="ck_sentiment_label_source_tier"),
+        CheckConstraint(
+            "(source = 'rules' AND rule_id IS NOT NULL AND rule_id <> '') "
+            "OR (source <> 'rules' AND rule_id IS NULL)",
+            name="ck_sentiment_label_rule_id",
+        ),
+        CheckConstraint(
+            "ticker <> '' AND ticker = upper(ticker)",
+            name="ck_sentiment_label_ticker",
+        ),
+        UniqueConstraint(
+            "article_id", "ticker", "source", name="uq_sentiment_label_article_ticker_source"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("news_article.id"), nullable=False
+    )
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    direction: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: The rules tier's matched phrase, or the vendor's own text verbatim.
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The pattern that fired, for a rules label; ``NULL`` for a vendor label.
+    rule_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: When the row was written, UTC. A label never changes after that (Q7):
+    #: a later differing label for the same key is logged, not applied.
+    labeled_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
 
 
 class WatchSymbol(Base):

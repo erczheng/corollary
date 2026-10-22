@@ -583,6 +583,7 @@ describe('storeHandlers', () => {
           volumeDate: '2026-09-17',
           avgVolume: 2_000,
           marketCap: 3_000,
+          isFund: false,
         }),
       ])
       const stamped = '2026-09-17T14:29:01Z'

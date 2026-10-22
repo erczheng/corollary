@@ -288,6 +288,14 @@ UNIVERSE_SYMBOLS: Final[tuple[str, ...]] = tuple(
     entry.symbol for entry in UNIVERSE
 )
 
+#: The universe's exchange-traded funds, read off the curated ``fund`` flag --
+#: never a hand-kept ticker list, so flagging a new entry is the only change.
+#: The rules tier's single-tag rule never lands on one (AUDIT3-M1): a vendor
+#: tags a macro print with SPY alone, and the phrase is about the economy.
+UNIVERSE_FUND_SYMBOLS: Final[tuple[str, ...]] = tuple(
+    entry.symbol for entry in UNIVERSE if entry.fund
+)
+
 #: The names a position can be written on -- the ones with a listed chain in
 #: this app. A subset of :data:`UNIVERSE`, because one symbol has one price and
 #: a second list is how the Markets table and an Activity row end up

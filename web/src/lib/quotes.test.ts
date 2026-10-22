@@ -180,6 +180,7 @@ describe('replacesPrice — the daily-bar fallback must not freeze a row for the
     volumeDate: '2026-09-16',
     avgVolume: 5_000,
     marketCap: 400,
+    isFund: false,
   }
 
   /** One poll of the bar-fallback snapshot: advancing close, static stamp. */
@@ -512,6 +513,7 @@ describe('mergeQuotes — an observation with no observation time', () => {
     volumeDate: '2026-09-16',
     avgVolume: 2_000,
     marketCap: 3_000,
+    isFund: false,
   }
 
   it('does not seed the map, so the table falls back to the query row', () => {
@@ -631,6 +633,7 @@ describe('the two producers', () => {
     volumeDate: '2026-09-16',
     avgVolume: 2_000,
     marketCap: 3_000,
+    isFund: false,
   }
 
   it('reads a stock row’s previous close outright, never as price − change', () => {
@@ -830,6 +833,7 @@ describe('liveStockRows', () => {
       volumeDate: '2026-09-16',
       avgVolume: 2_000,
       marketCap: 3_000,
+      isFund: false,
     },
     {
       symbol: 'SPY',
@@ -842,6 +846,7 @@ describe('liveStockRows', () => {
       volumeDate: null,
       avgVolume: null,
       marketCap: null,
+      isFund: true,
     },
   ]
 

@@ -618,8 +618,45 @@ async def test_a_job_task_that_dies_is_logged_when_it_dies_and_aclose_survives_i
         assert len(died) == 1
         assert getattr(died[0], "job") == "doomed"
         assert getattr(died[0], "error_type") == "RuntimeError"
+        # A reader of the status sees a job that will not run again, not the
+        # slot it was sleeping toward -- what reads its feed stale (5.3).
+        doomed = scheduler.status()["doomed"]
+        assert doomed.next_run is None and doomed.stopped is True
         await scheduler.aclose()  # does not raise
         await scheduler.aclose()
+
+
+class _NoMoreSlots:
+    """A schedule past its published calendar: it has nothing to say."""
+
+    def next_run(self, after: datetime) -> datetime | None:
+        return None
+
+    def describe(self) -> str:
+        return "never"
+
+
+@pytest.mark.asyncio
+async def test_a_job_whose_schedule_runs_out_is_stopped_and_its_status_says_so() -> None:
+    async def body() -> None:
+        return None
+
+    cadence = _NoMoreSlots()
+    scheduler = Scheduler(
+        [ScheduledJob(name="ended", schedule=cadence, run=body, rule="test")],
+        secrets=no_secrets,
+        clock=lambda: WED_1500_ET,
+    )
+    before = scheduler.status()["ended"]
+    assert before.stopped is False and before.next_run is None  # not yet asked
+    assert before.cadence is cadence
+    scheduler.start()
+    await asyncio.wait_for(scheduler.ready(), timeout=10)
+    for _ in range(50):
+        await asyncio.sleep(0)
+    after = scheduler.status()["ended"]
+    assert after.next_run is None and after.stopped is True
+    await scheduler.aclose()
 
 
 @pytest.mark.asyncio
@@ -723,7 +760,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
     its body returns ``JobSkipped`` -- so the isolation tests below always
     run all of them. Each carries a rule and the host it calls.
     """
-    jobs = context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+    jobs = context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     assert [job.name for job in jobs] == _SHIPPED_NAMES
     by_name = {job.name: job for job in jobs}
     probe, fred = by_name["calendar_probe"], by_name["fred_dgs3mo"]
@@ -1015,9 +1052,10 @@ def _news_services(
     holder = AssetDirectoryHolder()
     sessions = lambda: Session(db_engine)  # noqa: E731
     return ContextServices(
+        funds=(),
         session_factory=sessions,
         assets=holder,
-        news_store=NewsStore(session_factory=sessions, assets=holder),
+        news_store=NewsStore(session_factory=sessions, assets=holder, books=None),
         alpaca=alpaca,  # type: ignore[arg-type]
         finnhub=finnhub,  # type: ignore[arg-type]
         massive=massive,  # type: ignore[arg-type]
@@ -1172,9 +1210,10 @@ def test_a_news_store_on_another_asset_holder_is_refused(db_engine: Engine) -> N
     sessions = lambda: Session(db_engine)  # noqa: E731
     with pytest.raises(ValueError, match="asset"):
         ContextServices(
+            funds=(),
             session_factory=sessions,
             assets=AssetDirectoryHolder(),
-            news_store=NewsStore(session_factory=sessions, assets=AssetDirectoryHolder()),
+            news_store=NewsStore(session_factory=sessions, assets=AssetDirectoryHolder(), books=None),
         )
 
 
@@ -1314,7 +1353,7 @@ async def test_without_a_fred_key_the_shipped_fred_job_never_reports_a_success(
     db_engine: Engine,
 ) -> None:
     """Case A: ``FRED_API_KEY`` unset. Catch-up and the 10:00 ET run both skip."""
-    services = ContextServices(session_factory=lambda: Session(db_engine), fred=None)
+    services = ContextServices(funds=(), session_factory=lambda: Session(db_engine), fred=None)
     clock = FakeClock(WED_1500_ET, stop_at=HALF_DAY_CLOSE)
     scheduler = build_context_scheduler(
         services, no_secrets, clock=clock, sleep=clock.sleep
@@ -1366,7 +1405,7 @@ async def test_a_catch_up_on_a_current_table_is_skipped_not_counted_a_success(
         )
         session.commit()
     fred = _CountingFred()
-    services = ContextServices(session_factory=lambda: Session(db_engine), fred=fred)
+    services = ContextServices(funds=(), session_factory=lambda: Session(db_engine), fred=fred)
     clock = FakeClock(
         WED_1500_ET,
         stop_at=datetime(2026, 11, 25, 21, 0, tzinfo=UTC),
@@ -1902,7 +1941,7 @@ def test_the_scheduler_cannot_reach_the_runtime_by_construction() -> None:
     What an AST scan cannot see is a dynamic ``importlib.import_module`` of
     a string; the behavioural test above is what stands behind that.
     """
-    services = ContextServices(session_factory=lambda: None)  # type: ignore[arg-type, return-value]
+    services = ContextServices(funds=(), session_factory=lambda: None)  # type: ignore[arg-type, return-value]
     jobs = context_jobs(services)
     contributing = _contributing_modules(jobs) | {
         name for name in _service_modules(services) if name.startswith("corollary.")
@@ -2445,7 +2484,7 @@ async def test_an_openfigi_outage_aborts_the_spdr_job_and_stores_nothing(
 
 
 def test_the_services_default_seed_loader_reads_the_database(db_engine: Engine) -> None:
-    services = ContextServices(session_factory=lambda: Session(db_engine))
+    services = ContextServices(funds=(), session_factory=lambda: Session(db_engine))
     assert services.seed_loader is not None
     assert services.seed_loader() is None  # no accepted snapshot: no seed, no file read
 

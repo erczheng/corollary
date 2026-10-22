@@ -114,6 +114,7 @@ __all__ = [
     "MARKET_TICKER",
     "URL_MATCH_WINDOW",
     "IngestResult",
+    "StoredArticle",
     "filter_tags",
     "headline_key",
     "store_articles",
@@ -285,6 +286,18 @@ def filter_tags(
 
 
 @dataclass(frozen=True, slots=True)
+class StoredArticle:
+    """One article as stored: its ``news_article.id`` and the article as fetched.
+
+    The fetched article, not the row, because Massive's ``insights`` are not
+    persisted -- the labeller reads them from here, at store time, or never.
+    """
+
+    article_id: int
+    article: NewsArticle
+
+
+@dataclass(frozen=True, slots=True)
 class IngestResult:
     """What one :func:`store_articles` call did.
 
@@ -307,6 +320,9 @@ class IngestResult:
     tags_dropped: int
     #: True when no asset directory was available and tags were kept by shape.
     degraded_tag_filter: bool
+    #: Every article passed in, new or re-seen, with the row it landed on --
+    #: in storing order. What the labeller labels.
+    stored: tuple[StoredArticle, ...] = ()
 
 
 def _batch_order(article: NewsArticle) -> tuple[datetime, str, str, str, str, str, str, tuple[str, ...]]:
@@ -369,6 +385,7 @@ def store_articles(
 
     inserted = updated = unchanged = linked = tags_added = 0
     dropped_all: list[str] = []
+    stored: list[StoredArticle] = []
     for article in ordered:
         kept, dropped = filter_tags(article.tickers, assets)
         dropped_all.extend(dropped)
@@ -386,6 +403,7 @@ def store_articles(
                 linked += 1
             added, _ = _merge_tags(session, row.id, kept)
             tags_added += added
+            stored.append(StoredArticle(row.id, article))
             continue
 
         text_changed = _apply_edit(existing, article)
@@ -395,6 +413,7 @@ def store_articles(
             updated += 1
         else:
             unchanged += 1
+        stored.append(StoredArticle(existing.id, article))
 
     session.flush()
     if dropped_all:
@@ -418,6 +437,7 @@ def store_articles(
         tags_added=tags_added,
         tags_dropped=len(dropped_all),
         degraded_tag_filter=degraded,
+        stored=tuple(stored),
     )
 
 

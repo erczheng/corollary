@@ -54,6 +54,7 @@ const STOCKS: StockQuote[] = [
     volumeDate: '2026-09-11',
     avgVolume: 52_000_000,
     marketCap: 3_540,
+    isFund: false,
   },
 ]
 

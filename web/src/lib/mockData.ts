@@ -26,6 +26,7 @@ import type {
   DataPlan,
   DataSourceStatus,
   NewsItem,
+  NewsLabel,
   Notification,
   NotificationRoute,
   OptionContract,
@@ -730,9 +731,12 @@ const NEWS_UNIVERSE: { ticker: string; company: string; sector: string }[] = [
 ]
 
 /** The outlets that actually reach this terminal. Alpaca's news endpoint is
- * Benzinga-sourced and Finnhub aggregates the rest. Neither vendor is named
- * here — a vendor is where an item *arrived from*, which is what `tier`
- * records, not who wrote it. */
+ * Benzinga-sourced and Finnhub aggregates the rest. These are who *wrote* an
+ * item, which is a different question from `tier`: `tier: 'vendor'` means
+ * Massive labelled it (decision 17), not where it arrived from. Publisher is
+ * drawn independently of tier here, so the fixture can pair a `vendor` label
+ * with a Benzinga byline the real pipeline would rarely produce — Massive
+ * labels its own publishers, not Alpaca's Benzinga copies. */
 const PUBLISHERS = ['Benzinga', 'Reuters', 'MarketWatch', 'Bloomberg', 'CNBC', 'Seeking Alpha']
 
 const BANKS = ['Morgan Stanley', 'Goldman Sachs', 'Jefferies', 'Wedbush', 'Piper Sandler', 'BofA']
@@ -744,9 +748,15 @@ interface StoryContext {
   rand: () => number
 }
 
-interface Story {
-  sentiment: Sentiment
-  tier: SentimentTier
+/** A label and its tier, or no label and no tier — decision 17's invariant
+ * as a type, so a story cannot be written that the server could not serve:
+ * an unclassified item is one no source labelled, so it names no tier, and
+ * every labelled item names the source that labelled it. */
+type StoryLabel =
+  | { sentiment: Exclude<Sentiment, 'unclassified'>; tier: SentimentTier }
+  | { sentiment: 'unclassified'; tier: null }
+
+type Story = StoryLabel & {
   /** Restricts a story to sectors where it is possible. An FDA hold on a
    * bank is not a rare event, it is a nonsense one. */
   sectors?: string[]
@@ -761,14 +771,17 @@ function int(rand: () => number, lo: number, hi: number): number {
   return lo + Math.floor(rand() * (hi - lo + 1))
 }
 
-/** Tier 2 is PRD.md §9's list of high-signal events, verbatim: beat/miss vs
- * estimates, guidance raised/cut, upgrade/downgrade, M&A, secondary
- * offering, buyback, executive departure, FDA action. The fixture is built
- * from that list rather than from invented headlines, so the tier column
- * means something — every `rules` story below is a pattern the
- * deterministic classifier genuinely claims to catch. */
+/** The `rules` stories are PRD.md §9's list of high-signal events,
+ * verbatim: beat/miss vs estimates, guidance raised/cut, upgrade/downgrade,
+ * M&A, secondary offering, buyback, executive departure, FDA action. The
+ * fixture is built from that list rather than from invented headlines, so
+ * the tier column means something — every `rules` company story below is a
+ * pattern the deterministic classifier genuinely claims to catch, and a
+ * headline that matches none of them is `vendor` or nothing. The two macro
+ * `rules` stories (CPI, Core PCE) stretch beat/miss-vs-consensus to a macro
+ * print; that is a fixture assumption, not a promise about `rules.py`. */
 const COMPANY_STORIES: Story[] = [
-  // Tier 2 — deterministic patterns.
+  // Rules — deterministic patterns.
   {
     sentiment: 'bullish',
     tier: 'rules',
@@ -837,75 +850,77 @@ const COMPANY_STORIES: Story[] = [
     headline: (c) => `FDA places a clinical hold on the ${c.company} late-stage trial`,
   },
 
-  // Tier 1 — the vendor shipped a score with the article.
+  // Vendor — Massive shipped a per-ticker insight with the article.
   {
     sentiment: 'bullish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `${c.company} named a top pick at ${pick(c.rand, BANKS)}`,
   },
   {
     sentiment: 'bearish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) =>
       `${c.company} slips as ${pick(c.rand, ['peers guide lower', 'channel checks soften', 'a supplier warns'])}`,
   },
   {
     sentiment: 'neutral',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `${c.company} volume tops its ${int(c.rand, 20, 90)}-day average`,
   },
   {
     sentiment: 'bullish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `${c.company} sets a fresh 52-week high`,
   },
   {
     sentiment: 'bearish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `${c.company} touches a 52-week low in early trade`,
   },
 
-  // Tier 3 — the LLM. Some come back under threshold, which is where
-  // `unclassified` comes from and the only place it comes from.
+  // Headlines no rule pattern catches. Massive labels some — a `neutral`
+  // among them is still a label — and carries no insight for the ticker on
+  // the rest, which is where `unclassified` comes from: no source labelled
+  // it, so it has no tier. These were `llm` before decision 17.
   {
     sentiment: 'bullish',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) =>
       `${c.company} expands its ${pick(c.rand, ['cloud', 'silicon', 'logistics', 'payments'])} partnership with ${pick(c.rand, ['Accenture', 'Siemens', 'Oracle', 'Stripe'])}`,
   },
   {
     sentiment: 'bearish',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) =>
       `${c.company} faces ${pick(c.rand, ['an EU', 'an FTC', 'a DOJ', 'a state'])} inquiry over ${pick(c.rand, ['bundling', 'data handling', 'pricing practices'])}`,
   },
   {
     sentiment: 'neutral',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) =>
       `${c.company} reshuffles its ${pick(c.rand, ['hardware', 'international', 'enterprise'])} leadership`,
   },
   {
     sentiment: 'neutral',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) =>
       `${c.company} opens ${pick(c.rand, ['a Phoenix', 'an Austin', 'a Dublin', 'a Singapore'])} facility`,
   },
   {
     sentiment: 'unclassified',
-    tier: 'llm',
+    tier: null,
     headline: (c) =>
       `Report: ${c.company} weighing ${pick(c.rand, ['a spin-off of its smaller unit', 'changes to its supplier terms', 'a shift in its capex plan'])}`,
   },
   {
     sentiment: 'unclassified',
-    tier: 'llm',
+    tier: null,
     headline: (c) =>
       `${c.company} executives address ${pick(c.rand, ['margins', 'AI spend', 'capital return'])} at ${pick(c.rand, ['a Barclays', 'a Citi', 'a Deutsche Bank'])} conference`,
   },
   {
     sentiment: 'unclassified',
-    tier: 'llm',
+    tier: null,
     headline: (c) => `${c.company} files an 8-K without further detail`,
   },
 ]
@@ -913,7 +928,7 @@ const COMPANY_STORIES: Story[] = [
 const MACRO_STORIES: Story[] = [
   {
     sentiment: 'neutral',
-    tier: 'rules',
+    tier: 'vendor',
     headline: (c) =>
       `Fed holds rates, signals ${pick(c.rand, ['one cut', 'two cuts', 'no cuts'])} possible in 2027`,
   },
@@ -930,33 +945,33 @@ const MACRO_STORIES: Story[] = [
   },
   {
     sentiment: 'bullish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `Nonfarm payrolls add ${int(c.rand, 180, 320)}K, above consensus`,
   },
   {
     sentiment: 'bearish',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `Jobless claims rise to ${int(c.rand, 232, 268)}K`,
   },
   {
     sentiment: 'neutral',
-    tier: 'provider',
+    tier: 'vendor',
     headline: (c) => `Breadth narrows as ${int(c.rand, 3, 7)} names drive the session`,
   },
   {
     sentiment: 'bearish',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) =>
       `Treasury yields climb as ${pick(c.rand, ['auction demand softens', 'the term premium widens'])}`,
   },
   {
     sentiment: 'neutral',
-    tier: 'llm',
+    tier: 'vendor',
     headline: (c) => `Oil holds a ${int(c.rand, 2, 6)}-session range ahead of the OPEC+ meeting`,
   },
   {
     sentiment: 'unclassified',
-    tier: 'llm',
+    tier: null,
     headline: (c) =>
       `Officials offer mixed remarks on the ${pick(c.rand, ['September', 'October', 'December'])} path`,
   },
@@ -986,6 +1001,43 @@ function previousSessions(fromDate: string, count: number): string[] {
 
 const newsRand = mulberry32(20264001)
 
+/** The provenance fields `GET /api/news` serves beside a label (Q22).
+ *
+ * Derived from the tier and the story's minute-of-day rather than from new
+ * PRNG draws: an extra `rand()` here would shift every later draw and move
+ * every headline in the corpus. The server's invariants hold — `source` and
+ * `sourceStatus` are null exactly when the item is unclassified, and every
+ * source is `unaudited`, because no audit has run (step 6). Some rules items
+ * carry Massive's disagreeing label as `otherLabel`, and some are filed
+ * under a ticker only because the headline names it, so both states are
+ * reachable from the fixtures. */
+function labelProvenance(
+  tier: SentimentTier | null,
+  sentiment: Sentiment,
+  minutes: number,
+): Pick<NewsItem, 'source' | 'sourceStatus' | 'otherLabel' | 'attributedBy'> {
+  if (tier === null) {
+    return { source: null, sourceStatus: null, otherLabel: null, attributedBy: 'tag' }
+  }
+  const otherLabel: NewsLabel | null =
+    tier === 'rules' && minutes % 7 === 0
+      ? {
+          sentiment: sentiment === 'bullish' ? 'bearish' : 'bullish',
+          tier: 'vendor',
+          source: 'massive',
+          sourceStatus: 'unaudited',
+          ruleId: null,
+          reasoning: 'Massive read the same story the other way.',
+        }
+      : null
+  return {
+    source: tier === 'rules' ? 'rules' : 'massive',
+    sourceStatus: 'unaudited',
+    otherLabel,
+    attributedBy: tier === 'rules' && minutes % 11 === 0 ? 'headline' : 'tag',
+  }
+}
+
 /** One story, filed against a session and a time of day. */
 function buildItem(id: string, date: string, rand: () => number): NewsItem {
   // 10:05 to 20:55 UTC — 6:05am to 4:55pm ET. News runs well before the
@@ -1014,8 +1066,7 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
       // `.example` is a reserved TLD — a fixture link that can never
       // resolve to somebody's real article.
       url: `https://news.example/${id}`,
-      source: null,
-      demoted: false,
+      ...labelProvenance(story.tier, story.sentiment, minutes),
     }
   }
 
@@ -1034,8 +1085,7 @@ function buildItem(id: string, date: string, rand: () => number): NewsItem {
     sector: name.sector,
     tier: story.tier,
     url: `https://news.example/${id}`,
-    source: null,
-    demoted: false,
+    ...labelProvenance(story.tier, story.sentiment, minutes),
   }
 }
 
@@ -1386,36 +1436,41 @@ const STOCK_SEEDS: {
   price: number
   avgVolume: number
   marketCap: number | null
+  /** Mirrors `UniverseEntry.fund` in `corollary/api/routes/markets.py`, the
+   * curated universe the server serves as `isFund`. Stated per row rather
+   * than read off the null `marketCap` — on the wire that null also means a
+   * vendor outage or a symbol not fetched yet. */
+  isFund: boolean
   seed: number
 }[] = [
-  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, avgVolume: 52_000_000, marketCap: 3540e9, seed: 20263001 },
-  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, avgVolume: 22_000_000, marketCap: 3110e9, seed: 20263002 },
-  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, avgVolume: 210_000_000, marketCap: 3390e9, seed: 20263003 },
-  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, avgVolume: 41_000_000, marketCap: 2120e9, seed: 20263004 },
-  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, avgVolume: 28_000_000, marketCap: 2160e9, seed: 20263005 },
-  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, avgVolume: 15_000_000, marketCap: 1420e9, seed: 20263006 },
-  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, avgVolume: 24_000_000, marketCap: 830e9, seed: 20263007 },
-  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, avgVolume: 92_000_000, marketCap: 760e9, seed: 20263008 },
-  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, avgVolume: 3_400_000, marketCap: 754e9, seed: 20263009 },
-  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, avgVolume: 18_000_000, marketCap: 638e9, seed: 20263010 },
-  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, avgVolume: 9_200_000, marketCap: 623e9, seed: 20263011 },
-  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, avgVolume: 4_100_000, marketCap: 528e9, seed: 20263012 },
-  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, avgVolume: 16_000_000, marketCap: 516e9, seed: 20263013 },
-  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, avgVolume: 2_100_000, marketCap: 392e9, seed: 20263014 },
-  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, avgVolume: 3_600_000, marketCap: 366e9, seed: 20263015 },
+  { symbol: 'AAPL', name: 'Apple Inc.', price: 232.4, avgVolume: 52_000_000, marketCap: 3540e9, isFund: false, seed: 20263001 },
+  { symbol: 'MSFT', name: 'Microsoft Corp.', price: 418.35, avgVolume: 22_000_000, marketCap: 3110e9, isFund: false, seed: 20263002 },
+  { symbol: 'NVDA', name: 'NVIDIA Corp.', price: 138.2, avgVolume: 210_000_000, marketCap: 3390e9, isFund: false, seed: 20263003 },
+  { symbol: 'AMZN', name: 'Amazon.com Inc.', price: 201.64, avgVolume: 41_000_000, marketCap: 2120e9, isFund: false, seed: 20263004 },
+  { symbol: 'GOOGL', name: 'Alphabet Inc. Class A', price: 176.28, avgVolume: 28_000_000, marketCap: 2160e9, isFund: false, seed: 20263005 },
+  { symbol: 'META', name: 'Meta Platforms Inc.', price: 562.91, avgVolume: 15_000_000, marketCap: 1420e9, isFund: false, seed: 20263006 },
+  { symbol: 'AVGO', name: 'Broadcom Inc.', price: 178.05, avgVolume: 24_000_000, marketCap: 830e9, isFund: false, seed: 20263007 },
+  { symbol: 'TSLA', name: 'Tesla Inc.', price: 238.1, avgVolume: 92_000_000, marketCap: 760e9, isFund: false, seed: 20263008 },
+  { symbol: 'LLY', name: 'Eli Lilly and Co.', price: 794.12, avgVolume: 3_400_000, marketCap: 754e9, isFund: false, seed: 20263009 },
+  { symbol: 'WMT', name: 'Walmart Inc.', price: 79.36, avgVolume: 18_000_000, marketCap: 638e9, isFund: false, seed: 20263010 },
+  { symbol: 'JPM', name: 'JPMorgan Chase & Co.', price: 221.47, avgVolume: 9_200_000, marketCap: 623e9, isFund: false, seed: 20263011 },
+  { symbol: 'UNH', name: 'UnitedHealth Group Inc.', price: 573.8, avgVolume: 4_100_000, marketCap: 528e9, isFund: false, seed: 20263012 },
+  { symbol: 'XOM', name: 'Exxon Mobil Corp.', price: 117.42, avgVolume: 16_000_000, marketCap: 516e9, isFund: false, seed: 20263013 },
+  { symbol: 'COST', name: 'Costco Wholesale Corp.', price: 884.19, avgVolume: 2_100_000, marketCap: 392e9, isFund: false, seed: 20263014 },
+  { symbol: 'HD', name: 'Home Depot Inc.', price: 368.55, avgVolume: 3_600_000, marketCap: 366e9, isFund: false, seed: 20263015 },
   // Funds. Every one carries a null market cap on purpose — the column has
   // an em-dash branch and a fixture has to reach it.
-  { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust', price: 429.88, avgVolume: 61_000_000, marketCap: null, seed: 20263016 },
-  { symbol: 'QQQ', name: 'Invesco QQQ Trust', price: 372.4, avgVolume: 34_000_000, marketCap: null, seed: 20263017 },
-  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 218.63, avgVolume: 28_000_000, marketCap: null, seed: 20263018 },
-  { symbol: 'XLE', name: 'Energy Select Sector SPDR Fund', price: 91.24, avgVolume: 17_000_000, marketCap: null, seed: 20263019 },
-  { symbol: 'ARKK', name: 'ARK Innovation ETF', price: 54.77, avgVolume: 12_000_000, marketCap: null, seed: 20263020 },
-  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, avgVolume: 8_400_000, marketCap: 149e9, seed: 20263021 },
-  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, avgVolume: 6_200_000, marketCap: 14e9, seed: 20263022 },
-  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, avgVolume: 9_800_000, marketCap: 21e9, seed: 20263023 },
-  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, avgVolume: 3_100_000, marketCap: 12e9, seed: 20263024 },
-  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, avgVolume: 14_000_000, marketCap: 47e9, seed: 20263025 },
-  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, avgVolume: 11_000_000, marketCap: 33e9, seed: 20263026 },
+  { symbol: 'SPY', name: 'SPDR S&P 500 ETF Trust', price: 429.88, avgVolume: 61_000_000, marketCap: null, isFund: true, seed: 20263016 },
+  { symbol: 'QQQ', name: 'Invesco QQQ Trust', price: 372.4, avgVolume: 34_000_000, marketCap: null, isFund: true, seed: 20263017 },
+  { symbol: 'IWM', name: 'iShares Russell 2000 ETF', price: 218.63, avgVolume: 28_000_000, marketCap: null, isFund: true, seed: 20263018 },
+  { symbol: 'XLE', name: 'Energy Select Sector SPDR Fund', price: 91.24, avgVolume: 17_000_000, marketCap: null, isFund: true, seed: 20263019 },
+  { symbol: 'ARKK', name: 'ARK Innovation ETF', price: 54.77, avgVolume: 12_000_000, marketCap: null, isFund: true, seed: 20263020 },
+  { symbol: 'ARM', name: 'Arm Holdings plc', price: 142.9, avgVolume: 8_400_000, marketCap: 149e9, isFund: false, seed: 20263021 },
+  { symbol: 'ALAB', name: 'Astera Labs Inc.', price: 87.35, avgVolume: 6_200_000, marketCap: 14e9, isFund: false, seed: 20263022 },
+  { symbol: 'RDDT', name: 'Reddit Inc.', price: 118.46, avgVolume: 9_800_000, marketCap: 21e9, isFund: false, seed: 20263023 },
+  { symbol: 'RBRK', name: 'Rubrik Inc.', price: 63.28, avgVolume: 3_100_000, marketCap: 12e9, isFund: false, seed: 20263024 },
+  { symbol: 'CRWV', name: 'CoreWeave Inc.', price: 96.14, avgVolume: 14_000_000, marketCap: 47e9, isFund: false, seed: 20263025 },
+  { symbol: 'CRCL', name: 'Circle Internet Group Inc.', price: 149.32, avgVolume: 11_000_000, marketCap: 33e9, isFund: false, seed: 20263026 },
 ]
 
 /** **One price per symbol, for the whole terminal.**
@@ -1470,6 +1525,7 @@ export const STOCKS: StockQuote[] = STOCK_SEEDS.map((s) => {
     volumeDate: MARKET_TODAY,
     avgVolume: s.avgVolume,
     marketCap: s.marketCap,
+    isFund: s.isFund,
   }
 })
 

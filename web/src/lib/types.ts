@@ -356,18 +356,21 @@ export interface WorkingOrder {
 
 export type Sentiment = 'bullish' | 'bearish' | 'neutral' | 'unclassified'
 
-/** Which of PRD.md §9's three tiers produced a label.
+/** The word for each label, and the honest account of `unclassified`.
  *
- * Carried on the item because the tiers do not have equal standing and the
- * feed should not pretend they do: tier 1 is a score the vendor shipped,
- * tier 2 is a deterministic pattern match on a high-signal event, and tier
- * 3 is the LLM. Settings reports accuracy *per tier*, so a reader comparing
- * that table against a headline has to know which row the headline belongs
- * to.
+ * Which source produced a label is `SentimentTier`, carried on the item
+ * because the sources do not have equal standing and the feed should not
+ * pretend they do: `vendor` is Massive's per-ticker insight, published as
+ * shipped, and `rules` is a deterministic pattern match on a high-signal
+ * event. Settings reports accuracy per source, so a reader comparing that
+ * table against a headline has to know which row the headline belongs to.
  *
- * It is also the only honest account of `unclassified`: tiers 1 and 2
- * always publish a direction, so an unlabelled item is always tier 3
- * falling below its confidence threshold. Silence beats a wrong label. */
+ * In Phase 3 `Unclassified` means **no source labelled the item for that
+ * ticker** — no rule matched the headline, and Massive carried no insight
+ * for that ticker on that article. It is not a low-confidence label and not
+ * a failure: a Massive `neutral` is a label and reads `Neutral`, never
+ * `Unclassified`. An unclassified item is never graded, has no tier, and
+ * renders in `caution`, not `error`. Silence beats a wrong label. */
 export const SENTIMENT_LABEL: Record<Sentiment, string> = {
   bullish: 'Bullish',
   bearish: 'Bearish',
@@ -396,8 +399,8 @@ export const SENTIMENT_SHORT: Record<Sentiment, string> = {
  * sets the row height for the sake of a two-word label. Chips stay for
  * places with room to breathe.
  *
- * `unclassified` takes `caution`, never `error` — the LLM declining to
- * commit is the system working as PRD.md §9 specifies, not a failure. And
+ * `unclassified` takes `caution`, never `error` — no source having
+ * labelled an item is the system working, not a failure. And
  * `neutral` the token is 4.27:1 and below the text floor, so a neutral
  * label reads in `on-surface-variant` instead. */
 export const SENTIMENT_CLASS: Record<Sentiment, string> = {
@@ -407,18 +410,28 @@ export const SENTIMENT_CLASS: Record<Sentiment, string> = {
   unclassified: 'text-caution',
 }
 
-export type SentimentTier = 'provider' | 'rules' | 'llm'
+/** Which source produced a label — decision 17.
+ *
+ * Two members, because Phase 3 has two producers. `'vendor'` was
+ * `'provider'`, renamed because the label is sourced from Massive. There is
+ * deliberately **no `'llm'` member**, not even reserved for Phase 4: a
+ * member with no producer is a member a fixture can claim, and a feed row
+ * reading "LLM" in a phase with no model would be a fixture impersonating a
+ * tier. Phase 4 adds it back alongside the thing that produces it.
+ *
+ * Not `Recommendation.origin`'s `'llm'`, which is LLM *origination* and a
+ * different question. */
+export type SentimentTier = 'rules' | 'vendor'
 
 export const SENTIMENT_TIER_LABEL: Record<SentimentTier, string> = {
-  provider: 'Provider',
   rules: 'Rules',
-  llm: 'LLM',
+  vendor: 'Vendor',
 }
 
 export const SENTIMENT_TIER_DETAIL: Record<SentimentTier, string> = {
-  provider: 'Tier 1 — a score shipped by Finnhub or Alpaca, published as-is.',
-  rules: 'Tier 2 — a deterministic headline pattern for a high-signal event.',
-  llm: 'Tier 3 — the LLM, batched 20 headlines per call and cached by article ID. Publishes a direction only above its confidence threshold.',
+  rules: 'A deterministic headline pattern for a high-signal event.',
+  vendor:
+    "Massive's per-ticker insight — the score and its reasoning are Massive's, published as-is.",
 }
 
 export interface NewsItem {
@@ -433,17 +446,163 @@ export interface NewsItem {
    * never the string "null". */
   publisher: string | null
   sector: string
-  /** Which tier of PRD.md §9 produced `sentiment`. **`null` while nothing
-   * has labelled the item** — every item in Phase 3 step 4, which serves
-   * `unclassified` with no tier. A `SENTIMENT_TIER_LABEL[item.tier]` lookup
-   * without the null check reads `undefined`. */
+  /** Which source produced `sentiment`. **`null` exactly when `sentiment`
+   * is `'unclassified'`** — an unclassified item is one no source labelled,
+   * so there is no tier to name, and every labelled item names one. The
+   * feed renders an em dash for null. A `SENTIMENT_TIER_LABEL[item.tier]`
+   * lookup without the null check reads `undefined`. */
   tier: SentimentTier | null
   /** The article itself. Opens in a new tab. */
   url: string
   /** The labelling source that produced `sentiment`; `null` with no label. */
-  source: string | null
-  /** Whether that source is demoted. `false` with no source. */
-  demoted: boolean
+  source: NewsLabelSource | null
+  /** That source's audit status (Q22); `null` with no label. **Every source
+   * is `unaudited` until step 6's audit runs** — never read that as "not
+   * demoted". The feed's *display only* suffix keys on `'demoted'` alone. */
+  sourceStatus: NewsSourceStatus | null
+  /** The label that did **not** win display, when both sources labelled the
+   * item; `null` otherwise. Shown on hover, never folded into `sentiment`. */
+  otherLabel: NewsLabel | null
+  /** `tag`: a vendor tagged some copy of the story to `ticker`. `headline`:
+   * none did, and a rules label on a company the headline names did — the
+   * feed says so, since the vendor never filed it there. */
+  attributedBy: NewsAttribution
+}
+
+/** `sentiment_label.source` — the two Phase 3 labelling sources. */
+export type NewsLabelSource = 'rules' | 'massive'
+
+/** A labelling source's audit status (Q22). `unaudited` until step 6. */
+export type NewsSourceStatus = 'unaudited' | 'active' | 'demoted'
+
+/** Why a feed item is filed under its ticker. */
+export type NewsAttribution = 'tag' | 'headline'
+
+/** One stored label, as `NewsItem.otherLabel` carries it. A stored label
+ * always has a direction — `unclassified` is the absence of one. */
+export interface NewsLabel {
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+  tier: SentimentTier
+  source: NewsLabelSource
+  sourceStatus: NewsSourceStatus
+  /** The pattern that fired, for a rules label; `null` for Massive. */
+  ruleId: string | null
+  /** The rules tier's matched phrase, or Massive's own text verbatim. */
+  reasoning: string | null
+}
+
+/** A discovery reason's direction. `neutral` never qualifies (decision 21). */
+export type MoverDirection = 'bullish' | 'bearish'
+
+/** `rules`: at least one rules reason; `massive_only`: none. Rules rows rank
+ * first — the server's order, which the panel never re-sorts. */
+export type MoverRankGroup = 'rules' | 'massive_only'
+
+/** The three discovery firehoses `/movers` reports freshness for. */
+export type DiscoveryFeedName = 'alpaca_news' | 'finnhub_market' | 'massive_news'
+
+/** One article a reason rests on, with that label's own text. */
+export interface NewsMoverEvidence {
+  articleId: number
+  time: string
+  reasoning: string | null
+}
+
+/** One (source, rule, direction) a mover was flagged by. Conflicting
+ * directions are separate reasons, side by side, never netted. */
+export interface NewsMoverReason {
+  source: NewsLabelSource
+  /** That source's audit status (Q22), from the same table `/api/news`
+   * serves. The Movers panel's "unaudited" caption reads **this**, never the
+   * feed's page: the feed can show no labelled item, or only the other
+   * source's, while every row here rests on an unaudited label. */
+  sourceStatus: NewsSourceStatus
+  tier: SentimentTier
+  ruleId: string | null
+  /** `earnings`, `guidance`, … for a rules reason; `null` for Massive. */
+  family: string | null
+  direction: MoverDirection
+  /** Newest first. Never empty. */
+  articleIds: number[]
+  evidence: NewsMoverEvidence[]
+  latestAt: string
+}
+
+export interface NewsMoverArticle {
+  id: number
+  time: string
+  headline: string
+  url: string
+  /** `null` when the vendor named none; never substituted. */
+  publisher: string | null
+}
+
+/** One *Movers in the news* row, in the server's rank order. */
+export interface NewsMover {
+  ticker: string
+  sector: string
+  rankGroup: MoverRankGroup
+  /** Rules first, then Massive; newest first within a source. */
+  reasons: NewsMoverReason[]
+  /** Distinct directions among the reasons, sorted. Two means they disagree. */
+  directions: MoverDirection[]
+  /** Newest first. */
+  articles: NewsMoverArticle[]
+  articleCount: number
+  latestAt: string
+  /** Average daily volume, shares, over `advSessions` completed sessions. */
+  avgVolume: number
+  advSessions: number
+  /** **A decimal string** (`"41.20"`) — displayed verbatim, never parsed. */
+  lastClose: string
+  /** Date-only — format in UTC. */
+  tradeabilitySessionDate: string
+  tradeabilityCheckedAt: string
+}
+
+export interface DiscoveryFeedFreshness {
+  feed: DiscoveryFeedName
+  job: string
+  scheduled: boolean
+  lastSuccess: string | null
+  lastFailure: string | null
+  failing: boolean
+  lastIngestedAt: string | null
+  stale: boolean
+  /** Last time the feed was known good; `null` when not stale, or stale and
+   * never delivered. */
+  staleSince: string | null
+}
+
+export interface DiscoveryEvaluation {
+  job: string
+  scheduled: boolean
+  lastSuccess: string | null
+  lastFailure: string | null
+  failing: boolean
+  lastCheckedAt: string | null
+}
+
+/** `GET /api/news/movers`. Two empty states, told apart by `feedsStale`. */
+export interface NewsMovers {
+  items: NewsMover[]
+  lookback: NewsLookback
+  /** The lookback's first instant; `null` for `all`. */
+  since: string | null
+  evaluatedAt: string
+  /** Off-watch tickers with a qualifying signal in the lookback. */
+  signalled: number
+  watchedExcluded: number
+  failedTradeability: number
+  /** Signalled tickers with no cached tradeability verdict yet. */
+  awaitingCheck: number
+  feeds: DiscoveryFeedFreshness[]
+  feedsStale: boolean
+  /** Earliest `staleSince` among stale feeds that have delivered; `null`
+   * when none is stale, or every stale feed never delivered. */
+  staleSince: string | null
+  evaluation: DiscoveryEvaluation
+  sectorsAvailable: boolean
 }
 
 /** `?lookback` on `GET /api/news` — calendar days in ET, never a trailing

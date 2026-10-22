@@ -18,6 +18,15 @@ import {
   sortNews,
   upcomingEvents,
   orderSectors,
+  evaluationStuckLine,
+  moverArticleTime,
+  moverReasonName,
+  moversEmptyState,
+  sourceStatusSentence,
+  staleLine,
+  unauditedCaption,
+  unauditedMoverSources,
+  unauditedSources,
 } from './news'
 import {
   CALENDAR_EVENTS,
@@ -27,7 +36,15 @@ import {
   SENTIMENT_COMPONENTS,
   SOCIAL_ATTENTION,
 } from './mockData'
-import { MACRO_SECTOR, type CalendarEvent, type NewsItem } from './types'
+import {
+  MACRO_SECTOR,
+  type CalendarEvent,
+  type DiscoveryEvaluation,
+  type NewsItem,
+  type NewsMover,
+  type NewsMoverReason,
+  type NewsMovers,
+} from './types'
 
 /** The feed's own clock. Every lookback and the calendar are measured
  * against this, never the wall clock — see the note in `News.tsx`. */
@@ -208,18 +225,22 @@ describe('the news corpus', () => {
     expect(seen).toEqual(new Set(['bullish', 'bearish', 'neutral', 'unclassified']))
   })
 
-  it('covers all three classification tiers', () => {
+  /** Decision 17: two tiers, plus the null of an item nothing labelled. An
+   * `llm` or `provider` here is a fixture claiming a producer Phase 3 does
+   * not have. */
+  it('covers both classification tiers and the untiered case', () => {
     const seen = new Set(NEWS_ITEMS.map((i) => i.tier))
-    expect(seen).toEqual(new Set(['provider', 'rules', 'llm']))
+    expect(seen).toEqual(new Set(['rules', 'vendor', null]))
   })
 
-  /** PRD.md §9: tiers 1 and 2 always publish a direction, so an unlabelled
-   * item is always tier 3 falling below its confidence threshold. If a
-   * `provider` or `rules` item ever reads Unclassified, either the fixture
-   * or the story that produced it is wrong. */
-  it('only ever leaves an LLM-tier item unclassified', () => {
+  /** Decision 4: `unclassified` means no source labelled the item for that
+   * ticker, so there is no tier to name — and a labelled item always names
+   * the source that labelled it. Both directions, because a tierless
+   * `Neutral` is as wrong as a tiered `Unclassified`: a Massive `neutral`
+   * is a label. */
+  it('makes an item unclassified if and only if its tier is null', () => {
     const wrong = [...NEWS_ITEMS, ...NEWS_INCOMING].filter(
-      (i) => i.sentiment === 'unclassified' && i.tier !== 'llm',
+      (i) => (i.sentiment === 'unclassified') !== (i.tier === null),
     )
     expect(wrong).toEqual([])
   })
@@ -459,5 +480,252 @@ describe('the live feed helpers (Phase 3 step 4)', () => {
       'Other',
       MACRO_SECTOR,
     ])
+  })
+})
+
+describe('label provenance and discovery (Phase 3 step 5)', () => {
+  const RULES_REASON: NewsMoverReason = {
+    source: 'rules',
+    sourceStatus: 'unaudited',
+    tier: 'rules',
+    ruleId: 'earnings_beat',
+    family: 'earnings',
+    direction: 'bullish',
+    articleIds: [501],
+    evidence: [{ articleId: 501, time: '2026-09-25T13:40:00Z', reasoning: 'beats estimates' }],
+    latestAt: '2026-09-25T13:40:00Z',
+  }
+
+  const EVALUATION: DiscoveryEvaluation = {
+    job: 'tradeability_refresh',
+    scheduled: true,
+    lastSuccess: '2026-09-25T12:30:00Z',
+    lastFailure: null,
+    failing: false,
+    lastCheckedAt: '2026-09-25T12:30:00Z',
+  }
+
+  function movers(overrides: Partial<NewsMovers> = {}): NewsMovers {
+    return {
+      items: [],
+      lookback: 'today',
+      since: '2026-09-25T04:00:00Z',
+      evaluatedAt: '2026-09-25T14:30:00Z',
+      signalled: 0,
+      watchedExcluded: 0,
+      failedTradeability: 0,
+      awaitingCheck: 0,
+      feeds: [],
+      feedsStale: false,
+      staleSince: null,
+      evaluation: EVALUATION,
+      sectorsAvailable: true,
+      ...overrides,
+    }
+  }
+
+  describe('moverReasonName', () => {
+    it('names a known rules family in words', () => {
+      expect(moverReasonName(RULES_REASON)).toBe('Earnings')
+      expect(moverReasonName({ ...RULES_REASON, family: 'mna' })).toBe('M&A')
+    })
+
+    /** A family the engine added after the map is spelled, never dropped. */
+    it('spells an unknown family from its id', () => {
+      expect(moverReasonName({ ...RULES_REASON, family: 'share_split' })).toBe('Share split')
+    })
+
+    it('names the vendor for a Massive reason', () => {
+      expect(
+        moverReasonName({
+          ...RULES_REASON,
+          source: 'massive',
+          tier: 'vendor',
+          ruleId: null,
+          family: null,
+        }),
+      ).toBe('Massive')
+    })
+  })
+
+  describe('moversEmptyState', () => {
+    it('is null while there are rows, stale feed or not', () => {
+      const rows = movers({ items: [{} as NewsMovers['items'][number]] })
+      expect(moversEmptyState(rows)).toBeNull()
+      expect(moversEmptyState({ ...rows, feedsStale: true })).toBeNull()
+    })
+
+    it('is stale when the list is empty and a feed is down', () => {
+      expect(moversEmptyState(movers({ feedsStale: true }))).toBe('stale')
+    })
+
+    it('is none-passed when the list is empty and the feeds are fresh', () => {
+      expect(moversEmptyState(movers())).toBe('none-passed')
+    })
+  })
+
+  /** The old fall-through read any unrecognised value as an audit pass. */
+  describe('sourceStatusSentence', () => {
+    it('spells out every status, active included', () => {
+      expect(sourceStatusSentence('unaudited')).toBe('No accuracy audit has run on this source yet.')
+      expect(sourceStatusSentence('active')).toBe('This source passed its accuracy audit.')
+      expect(sourceStatusSentence('demoted')).toMatch(/demoted/)
+    })
+
+    it('says nothing for null or an unknown status, never "passed"', () => {
+      expect(sourceStatusSentence(null)).toBeNull()
+      expect(sourceStatusSentence('pending_review')).toBeNull()
+      // An inherited key is not a status either.
+      expect(sourceStatusSentence('toString')).toBeNull()
+    })
+  })
+
+  describe('unauditedSources and unauditedCaption', () => {
+    const base = NEWS_ITEMS[0]
+    const rules: NewsItem = {
+      ...base,
+      id: 'r',
+      source: 'rules',
+      sourceStatus: 'unaudited',
+      otherLabel: null,
+    }
+    const massive: NewsItem = { ...rules, id: 'm', source: 'massive' }
+    const unlabelled: NewsItem = { ...rules, id: 'u', source: null, sourceStatus: null }
+
+    it('reads the served statuses, the non-displayed label included', () => {
+      expect(unauditedSources([unlabelled])).toEqual([])
+      expect(unauditedSources([massive, rules])).toEqual(['rules', 'massive'])
+      expect(
+        unauditedSources([
+          {
+            ...rules,
+            otherLabel: {
+              sentiment: 'bearish',
+              tier: 'vendor',
+              source: 'massive',
+              sourceStatus: 'unaudited',
+              ruleId: null,
+              reasoning: null,
+            },
+          },
+        ]),
+      ).toEqual(['rules', 'massive'])
+    })
+
+    /** It leaves on its own once step 6 audits a source. */
+    it('drops a source once it is no longer unaudited', () => {
+      expect(unauditedSources([{ ...rules, sourceStatus: 'active' }, massive])).toEqual(['massive'])
+      expect(unauditedSources([{ ...rules, sourceStatus: 'active' }])).toEqual([])
+    })
+
+    /** The Movers panel reads its own reasons, never the feed's page. */
+    describe('unauditedMoverSources', () => {
+      const MASSIVE_REASON: NewsMoverReason = {
+        ...RULES_REASON,
+        source: 'massive',
+        tier: 'vendor',
+        ruleId: null,
+        family: null,
+      }
+      const row = (reasons: NewsMoverReason[]): NewsMover =>
+        ({ ticker: 'X', reasons }) as unknown as NewsMover
+
+      it('reads every reason on every row, in source order', () => {
+        expect(unauditedMoverSources([])).toEqual([])
+        expect(unauditedMoverSources([row([MASSIVE_REASON])])).toEqual(['massive'])
+        expect(unauditedMoverSources([row([MASSIVE_REASON]), row([RULES_REASON])])).toEqual([
+          'rules',
+          'massive',
+        ])
+      })
+
+      it('drops a source once its reasons are no longer unaudited', () => {
+        expect(
+          unauditedMoverSources([
+            row([{ ...RULES_REASON, sourceStatus: 'active' }, MASSIVE_REASON]),
+          ]),
+        ).toEqual(['massive'])
+        expect(
+          unauditedMoverSources([row([{ ...MASSIVE_REASON, sourceStatus: 'demoted' }])]),
+        ).toEqual([])
+      })
+    })
+
+    it('captions all, some, or none', () => {
+      expect(unauditedCaption(['rules', 'massive'])).toBe(
+        'Labels are unaudited: no accuracy audit has run yet.',
+      )
+      expect(unauditedCaption(['massive'])).toBe(
+        'Massive labels are unaudited: no accuracy audit has run on that source yet.',
+      )
+      expect(unauditedCaption([])).toBeNull()
+    })
+  })
+
+  /** The article line is the only place a mover row says when its news ran. */
+  describe('moverArticleTime', () => {
+    it('is the clock alone under today, and dated under any longer lookback', () => {
+      const nineDaysAgo = '2026-09-16T13:42:00Z'
+      expect(moverArticleTime(nineDaysAgo, 'today')).toBe('9:42 AM')
+      for (const lookback of ['3d', '1w', '2w'] as const) {
+        expect(moverArticleTime(nineDaysAgo, lookback)).toBe('Sep 16, 9:42 AM')
+      }
+    })
+
+    /** Labelled articles are retained indefinitely, so under `all` a bare
+     * month and day could be any year's. */
+    it('carries the year under all', () => {
+      expect(moverArticleTime('2026-09-16T13:42:00Z', 'all')).toBe('Wed, Sep 16, 2026, 9:42 AM')
+      expect(moverArticleTime('2025-09-16T13:42:00Z', 'all')).toBe('Tue, Sep 16, 2025, 9:42 AM')
+    })
+  })
+
+  describe('staleLine', () => {
+    it('dates the line when a feed delivered, and names the feed when none did', () => {
+      expect(staleLine(movers({ feedsStale: true, staleSince: '2026-09-25T13:15:00Z' }))).toBe(
+        'Discovery feeds stale since Sep 25, 9:15 AM ET',
+      )
+      expect(
+        staleLine(
+          movers({
+            feedsStale: true,
+            feeds: [
+              {
+                feed: 'massive_news',
+                job: 'massive_news_poll',
+                scheduled: true,
+                lastSuccess: null,
+                lastFailure: null,
+                failing: false,
+                lastIngestedAt: null,
+                stale: true,
+                staleSince: null,
+              },
+            ],
+          }),
+        ),
+      ).toBe('Discovery feeds stale — Massive news has not delivered yet')
+    })
+  })
+
+  describe('evaluationStuckLine', () => {
+    it('is null while the tradeability job is scheduled and succeeding', () => {
+      expect(evaluationStuckLine(EVALUATION)).toBeNull()
+    })
+
+    it('names the job when it is failing, with its last success', () => {
+      expect(evaluationStuckLine({ ...EVALUATION, failing: true })).toBe(
+        'The tradeability check (tradeability_refresh) is failing — it last succeeded Sep 25, 8:30 AM ET — so signalled names are not being checked.',
+      )
+      expect(evaluationStuckLine({ ...EVALUATION, failing: true, lastSuccess: null })).toMatch(
+        /it has never succeeded/,
+      )
+    })
+
+    it('names the job when it is not scheduled', () => {
+      expect(evaluationStuckLine({ ...EVALUATION, scheduled: false })).toBe(
+        'The tradeability check (tradeability_refresh) is not scheduled, so signalled names are not being checked.',
+      )
+    })
   })
 })

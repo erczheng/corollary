@@ -67,7 +67,12 @@ EXPECTED_TABLES = {
     "spdr_holding",
     # 0012 -- Q17: the OpenFIGI ISIN -> ticker cache
     "isin_ticker",
+    # 0013 -- step 5: one label per (article, ticker, source)
+    "sentiment_label",
 }
+
+#: Everything 0013 created.
+_0013_TABLES = {"sentiment_label"}
 
 #: Everything 0012 created.
 _0012_TABLES = {"isin_ticker"}
@@ -126,7 +131,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES - _0010_TABLES - _0012_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -153,7 +158,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0012"]
+    assert script.get_heads() == ["0013"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -166,7 +171,7 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES <= tables
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -194,7 +199,7 @@ def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert EXPECTED_TABLES - _0012_TABLES <= tables  # 0011 dropped nothing
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables  # 0011 dropped nothing
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
@@ -226,8 +231,8 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert tables & _0012_TABLES == set()
-    assert EXPECTED_TABLES - _0012_TABLES <= tables
+    assert tables & (_0012_TABLES | _0013_TABLES) == set()
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
 
     command.upgrade(cfg, "head")
@@ -314,7 +319,7 @@ def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0010_TABLES == set()
-    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES <= tables
+    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -398,7 +403,7 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
         - {"fred_observation", "ticker_ipo_date"}
         - _0008_TABLES
         - _0010_TABLES
-        - _0012_TABLES
+        - _0012_TABLES - _0013_TABLES
         <= tables
     )
 

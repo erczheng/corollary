@@ -1168,6 +1168,7 @@ describe('the live quote map', () => {
         volumeDate: '2026-09-16',
         avgVolume: 20,
         marketCap: 3_000,
+        isFund: false,
       }),
     ])
 
@@ -1192,6 +1193,7 @@ describe('the live quote map', () => {
         volumeDate: '2026-09-16',
         avgVolume: 20,
         marketCap: 3_000,
+        isFund: false,
       }),
     ])
 

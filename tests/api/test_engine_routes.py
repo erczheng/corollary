@@ -373,8 +373,10 @@ SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/markets/chain/{underlying}",
     "/api/markets/stocks",
     "/api/markets/underlyings",
-    # Phase 3 step 4: the canonical-row feed and the manual watch list.
+    # Phase 3 step 4: the canonical-row feed and the manual watch list;
+    # step 5: the discovery movers.
     "/api/news",
+    "/api/news/movers",
     "/api/news/watch",
     "/api/news/watch/{ticker}",
     "/api/notifications",
