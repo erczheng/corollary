@@ -130,10 +130,12 @@ Calendars (Phase 3, step 7)
 
 Two more reads, :meth:`FinnhubProvider.earnings_calendar`
 (``/calendar/earnings``, decision 7) and :meth:`FinnhubProvider.ipo_calendar`
-(``/calendar/ipo``, Q15). Each is **one request for the whole window** on the
-shared ``finnhub.io`` bucket -- the earnings calendar is filtered to the
-watch universe after the fact, so the daily refresh costs one request, not
-one per symbol. Both return the vendor's rows decoded exactly
+(``/calendar/ipo``, Q15). Each is **one request for the window it is given**
+on the shared ``finnhub.io`` bucket, every symbol at once -- the earnings
+calendar is filtered to the watch universe after the fact. **A response is
+silently capped at 1500 rows** (measured on ``/calendar/earnings`` in peak
+season, keeping the latest dates), so the earnings job asks one day per
+request: see ``calendar_finnhub.FINNHUB_EARNINGS_ROW_CAP``. Both return the vendor's rows decoded exactly
 (:func:`corollary.wire.decode_json`) and otherwise untouched; mapping them
 into ``calendar_event`` rows is :mod:`corollary.data.calendar_finnhub`'s
 job. Recorded under ``tests/fixtures/finnhub/p3_calendar_earnings.json`` and
@@ -593,7 +595,10 @@ class FinnhubProvider(FundamentalsProvider):
 
         Decision 7. Each row is ``{symbol, date, hour, year, quarter,
         epsEstimate, epsActual, revenueEstimate, revenueActual}``; ``hour`` is
-        a session code, not a time. One request for the window, every symbol.
+        a session code, not a time. One request for the window, every symbol --
+        and at most 1500 rows, the latest dates kept, with nothing in the
+        response to say it was cut. Ask for one day at a time
+        (``calendar_finnhub.read_earnings_by_day``).
         """
         return await self._get_calendar("/calendar/earnings", "earningsCalendar", start, end)
 

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from corollary.data.calendar import (
     WindowReplace,
     WindowReplaceError,
+    count_live_in_window,
     create_manual,
     read_range,
     replace_window,
@@ -138,6 +139,7 @@ def _replace(
     start: date = START,
     end: date = END,
     now: datetime = T1,
+    tickers: frozenset[str] | None = None,
 ) -> WindowReplace:
     return replace_window(
         session,
@@ -146,6 +148,7 @@ def _replace(
         kinds=kinds,
         window_start=start,
         window_end=end,
+        tickers=tickers,
         now=now,
     )
 
@@ -309,6 +312,72 @@ def test_a_listed_row_already_withdrawn_elsewhere_is_not_double_counted(
     assert _row(session, CalendarSource.FINNHUB, "AAPL:2026Q3").deleted_at == T1
 
 
+# --- ticker scope: withdraw only what the fetch was asked about (fix 2) -------
+#
+# The earnings and dividends fetches are asked about the watch universe only.
+# A stored row for a ticker that has left the universe -- a position closed,
+# or held only in the Cash book the calendar cannot read -- was never asked
+# about, so its absence from the response says nothing about it.
+
+
+def test_a_row_for_a_ticker_outside_the_scope_is_never_withdrawn(session: Session) -> None:
+    _replace(session, [_earnings("NVDA"), _earnings("PLTR")], now=T0)
+    result = _replace(session, [_earnings("NVDA")], tickers=frozenset({"NVDA"}))
+    assert result.withdrawn == 0 and result.withdrawn_keys == ()
+    assert _live_keys(session) == {"NVDA:2026Q3", "PLTR:2026Q3"}
+
+
+def test_a_row_for_a_ticker_inside_the_scope_is_still_withdrawn(session: Session) -> None:
+    _replace(session, [_earnings("NVDA"), _earnings("AAPL"), _earnings("PLTR")], now=T0)
+    result = _replace(session, [_earnings("NVDA")], tickers=frozenset({"NVDA", "AAPL"}))
+    assert result.withdrawn_keys == ((CalendarKind.EARNINGS, "AAPL:2026Q3"),)
+    assert _live_keys(session) == {"NVDA:2026Q3", "PLTR:2026Q3"}
+
+
+def test_the_scope_is_matched_without_regard_to_case_or_padding(session: Session) -> None:
+    _replace(session, [_earnings("NVDA"), _earnings("AAPL")], now=T0)
+    result = _replace(session, [_earnings("NVDA")], tickers=frozenset({" nvda ", "aapl"}))
+    assert result.withdrawn_keys == ((CalendarKind.EARNINGS, "AAPL:2026Q3"),)
+
+
+def test_a_class_share_in_the_scope_matches_its_dotted_row(session: Session) -> None:
+    _replace(session, [_earnings("NVDA"), _earnings("BRK.B")], now=T0)
+    result = _replace(session, [_earnings("NVDA")], tickers=frozenset({"NVDA", "BRK/B"}))
+    assert result.withdrawn_keys == ((CalendarKind.EARNINGS, "BRK.B:2026Q3"),)
+
+
+def test_an_empty_scope_withdraws_nothing(session: Session) -> None:
+    """A fetch asked about no ticker learnt nothing about any stored row."""
+    _replace(session, [_earnings("NVDA")], now=T0)
+    result = _replace(session, [], tickers=frozenset())
+    assert result.withdrawn == 0
+    assert _live_keys(session) == {"NVDA:2026Q3"}
+
+
+def test_a_tickerless_row_is_never_withdrawn_by_a_scoped_replace(session: Session) -> None:
+    named = _ipo("name:new iceland arctic acquisition corp", None)
+    _replace(session, [named], kinds=IPO, now=T0)
+    result = _replace(session, [], kinds=IPO, tickers=frozenset({"IAM"}))
+    assert result.withdrawn == 0
+    assert _live_keys(session) == {"name:new iceland arctic acquisition corp"}
+
+
+def test_a_market_wide_replace_still_withdraws_every_ticker(session: Session) -> None:
+    """``tickers=None`` is a fetch asked about everything: the pre-fix behaviour."""
+    _replace(session, [_earnings("NVDA"), _earnings("PLTR")], now=T0)
+    result = _replace(session, [_earnings("NVDA")], tickers=None)
+    assert result.withdrawn_keys == ((CalendarKind.EARNINGS, "PLTR:2026Q3"),)
+
+
+def test_the_live_count_reads_the_same_scope(session: Session) -> None:
+    _replace(session, [_earnings("NVDA"), _earnings("PLTR")], now=T0)
+    common = {"source": CalendarSource.FINNHUB, "kinds": EARNINGS,
+              "window_start": START, "window_end": END}
+    assert count_live_in_window(session, tickers=None, **common) == 2  # type: ignore[arg-type]
+    assert count_live_in_window(session, tickers=frozenset({"nvda"}), **common) == 1  # type: ignore[arg-type]
+    assert count_live_in_window(session, tickers=frozenset(), **common) == 0  # type: ignore[arg-type]
+
+
 # --- refusals: each writes nothing --------------------------------------------
 
 
@@ -366,6 +435,17 @@ def test_a_bad_event_late_in_the_batch_writes_nothing(session: Session) -> None:
     bad = _earnings("MSFT", day=date(2026, 11, 2))
     _refused(session, events=[good, bad])
     assert "NVDA:2026Q3" not in _live_keys(session)
+
+
+def test_an_event_for_a_ticker_outside_the_scope_is_refused(session: Session) -> None:
+    """A fetch that claims to have asked about NVDA only cannot list AAPL."""
+    err = _refused(session, events=[_earnings("MSFT")], tickers=frozenset({"NVDA"}))
+    assert "MSFT" in str(err)
+
+
+def test_a_tickerless_event_in_a_scoped_replace_is_refused(session: Session) -> None:
+    named = _ipo("name:new iceland arctic acquisition corp", None)
+    _refused(session, events=[named], kinds=IPO, tickers=frozenset({"IAM"}))
 
 
 def test_a_naive_now_is_refused(session: Session) -> None:

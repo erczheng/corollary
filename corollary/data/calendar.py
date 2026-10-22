@@ -62,6 +62,7 @@ from corollary.data.calendar_event import (
     check_title,
     check_when,
 )
+from corollary.data.seeds import normalize_symbol
 from corollary.data.seeds.calendar_seeds import (
     Bank,
     CentralBankDecision,
@@ -85,6 +86,7 @@ __all__ = [
     "WindowReplace",
     "WindowReplaceError",
     "central_bank_inputs",
+    "count_live_in_window",
     "create_manual",
     "delete_manual",
     "group_by_date",
@@ -447,6 +449,29 @@ def upsert_events(
 # --- vendor window replacement --------------------------------------------------
 
 
+def _scope(tickers: frozenset[str] | None) -> frozenset[str] | None:
+    """``tickers`` as the store compares them (``normalize_symbol``); ``None`` kept.
+
+    The same normalisation the dividends fetcher asks Alpaca with, so
+    ``BRK/B`` in a universe and ``BRK.B`` on a row are one ticker.
+    """
+    if tickers is None:
+        return None
+    return frozenset(normalize_symbol(ticker) for ticker in tickers if ticker.strip())
+
+
+def _in_scope(ticker: str | None, scope: frozenset[str] | None) -> bool:
+    """Whether a row's ``ticker`` is one the fetch was asked about.
+
+    ``scope is None`` is a market-wide fetch: every row is in scope. Otherwise
+    a tickerless row never is -- a fetch asked about named tickers learnt
+    nothing about a row that names none.
+    """
+    if scope is None:
+        return True
+    return ticker is not None and normalize_symbol(ticker) in scope
+
+
 def _check_window(
     events: Sequence[CalendarEventInput],
     *,
@@ -454,6 +479,7 @@ def _check_window(
     kinds: frozenset[CalendarKind],
     window_start: date,
     window_end: date,
+    scope: frozenset[str] | None,
 ) -> None:
     """Every refusal :func:`replace_window` makes, all before anything is written."""
     for name, day in (("window_start", window_start), ("window_end", window_end)):
@@ -496,6 +522,11 @@ def _check_window(
                 f"{label} is dated {event.date.isoformat()}, outside the window "
                 f"{window_start.isoformat()}..{window_end.isoformat()}"
             )
+        if not _in_scope(event.ticker, scope):
+            raise WindowReplaceError(
+                f"{label} is for ticker {event.ticker!r}, outside the tickers the "
+                "fetch was asked about; a response cannot list what was not asked"
+            )
         key = (event.kind, event.vendor_id)
         if key in seen:
             raise WindowReplaceError(f"{label} appears twice in one batch")
@@ -510,6 +541,7 @@ def replace_window(
     kinds: frozenset[CalendarKind],
     window_start: date,
     window_end: date,
+    tickers: frozenset[str] | None,
     now: datetime,
 ) -> WindowReplace:
     """Make ``events`` the complete set of live ``source``/``kinds`` rows in the window.
@@ -526,6 +558,19 @@ def replace_window(
     :func:`upsert_events`, which withdraws nothing. An *empty* complete
     fetch is a real answer and withdraws the whole window.
 
+    **``tickers`` is what the fetch was asked about, and it bounds the
+    withdrawal.** Required, so every caller states it. ``None`` is a
+    market-wide fetch (IPOs, FRED releases): every row in scope may be
+    withdrawn. A set -- the watch universe an earnings or dividends fetch was
+    filtered to -- confines withdrawal to rows whose ``ticker`` is in it
+    (compared through ``normalize_symbol``: trimmed, upper-cased, class
+    shares dotted). A row for a ticker outside it, or with no
+    ticker, is never read for withdrawal: its absence from a response that
+    never asked about it says nothing. That is what keeps an underlying that
+    left the universe -- a position closed, or held only in the Cash book
+    the calendar does not read -- from losing its earnings and ex-dates.
+    An event whose ticker is outside a stated set is refused.
+
     The vendor equivalent of the seed import's withdrawal. It closes the
     stale-row gap the fetcher audits reported: an IPO first keyed by name and
     later given a symbol, a FRED release moved to another date (its
@@ -538,13 +583,14 @@ def replace_window(
        window, empty ``kinds``, a kind ``source`` does not produce
        (:data:`~corollary.data.calendar_event.KIND_SOURCE`), ``source``
        ``manual`` or ``seed``, or any event of another source, of a kind
-       outside ``kinds``, dated outside the window, or keyed twice.
+       outside ``kinds``, dated outside the window, for a ticker outside a
+       stated ``tickers``, or keyed twice.
     2. **Upsert** ``events``. A previously withdrawn row that reappears is
        **revived** -- the same row, ``deleted_at`` cleared.
     3. **Withdraw** the live rows in scope that ``events`` does not list.
        Each withdrawal is logged. Rows outside the window, of other sources
-       or other kinds -- manual and seed rows always among them -- are never
-       read for withdrawal.
+       or other kinds -- manual and seed rows always among them -- or outside
+       ``tickers`` are never withdrawn.
 
     The four upsert counts partition ``events``: ``inserted + updated +
     unchanged + revived == len(events)``; a revived row is counted as
@@ -553,8 +599,14 @@ def replace_window(
     Flushes, never commits: the caller owns the transaction.
     """
     now = _utc_now(now)
+    scope = _scope(tickers)
     _check_window(
-        events, source=source, kinds=kinds, window_start=window_start, window_end=window_end
+        events,
+        source=source,
+        kinds=kinds,
+        window_start=window_start,
+        window_end=window_end,
+        scope=scope,
     )
 
     # Which listed keys are currently withdrawn rows -- they revive on upsert.
@@ -593,6 +645,8 @@ def replace_window(
         kind = CalendarKind(row.kind)
         if row.vendor_id in listed[kind]:
             continue
+        if not _in_scope(row.ticker, scope):
+            continue
         row.deleted_at = now
         row.updated_at = now
         withdrawn.append((kind, row.vendor_id))
@@ -614,6 +668,7 @@ def replace_window(
                 "vendor_id": vendor_id,
                 "window_start": window_start.isoformat(),
                 "window_end": window_end.isoformat(),
+                "tickers": None if scope is None else sorted(scope),
                 "at": now.isoformat(),
             },
         )
@@ -625,6 +680,38 @@ def replace_window(
         withdrawn=len(withdrawn),
         revived=revived,
         withdrawn_keys=tuple(withdrawn),
+    )
+
+
+def count_live_in_window(
+    session: Session,
+    *,
+    source: CalendarSource,
+    kinds: frozenset[CalendarKind],
+    window_start: date,
+    window_end: date,
+    tickers: frozenset[str] | None,
+) -> int:
+    """How many live rows :func:`replace_window` could withdraw, same scope.
+
+    The rows of ``source``, of a kind in ``kinds``, dated ``window_start <=
+    date <= window_end``, not withdrawn, and inside ``tickers`` exactly as
+    :func:`replace_window` reads it. The scheduler compares a fetch's size
+    against it before trusting the fetch as complete.
+    """
+    scope = _scope(tickers)
+    return sum(
+        1
+        for ticker in session.scalars(
+            select(CalendarEvent.ticker).where(
+                CalendarEvent.source == source.value,
+                CalendarEvent.kind.in_(sorted(kind.value for kind in kinds)),
+                CalendarEvent.date >= window_start,
+                CalendarEvent.date <= window_end,
+                CalendarEvent.deleted_at.is_(None),
+            )
+        )
+        if _in_scope(ticker, scope)
     )
 
 

@@ -33,10 +33,13 @@ from corollary.data.calendar_event import (
     IpoStatus,
 )
 from corollary.data.calendar_finnhub import (
-    FinnhubCalendarBatch,
+    EARNINGS_POSSIBLY_TRUNCATED_AT,
+    EARNINGS_WINDOW,
+    FINNHUB_EARNINGS_ROW_CAP,
     earnings_events,
+    earnings_request_days,
     earnings_vendor_id,
-    fetch_earnings,
+    read_earnings_by_day,
     fetch_ipos,
     ipo_events,
     ipo_vendor_id,
@@ -407,14 +410,106 @@ def test_the_recorded_earnings_round_trip_through_the_store(session: Session) ->
     assert {e.ticker: e.estimate for e in stored}["AA"] == Decimal("1.563")
 
 
+# --- the row cap: one request per day (fix 1 of the calendar risks) --------------
+#
+# Measured 2026-10-22 (tests/fixtures/finnhub/p7_earnings_truncation_counts.json):
+# the job's 22-day window in one request answered exactly 1500 rows of 3780
+# distinct reports, keeping the *latest* dates and dropping 2026-10-22 ..
+# 2026-11-04 entirely. Replaced, that response would withdraw every near-term
+# earnings row in peak season.
+
+_TRUNCATION = json.loads(
+    (FIXTURE_DIR / "p7_earnings_truncation_counts.json").read_text(encoding="utf-8")
+)
+
+
+def test_the_recorded_probe_measured_the_cap_the_module_names() -> None:
+    assert _TRUNCATION["full_window"]["rows"] == FINNHUB_EARNINGS_ROW_CAP == 1500
+    assert _TRUNCATION["per_day_sum"]["distinct_keys"] > FINNHUB_EARNINGS_ROW_CAP
+    assert _TRUNCATION["keys_missing_from_full_window"] > 0
+    # The busiest single day stayed well under the threshold, which is what
+    # makes one request per day a complete read.
+    assert max(_TRUNCATION["per_day"].values()) < EARNINGS_POSSIBLY_TRUNCATED_AT
+    assert EARNINGS_POSSIBLY_TRUNCATED_AT < FINNHUB_EARNINGS_ROW_CAP
+
+
+def test_the_job_window_is_requested_one_day_at_a_time() -> None:
+    start = date(2026, 10, 22)
+    days = earnings_request_days(start, start + EARNINGS_WINDOW)
+    assert len(days) == EARNINGS_WINDOW.days + 1 == 22
+    assert days[0] == start and days[-1] == start + EARNINGS_WINDOW
+    assert list(days) == sorted(set(days))
+    with pytest.raises(ValueError):
+        earnings_request_days(start, start.replace(day=21))
+
+
+class _ByDay:
+    """A stand-in for ``earnings_calendar`` that answers each day's rows."""
+
+    def __init__(self, by_day: dict[date, list[object]]) -> None:
+        self.by_day = by_day
+        self.calls: list[tuple[date, date]] = []
+
+    async def __call__(self, start: date, end: date) -> list[object]:
+        self.calls.append((start, end))
+        return [row for day, rows in self.by_day.items() if start <= day <= end for row in rows]
+
+
+def _row(symbol: str, day: date) -> dict[str, Any]:
+    return {"symbol": symbol, "date": day.isoformat(), "hour": "amc", "year": 2026,
+            "quarter": 3, "epsEstimate": None, "epsActual": None,
+            "revenueEstimate": None, "revenueActual": None}
+
+
 @pytest.mark.asyncio
-async def test_fetch_earnings_requests_once_and_filters(make_provider: ProviderFactory) -> None:
+async def test_reading_by_day_requests_each_day_once_and_keeps_every_row() -> None:
+    start, end = date(2026, 10, 22), date(2026, 10, 25)
+    read = _ByDay({start: [_row("AAPL", start)], end: [_row("NVDA", end), _row("MSFT", end)]})
+
+    result = await read_earnings_by_day(read, start=start, end=end)
+
+    assert read.calls == [(day, day) for day in earnings_request_days(start, end)]
+    assert [row["symbol"] for row in result.rows] == ["AAPL", "NVDA", "MSFT"]  # type: ignore[index]
+    assert result.counts == ((start, 1), (date(2026, 10, 23), 0), (date(2026, 10, 24), 0), (end, 2))
+    assert result.possibly_truncated == ()
+
+
+@pytest.mark.asyncio
+async def test_a_day_whose_response_is_near_the_cap_is_reported_possibly_truncated() -> None:
+    busy, quiet = date(2026, 11, 4), date(2026, 11, 5)
+    read = _ByDay({
+        busy: [_row(f"S{i}", busy) for i in range(EARNINGS_POSSIBLY_TRUNCATED_AT)],
+        quiet: [_row("AAPL", quiet)],
+    })
+
+    result = await read_earnings_by_day(read, start=busy, end=quiet)
+
+    assert result.possibly_truncated == ((busy, EARNINGS_POSSIBLY_TRUNCATED_AT),)
+    assert len(result.rows) == EARNINGS_POSSIBLY_TRUNCATED_AT + 1
+
+
+@pytest.mark.asyncio
+async def test_a_day_one_row_under_the_threshold_is_complete() -> None:
+    day = date(2026, 11, 4)
+    read = _ByDay({day: [_row(f"S{i}", day) for i in range(EARNINGS_POSSIBLY_TRUNCATED_AT - 1)]})
+
+    result = await read_earnings_by_day(read, start=day, end=day)
+
+    assert result.possibly_truncated == ()
+
+
+@pytest.mark.asyncio
+async def test_reading_by_day_against_the_provider_filters_to_the_watch(
+    make_provider: ProviderFactory,
+) -> None:
     provider, transport = make_provider(_route("/calendar/earnings", "p3_calendar_earnings"))
-    batch = await fetch_earnings(
-        provider, WATCH, start=date(2026, 9, 24), end=date(2026, 10, 15)
-    )
-    assert isinstance(batch, FinnhubCalendarBatch)
-    assert len(transport.requests) == 1  # 1/day: the whole window in one request
+    start, end = date(2026, 9, 24), date(2026, 9, 26)
+
+    result = await read_earnings_by_day(provider.earnings_calendar, start=start, end=end)
+    batch = earnings_events(result.rows, WATCH)
+
+    assert len(transport.requests) == 3  # one per day, never one for the window
+    # The recorded body answers every request; identical copies collapse.
     assert {event.ticker for event in batch.events} == set(WATCH)
 
 

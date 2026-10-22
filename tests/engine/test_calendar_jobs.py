@@ -45,7 +45,11 @@ from corollary.data.calendar_dividends import (
     SkippedDividend,
 )
 from corollary.data.calendar_event import CalendarEventInput, CalendarKind, CalendarSource
-from corollary.data.calendar_finnhub import EARNINGS_WINDOW, IPO_WINDOW
+from corollary.data.calendar_finnhub import (
+    EARNINGS_POSSIBLY_TRUNCATED_AT,
+    EARNINGS_WINDOW,
+    IPO_WINDOW,
+)
 from corollary.data.calendar_releases import ReleaseEvents, SkippedRelease
 from corollary.data.providers.finnhub import CalendarAccessDenied, CalendarProviderError
 from corollary.data.providers.fred import FredError, FredReleaseDate
@@ -55,6 +59,8 @@ from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine import scheduler as scheduler_module
 from corollary.engine.scheduler import (
     CALENDAR_CATCH_UP_AFTER,
+    EARNINGS_SHARP_DROP_KEEPS_BELOW,
+    EARNINGS_SHARP_DROP_MIN_STORED,
     HELD_POSITIONS_STALE_AFTER,
     AtTime,
     ContextServices,
@@ -106,6 +112,29 @@ def _earning(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _answers(row: object, start: date, end: date) -> bool:
+    """Whether a vendor asked for ``[start, end]`` would list ``row``."""
+    day = row.get("date") if isinstance(row, dict) else None
+    if not isinstance(day, str):
+        return True
+    try:
+        return start <= date.fromisoformat(day) <= end
+    except ValueError:
+        return True
+
+
+#: Requests in one earnings sweep: the window is inclusive at both ends.
+_EARNINGS_DAYS = EARNINGS_WINDOW.days + 1
+
+
+def _per_day(start: date) -> list[tuple[str, date, date]]:
+    """The job's earnings requests for a window starting ``start``: one per day."""
+    return [
+        ("earnings", start + timedelta(days=n), start + timedelta(days=n))
+        for n in range(EARNINGS_WINDOW.days + 1)
+    ]
+
+
 def _ipo(**overrides: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "date": "2026-11-20",
@@ -122,7 +151,13 @@ def _ipo(**overrides: Any) -> dict[str, Any]:
 
 
 class FakeFinnhubCalendar:
-    """``FinnhubProvider``'s two calendar reads, scripted."""
+    """``FinnhubProvider``'s two calendar reads, scripted.
+
+    Earnings answer like the vendor: only the rows dated inside the request's
+    ``[start, end]`` (a row whose date is not ``YYYY-MM-DD`` text answers every
+    request, so an unreadable row still reaches the mapper). The job reads one
+    day per request since the 1500-row cap was measured.
+    """
 
     def __init__(
         self,
@@ -140,7 +175,7 @@ class FakeFinnhubCalendar:
         self.calls.append(("earnings", start, end))
         if self.error is not None:
             raise self.error
-        return list(self.earnings)
+        return [row for row in self.earnings if _answers(row, start, end)]
 
     async def ipo_calendar(self, start: date, end: date) -> list[Any]:
         self.calls.append(("ipo", start, end))
@@ -307,7 +342,7 @@ async def test_earnings_replace_the_finnhub_earnings_window(
 
     assert await job.run() is None
 
-    assert finnhub.calls == [("earnings", TODAY, TODAY + EARNINGS_WINDOW)]
+    assert finnhub.calls == _per_day(TODAY)
     (call,) = replace_spy.calls
     assert call["source"] is CalendarSource.FINNHUB
     assert call["kinds"] == frozenset({CalendarKind.EARNINGS})
@@ -566,6 +601,214 @@ async def test_a_skipped_release_fetch_withdraws_nothing(
 
 
 # --------------------------------------------------------------------------
+# The earnings row cap (fix 1 of the calendar risks)
+# --------------------------------------------------------------------------
+#
+# Finnhub's /calendar/earnings silently answers at most 1500 rows, keeping the
+# latest dates (measured 2026-10-22). The job reads one day per request, and
+# a response that may still be capped -- or a window that has shrunk sharply
+# against what is stored -- upserts and withdraws nothing.
+
+
+@pytest.mark.asyncio
+async def test_earnings_are_read_a_day_at_a_time_and_the_whole_window_is_complete(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    """Rows on the first and last day both arrive: nothing at either end is cut off."""
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.EARNINGS,
+        source=CalendarSource.FINNHUB,
+        vendor_id="NVDA:2026Q4",
+        day=TODAY + timedelta(days=3),
+        ticker="NVDA",
+    )
+    last = TODAY + EARNINGS_WINDOW
+    finnhub = FakeFinnhubCalendar(
+        earnings=[
+            _earning(symbol="AAPL", date=TODAY.isoformat(), quarter=4, year=2026),
+            _earning(symbol="NVDA", date=last.isoformat()),
+        ]
+    )
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    assert await job.run() is None
+
+    assert finnhub.calls == _per_day(TODAY)
+    (call,) = replace_spy.calls
+    assert sorted(event.date for event in call["events"]) == [TODAY, last]
+    live = _live(db_engine)
+    assert {("earnings", "AAPL:2026Q4"), ("earnings", "NVDA:2027Q3")} <= live
+    assert ("earnings", "NVDA:2026Q4") not in live  # a complete window still withdraws
+
+
+@pytest.mark.asyncio
+async def test_a_day_answered_at_the_cap_threshold_withdraws_nothing(
+    db_engine: Engine, replace_spy: _ReplaceSpy, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A day that may itself be truncated cannot be split further: keep, never withdraw."""
+    busy = TODAY + timedelta(days=2)
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.EARNINGS,
+        source=CalendarSource.FINNHUB,
+        vendor_id="AAPL:2027Q1",
+        day=busy,
+        ticker="AAPL",
+    )
+    capped = [
+        _earning(symbol=f"X{n:04d}", date=busy.isoformat())
+        for n in range(EARNINGS_POSSIBLY_TRUNCATED_AT - 1)
+    ]
+    finnhub = FakeFinnhubCalendar(earnings=[*capped, _earning(date=busy.isoformat())])
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.__name__):
+        assert await job.run() is None
+
+    assert replace_spy.calls == []
+    live = _live(db_engine)
+    assert ("earnings", "AAPL:2027Q1") in live
+    assert ("earnings", "NVDA:2027Q3") in live  # what was read is still upserted
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "calendar_window_kept"]
+    assert record.job == "calendar_earnings"  # type: ignore[attr-defined]
+    (gap,) = record.gaps  # type: ignore[attr-defined]
+    assert busy.isoformat() in gap and str(EARNINGS_POSSIBLY_TRUNCATED_AT) in gap
+
+
+@pytest.mark.asyncio
+async def test_a_day_one_row_under_the_threshold_still_replaces(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    busy = TODAY + timedelta(days=2)
+    rows = [
+        _earning(symbol=f"X{n:04d}", date=busy.isoformat())
+        for n in range(EARNINGS_POSSIBLY_TRUNCATED_AT - 2)
+    ]
+    finnhub = FakeFinnhubCalendar(earnings=[*rows, _earning(date=busy.isoformat())])
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    assert await job.run() is None
+
+    assert len(replace_spy.calls) == 1
+
+
+def _seed_earnings(db_engine: Engine, count: int) -> set[tuple[str, str | None]]:
+    """``count`` live AAPL earnings rows inside the job's window, distinct keys."""
+    for n in range(count):
+        _seed_row(
+            db_engine,
+            kind=CalendarKind.EARNINGS,
+            source=CalendarSource.FINNHUB,
+            vendor_id=f"AAPL:seeded{n:02d}",
+            day=TODAY + timedelta(days=n % (EARNINGS_WINDOW.days + 1)),
+            ticker="AAPL",
+        )
+    return _live(db_engine)
+
+
+def _fresh_rows(count: int) -> list[dict[str, Any]]:
+    return [
+        _earning(symbol="NVDA", year=2030 + n, date=(TODAY + timedelta(days=n)).isoformat())
+        for n in range(count)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_shrinks_sharply_against_the_store_withdraws_nothing(
+    db_engine: Engine, replace_spy: _ReplaceSpy, caplog: pytest.LogCaptureFixture
+) -> None:
+    stored = EARNINGS_SHARP_DROP_MIN_STORED * 2
+    before = _seed_earnings(db_engine, stored)
+    fetched = stored // 2 - 1  # one under half: past the documented ratio
+    assert Decimal(fetched) < Decimal(stored) * EARNINGS_SHARP_DROP_KEEPS_BELOW
+    finnhub = FakeFinnhubCalendar(earnings=_fresh_rows(fetched))
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.__name__):
+        assert await job.run() is None
+
+    assert replace_spy.calls == []
+    live = _live(db_engine)
+    assert before <= live
+    assert len(live) == stored + fetched
+    (record,) = [r for r in caplog.records if getattr(r, "event", None) == "calendar_window_kept"]
+    (gap,) = record.gaps  # type: ignore[attr-defined]
+    assert f"{fetched} " in gap and f"{stored} " in gap
+
+
+@pytest.mark.asyncio
+async def test_a_window_at_exactly_the_drop_ratio_still_replaces(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    stored = EARNINGS_SHARP_DROP_MIN_STORED * 2
+    _seed_earnings(db_engine, stored)
+    fetched = stored // 2  # exactly half: at the boundary, permitted
+    finnhub = FakeFinnhubCalendar(earnings=_fresh_rows(fetched))
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    assert await job.run() is None
+
+    (call,) = replace_spy.calls
+    assert len(call["events"]) == fetched
+    assert len([1 for kind, _ in _live(db_engine) if kind == "earnings"]) == fetched
+
+
+@pytest.mark.asyncio
+async def test_below_the_minimum_stored_count_an_empty_window_still_replaces(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    """A handful of stored rows is too few for a ratio to mean anything."""
+    _seed_earnings(db_engine, EARNINGS_SHARP_DROP_MIN_STORED - 1)
+    job = _jobs(_services(db_engine, finnhub=FakeFinnhubCalendar(earnings=[])))[
+        "calendar_earnings"
+    ]
+
+    assert await job.run() is None
+
+    assert len(replace_spy.calls) == 1
+    assert not [1 for kind, _ in _live(db_engine) if kind == "earnings"]
+
+
+@pytest.mark.asyncio
+async def test_at_the_minimum_stored_count_an_empty_window_is_kept(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    before = _seed_earnings(db_engine, EARNINGS_SHARP_DROP_MIN_STORED)
+    job = _jobs(_services(db_engine, finnhub=FakeFinnhubCalendar(earnings=[])))[
+        "calendar_earnings"
+    ]
+
+    assert await job.run() is None
+
+    assert replace_spy.calls == []
+    assert _live(db_engine) == before
+
+
+@pytest.mark.asyncio
+async def test_a_request_failing_part_way_through_the_days_writes_nothing(
+    db_engine: Engine, replace_spy: _ReplaceSpy
+) -> None:
+    before = _seed_earnings(db_engine, 3)
+
+    class _FailsOnDayThree(FakeFinnhubCalendar):
+        async def earnings_calendar(self, start: date, end: date) -> list[Any]:
+            if start == TODAY + timedelta(days=2):
+                raise CalendarProviderError("GET /calendar/earnings returned 502")
+            return await super().earnings_calendar(start, end)
+
+    finnhub = _FailsOnDayThree(earnings=_fresh_rows(5))
+    job = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"]
+
+    with pytest.raises(CalendarProviderError):
+        await job.run()
+
+    assert len(finnhub.calls) == 2  # stopped at the failure; no later day was asked
+    assert replace_spy.calls == []
+    assert _live(db_engine) == before
+
+
+# --------------------------------------------------------------------------
 # Partial: upsert what was read, withdraw nothing
 # --------------------------------------------------------------------------
 
@@ -777,31 +1020,103 @@ async def test_a_held_positions_read_that_is_missing_or_stale_withdraws_nothing(
     assert any(said in gap for gap in gaps), gaps
 
 
-@pytest.mark.risk
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("name", "withdrawn"),
-    [
-        ("calendar_earnings", ("earnings", "PLTR:2026Q4")),
-        ("calendar_dividends", ("dividend", "div-pltr")),
-    ],
-)
-async def test_a_held_positions_read_exactly_at_the_bound_is_fresh_and_replaces(
-    db_engine: Engine, replace_spy: _ReplaceSpy, name: str, withdrawn: tuple[str, str]
-) -> None:
-    """The boundary permits: read exactly ``HELD_POSITIONS_STALE_AFTER`` ago,
-    the universe is complete, and a row nothing in it holds is withdrawn."""
-    _seed_held_pltr(db_engine)
-    services = _services(
+def _seed_held_nvda_stale_rows(db_engine: Engine) -> None:
+    """An NVDA earnings and ex-dividend row no fetch below lists -- NVDA is in
+    the universe (a market member and held), so a complete fetch withdraws them."""
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.EARNINGS,
+        source=CalendarSource.FINNHUB,
+        vendor_id="NVDA:2026Q4",
+        day=date(2026, 11, 17),
+        ticker="NVDA",
+    )
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.DIVIDEND,
+        source=CalendarSource.ALPACA,
+        vendor_id="div-nvda-old",
+        day=date(2026, 11, 20),
+        ticker="NVDA",
+    )
+
+
+_JOB_KEYS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
+    # name: (an in-universe row the fetch omits, PLTR's row)
+    "calendar_earnings": (("earnings", "NVDA:2026Q4"), ("earnings", "PLTR:2026Q4")),
+    "calendar_dividends": (("dividend", "div-nvda-old"), ("dividend", "div-pltr")),
+}
+
+
+def _complete_fetch_services(db_engine: Engine, held: HeldPositionUnderlyings) -> ContextServices:
+    return _services(
         db_engine,
         finnhub=FakeFinnhubCalendar(earnings=[_earning()]),
         dividends=FakeDividends(CashDividendRead(dividends=(_dividend(),), skipped=())),
-        position_underlyings=_held("NVDA", as_of=NOW - HELD_POSITIONS_STALE_AFTER),
+        position_underlyings=held,
+    )
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(_JOB_KEYS))
+async def test_a_held_positions_read_exactly_at_the_bound_is_fresh_and_replaces(
+    db_engine: Engine, replace_spy: _ReplaceSpy, name: str
+) -> None:
+    """The boundary permits: read exactly ``HELD_POSITIONS_STALE_AFTER`` ago,
+    the universe is complete, and an in-universe row the fetch omits is withdrawn."""
+    _seed_held_nvda_stale_rows(db_engine)
+    services = _complete_fetch_services(
+        db_engine, _held("NVDA", as_of=NOW - HELD_POSITIONS_STALE_AFTER)
     )
     assert await _jobs(services)[name].run() is None
 
     assert len(replace_spy.calls) == 1
-    assert withdrawn not in _live(db_engine)
+    in_universe, _pltr = _JOB_KEYS[name]
+    assert in_universe not in _live(db_engine)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", sorted(_JOB_KEYS))
+async def test_a_ticker_that_left_the_universe_keeps_its_rows_through_a_complete_fetch(
+    db_engine: Engine, replace_spy: _ReplaceSpy, name: str
+) -> None:
+    """Fix 2 of the calendar risks. PLTR was a held position; it is no longer
+    in the paper book -- closed, or held only in Cash, which the calendar does
+    not read. The fetch was never asked about PLTR, so PLTR's absence from it
+    withdraws nothing: a short call's ex-date must not vanish because the
+    universe stopped asking. The same complete fetch still withdraws the
+    in-universe row it omits."""
+    _seed_held_pltr(db_engine)
+    _seed_held_nvda_stale_rows(db_engine)
+    services = _complete_fetch_services(db_engine, _held("NVDA", as_of=NOW))
+
+    assert await _jobs(services)[name].run() is None
+
+    (call,) = replace_spy.calls
+    assert call["tickers"] is not None and "PLTR" not in call["tickers"]
+    assert {"AAPL", "NVDA"} <= call["tickers"]
+    in_universe, pltr = _JOB_KEYS[name]
+    live = _live(db_engine)
+    assert pltr in live
+    assert in_universe not in live
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["calendar_ipo", "calendar_releases"])
+async def test_the_market_wide_feeds_replace_without_a_ticker_scope(
+    db_engine: Engine, replace_spy: _ReplaceSpy, name: str
+) -> None:
+    services = _services(
+        db_engine,
+        finnhub=FakeFinnhubCalendar(ipos=[_ipo()]),
+        releases=FakeReleases([_cpi(date(2026, 11, 13))]),
+    )
+    assert await _jobs(services)[name].run() is None
+
+    (call,) = replace_spy.calls
+    assert call["tickers"] is None
 
 
 @pytest.mark.risk
@@ -950,7 +1265,8 @@ async def test_a_catch_up_on_an_empty_table_fetches(db_engine: Engine) -> None:
         catch_up = jobs[name].catch_up
         assert catch_up is not None
         assert await catch_up() is None, name
-    assert [call[0] for call in finnhub.calls] == ["earnings", "ipo"]
+    # One earnings sweep (a request per day of the window), then one IPO request.
+    assert [call[0] for call in finnhub.calls] == ["earnings"] * _EARNINGS_DAYS + ["ipo"]
     assert len(dividends.calls) == 1 and len(releases.calls) == 1
 
 
@@ -1050,7 +1366,7 @@ async def test_a_catch_up_on_rows_older_than_a_day_fetches(db_engine: Engine) ->
     catch_up = _jobs(_services(db_engine, finnhub=finnhub))["calendar_earnings"].catch_up
     assert catch_up is not None
     assert await catch_up() is None
-    assert [call[0] for call in finnhub.calls] == ["earnings"]
+    assert [call[0] for call in finnhub.calls] == ["earnings"] * _EARNINGS_DAYS
 
 
 @pytest.mark.asyncio
@@ -1098,7 +1414,8 @@ async def test_a_quiet_feed_and_an_empty_feed_each_cost_one_request_per_restart(
 ) -> None:
     """The stated deviation (no fetch record): a feed that changes nothing
     leaves no newer stamp, so every restart fetches once -- and a feed that
-    lists nothing at all costs exactly the same, never more."""
+    lists nothing at all costs exactly the same, never more. "Once" is one
+    request for the IPO window and one sweep (a request per day) for earnings."""
     empty = FakeFinnhubCalendar(ipos=[])
     for _restart in range(3):
         catch_up = _jobs(_services(db_engine, finnhub=empty))["calendar_ipo"].catch_up
@@ -1114,7 +1431,7 @@ async def test_a_quiet_feed_and_an_empty_feed_each_cost_one_request_per_restart(
         catch_up = _jobs(_services(db_engine, finnhub=quiet))["calendar_earnings"].catch_up
         assert catch_up is not None
         assert await catch_up() is None
-    assert len(quiet.calls) == 1 + 3
+    assert len(quiet.calls) == (1 + 3) * _EARNINGS_DAYS
     assert ("earnings", "NVDA:2027Q3") in _live(db_engine)
 
 
@@ -1345,7 +1662,7 @@ async def test_a_fetchs_rows_are_stamped_with_the_clock_read_before_the_fetch(
     assert await job.run() is None
 
     assert clock[0] == after  # the fetch did move the clock
-    assert finnhub.calls == [("earnings", date(2026, 11, 9), date(2026, 11, 9) + EARNINGS_WINDOW)]
+    assert finnhub.calls == _per_day(date(2026, 11, 9))
     with Session(db_engine) as session:
         stamps = session.scalars(select(CalendarEvent.updated_at)).all()
     assert stamps and all(stamp == before for stamp in stamps)

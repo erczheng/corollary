@@ -78,7 +78,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import date, timedelta
 from decimal import Decimal
@@ -97,14 +97,19 @@ from corollary.data.providers.finnhub import FinnhubProvider
 from corollary.wire import WireFormatError, as_decimal
 
 __all__ = [
+    "EARNINGS_POSSIBLY_TRUNCATED_AT",
     "EARNINGS_WINDOW",
     "EARNINGS_UNIT",
+    "EarningsRead",
+    "FINNHUB_EARNINGS_ROW_CAP",
     "FinnhubCalendarBatch",
     "IPO_WINDOW",
     "SkippedRow",
     "earnings_events",
+    "earnings_request_days",
     "earnings_vendor_id",
-    "fetch_earnings",
+    "possibly_truncated",
+    "read_earnings_by_day",
     "fetch_ipos",
     "ipo_events",
     "ipo_vendor_id",
@@ -115,6 +120,23 @@ logger = logging.getLogger(__name__)
 
 #: The spec's earnings window: today -> +21 days (*Feeds and budgets*).
 EARNINGS_WINDOW: Final = timedelta(days=21)
+
+#: ``/calendar/earnings``'s row ceiling, **measured** 2026-10-22 in peak
+#: season (``scripts/probe_earnings_truncation.py``; counts in
+#: ``tests/fixtures/finnhub/p7_earnings_truncation_counts.json``). The job's
+#: 22-day window in one request answered exactly 1500 rows of 3780 distinct
+#: reports, and so did 42- and 63-day windows. The cap is silent -- no status,
+#: no field, no header says so -- and it keeps the **latest** dates: every row
+#: dated 2026-10-22 .. 2026-11-04 was missing, the nearest and most relevant
+#: reports. Replaced as complete, that response withdraws all of them.
+FINNHUB_EARNINGS_ROW_CAP: Final = 1500
+
+#: A single response this large is treated as **possibly truncated**: 90% of
+#: the measured cap. The cap is the vendor's and undocumented, so it can move;
+#: a response close under it is as suspect as one exactly on it. The busiest
+#: single day measured was 455 rows (2026-11-05), so a one-day request sits far
+#: below this in the season that matters.
+EARNINGS_POSSIBLY_TRUNCATED_AT: Final = FINNHUB_EARNINGS_ROW_CAP * 9 // 10
 
 #: The IPO window the Q15 probe used: today -> +30 days.
 IPO_WINDOW: Final = timedelta(days=30)
@@ -518,11 +540,59 @@ def _dedupe(
     return tuple(events), conflicts
 
 
-async def fetch_earnings(
-    provider: FinnhubProvider, watch: Iterable[str], *, start: date, end: date
-) -> FinnhubCalendarBatch:
-    """One ``/calendar/earnings`` request for ``[start, end]``, mapped and filtered."""
-    return earnings_events(await provider.earnings_calendar(start, end), watch)
+def possibly_truncated(rows: int) -> bool:
+    """Whether a response of ``rows`` rows may have been cut at the vendor's cap."""
+    return rows >= EARNINGS_POSSIBLY_TRUNCATED_AT
+
+
+def earnings_request_days(start: date, end: date) -> tuple[date, ...]:
+    """Every day in ``[start, end]``, both inclusive: one ``/calendar/earnings`` request each.
+
+    One day, not one week: a week measured 1395 rows in peak season, within
+    7% of the cap, while the busiest day was 455.
+    """
+    if end < start:
+        raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
+    return tuple(start + timedelta(days=offset) for offset in range((end - start).days + 1))
+
+
+@dataclass(frozen=True, slots=True)
+class EarningsRead:
+    """The raw rows of one window, read one day per request.
+
+    ``counts`` is each request's day and row count, in request order.
+    ``possibly_truncated`` is the subset whose response was at or above
+    :data:`EARNINGS_POSSIBLY_TRUNCATED_AT` -- a day that cannot be split
+    further, so the caller must not treat the window as complete.
+    """
+
+    rows: tuple[object, ...]
+    counts: tuple[tuple[date, int], ...]
+
+    @property
+    def possibly_truncated(self) -> tuple[tuple[date, int], ...]:
+        return tuple((day, count) for day, count in self.counts if possibly_truncated(count))
+
+
+async def read_earnings_by_day(
+    read: Callable[[date, date], Awaitable[Sequence[object]]], *, start: date, end: date
+) -> EarningsRead:
+    """``[start, end]`` as one ``read(day, day)`` per day, the rows concatenated in day order.
+
+    Never one request for the window: the window's single response is capped
+    at :data:`FINNHUB_EARNINGS_ROW_CAP` and silently drops the nearest dates.
+    A raise from any request propagates -- a read that stopped part-way is
+    not a window. The same report listed on two days stays twice here;
+    :func:`earnings_events` collapses identical copies and skips conflicting
+    ones, which makes the fetch partial.
+    """
+    rows: list[object] = []
+    counts: list[tuple[date, int]] = []
+    for day in earnings_request_days(start, end):
+        answered = await read(day, day)
+        rows.extend(answered)
+        counts.append((day, len(answered)))
+    return EarningsRead(rows=tuple(rows), counts=tuple(counts))
 
 
 async def fetch_ipos(provider: FinnhubProvider, *, start: date, end: date) -> FinnhubCalendarBatch:

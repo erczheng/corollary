@@ -141,6 +141,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Final, Protocol
 
 from sqlalchemy import Engine, select
@@ -149,6 +150,7 @@ from sqlalchemy.orm import Session
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
 from corollary.data.calendar import (
     WindowReplace,
+    count_live_in_window,
     import_central_bank_year,
     replace_window,
     upsert_events,
@@ -161,10 +163,15 @@ from corollary.data.calendar_dividends import (
 )
 from corollary.data.calendar_event import CalendarEventInput, CalendarKind, CalendarSource
 from corollary.data.calendar_finnhub import (
+    EARNINGS_POSSIBLY_TRUNCATED_AT,
     EARNINGS_WINDOW,
+    FINNHUB_EARNINGS_ROW_CAP,
     IPO_WINDOW,
+    EarningsRead,
     earnings_events,
     ipo_events,
+    possibly_truncated,
+    read_earnings_by_day,
 )
 from corollary.data.calendar_releases import (
     FRED_RELEASES_HORIZON_DAYS,
@@ -1147,10 +1154,10 @@ class FinnhubCalendarSource(Protocol):
     ``FinnhubProvider`` satisfies it -- the same instance as
     :class:`FinnhubNewsSource`, so both draw on the one ``finnhub.io`` bucket.
     A structural type rather than the provider class, because
-    ``calendar_finnhub.fetch_earnings``/``fetch_ipos`` are annotated with the
-    concrete provider: the jobs call the same two steps those wrappers do --
-    one request for the window, then :func:`earnings_events` /
-    :func:`ipo_events` -- over this protocol, so a test passes a fake.
+    ``calendar_finnhub.fetch_ipos`` is annotated with the concrete provider:
+    the jobs read over this protocol -- one request per day for earnings
+    (``read_earnings_by_day``), one for the IPO window -- then map with
+    :func:`earnings_events` / :func:`ipo_events`, so a test passes a fake.
     """
 
     async def earnings_calendar(self, start: date, end: date) -> Sequence[object]: ...
@@ -2120,6 +2127,24 @@ def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> Sch
 #   withdraw its own stored predecessor, and a universe missing TSLA for one
 #   cycle would withdraw TSLA's earnings.
 #
+# And even a complete fetch withdraws **only the tickers it was asked about**.
+# Earnings and dividends pass the built watch universe to ``replace_window``
+# as ``tickers``; a stored row for a ticker outside it is never withdrawn,
+# because a response that never asked about a ticker says nothing about it.
+# IPOs and FRED releases are market-wide and pass ``None``.
+#
+# **The Cash book is not in the universe, and that is a known limit.** The
+# held-position members come from ``PaperPositionsRefresher`` alone. The app
+# has no server-side record that Cash was confirmed this session (rule 5's
+# confirmation lives in the browser; the server answers ``?account=cash``
+# per request whenever the live keys are set), so a background job reading
+# the Cash book would be a live-credential read nobody confirmed -- it is
+# deliberately not built. An underlying held only in Cash, and not otherwise
+# watched, therefore gets **no new** earnings or ex-dividend rows; the ticker
+# scope above only guarantees that rows it already had are not withdrawn.
+# Closing that needs an owner decision: a confirmed-Cash session state the
+# engine can read.
+#
 # The FRED "actual about ten minutes after each release" job is **not** here:
 # prior and actual are blocked on an owner question (unit 7.2b-R's
 # ``actual_for``). Nothing in this section is a rule 9 input; every database
@@ -2131,7 +2156,10 @@ def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> Sch
 #: read is not stacked on the same minute either. The central-bank seed is a
 #: local file and goes first, at 06:45. **Every day**, not trading days only:
 #: these are forward calendars whose window starts today, and the panel is
-#: read at the weekend while the week is planned -- one request a day each.
+#: read at the weekend while the week is planned. One request a day for IPOs
+#: and dividends; earnings is one *sweep* a day, a request per day of its
+#: window (22), because Finnhub caps a response at 1500 rows -- the sweep is
+#: paced by the provider's 60/min limiter and ends well before 07:05.
 CALENDAR_EARNINGS_AT: Final = time(7, 0)
 CALENDAR_IPO_AT: Final = time(7, 5)
 CALENDAR_DIVIDENDS_AT: Final = time(7, 10)
@@ -2149,6 +2177,22 @@ CALENDAR_CATCH_UP_AFTER: Final = timedelta(days=1)
 #: this module may not import ``corollary.api``, so a test pins the two
 #: together). One missed refresh is tolerated, two in a row is a gap.
 HELD_POSITIONS_STALE_AFTER: Final = timedelta(minutes=10)
+#: *The earnings drop guard.* A complete earnings fetch whose window holds
+#: fewer than this fraction of the live rows already stored for the same
+#: window withdraws nothing: its rows are upserted and the drop is logged as
+#: a ``calendar_window_kept`` gap. Earnings reports do not vanish in bulk --
+#: a cancellation or a reschedule is one row -- so a window that shrinks by
+#: more than half overnight is far likelier a vendor that answered short
+#: (the silent row cap, ``FINNHUB_EARNINGS_ROW_CAP``, was exactly that) than
+#: a market that changed. Exactly the fraction is permitted. Counted after the
+#: watch filter on the fetch side, against the stored rows the replace would
+#: read for withdrawal on the other.
+EARNINGS_SHARP_DROP_KEEPS_BELOW: Final = Decimal("0.5")
+#: The drop guard only applies when at least this many rows are stored for
+#: the window: below it a ratio is noise (two reports rescheduled out of
+#: three is a real week), and a genuinely emptied small window must still be
+#: able to empty.
+EARNINGS_SHARP_DROP_MIN_STORED: Final = 10
 #: The central-bank job imports this year's seed and this many following
 #: years'. ``corollary.api.routes.calendar`` reads it to know which dates the
 #: job covers, so the number lives here once.
@@ -2246,6 +2290,45 @@ def _row_gaps(skipped: int) -> list[str]:
     return [f"{skipped} fetched row(s) could not be written as events"]
 
 
+def _truncation_gaps(read: EarningsRead) -> list[str]:
+    """Each requested day whose response may have been cut at Finnhub's row cap."""
+    return [
+        f"the /calendar/earnings response for {day.isoformat()} carried {count} rows, "
+        f"at or above {EARNINGS_POSSIBLY_TRUNCATED_AT} (90% of the measured "
+        f"{FINNHUB_EARNINGS_ROW_CAP}-row cap), so it may be truncated"
+        for day, count in read.possibly_truncated
+    ]
+
+
+def _response_size_gaps(endpoint: str, rows: int) -> list[str]:
+    """One whole-window response that may have been cut at a Finnhub row cap.
+
+    The cap was measured on ``/calendar/earnings``; ``/calendar/ipo`` has
+    never come near it (tens of rows), and is held to the same bound because
+    a vendor cap is silent and can appear on any list endpoint.
+    """
+    if not possibly_truncated(rows):
+        return []
+    return [
+        f"the {endpoint} response carried {rows} rows, at or above "
+        f"{EARNINGS_POSSIBLY_TRUNCATED_AT} (90% of Finnhub's measured "
+        f"{FINNHUB_EARNINGS_ROW_CAP}-row cap), so it may be truncated"
+    ]
+
+
+def _sharp_drop_gaps(fetched: int, stored: int) -> list[str]:
+    """The earnings drop guard (:data:`EARNINGS_SHARP_DROP_KEEPS_BELOW`)."""
+    if stored < EARNINGS_SHARP_DROP_MIN_STORED:
+        return []
+    if Decimal(fetched) >= Decimal(stored) * EARNINGS_SHARP_DROP_KEEPS_BELOW:
+        return []
+    return [
+        f"the fetch listed {fetched} rows for a window holding {stored} stored rows, "
+        f"under {EARNINGS_SHARP_DROP_KEEPS_BELOW} of them; a drop that sharp is "
+        "taken as a short answer, not as cancellations"
+    ]
+
+
 def _write_calendar_blocking(
     session_factory: Callable[[], Session],
     events: Sequence[CalendarEventInput],
@@ -2255,14 +2338,21 @@ def _write_calendar_blocking(
     kinds: frozenset[CalendarKind],
     window_start: date,
     window_end: date,
+    tickers: frozenset[str] | None,
     now: datetime,
     gaps: Sequence[str],
+    drop_guard: bool = False,
 ) -> None:
     """Write one fetch's rows and commit. **Blocks**; called through ``asyncio.to_thread``.
 
     No ``gaps``: the fetch was complete, so :func:`replace_window` makes it
     the window's whole truth. Any gap: :func:`upsert_events` only, and the
     gaps are logged -- the stored rows the fetch did not list stay live.
+    ``tickers`` is what the fetch was asked about, passed straight to
+    :func:`replace_window`: the built watch universe for earnings and
+    dividends, so a ticker outside it is never withdrawn; ``None`` for the
+    market-wide feeds. ``drop_guard`` adds one more gap, read in the same session as the write:
+    the fetch is much smaller than what is stored (:func:`_sharp_drop_gaps`).
     """
     window = {
         "job": job,
@@ -2270,9 +2360,20 @@ def _write_calendar_blocking(
         "kinds": sorted(kind.value for kind in kinds),
         "window_start": window_start.isoformat(),
         "window_end": window_end.isoformat(),
+        "tickers": None if tickers is None else len(tickers),
         "at": now.isoformat(),
     }
     with session_factory() as session:
+        if drop_guard and not gaps:
+            stored = count_live_in_window(
+                session,
+                source=source,
+                kinds=kinds,
+                window_start=window_start,
+                window_end=window_end,
+                tickers=tickers,
+            )
+            gaps = _sharp_drop_gaps(len(events), stored)
         if gaps:
             counts = upsert_events(session, events, now=now)
             session.commit()
@@ -2300,6 +2401,7 @@ def _write_calendar_blocking(
             kinds=kinds,
             window_start=window_start,
             window_end=window_end,
+            tickers=tickers,
             now=now,
         )
         session.commit()
@@ -2354,7 +2456,17 @@ async def _read_finnhub_calendar(
 async def _calendar_earnings(
     services: ContextServices, universe: UniverseSource, clock: UtcClock
 ) -> JobSkipped | None:
-    """Earnings for the watch universe, today -> ``EARNINGS_WINDOW``: one ``/calendar/earnings`` request."""
+    """Earnings for the watch universe, today -> ``EARNINGS_WINDOW``: one ``/calendar/earnings`` request **per day**.
+
+    Never one request for the window: Finnhub silently caps a response at
+    ``FINNHUB_EARNINGS_ROW_CAP`` rows and drops the *nearest* dates (measured
+    in peak season, 2026-10-22), so a single window request would withdraw
+    every near-term report. 22 requests a day on the 60/min ``finnhub.io``
+    bucket, paced by the provider's limiter. Any request raising fails the
+    whole run and writes nothing. A day still answering near the cap, or a
+    window that shrank sharply against the store (``drop_guard``), upserts
+    and withdraws nothing.
+    """
     source = services.finnhub_calendar
     if source is None:
         return JobSkipped(_NO_FINNHUB_CALENDAR)
@@ -2363,8 +2475,14 @@ async def _calendar_earnings(
     end = start + EARNINGS_WINDOW
     held_gaps = _held_positions_gaps(services.position_underlyings, now)
     built = await universe()
-    rows = await _read_finnhub_calendar("calendar_earnings", source.earnings_calendar, start, end)
-    batch = await asyncio.to_thread(earnings_events, rows, built.universe.symbols)
+
+    async def read_day(day_start: date, day_end: date) -> Sequence[object]:
+        return await _read_finnhub_calendar(
+            "calendar_earnings", source.earnings_calendar, day_start, day_end
+        )
+
+    read = await read_earnings_by_day(read_day, start=start, end=end)
+    batch = await asyncio.to_thread(earnings_events, read.rows, built.universe.symbols)
     await asyncio.to_thread(
         _write_calendar_blocking,
         services.session_factory,
@@ -2374,8 +2492,15 @@ async def _calendar_earnings(
         kinds=frozenset({CalendarKind.EARNINGS}),
         window_start=start,
         window_end=end,
+        tickers=frozenset(built.universe.symbols),
         now=now,
-        gaps=[*held_gaps, *_universe_gaps(built), *_row_gaps(len(batch.skipped))],
+        gaps=[
+            *held_gaps,
+            *_universe_gaps(built),
+            *_row_gaps(len(batch.skipped)),
+            *_truncation_gaps(read),
+        ],
+        drop_guard=True,
     )
     return None
 
@@ -2399,8 +2524,9 @@ async def _calendar_ipos(services: ContextServices, clock: UtcClock) -> JobSkipp
         kinds=frozenset({CalendarKind.IPO}),
         window_start=start,
         window_end=end,
+        tickers=None,
         now=now,
-        gaps=_row_gaps(len(batch.skipped)),
+        gaps=[*_row_gaps(len(batch.skipped)), *_response_size_gaps("/calendar/ipo", len(rows))],
     )
     return None
 
@@ -2432,6 +2558,7 @@ async def _calendar_dividends(
         kinds=frozenset({CalendarKind.DIVIDEND}),
         window_start=fetched.first_ex_date,
         window_end=fetched.last_ex_date,
+        tickers=frozenset(built.universe.symbols),
         now=now,
         gaps=[*held_gaps, *_universe_gaps(built), *_row_gaps(len(fetched.skipped))],
     )
@@ -2464,6 +2591,7 @@ async def _calendar_releases(services: ContextServices, clock: UtcClock) -> JobS
         kinds=frozenset({CalendarKind.ECONOMIC}),
         window_start=outcome.start,
         window_end=outcome.end,
+        tickers=None,
         now=now,
         gaps=_row_gaps(len(outcome.skipped)),
     )
