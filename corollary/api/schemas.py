@@ -162,6 +162,19 @@ __all__ = [
     "WsSubscribeRequest",
     "WsTradeUpdate",
     "WsTradeUpdateFrame",
+    "AuditRunStatus",
+    "AuditRunSummary",
+    "AuditRunTrigger",
+    "SentimentAccuracyBasis",
+    "SentimentAuditStarted",
+    "SentimentAuditStatus",
+    "SentimentCounts",
+    "SentimentEligibility",
+    "SentimentEligibilityKind",
+    "SentimentSourceAudit",
+    "SentimentWindow",
+    "SentimentWindowAccuracy",
+    "SentimentWindowProgress",
 ]
 
 logger = logging.getLogger(__name__)
@@ -315,8 +328,12 @@ RiskLimitUnit: TypeAlias = Literal["%", "count"]
 #: ``db.models.AUDIT_CATEGORIES`` value for value -- every category
 #: ``ck_audit_log_category`` admits, or the first row of a new one fails
 #: validation and 500s every audit page holding it. ``watchlist`` is Phase 3
-#: decision 21's (migration 0008). ``test_settings_routes.py`` pins the two.
-AuditCategory: TypeAlias = Literal["risk", "feed", "notification", "watchlist"]
+#: decision 21's (migration 0008); ``sentiment`` is decision 13's, a source's
+#: audit status changing (migration 0014). ``test_settings_routes.py`` pins
+#: the two.
+AuditCategory: TypeAlias = Literal[
+    "risk", "feed", "notification", "watchlist", "sentiment"
+]
 
 #: Exactly the events ``db.seed.NOTIFICATION_ROUTE_DEFAULTS`` routes. An event
 #: seeded there but missing here is dropped from the Settings matrix with a
@@ -343,8 +360,17 @@ NotificationEvent: TypeAlias = Literal[
     # An adopted NPORT-P/A for a loaded SPDR quarter (owner decision
     # 2026-09-30, migration 0011), emitted by the ``spdr_holdings`` job.
     "spdr_seed_amended",
+    # The self-audit's transitions (Phase 3 decisions 13 and 14, migration
+    # 0014): a source demoted (``warning`` -- the audit working as designed,
+    # not a failure) or re-promoted (``info``). No emitter until step 6's
+    # transition unit lands.
+    "sentiment_demoted",
+    "sentiment_repromoted",
+    # A manual sentiment audit run started (step 6, migration 0014): ``info``,
+    # emitted by ``POST /api/settings/sentiment/audit`` (decision 20).
+    "sentiment_audit_requested",
     # A manual calendar entry added, edited or removed (Phase 3 decisions 9
-    # and 20, migration 0013), emitted by the calendar's manual routes.
+    # and 20, migration 0015), emitted by the calendar's manual routes.
     "calendar_changed",
 ]
 
@@ -1565,10 +1591,10 @@ NewsSort: TypeAlias = Literal["newest", "oldest"]
 NewsDirection: TypeAlias = Literal["bullish", "bearish", "neutral"]
 #: ``sentiment_label.source`` (decision 13's demotion unit).
 NewsLabelSource: TypeAlias = Literal["rules", "massive"]
-#: A labelling source's audit status (Q22). **Until step 6 exists every source
-#: is ``unaudited``**, never "not demoted": no audit has run, so none has been
-#: passed. Step 6 replaces it with ``sentiment_source_status``; the client's
-#: *display only* suffix keys on ``demoted``.
+#: A labelling source's audit status: its ``sentiment_source_status`` row
+#: (decision 13), which only the audit run writes. ``unaudited`` until a run
+#: has moved it -- never "not demoted": a source no run has judged has not
+#: been passed. The client's *display only* suffix keys on ``demoted``.
 NewsSourceStatus: TypeAlias = Literal["unaudited", "active", "demoted"]
 #: The three discovery feeds (decision 21) whose freshness ``/movers`` reports.
 DiscoveryFeedName: TypeAlias = Literal["alpaca_news", "finnhub_market", "massive_news"]
@@ -1589,7 +1615,7 @@ class NewsLabel(ApiModel):
     sentiment: NewsDirection
     tier: NewsSentimentTier
     source: NewsLabelSource
-    #: Q22: ``unaudited`` until step 6's audit runs.
+    #: The source's ``sentiment_source_status`` row, read once per request.
     source_status: NewsSourceStatus
     #: The pattern that fired, for a rules label; ``None`` for Massive.
     rule_id: str | None
@@ -2507,3 +2533,149 @@ vendor**, at the lowest priority there is. The name is what the transport
 dispatches on, and conflating them would let scrolling the Markets page
 change what a position row receives.
 """
+
+
+# --------------------------------------------------------------------------
+# GET /api/settings/sentiment, POST /api/settings/sentiment/audit
+# --------------------------------------------------------------------------
+
+#: ``sentiment_accuracy.window`` (``db.models.SENTIMENT_WINDOWS``).
+SentimentWindow: TypeAlias = Literal["1h", "1d"]
+#: ``sentiment_accuracy.basis`` (``db.models.ACCURACY_BASES``):
+#: ``trailing_28d`` is what demotion is judged on, ``since_demotion`` what
+#: re-promotion is judged on (decision 13).
+SentimentAccuracyBasis: TypeAlias = Literal["trailing_28d", "since_demotion"]
+#: ``audit_run.trigger`` (``db.models.AUDIT_RUN_TRIGGERS``).
+AuditRunTrigger: TypeAlias = Literal["scheduled", "manual"]
+#: ``audit_run.status`` (``db.models.AUDIT_RUN_STATUSES``).
+AuditRunStatus: TypeAlias = Literal["running", "succeeded", "failed"]
+#: Which transition a source's sample counts toward: an ``unaudited`` or
+#: ``active`` source can be demoted (or first promoted), a ``demoted`` one
+#: re-promoted. Decision 13.
+SentimentEligibilityKind: TypeAlias = Literal["demote", "repromote"]
+
+
+class SentimentCounts(ApiModel):
+    """One ``sentiment_accuracy`` row's three counts. **No percentage**: the
+    client derives one, so no rounded figure travels beside its numbers.
+
+    ``graded`` is graded **directional** labels -- the accuracy denominator
+    and what the 30 / 100 floors count; ``correct`` is at most ``graded``;
+    ``neutral`` is graded neutral labels, in neither (Q5).
+    """
+
+    graded: int
+    correct: int
+    neutral: int
+
+
+class SentimentWindowAccuracy(ApiModel):
+    """One window on one basis, from one run: the combined figure and its split.
+
+    ``combined`` is ``scope = all``, the only figure a transition reads.
+    ``watch`` and ``discovery`` are decision 12's display-only split, which
+    sum to it.
+    """
+
+    window: SentimentWindow
+    basis: SentimentAccuracyBasis
+    combined: SentimentCounts
+    watch: SentimentCounts
+    discovery: SentimentCounts
+
+
+class SentimentWindowProgress(ApiModel):
+    """One window's progress toward its floor: ``needed`` more graded labels,
+    ``0`` once ``graded`` has reached it."""
+
+    window: SentimentWindow
+    graded: int
+    needed: int
+
+
+class SentimentEligibility(ApiModel):
+    """Whether a source may transition at the next run, as of the last one.
+
+    ``kind`` follows the status: ``demote`` for ``unaudited`` / ``active``
+    (floor 30, ``trailing_28d``), ``repromote`` for ``demoted`` (floor 100,
+    ``since_demotion``). ``eligible`` is every window at or over ``floor``.
+    ``asOfRunId`` is the run the counts come from; ``null`` when no run has
+    counted anything on this basis yet -- no run has succeeded, or the latest
+    one is the run that demoted the source, so nothing is graded *since*.
+    Every window then reads ``graded: 0``, which is a count, not a guess.
+    """
+
+    kind: SentimentEligibilityKind
+    basis: SentimentAccuracyBasis
+    floor: int
+    eligible: bool
+    windows: list[SentimentWindowProgress]
+    as_of_run_id: int | None
+
+
+class SentimentSourceAudit(ApiModel):
+    """One labelling source in the self-audit (decisions 12 and 13).
+
+    ``changedAt`` is ``null`` exactly while ``unaudited``: the source has
+    **never been audited**, and ``neverAudited`` says so in words, rather
+    than a date anyone invented. ``statusMissing`` is ``true`` when the
+    source has **no** ``sentiment_source_status`` row at all -- a damaged
+    database, since both are seeded. ``status``, ``changedAt`` and
+    ``neverAudited`` are then a display fallback (``unaudited``), not a
+    record, and claim nothing. ``reason`` is the latest transition's, as
+    the run wrote it. ``accuracy`` is the latest **succeeded** run's rows for
+    this source, every basis that run computed, ordered by window then basis;
+    empty when no run has succeeded.
+    """
+
+    source: NewsLabelSource
+    status: NewsSourceStatus
+    changed_at: datetime | None
+    never_audited: bool
+    status_missing: bool
+    reason: str | None
+    accuracy: list[SentimentWindowAccuracy]
+    eligibility: SentimentEligibility
+
+
+class AuditRunSummary(ApiModel):
+    """One ``audit_run`` row. ``finishedAt`` is ``null`` exactly while ``running``."""
+
+    id: int
+    trigger: AuditRunTrigger
+    status: AuditRunStatus
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class SentimentAuditStatus(ApiModel):
+    """``GET /api/settings/sentiment``.
+
+    ``lastRun`` is the newest run in any state; ``accuracyRun`` the newest
+    **succeeded** one, which every source's figures come from. ``nextRunAt``
+    is the scheduled job's next slot, ``null`` with no scheduler running.
+    ``manualAvailableAt`` is when the once-an-hour manual limit next admits a
+    run, ``null`` when it admits one now. Display only: the ``POST`` enforces
+    the limit itself (rule 4).
+    """
+
+    sources: list[SentimentSourceAudit]
+    last_run: AuditRunSummary | None
+    accuracy_run: AuditRunSummary | None
+    next_run_at: datetime | None
+    manual_available_at: datetime | None
+
+
+class SentimentAuditStarted(ApiModel):
+    """``POST /api/settings/sentiment/audit``'s 202.
+
+    The run has committed its ``running`` ``audit_run`` row -- ``runId`` is
+    that row's id -- and is grading on the engine's event loop; it takes
+    minutes, so its outcome is read from ``GET /api/settings/sentiment``'s
+    ``lastRun``, never waited for here.
+    """
+
+    status: Literal["started"] = "started"
+    trigger: Literal["manual"] = "manual"
+    run_id: int
+    requested_at: datetime

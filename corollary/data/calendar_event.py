@@ -90,7 +90,7 @@ __all__ = [
 #: Display zone, and the zone ``date`` is stated in.
 ET_ZONE: Final = ZoneInfo("America/New_York")
 
-#: Widths the ``calendar_event`` columns carry. Repeated in migration 0013.
+#: Widths the ``calendar_event`` columns carry. Repeated in migration 0015.
 TITLE_MAX: Final = 256
 TICKER_MAX: Final = 16
 UNIT_MAX: Final = 32
@@ -145,7 +145,7 @@ class IpoStatus(StrEnum):
     WITHDRAWN = "withdrawn"
 
 
-#: The fields only an ``ipo`` row may carry (Q15). Repeated in migration 0013.
+#: The fields only an ``ipo`` row may carry (Q15). Repeated in migration 0015.
 IPO_FIELDS: Final = ("exchange", "shares", "price_low", "price_high", "ipo_status")
 
 

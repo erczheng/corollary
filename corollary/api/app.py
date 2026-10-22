@@ -67,7 +67,7 @@ import functools
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Final, cast, get_args
@@ -100,6 +100,7 @@ from corollary.api.routes import (
     news_router,
     notifications_router,
     positions_router,
+    sentiment_router,
     settings_router,
     ws_router,
 )
@@ -257,9 +258,15 @@ def _scrub(request: Request, text: str) -> str:
     return vendor_detail(text, secrets=secrets)
 
 
-def _envelope(status_code: int, code: str, message: str) -> JSONResponse:
+def _envelope(
+    status_code: int, code: str, message: str, headers: Mapping[str, str] | None = None
+) -> JSONResponse:
     body = ApiErrorResponse(error=ApiErrorBody(code=code, message=message))
-    return JSONResponse(status_code=status_code, content=body.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(mode="json"),
+        headers=dict(headers) if headers else None,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +299,7 @@ def _vendor_handler(
 
 def _api_error_handler(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, ApiError)
-    return _envelope(exc.status_code, exc.code, _scrub(request, exc.message))
+    return _envelope(exc.status_code, exc.code, _scrub(request, exc.message), exc.headers)
 
 
 def _database_handler(request: Request, exc: Exception) -> Response:
@@ -1143,10 +1150,8 @@ def create_app(
         refresher: PaperPositionsRefresher | None = None
         try:
             if scheduler is not no_scheduler:
-                context_scheduler = scheduler(
-                    _context_services(app, context_sessions, context_notices),
-                    app.state.secret_values,
-                )
+                services = _context_services(app, context_sessions, context_notices)
+                context_scheduler = scheduler(services, app.state.secret_values)
             if context_scheduler is not None:
                 refresher = _position_refresher(app)
                 refresher.start()
@@ -1154,6 +1159,11 @@ def create_app(
                     deliver_context_notices(context_notices, runtime)
                 )
                 context_scheduler.start()
+                # The manual sentiment audit (``routes/sentiment.py``) runs on
+                # these same services, so its notices reach the drain above.
+                # Published only once the scheduler is running: without the
+                # drain, a run's transition notices would wait for shutdown.
+                app.state.context_services = services
         except Exception as exc:
             logger.error(
                 "the context scheduler did not start; the app keeps serving "
@@ -1168,6 +1178,7 @@ def create_app(
                 },
             )
             context_scheduler = None
+            app.state.context_services = None
         app.state.scheduler = context_scheduler
         app.state.position_refresher = refresher
         try:
@@ -1181,7 +1192,19 @@ def create_app(
             if refresher is not None:
                 await refresher.aclose()
             if context_scheduler is not None:
+                # No new manual run from here on: the route refuses without
+                # context services, so none can start while the jobs stop.
+                app.state.context_services = None
                 await context_scheduler.aclose()
+                # A manual audit run in flight is stopped like a job: the
+                # runner closes its row ``failed`` on the cancel; only a row
+                # whose commit it never saw is left ``running``, for the next
+                # run to close as abandoned past ``ABANDONED_RUN_AFTER``.
+                manual: asyncio.Task[object] | None = app.state.sentiment_audit_task
+                if manual is not None and not manual.done():
+                    manual.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await manual
                 # A job task cancelled mid-``to_thread`` leaves its worker
                 # thread running; wait (bounded) for its session to close, so
                 # no commit lands after this lifespan has returned. Never
@@ -1237,6 +1260,11 @@ def create_app(
     # when the app was built with no scheduler or it could not start. A later
     # step's routes read ``status()`` off it for *stale since HH:MM ET*.
     app.state.scheduler = None
+    # The ContextServices the lifespan builds, published once its scheduler
+    # runs -- what ``POST /api/settings/sentiment/audit`` starts a run on --
+    # and that run's task. ``None`` until then, and with no scheduler.
+    app.state.context_services = None
+    app.state.sentiment_audit_task = None
     # Replaced in the lifespan. Present so that a route reading it outside a
     # running app gets ``None`` rather than an AttributeError from Starlette's
     # State, which is a confusing way to learn the app was never started.
@@ -1298,6 +1326,7 @@ def create_app(
     app.include_router(notifications_router)
     app.include_router(positions_router)
     app.include_router(settings_router)
+    app.include_router(sentiment_router)
     app.include_router(ws_router)
 
     return app

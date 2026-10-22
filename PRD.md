@@ -454,6 +454,10 @@ No article is ever manually reviewed. The system grades itself and reports when 
 | Price alert on a recommended trade | ✓ | ✓ |
 | New recommendations ready | ✓ | — |
 | Strategy promotion eligible | ✓ | — |
+| Sentiment source demoted | ✓ | ✓ |
+| Sentiment source re-promoted | ✓ | ✓ |
+
+The two sentiment rows are the self-audit's transitions (Phase 3 decisions 13 and 14): the weekly audit run withdrawing a labelling source from what the scanner may read, or restoring it. A demotion is a **warning**, not critical — the audit working as designed is a degradation report, the same reasoning that makes a stop loss `caution` — and a re-promotion is `info`. Both route to both channels, so a withdrawal and its restoration arrive the same way.
 
 **The bell is a panel anchored to the header icon, not a page.** A notification you have to navigate to is one you miss while watching a position, and there is no `/notifications` route among the app's screens. It carries an unread badge scoped to the account on screen, and opening it marks nothing read — clearing is an explicit action, because glancing at a badge is not reading the feed. Each notification belongs to the book it happened in; an engine fault belongs to neither and appears in both.
 

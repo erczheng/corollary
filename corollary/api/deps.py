@@ -133,11 +133,20 @@ class ApiError(Exception):
     human and is scrubbed before it is rendered.
     """
 
-    def __init__(self, *, status_code: int, code: str, message: str) -> None:
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
         super().__init__(f"{code}: {message}")
         self.status_code = status_code
         self.code = code
         self.message = message
+        #: Response headers the envelope carries -- ``Retry-After`` on a 429.
+        self.headers: Mapping[str, str] = dict(headers or {})
 
 
 # --------------------------------------------------------------------------

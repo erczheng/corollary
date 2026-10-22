@@ -225,3 +225,42 @@ def _halt_state(engine: Engine) -> tuple[bool, str | None, datetime | None]:
         state = session.get(EngineState, ENGINE_STATE_ID)
         assert state is not None
         return (state.halted, state.halted_reason, state.halted_at)
+
+
+@pytest.mark.asyncio
+async def test_the_manual_audit_reaches_the_services_the_scheduler_was_built_on(
+    registry: ServiceRegistry, db_engine: Engine
+) -> None:
+    """``POST /api/settings/sentiment/audit`` runs on the lifespan's ContextServices.
+
+    The *same* object the scheduler was handed -- so a manual run's transition
+    notices land in the outbox the lifespan drains -- published only while the
+    scheduler runs, and withdrawn at shutdown, when a manual run still in
+    flight is cancelled like a job.
+    """
+    handed: list[ContextServices] = []
+    clock = FakeClock(WED_1500_ET, stop_at=WED_1500_ET + timedelta(minutes=1))
+
+    def factory(services: ContextServices, secrets: Callable[[], Sequence[str]]) -> Scheduler:
+        handed.append(services)
+        return build_context_scheduler(services, secrets, clock=clock, sleep=clock.sleep)
+
+    app = create_app(registry=registry, db_engine=db_engine, scheduler=factory)
+    assert app.state.context_services is None
+    assert app.state.sentiment_audit_task is None
+    async with app.router.lifespan_context(app):
+        (services,) = handed
+        assert app.state.context_services is services
+        manual = asyncio.create_task(asyncio.sleep(3600))
+        app.state.sentiment_audit_task = manual
+    assert app.state.context_services is None
+    assert manual.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_no_scheduler_means_no_services_for_a_manual_audit(
+    registry: ServiceRegistry, db_engine: Engine
+) -> None:
+    app = create_app(registry=registry, db_engine=db_engine)
+    async with app.router.lifespan_context(app):
+        assert app.state.context_services is None

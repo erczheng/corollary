@@ -28,6 +28,7 @@ from corollary.api.routes.markets import router as markets_router
 from corollary.api.routes.news import router as news_router
 from corollary.api.routes.notifications import router as notifications_router
 from corollary.api.routes.positions import router as positions_router
+from corollary.api.routes.sentiment import router as sentiment_router
 from corollary.api.routes.settings import router as settings_router
 from corollary.api.routes.ws import router as ws_router
 
@@ -40,6 +41,7 @@ __all__ = [
     "news_router",
     "notifications_router",
     "positions_router",
+    "sentiment_router",
     "settings_router",
     "ws_router",
 ]

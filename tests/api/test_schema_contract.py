@@ -42,6 +42,14 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     # Phase 3 step 5: the feed's labels and decision 21's movers panel.
     "NewsLabel": schemas.NewsLabel,
     "NewsMover": schemas.NewsMover,
+    "AuditRunSummary": schemas.AuditRunSummary,
+    "SentimentAuditStarted": schemas.SentimentAuditStarted,
+    "SentimentAuditStatus": schemas.SentimentAuditStatus,
+    "SentimentCounts": schemas.SentimentCounts,
+    "SentimentEligibility": schemas.SentimentEligibility,
+    "SentimentSourceAudit": schemas.SentimentSourceAudit,
+    "SentimentWindowAccuracy": schemas.SentimentWindowAccuracy,
+    "SentimentWindowProgress": schemas.SentimentWindowProgress,
     "NewsMoverArticle": schemas.NewsMoverArticle,
     "NewsMoverEvidence": schemas.NewsMoverEvidence,
     "NewsMoverReason": schemas.NewsMoverReason,
@@ -105,6 +113,11 @@ MIRRORED_UNIONS: Mapping[str, object] = {
     "DiscoveryFeedName": schemas.DiscoveryFeedName,
     "MoverRankGroup": schemas.MoverRankGroup,
     "MoverDirection": schemas.MoverDirection,
+    "SentimentWindow": schemas.SentimentWindow,
+    "SentimentAccuracyBasis": schemas.SentimentAccuracyBasis,
+    "AuditRunTrigger": schemas.AuditRunTrigger,
+    "AuditRunStatus": schemas.AuditRunStatus,
+    "SentimentEligibilityKind": schemas.SentimentEligibilityKind,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -214,3 +227,32 @@ def test_volume24h_keeps_its_lowercase_h() -> None:
 
     assert to_camel("volume_24h") == "volume24H"
     assert "volume24h" in wire_fields(schemas.AccountSnapshot)
+
+
+SETTINGS_TS = TYPES_TS.with_name("settings.ts")
+
+
+def _ts_const(name: str) -> int:
+    match = re.search(
+        rf"^export const {name} = (\d+)\s*$",
+        SETTINGS_TS.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    assert match is not None, f"{name} not found in {SETTINGS_TS}"
+    return int(match.group(1))
+
+
+def test_sentiment_thresholds_match_the_engine() -> None:
+    """The Settings page states decision 13's thresholds in words; they are the engine's.
+
+    ``settings.ts`` restates them for display (the API serves the per-source
+    sample floor but not the percentages), so a change on either side that is
+    not made on the other would leave the page quoting a rule the audit no
+    longer applies.
+    """
+    from corollary.data.news import audit
+
+    assert _ts_const("SENTIMENT_FLOOR") == audit.DEMOTE_BELOW_PCT
+    assert _ts_const("SENTIMENT_REPROMOTE") == audit.REPROMOTE_AT_PCT
+    assert _ts_const("SENTIMENT_DEMOTE_SAMPLE") == audit.DEMOTION_FLOOR
+    assert _ts_const("SENTIMENT_REPROMOTE_SAMPLE") == audit.REPROMOTION_FLOOR

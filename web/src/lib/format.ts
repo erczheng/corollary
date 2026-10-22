@@ -38,6 +38,20 @@ export function formatPct(value: number, opts: { signed?: boolean } = {}): strin
   return `${sign}${abs.toFixed(2)}%`
 }
 
+/** A percentage held as an **integer count of tenths** — `519` is "51.9%".
+ *
+ * For a figure whose rounding direction matters: the sentiment audit's
+ * accuracy is truncated to tenths by `accuracyTenths` (in integers, so no
+ * float moves it), and this only places the decimal point. `formatPct` would
+ * round, and rounding 51.96% up to "52.0%" prints a passing figure beside a
+ * source the engine just demoted for being below 52. Unsigned: an accuracy
+ * has no direction. */
+export function formatTenthsPct(tenths: number): string {
+  const whole = Math.trunc(tenths / 10)
+  const tenth = Math.abs(tenths % 10)
+  return `${whole}.${tenth}%`
+}
+
 /** A signed plain number — no currency, no percent.
  *
  * For quantities measured in their own units, where a `$` would be wrong and

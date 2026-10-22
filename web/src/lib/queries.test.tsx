@@ -1,16 +1,20 @@
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { ApiError, isAccountUnavailable } from './api'
 import { shouldRetry } from './queryClient'
 import {
+  SENTIMENT_AUDIT_RUNNING_POLL_MS,
   queryKeys,
   useChain,
   useHaltEngine,
   usePositions,
   useRiskLimits,
+  useSentimentAudit,
 } from './queries'
+import { SENTIMENT_AUDIT_STATES } from './mockData'
+import type { SentimentAuditStatus } from './types'
 import { useUIStore } from './store'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -251,5 +255,45 @@ describe('a ceiling nobody configured', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true))
 
     expect(result.current.data?.[0].value).toBeNull()
+  })
+})
+
+/** The readout polls only while a run is open — a run takes minutes and, with
+ * none open, nothing changes between Saturdays. */
+describe('the sentiment audit readout', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function readsOverOnePollInterval(state: SentimentAuditStatus) {
+    vi.useFakeTimers()
+    const fetchMock = stubFetchByUrl(() => jsonResponse(200, state))
+    const { Wrapper } = wrapper()
+    const { result } = renderHook(() => useSentimentAudit(), { wrapper: Wrapper })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(result.current.isSuccess).toBe(true)
+    const first = fetchMock.mock.calls.length
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SENTIMENT_AUDIT_RUNNING_POLL_MS + 50)
+    })
+    const urls = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(urls.every((u) => u.includes('/settings/sentiment'))).toBe(true)
+    return { first, after: fetchMock.mock.calls.length }
+  }
+
+  it('re-reads after 10s while a run is open', async () => {
+    expect(SENTIMENT_AUDIT_RUNNING_POLL_MS).toBe(10_000)
+    const { first, after } = await readsOverOnePollInterval(SENTIMENT_AUDIT_STATES.running)
+    expect(first).toBe(1)
+    expect(after).toBe(2)
+  })
+
+  it('does not poll with no run open', async () => {
+    const { first, after } = await readsOverOnePollInterval(SENTIMENT_AUDIT_STATES.populated)
+    expect(first).toBe(1)
+    expect(after).toBe(1)
   })
 })

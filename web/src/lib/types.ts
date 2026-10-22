@@ -472,7 +472,9 @@ export interface NewsItem {
 /** `sentiment_label.source` — the two Phase 3 labelling sources. */
 export type NewsLabelSource = 'rules' | 'massive'
 
-/** A labelling source's audit status (Q22). `unaudited` until step 6. */
+/** A labelling source's audit status: its `sentiment_source_status` row
+ * (decision 13), which only the audit run writes. `unaudited` until a run
+ * moves it. */
 export type NewsSourceStatus = 'unaudited' | 'active' | 'demoted'
 
 /** Why a feed item is filed under its ticker. */
@@ -1255,9 +1257,14 @@ export interface RiskLimit {
  * `watchlist` (Phase 3 decision 21) is a manual watch added or removed via
  * `POST`/`DELETE /api/news/watch/{ticker}`. It belongs here rather than
  * beside calendar notes because a watch changes what is polled and graded,
- * and grading governs what the scanner may read. Mirrors `AuditCategory` in
- * `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in `db/models.py`. */
-export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist'
+ * and grading governs what the scanner may read.
+ *
+ * `sentiment` (Phase 3 decision 13) is a source's audit status changing —
+ * `field` the source, the two values its old and new status. Only the weekly
+ * audit run writes it; there is no human route to change a status. Mirrors
+ * `AuditCategory` in `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in
+ * `db/models.py`. */
+export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist' | 'sentiment'
 
 export interface AuditLogEntry {
   id: string
@@ -1272,9 +1279,13 @@ export interface AuditLogEntry {
   newValue: string
 }
 
-/** The routable events: PRD.md §10's eight, six operator events, and one engine record
+/** The routable events: PRD.md §10's eight, six operator events, one engine record
  * (`spdr_seed_amended`, owner decision 2026-09-30: an NPORT-P/A adopted into the
- * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action).
+ * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action),
+ * and the self-audit's two transitions (`sentiment_demoted`,
+ * `sentiment_repromoted`, Phase 3 decisions 13 and 14 — emitted by the weekly
+ * audit run when a source's status changes). `sentiment_audit_requested` is
+ * the seventh operator event: an audit run started by hand from Settings.
  *
  * The owner's call: "any action i do should be put into the discord". So a
  * human halt or resume, and every change to risk limits, data feeds or the
@@ -1306,6 +1317,9 @@ export type NotificationEvent =
   | 'notification_routes_changed'
   | 'watchlist_changed'
   | 'spdr_seed_amended'
+  | 'sentiment_demoted'
+  | 'sentiment_repromoted'
+  | 'sentiment_audit_requested'
   | 'calendar_changed'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
@@ -1324,6 +1338,9 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   notification_routes_changed: 'Notification routing changed',
   watchlist_changed: 'News watchlist changed',
   spdr_seed_amended: 'SPDR seed amended',
+  sentiment_demoted: 'Sentiment source demoted',
+  sentiment_repromoted: 'Sentiment source re-promoted',
+  sentiment_audit_requested: 'Sentiment audit started by operator',
   calendar_changed: 'Calendar entry changed',
 }
 
@@ -1444,13 +1461,6 @@ export interface DataFeed {
   label: string
   value: string
   help: string
-}
-
-export interface SentimentAccuracy {
-  source: string
-  tier: string
-  accuracy1h: number
-  accuracy1d: number
 }
 
 /** Presence of one credential, and nothing else about it.
@@ -1724,3 +1734,102 @@ export interface WsMarketsVisibleMessage {
 }
 
 export type WsClientMessage = WsSubscribeMessage | WsMarketsVisibleMessage
+
+// ---------------------------------------------------------------------------
+// GET /api/settings/sentiment, POST /api/settings/sentiment/audit
+// (Phase 3 step 6; mirrored from `corollary/api/schemas.py`)
+// ---------------------------------------------------------------------------
+
+/** `sentiment_accuracy.window`. */
+export type SentimentWindow = '1h' | '1d'
+
+/** `trailing_28d` is what demotion is judged on, `since_demotion` what
+ * re-promotion is judged on (decision 13). */
+export type SentimentAccuracyBasis = 'trailing_28d' | 'since_demotion'
+
+export type AuditRunTrigger = 'scheduled' | 'manual'
+
+export type AuditRunStatus = 'running' | 'succeeded' | 'failed'
+
+/** `demote` for an unaudited or active source, `repromote` for a demoted one. */
+export type SentimentEligibilityKind = 'demote' | 'repromote'
+
+/** One `sentiment_accuracy` row's counts. **No percentage on the wire** —
+ * derive it here, from `correct / graded`; `neutral` is in neither (Q5). */
+export interface SentimentCounts {
+  graded: number
+  correct: number
+  neutral: number
+}
+
+/** One window on one basis. `combined` is the figure transitions act on;
+ * `watch` and `discovery` are decision 12's display-only split. */
+export interface SentimentWindowAccuracy {
+  window: SentimentWindow
+  basis: SentimentAccuracyBasis
+  combined: SentimentCounts
+  watch: SentimentCounts
+  discovery: SentimentCounts
+}
+
+/** `needed` more graded labels to reach the floor; `0` once reached. */
+export interface SentimentWindowProgress {
+  window: SentimentWindow
+  graded: number
+  needed: number
+}
+
+/** Eligibility as of the last run. `asOfRunId: null` means nothing has been
+ * counted on this basis yet, and every window reads `graded: 0`. */
+export interface SentimentEligibility {
+  kind: SentimentEligibilityKind
+  basis: SentimentAccuracyBasis
+  floor: number
+  eligible: boolean
+  windows: SentimentWindowProgress[]
+  asOfRunId: number | null
+}
+
+/** One source. `changedAt` is `null` exactly while unaudited: say "never
+ * audited" (`neverAudited`), never show a date. `statusMissing` is `true`
+ * when the source has no status row at all (a damaged database): `status`,
+ * `changedAt` and `neverAudited` are then a display fallback, not a record,
+ * so say the status is missing rather than "never audited". */
+export interface SentimentSourceAudit {
+  source: NewsLabelSource
+  status: NewsSourceStatus
+  changedAt: string | null
+  neverAudited: boolean
+  statusMissing: boolean
+  reason: string | null
+  accuracy: SentimentWindowAccuracy[]
+  eligibility: SentimentEligibility
+}
+
+export interface AuditRunSummary {
+  id: number
+  trigger: AuditRunTrigger
+  status: AuditRunStatus
+  startedAt: string
+  /** `null` exactly while `running`. */
+  finishedAt: string | null
+}
+
+/** `GET /api/settings/sentiment`. `manualAvailableAt` is display only — the
+ * server enforces the hourly limit (rule 4). */
+export interface SentimentAuditStatus {
+  sources: SentimentSourceAudit[]
+  lastRun: AuditRunSummary | null
+  accuracyRun: AuditRunSummary | null
+  nextRunAt: string | null
+  manualAvailableAt: string | null
+}
+
+/** `POST /api/settings/sentiment/audit`'s 202: the run committed its
+ * `running` row (`runId`); read its outcome from `lastRun`. */
+export interface SentimentAuditStarted {
+  status: 'started'
+  trigger: 'manual'
+  runId: number
+  requestedAt: string
+}

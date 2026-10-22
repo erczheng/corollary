@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { FixtureMarker } from '../components/FixtureMarker'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { RequestFailed } from '../components/RequestFailed'
 import { RiskLimitField } from '../components/RiskLimitField'
+import { SentimentAuditPanel } from '../components/SentimentAuditPanel'
 import { SettingsSection } from '../components/SettingsSection'
 import { TableSkeleton } from '../components/Skeleton'
 import { ThemeToggle } from '../components/ThemeToggle'
@@ -20,7 +20,6 @@ import {
   useUpdateRiskLimits,
 } from '../lib/queries'
 import { useUIStore } from '../lib/store'
-import { SENTIMENT_ACCURACY } from '../lib/mockData'
 import {
   ACCOUNT_LABEL,
   DATA_PLANS,
@@ -33,9 +32,7 @@ import {
   type RiskLimit,
 } from '../lib/types'
 import {
-  SENTIMENT_FLOOR,
   auditFieldLabel,
-  demotedSources,
   feedOptionsFor,
   feedWarning,
   isCriticalEvent,
@@ -111,9 +108,9 @@ function WriteRefused({ error, what }: { error: unknown; what: string }) {
 /** PRD.md §8.7 — replaces the user menu. No authentication: the terminal binds
  * to 127.0.0.1 and there is one user.
  *
- * **Everything on this page except the sentiment table is served by
- * `/api/settings/*`.** Keys, ceilings, routes, feeds, provider health and the
- * audit log are all reads of the engine's own configuration, and every edit is
+ * **Everything on this page is served by `/api/settings/*`.** Keys, ceilings,
+ * routes, feeds, provider health, the sentiment audit and the config log are
+ * all reads of the engine's own configuration, and every edit is
  * a `PUT` the server validates, stores and audit-logs. Rule 4 is unchanged by
  * that: this page edits what is *stored*, and `RiskManager.approve()` decides
  * what is allowed, reading the table rather than anything that arrived from a
@@ -166,7 +163,6 @@ export function Settings() {
       : `the ${ACCOUNT_LABEL[accountMode]} balance is still loading.`
 
   const plan = DATA_PLANS[dataPlan]
-  const demoted = demotedSources(SENTIMENT_ACCURACY)
 
   const apiKeys = keysQuery.data ?? []
   const routes = routesQuery.data ?? []
@@ -574,92 +570,9 @@ export function Settings() {
         <SettingsSection
           id="sentiment-heading"
           title="Sentiment accuracy"
-          description={`Every published label is scored weekly against that ticker's realized forward return. Below ${SENTIMENT_FLOOR}% is coin-flip territory, and a source that falls under it is demoted from a scanner input to display-only.`}
-          aside={
-            /* On the panel and not the page title: everything else here is
-               the engine's own configuration, and a marker over the title
-               would label real risk ceilings as invented — worse than no
-               marker. Unmarked, a table of invented percentages reads as
-               measured now that its neighbours are real.
-
-               Shared with News and Research so the three cannot drift into
-               three different sentences; the choice of `neutral` over
-               `caution` is argued in `FixtureMarker`, and matters most right
-               here, where the genuinely actionable amber thing — the
-               demoted-source banner — is a few pixels below it.
-
-               `detailRestated` because the paragraph directly below this
-               panel's heading already says the same thing in visible prose,
-               to everyone. The marker's screen-reader copy exists for News
-               and Research, which have no such paragraph; here it would only
-               make a screen reader read the claim twice. */
-            <FixtureMarker
-              detailRestated
-              detail="These figures are sample data. Nothing has scored a sentiment label against realized return yet — the news and sentiment pipeline is PRD §9, a later phase."
-            />
-          }
+          description="Every published label is graded weekly against that ticker's realized forward return, at one hour and one day. A source that grades as coin-flip is demoted from a scanner input to display-only. Status, counts and runs are the engine's own record — this page derives nothing about them."
         >
-          <p className="mb-4 max-w-prose text-caption text-caution">
-            The only panel on this page that is not the engine’s own configuration. No label has
-            been scored against a realized return, so nothing here can be demoted by the floor for
-            real — the table shows what the readout will look like when PRD §9's pipeline exists.
-          </p>
-
-          {demoted.length > 0 ? (
-            <p
-              role="status"
-              className="mb-4 rounded border border-caution bg-caution-container p-3 text-caption text-on-caution-container"
-            >
-              {demoted.map((d) => d.source).join(', ')} {demoted.length === 1 ? 'is' : 'are'} below{' '}
-              {SENTIMENT_FLOOR}% and {demoted.length === 1 ? 'has been' : 'have been'} demoted to
-              display-only. Headlines from {demoted.length === 1 ? 'it' : 'them'} still render with a
-              sentiment label; the scanner no longer reads it.
-            </p>
-          ) : null}
-
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b border-outline">
-                <th scope="col" className={`${TH} text-left`}>
-                  Source
-                </th>
-                <th scope="col" className={`${TH} text-left`}>
-                  Tier
-                </th>
-                <th scope="col" className={`${TH} text-right`}>
-                  1 hour
-                </th>
-                <th scope="col" className={`${TH} text-right`}>
-                  1 day
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {SENTIMENT_ACCURACY.map((row) => (
-                <tr key={row.source} className="h-8 border-b border-outline-variant last:border-0">
-                  <td className={`${TD} text-body-sm text-on-surface`}>{row.source}</td>
-                  <td className={`${TD} text-caption text-on-surface-variant`}>{row.tier}</td>
-                  {/* `caution` on a failing figure, never `error` — a signal
-                      that stopped working is not a system fault, and never
-                      `bearish`, which is for losses. */}
-                  <td
-                    className={`${TD} text-right text-data-md ${
-                      row.accuracy1h < SENTIMENT_FLOOR ? 'text-caution' : 'text-on-surface'
-                    }`}
-                  >
-                    {row.accuracy1h}%
-                  </td>
-                  <td
-                    className={`${TD} text-right text-data-md ${
-                      row.accuracy1d < SENTIMENT_FLOOR ? 'text-caution' : 'text-on-surface'
-                    }`}
-                  >
-                    {row.accuracy1d}%
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <SentimentAuditPanel />
         </SettingsSection>
 
         {/* ---------------------------------------------------------------- */}

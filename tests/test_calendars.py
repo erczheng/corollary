@@ -7,13 +7,17 @@ against this module's own arithmetic.
 """
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from corollary.calendars import (
     NYSE_DEFAULT_CLOSE,
+    add_session_minutes,
     nyse_close_at,
+    nyse_next_open,
     nyse_session_close,
+    nyse_session_containing,
     nyse_session_open,
 )
 
@@ -151,3 +155,104 @@ def test_the_open_resolver_answers_the_same_way_twice() -> None:
     assert nyse_session_open(date(2026, 3, 20)) == nyse_session_open(
         date(2026, 3, 20)
     )
+
+
+# --------------------------------------------------------------------- #
+# Session-minute arithmetic (Phase 3 step 6, decision 12's windows)
+# --------------------------------------------------------------------- #
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et(year: int, month: int, day: int, hour: int, minute: int, second: int = 0) -> datetime:
+    """An Eastern wall time as the UTC instant the code stores."""
+    return datetime(year, month, day, hour, minute, second, tzinfo=_ET).astimezone(
+        timezone.utc
+    )
+
+
+def test_session_minutes_inside_one_session_are_clock_minutes() -> None:
+    assert add_session_minutes(_et(2026, 10, 6, 10, 15), 60) == _et(2026, 10, 6, 11, 15)
+
+
+def test_session_minutes_may_end_exactly_on_the_close() -> None:
+    """390 minutes from the open is the close itself, not the next open."""
+    assert add_session_minutes(_et(2026, 10, 6, 9, 30), 390) == _et(2026, 10, 6, 16, 0)
+    assert add_session_minutes(_et(2026, 10, 6, 15, 0), 60) == _et(2026, 10, 6, 16, 0)
+
+
+def test_session_minutes_across_a_close_resume_at_the_next_open() -> None:
+    """Decision 12: a 15:30 label's 1h window ends at 10:00 the next session."""
+    assert add_session_minutes(_et(2026, 10, 6, 15, 30), 60) == _et(2026, 10, 7, 10, 0)
+
+
+def test_session_minutes_across_a_weekend() -> None:
+    """Friday 15:30 plus 60 lands Monday 10:00 (2026-10-12 is a session)."""
+    assert add_session_minutes(_et(2026, 10, 9, 15, 30), 60) == _et(2026, 10, 12, 10, 0)
+
+
+def test_session_minutes_across_a_holiday() -> None:
+    """Labor Day 2026-09-07 is closed: Friday's window resumes on Tuesday."""
+    assert add_session_minutes(_et(2026, 9, 4, 15, 30), 60) == _et(2026, 9, 8, 10, 0)
+
+
+def test_session_minutes_across_thanksgiving_into_a_half_day() -> None:
+    """Thanksgiving is closed; the half-day after it is a session."""
+    assert add_session_minutes(_et(2026, 11, 25, 15, 30), 60) == _et(2026, 11, 27, 10, 0)
+
+
+def test_session_minutes_across_a_half_day_close() -> None:
+    """2026-11-27 closes at 13:00 ET, so 12:30 plus 60 is Monday 10:00.
+
+    A hardcoded 16:00 close would put it at 13:30 the same day, in an empty
+    market.
+    """
+    assert add_session_minutes(_et(2026, 11, 27, 12, 30), 60) == _et(2026, 11, 30, 10, 0)
+
+
+def test_a_full_session_day_from_a_half_day_runs_into_the_next_session() -> None:
+    """The half-day has 210 minutes; the other 180 land on Monday at 12:30."""
+    assert add_session_minutes(_et(2026, 11, 27, 9, 30), 390) == _et(2026, 11, 30, 12, 30)
+
+
+def test_session_minutes_across_the_dst_change() -> None:
+    """DST ends 2026-11-01: Monday's 10:00 ET is 15:00 UTC, not Friday's 14:00."""
+    landed = add_session_minutes(_et(2026, 10, 30, 15, 30), 60)
+    assert landed == datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)
+
+
+def test_session_minutes_from_out_of_session_start_at_the_next_open() -> None:
+    """Pre-market, after the close and on a weekend all count from the next open."""
+    assert add_session_minutes(_et(2026, 10, 6, 8, 0), 60) == _et(2026, 10, 6, 10, 30)
+    assert add_session_minutes(_et(2026, 10, 6, 18, 0), 60) == _et(2026, 10, 7, 10, 30)
+    assert add_session_minutes(_et(2026, 10, 10, 12, 0), 60) == _et(2026, 10, 12, 10, 30)
+    assert add_session_minutes(_et(2026, 10, 6, 16, 0), 0) == _et(2026, 10, 7, 9, 30)
+
+
+def test_session_minutes_refuse_a_naive_instant_and_a_negative_count() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        add_session_minutes(datetime(2026, 10, 6, 15, 0), 60)
+    with pytest.raises(ValueError, match="non-negative"):
+        add_session_minutes(_et(2026, 10, 6, 15, 0), -1)
+
+
+def test_session_minutes_past_the_published_schedule_raise() -> None:
+    """No invented sessions: the calendar cannot answer 2099."""
+    with pytest.raises(ValueError, match="published"):
+        add_session_minutes(datetime(2099, 1, 15, 15, 0, tzinfo=timezone.utc), 60)
+
+
+def test_the_session_containing_an_instant_is_half_open() -> None:
+    """The open belongs to the session; the close does not."""
+    assert nyse_session_containing(_et(2026, 10, 6, 9, 30)) == date(2026, 10, 6)
+    assert nyse_session_containing(_et(2026, 10, 6, 15, 59, 59)) == date(2026, 10, 6)
+    assert nyse_session_containing(_et(2026, 10, 6, 16, 0)) is None
+    assert nyse_session_containing(_et(2026, 10, 6, 9, 29, 59)) is None
+    assert nyse_session_containing(_et(2026, 11, 27, 13, 0)) is None
+    assert nyse_session_containing(_et(2026, 11, 26, 12, 0)) is None
+
+
+def test_the_next_open_is_at_or_after_the_instant() -> None:
+    assert nyse_next_open(_et(2026, 10, 6, 9, 30)) == _et(2026, 10, 6, 9, 30)
+    assert nyse_next_open(_et(2026, 10, 6, 9, 30, 1)) == _et(2026, 10, 7, 9, 30)
+    assert nyse_next_open(_et(2026, 12, 24, 13, 0)) == _et(2026, 12, 28, 9, 30)

@@ -63,7 +63,7 @@ from corollary.db.models import (
     NotificationRecord,
 )
 from corollary.engine.runtime import DISCORD_WEBHOOK_ENV
-from corollary.engine.scheduler import JobStatus, _calendar_jobs
+from corollary.engine.scheduler import EveryInterval, JobStatus, _calendar_jobs
 
 #: The app-wide request-validation handler's logger (finding 3).
 APP_LOGGER = "corollary.api.app"
@@ -90,6 +90,9 @@ def job(name: str, **fields: Any) -> JobStatus:
         "name": name,
         "rule": "test",
         "schedule": "daily",
+        # Step 6 made ``cadence`` required (the news staleness read); the
+        # calendar route never reads it, so any real schedule will do.
+        "cadence": EveryInterval(timedelta(days=1)),
         "next_run": None,
         "last_started": None,
         "last_success": None,

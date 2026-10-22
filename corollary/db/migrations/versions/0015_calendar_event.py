@@ -37,11 +37,16 @@ off, Discord on. Insert-if-missing, as ``0011`` does: ``seed.py`` carries the
 same rows and runs on every startup, and an existing row is a human's choice.
 No CHECK to widen -- ``notification_route.event`` has none by design.
 
+**Renumbered at merge (Q22).** Drafted as ``0013`` and carried as ``0014``
+in-branch; step 6's ``0014_sentiment_audit`` reached master first, so this
+revision merged second and became ``0015``, revising ``0014``. No Alembic
+merge revision.
+
 The downgrade drops the table, discarding manual rows with it, and deletes
 the two route rows, discarding any edit made to them.
 
-Revision ID: 0014
-Revises: 0013
+Revision ID: 0015
+Revises: 0014
 Create Date: 2026-10-10
 
 """
@@ -51,8 +56,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0014"
-down_revision: str | None = "0013"
+revision: str = "0015"
+down_revision: str | None = "0014"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

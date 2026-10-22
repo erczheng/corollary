@@ -1,4 +1,4 @@
-"""``calendar_event`` (migration 0013) against the models and the migration.
+"""``calendar_event`` (migration 0015) against the models and the migration.
 
 The CHECKs are tested against **both** engines, because Alembic's
 autogenerate comparison does not compare CHECK constraint text (see

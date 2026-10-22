@@ -95,6 +95,26 @@ describe('operator events', () => {
     }
   })
 
+  /** Phase 3 decision 14: a demotion is the audit working as designed — a
+   * degradation report, not a system failure — so it is a **warning**, the
+   * same reasoning that makes `stop_loss_hit` one. A re-promotion is `info`.
+   * Both ring the bell *and* reach Discord: a withdrawal and its restoration
+   * arrive on the same channels. Both belong to no book. */
+  it('makes a sentiment demotion a warning, never critical, and a re-promotion info', () => {
+    expect(severityFor('sentiment_demoted')).toBe('warning')
+    expect(severityFor('sentiment_repromoted')).toBe('info')
+    for (const event of ['sentiment_demoted', 'sentiment_repromoted'] as const) {
+      expect(NOTIFICATION_EVENT_LABEL[event]).toBeTruthy()
+      expect(routedTo(NOTIFICATION_ROUTES, event, 'bell')).toBe(true)
+      expect(routedTo(NOTIFICATION_ROUTES, event, 'discord')).toBe(true)
+      const n = buildNotification(event, 'Massive', 'Massive labels demoted.', null, '2026-10-03T14:05:00Z')
+      expect(SEVERITY_CLASS[n.severity]).not.toContain('error')
+      for (const mode of ['paper', 'cash'] as const) {
+        expect(visibleNotifications([n], mode)).toEqual([n])
+      }
+    }
+  })
+
   /** A human choosing to halt is not a fault — same split as bearish/error. */
   it('never dresses an operator halt as critical', () => {
     expect(severityFor('operator_halt')).not.toBe('critical')

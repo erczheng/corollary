@@ -247,6 +247,7 @@ def _services(
     **extra: object,
 ) -> ContextServices:
     return ContextServices(
+        funds=(),
         session_factory=lambda: Session(db_engine),
         finnhub_calendar=finnhub,  # type: ignore[arg-type]
         dividends=dividends,  # type: ignore[arg-type]
@@ -1193,7 +1194,7 @@ async def test_a_premium_refusal_is_its_own_error_type_and_its_own_log_event(
 
 
 def test_the_calendar_jobs_run_at_their_slots() -> None:
-    jobs = context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+    jobs = context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     by_name = {job.name: job for job in jobs}
     assert by_name["calendar_earnings"].schedule == AtTime(time(7, 0), every_day)
     assert by_name["calendar_ipo"].schedule == AtTime(time(7, 5), every_day)
@@ -1207,7 +1208,7 @@ def test_the_calendar_jobs_run_at_their_slots() -> None:
 def test_the_vendor_calendars_run_on_thanksgiving_and_fred_waits_for_the_half_day() -> None:
     jobs = {
         job.name: job
-        for job in context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+        for job in context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     }
     wednesday_evening = datetime(2026, 11, 26, 0, 0, tzinfo=UTC)  # Wed 19:00 EST
     # Thanksgiving, Thu 26 Nov: the vendor calendars run (07:00 EST = 12:00Z).
@@ -1227,7 +1228,7 @@ def test_the_vendor_calendars_run_on_thanksgiving_and_fred_waits_for_the_half_da
 def test_the_calendar_slots_stay_on_eastern_time_across_the_dst_change() -> None:
     jobs = {
         job.name: job
-        for job in context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+        for job in context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     }
     earnings, ipo = jobs["calendar_earnings"].schedule, jobs["calendar_ipo"].schedule
     friday_night = datetime(2026, 10, 31, 2, 0, tzinfo=UTC)
@@ -1527,6 +1528,7 @@ async def test_each_shipped_calendar_body_blocks_only_off_the_event_loop(
         spy.wrap("fetcher_load_econ_release_times", releases_module.load_econ_release_times),
     )
     services = ContextServices(
+        funds=(),
         session_factory=spy.wrap("session_factory", lambda: Session(db_engine)),
         finnhub_calendar=FakeFinnhubCalendar(earnings=[_earning()], ipos=[_ipo()]),
         dividends=FakeDividends(CashDividendRead(dividends=(_dividend(),), skipped=())),

@@ -30,11 +30,17 @@ Decisions this module makes
   (:data:`~corollary.data.news.tradeability.MAX_TICKERS_PER_RUN`) then checks
   the freshest news first, and the same rows always give the same order.
 
+**The tradeability cache's read** (:func:`latest_verdicts`) lives here too,
+for the same reason: Movers and the sentiment audit's runner both ask "what
+is this off-watch ticker's newest verdict", and the runner -- a context job --
+may not import ``corollary.api``, where the read used to live.
+
 Reads only; writes nothing, calls no vendor.
 """
 
-from collections.abc import Container, Mapping
-from datetime import datetime, time, timedelta, timezone
+import logging
+from collections.abc import Container, Iterable, Mapping
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
@@ -43,6 +49,7 @@ from sqlalchemy.orm import Session, aliased
 
 from corollary.data.news.discovery import (
     DIRECTIONAL,
+    CachedVerdict,
     FLAGGED_PATTERNS,
     DiscoverySignal,
     qualifies,
@@ -50,21 +57,29 @@ from corollary.data.news.discovery import (
 from corollary.data.news.labels import Direction, LabelSource
 from corollary.data.news.rules import RulePattern
 from corollary.data.news.watchlist import MARKET_TICKER
-from corollary.db.models import NewsArticle, SentimentLabelRow
+from corollary.db.models import NewsArticle, SentimentLabelRow, TickerTradeability
 from corollary.wire import require_aware
 
 __all__ = [
     "EASTERN",
     "LOOKBACK_DAYS",
     "SIGNAL_WINDOW_DAYS",
+    "VERDICT_CHUNK",
     "group_labels",
+    "latest_verdicts",
+    "verdict_histories",
     "lookback_start",
     "signal_window_start",
     "signalled_tickers",
     "stored_signals",
 ]
 
+logger = logging.getLogger(__name__)
+
 EASTERN: Final = ZoneInfo("America/New_York")
+
+#: Tickers per ``IN (...)`` when reading the tradeability cache.
+VERDICT_CHUNK: Final = 500
 
 #: Calendar days per lookback, ``None`` for no bound -- ``LOOKBACK_DAYS`` in
 #: ``web/src/lib/news.ts``, value for value.
@@ -114,7 +129,8 @@ def group_labels() -> Any:
     the Alpaca and the Finnhub copy of a headline -- the canonical row's
     label is picked, else the lowest member id's: deterministic, and never
     the order rows happened to be written in. **The one selector**: the feed,
-    Movers and the tradeability refresh all read labels through it.
+    Movers, the tradeability refresh and the sentiment audit (which grades
+    only the pick, joining on ``label_id``) all read labels through it.
     """
     member = aliased(NewsArticle, name="label_member")
     group_id = func.coalesce(member.canonical_id, member.id)
@@ -124,6 +140,7 @@ def group_labels() -> Any:
     )
     return (
         select(
+            SentimentLabelRow.id.label("label_id"),
             group_id.label("gid"),
             SentimentLabelRow.ticker.label("ticker"),
             SentimentLabelRow.source.label("source"),
@@ -215,3 +232,109 @@ def signalled_tickers(
     # Two passes of a stable sort: ticker ascending, then newest first.
     by_ticker = sorted(newest)
     return sorted(by_ticker, key=lambda ticker: newest[ticker], reverse=True)
+
+
+# --------------------------------------------------------------------------
+# The tradeability cache's read (decision 21)
+# --------------------------------------------------------------------------
+
+
+def _verdict(row: TickerTradeability, correlation_id: str) -> CachedVerdict:
+    """A cache row as the read path needs it. An unreadable row fails closed, logged."""
+    failures = tuple(token for token in row.failures.split(",") if token)
+    try:
+        return CachedVerdict(
+            ticker=row.ticker,
+            session_date=row.session_date,
+            passes=row.passes,
+            avg_volume_20d=row.avg_volume_20d,
+            last_close=row.last_close,
+            sessions_available=row.sessions_available,
+            failures=failures,
+            checked_at=row.checked_at,
+        )
+    except ValueError as exc:
+        logger.error(
+            "a tradeability cache row cannot be read; the ticker is treated as failing",
+            extra={
+                "event": "discovery_verdict_unreadable",
+                "rule": "decision 21: a ticker is a candidate only on a verdict that passes",
+                "ticker": row.ticker,
+                "session_date": row.session_date.isoformat(),
+                "error": str(exc),
+                "correlation_id": correlation_id,
+            },
+        )
+        return CachedVerdict(
+            ticker=row.ticker,
+            session_date=row.session_date,
+            passes=False,
+            avg_volume_20d=None,
+            last_close=None,
+            sessions_available=row.sessions_available,
+            failures=("unreadable_cache_row",),
+            checked_at=row.checked_at,
+        )
+
+
+def latest_verdicts(
+    session: Session, tickers: Iterable[str], today: date, correlation_id: str
+) -> dict[str, CachedVerdict]:
+    """Each ticker's newest cached verdict for a session on or before ``today``.
+
+    Read from ``ticker_tradeability`` only -- never a vendor. The newest row
+    is chosen in Python, by ``session_date``, which is a real ``Date``
+    column; nothing here compares ``Money``. A ticker with no row is absent
+    (no verdict), never a failing one. Movers and the sentiment audit's
+    runner both read through here.
+    """
+    wanted = sorted(set(tickers))
+    newest: dict[str, TickerTradeability] = {}
+    for start in range(0, len(wanted), VERDICT_CHUNK):
+        chunk = wanted[start : start + VERDICT_CHUNK]
+        rows = session.scalars(
+            select(TickerTradeability)
+            .where(TickerTradeability.ticker.in_(chunk))
+            .where(TickerTradeability.session_date <= today)
+        )
+        for row in rows:
+            held = newest.get(row.ticker)
+            if held is None or row.session_date > held.session_date:
+                newest[row.ticker] = row
+    return {ticker: _verdict(row, correlation_id) for ticker, row in newest.items()}
+
+
+def verdict_histories(
+    session: Session,
+    tickers: Iterable[str],
+    since: date,
+    until: date,
+    correlation_id: str,
+) -> dict[str, list[CachedVerdict]]:
+    """Each ticker's cached verdicts that can be "newest on or before" a session in ``[since, until]``.
+
+    For the sentiment audit, whose labels each read the newest verdict on or
+    before their own reference session (``audit.py``'s decision 25): every
+    row dated ``(since, until]``, plus the newest dated on or before
+    ``since`` -- older rows can never be the answer for a session at or after
+    ``since``. Ascending by ``session_date``. An unreadable row fails closed
+    as in :func:`latest_verdicts`; a ticker with no row is absent.
+    """
+    wanted = sorted(set(tickers))
+    rows_by_ticker: dict[str, list[TickerTradeability]] = {}
+    for start in range(0, len(wanted), VERDICT_CHUNK):
+        chunk = wanted[start : start + VERDICT_CHUNK]
+        rows = session.scalars(
+            select(TickerTradeability)
+            .where(TickerTradeability.ticker.in_(chunk))
+            .where(TickerTradeability.session_date <= until)
+        )
+        for row in rows:
+            rows_by_ticker.setdefault(row.ticker, []).append(row)
+    histories: dict[str, list[CachedVerdict]] = {}
+    for ticker, held in rows_by_ticker.items():
+        ordered = sorted(held, key=lambda row: row.session_date)
+        at_or_before = [i for i, row in enumerate(ordered) if row.session_date <= since]
+        first = at_or_before[-1] if at_or_before else 0
+        histories[ticker] = [_verdict(row, correlation_id) for row in ordered[first:]]
+    return histories

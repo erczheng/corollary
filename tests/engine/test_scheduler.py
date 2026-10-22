@@ -34,7 +34,7 @@ from typing import get_type_hints
 
 import httpx
 import pytest
-from sqlalchemy import Engine, event, text
+from sqlalchemy import Engine, event, select, text
 from sqlalchemy.orm import Session
 
 from corollary.db.models import Base
@@ -109,7 +109,8 @@ from corollary.ratelimit import FRED_HOST, HostRateLimiter
 from tests.data.providers.test_fred_provider import FAKE_KEY, fixture_body_text
 from tests.engine.test_runtime import read_state, resume_engine
 from tests.data.seeds.test_nport_snapshot import FakeResolver, FakeSec, sec_provider
-from corollary.data.seeds import nport
+from corollary.data.seeds import SpdrSeed, nport
+from tests.api.news_support import make_seed
 from corollary.db.models import SpdrHoldingsSnapshot
 from corollary.ratelimit import SEC_DATA_HOST
 
@@ -126,6 +127,8 @@ HALF_DAY_CLOSE = datetime(2026, 11, 27, 18, 0, tzinfo=UTC)
 MONDAY_OPEN = datetime(2026, 11, 30, 14, 30, tzinfo=UTC)
 #: Thursday 26 Nov 2026, 20:00 ET (Friday 01:00 UTC): the holiday's evening.
 THANKSGIVING_EVENING = datetime(2026, 11, 27, 1, 0, tzinfo=UTC)
+#: Saturday 28 Nov 2026, 10:00 ET (15:00 UTC): the weekly sentiment audit.
+SATURDAY_AUDIT = datetime(2026, 11, 28, 15, 0, tzinfo=UTC)
 
 
 # --------------------------------------------------------------------------
@@ -762,6 +765,7 @@ _SHIPPED_NAMES = [
     "tradeability_cache",
     "news_prune",
     "spdr_holdings",
+    "sentiment_audit",
     "calendar_earnings",
     "calendar_ipo",
     "calendar_dividends",
@@ -791,7 +795,7 @@ def test_the_shipped_job_set_carries_the_five_calendar_jobs_at_their_cadences() 
     10:00 ET on trading days, the central-bank seed at 06:45 ET. Every one
     catches up at start.
     """
-    jobs = context_jobs(ContextServices(session_factory=lambda: None))  # type: ignore[arg-type, return-value]
+    jobs = context_jobs(ContextServices(funds=(), session_factory=lambda: None))  # type: ignore[arg-type, return-value]
     by_name = {job.name: job for job in jobs}
     assert set(_CALENDAR_JOBS) <= set(by_name)
     assert {name: by_name[name].schedule for name in _CALENDAR_JOBS} == {
@@ -872,6 +876,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
         "tradeability_cache": ALPACA_DATA_HOST,
         "news_prune": "local",
         "spdr_holdings": SEC_DATA_HOST,
+        "sentiment_audit": ALPACA_DATA_HOST,
         "calendar_earnings": FINNHUB_HOST,
         "calendar_ipo": FINNHUB_HOST,
         "calendar_dividends": ALPACA_DATA_HOST,
@@ -1044,6 +1049,7 @@ class FakeAlpacaContext(FakeAlpaca):
 
     directory: AssetDirectory = DIRECTORY
     directory_calls: int = 0
+    minute_bar_calls: int = 0
 
     async def active_equities(self) -> AssetDirectory:
         self.directory_calls += 1
@@ -1055,6 +1061,19 @@ class FakeAlpacaContext(FakeAlpaca):
     async def adv_daily_bars(
         self, symbols: object, *, session_date: date
     ) -> dict[str, list[object]]:
+        return {}
+
+    async def stock_bars(
+        self,
+        symbols: object,
+        *,
+        timeframe: object = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int | None = None,
+    ) -> dict[str, list[object]]:
+        """The sentiment audit's minute bars: none, so every window waits."""
+        self.minute_bar_calls += 1
         return {}
 
 
@@ -1095,13 +1114,18 @@ def _held_positions() -> HeldPositionUnderlyings:
     the lifespan hands the jobs.
     """
     holder = PositionUnderlyings()
-    holder.replace({"TSLA"}, at=datetime(2026, 11, 25, 15, 0, tzinfo=UTC))
+    # Stamped at the Saturday audit slot (10:00 ET is 15:00 UTC in November):
+    # the audit skips on positions older than three refresh intervals, and
+    # the rule 9 test needs it to run. An as_of ahead of an earlier job's
+    # clock reads as fresh, which is all the other jobs ask of it.
+    holder.replace({"TSLA"}, at=datetime(2026, 11, 28, 15, 0, tzinfo=UTC))
     return HeldPositionUnderlyings(holder)
 
 
 def _news_services(
     db_engine: Engine,
     *,
+    seed_loader: Callable[[], SpdrSeed | None] = lambda: None,
     alpaca: object | None = None,
     finnhub: object | None = None,
     massive: object | None = None,
@@ -1119,7 +1143,7 @@ def _news_services(
         massive=massive,  # type: ignore[arg-type]
         markets=("AAPL",),
         position_underlyings=_held_positions(),
-        seed_loader=lambda: None,
+        seed_loader=seed_loader,
         **extra,  # type: ignore[arg-type]
     )
 
@@ -1722,14 +1746,15 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     # Thanksgiving evening into Friday's half-day: every kind of slot a
     # shipped job has fires here -- the overnight slow grids, the 03:00 prune,
     # the 07:30 directory, the watch window opening at 06:00, the open's 60 s
-    # grid, 10:00 FRED, and the half-day's 13:00 switch back to the slow grid.
+    # grid, 10:00 FRED, and the half-day's 13:00 switch back to the slow grid
+    # -- and on to Saturday 10:00 ET, the weekly sentiment audit (unit 6.4a).
     # Not from Wednesday: at the Alpaca job's cadence that is ~2,500 SQLite
     # round trips on worker threads, ~7 s a run, six runs on every ``-m risk``
     # -- and the Wednesday session and the holiday itself are pinned by the
     # pure schedule tests above. See ``wait_for_threads`` for the threads.
     clock = FakeClock(
         THANKSGIVING_EVENING,
-        stop_at=HALF_DAY_CLOSE + timedelta(hours=1),
+        stop_at=SATURDAY_AUDIT + timedelta(hours=1),
         wait_for_threads=True,
     )
 
@@ -1754,6 +1779,9 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         calendar_finnhub, dividends, releases = _calendar_fakes()
         services = _news_services(
             db_engine,
+            # A built seed: the audit skips on a missing one (fix B), and this
+            # test needs every shipped job, the audit included, to run.
+            seed_loader=make_seed,
             alpaca=alpaca,
             finnhub=finnhub,
             massive=massive,
@@ -1835,6 +1863,14 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     with Session(db_engine) as session:
         kinds = set(session.scalars(select(CalendarEvent.kind).distinct()))
     assert kinds == {"earnings", "ipo", "dividend", "economic", "central-bank"}
+    # The sentiment audit body really ran on Saturday: one scheduled run,
+    # closed -- never left ``running`` -- and never a skip for want of bars.
+    from corollary.db.models import AuditRun
+
+    with Session(db_engine) as session:
+        runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
+    assert runs == [("scheduled", "succeeded")]
+    assert status["sentiment_audit"].skips == 0
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
@@ -1858,9 +1894,11 @@ def _calendar_fakes() -> tuple[FakeFinnhubCalendar, FakeDividends, FakeReleases]
 _HEARTBEAT_EVERY = timedelta(seconds=30)
 #: Fri 27 Nov 2026 02:55 ET (the half-day): every shipped job reaches its
 #: body inside the hang test's window -- the catch-ups at once, the 03:00
-#: prune, the slow grids, the 07:30 directory, the 09:30 open's probe.
+#: prune, the slow grids, the 07:30 directory, the 09:30 open's probe --
+#: and on to Sat 28 Nov 10:10 ET, past step 6's weekly ``sentiment_audit``
+#: slot (Saturday 10:00 ET, ``SATURDAY_AUDIT``), so that job hangs too.
 _HANG_FROM = datetime(2026, 11, 27, 7, 55, tzinfo=UTC)
-_HANG_UNTIL = datetime(2026, 11, 27, 14, 40, tzinfo=UTC)
+_HANG_UNTIL = SATURDAY_AUDIT + timedelta(minutes=10)
 
 
 @pytest.mark.risk
@@ -1877,8 +1915,8 @@ async def test_shipped_context_jobs_hanging_past_the_watchdog_window_never_halt_
     the loop. The schedules, names, rules and inputs are the shipped ones.
     Beside them runs a stand-in for the risk manager on the same loop and
     the same clock, heartbeating an **armed** watchdog every 30 s and asking
-    it after every beat, for over six hours of calendar -- far past the 90 s
-    window -- with every job hung.
+    it after every beat, for over thirty hours of calendar -- far past the
+    90 s window -- with every job hung.
 
     It must come out un-halted, with the halt row as it went in, no watchdog
     input touched by anything but the stand-in, every heartbeat recorded at
