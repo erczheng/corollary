@@ -13,10 +13,15 @@ event                                     emitted by
 ``data_feeds_changed``                    ``PUT /api/settings/feeds``
 ``notification_routes_changed``           ``PUT /api/settings/routes``
 ``watchlist_changed``                     ``POST``/``DELETE /api/news/watch/{t}``
+``sentiment_audit_requested``             ``POST /api/settings/sentiment/audit``
 ========================================  ====================================
 
 ``watchlist_changed`` is Phase 3 decision 21's, on decision 20's terms for the
 config events: ``info``, built from the one ``audit_log`` row the route wrote.
+``sentiment_audit_requested`` is step 6's manual audit trigger, on the same
+terms (decision 20: an operator action notifies once it has an endpoint). It
+writes no ``audit_log`` row -- the ``audit_run`` row is its record -- so its
+words are the request instant and nothing else.
 
 Reading or dismissing a bell entry is not in the table and must never be: it
 would page Discord for reading Discord, and loop.
@@ -60,6 +65,7 @@ __all__ = [
     "halt_notice",
     "notify_after_response",
     "resume_notice",
+    "sentiment_audit_notice",
     "settings_notice",
 ]
 
@@ -78,6 +84,8 @@ class OperatorEvent(StrEnum):
     NOTIFICATION_ROUTES_CHANGED = "notification_routes_changed"
     #: A manual news watch added or removed (Phase 3 decision 21).
     WATCHLIST_CHANGED = "watchlist_changed"
+    #: A sentiment self-audit run started by hand (Phase 3 step 6).
+    SENTIMENT_AUDIT_REQUESTED = "sentiment_audit_requested"
 
 
 #: A halt is worth a glance; everything else is a record.
@@ -88,6 +96,7 @@ _SEVERITY: Final[dict[OperatorEvent, str]] = {
     OperatorEvent.DATA_FEEDS_CHANGED: "info",
     OperatorEvent.NOTIFICATION_ROUTES_CHANGED: "info",
     OperatorEvent.WATCHLIST_CHANGED: "info",
+    OperatorEvent.SENTIMENT_AUDIT_REQUESTED: "info",
 }
 
 _SETTINGS_TITLE: Final[dict[OperatorEvent, str]] = {
@@ -229,6 +238,23 @@ def settings_notice(
         severity=_SEVERITY[event],
         title=_SETTINGS_TITLE[event],
         body="\n".join(change_line(change) for change in changes),
+        at=at,
+        correlation_id=correlation_id,
+    )
+
+
+def sentiment_audit_notice(*, at: datetime, correlation_id: str) -> OperatorNotice:
+    """``sentiment_audit_requested``: a manual run started, and where its result lands."""
+    event = OperatorEvent.SENTIMENT_AUDIT_REQUESTED
+    return OperatorNotice(
+        event=event.value,
+        severity=_SEVERITY[event],
+        title="Sentiment audit started by operator",
+        body=(
+            f"A manual sentiment audit run started at {_eastern(at)}. It grades "
+            "every matured label and may demote or re-promote a source; its "
+            "result is on Settings."
+        ),
         at=at,
         correlation_id=correlation_id,
     )

@@ -1,4 +1,6 @@
 import { DATA_FEEDS, RISK_LIMITS } from './mockData'
+import { isApiError, isUnreachable } from './api'
+import { NEWS_SOURCE_LABEL } from './news'
 import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
@@ -6,10 +8,15 @@ import {
   type DataFeed,
   type DataPlan,
   type FeedKey,
+  type NewsLabelSource,
   type NotificationEvent,
   type RiskLimit,
   type RiskLimitKey,
-  type SentimentAccuracy,
+  type SentimentAuditStatus,
+  type SentimentCounts,
+  type SentimentSourceAudit,
+  type SentimentWindow,
+  type SentimentWindowAccuracy,
 } from './types'
 
 /** Every rule the Settings page needs, as pure functions with no React and
@@ -179,6 +186,13 @@ export function auditFieldLabel(entry: AuditLogEntry, catalog: AuditCatalog = {}
     return `News watchlist — ${entry.field}`
   }
 
+  // A status transition is keyed by the source it moved (decision 13). An
+  // unknown source keeps its raw key, never a blank.
+  if (entry.category === 'sentiment') {
+    const source = NEWS_SOURCE_LABEL[entry.field as NewsLabelSource] ?? entry.field
+    return `Sentiment source — ${source}`
+  }
+
   const [event, channel] = entry.field.split('.')
   const eventLabel = NOTIFICATION_EVENT_LABEL[event as NotificationEvent]
   const channelLabel = CHANNEL_LABEL[channel as NotificationChannel]
@@ -276,22 +290,164 @@ export function isCriticalEvent(event: NotificationEvent): boolean {
 // Sentiment self-audit
 // ---------------------------------------------------------------------- //
 
-/** PRD.md §9 — coin-flip territory. Below this, news sentiment stops being a
- * scanner input and becomes display-only. */
+//
+// The status is the server's. Nothing below decides whether a source is
+// demoted: `sentiment_source_status` is written by the audit run and nothing
+// else, and a client-side recomputation from accuracy is how this page and
+// the engine would come to disagree about which labels the scanner reads.
+// These helpers derive *display* from counts the server sent.
+
+/** Decision 13 — below this percentage in **either** window demotes a source
+ * (at the sample floor). Mirrors `DEMOTE_BELOW_PCT` in
+ * `corollary/data/news/audit.py`. The pin is
+ * `tests/api/test_schema_contract.py::test_sentiment_thresholds_match_the_engine`,
+ * which reads this file and fails if the two part (a `?raw` import of
+ * `audit.py` is refused by Vite's fs allow-list). Display only: the engine
+ * applies it. */
 export const SENTIMENT_FLOOR = 52
 
-/** Sources that have fallen through the floor.
+/** Decision 13 — at or above this percentage in **both** windows re-promotes a
+ * demoted source. Mirrors `REPROMOTE_AT_PCT` in `audit.py`, pinned by the same
+ * pytest. Between the two thresholds is a dead band: a source there stays where
+ * it is, whichever side it came from. */
+export const SENTIMENT_REPROMOTE = 66
+
+/** Graded directional labels needed in each window, over the trailing 28
+ * days, before a source may be demoted. Mirrors `DEMOTION_FLOOR`. The
+ * per-source figure the page compares against is `eligibility.floor`, which
+ * the server sends; this is for the sentence that states the rule. */
+export const SENTIMENT_DEMOTE_SAMPLE = 30
+
+/** Graded directional labels needed in each window since the demotion before
+ * a source may be re-promoted. Mirrors `REPROMOTION_FLOOR`. */
+export const SENTIMENT_REPROMOTE_SAMPLE = 100
+
+/** The two scoring windows, in the order the table shows them. */
+export const SENTIMENT_WINDOWS: readonly SentimentWindow[] = ['1h', '1d']
+
+export const SENTIMENT_WINDOW_LABEL: Record<SentimentWindow, string> = {
+  '1h': '1 hour',
+  '1d': '1 day',
+}
+
+/** Accuracy as an integer count of **tenths of a percent**, truncated —
+ * `correct / graded`, with neutral labels in neither (Q5). `null` with
+ * nothing graded: 0 of 0 is not 0%.
  *
- * **Strictly** below, so 52% exactly still passes — the PRD says "falls
- * below 52%", and an off-by-one here drops a working signal out of the
- * scanner with no visible cause.
+ * Integers end to end, the way `audit.py`'s `_below` and `_pct` work, so the
+ * figure on screen can never round across a threshold the engine compared
+ * exactly: 51.96% shows as 51.9%, not 52.0%. Format with `formatTenthsPct`. */
+export function accuracyTenths(counts: SentimentCounts): number | null {
+  if (counts.graded <= 0) return null
+  return Math.floor((counts.correct * 1000) / counts.graded)
+}
+
+/** Below the sample floor, a percentage is not yet a measurement — the cell
+ * says how far short it is instead. */
+export function isInsufficientSample(counts: SentimentCounts, floor: number): boolean {
+  return counts.graded < floor
+}
+
+/** The cell a source is judged on in one window: the basis its
+ * `eligibility` names (`trailing_28d`, or `since_demotion` once demoted).
+ * `null` when the latest run wrote no row on that basis — which reads as
+ * nothing graded yet, the same zero the server's eligibility reports. */
+export function actingCell(
+  source: SentimentSourceAudit,
+  window: SentimentWindow,
+): SentimentWindowAccuracy | null {
+  return (
+    source.accuracy.find((a) => a.window === window && a.basis === source.eligibility.basis) ??
+    null
+  )
+}
+
+/** The counts a cell shows; zeros for a window with no row on the basis. */
+export function cellCounts(cell: SentimentWindowAccuracy | null): SentimentCounts {
+  return cell?.combined ?? { graded: 0, correct: 0, neutral: 0 }
+}
+
+/** The sources the banner names: those whose **server** status is
+ * `demoted`. A missing status row is a display fallback (`unaudited`), never
+ * a demotion, and is reported separately. */
+export function demotedSources(sources: readonly SentimentSourceAudit[]): SentimentSourceAudit[] {
+  return sources.filter((s) => !s.statusMissing && s.status === 'demoted')
+}
+
+/** What the status cell says a source is. `missing` comes first: with no
+ * status row the served `status` and `neverAudited` are a fallback, and
+ * calling that "never audited" would state a fact nobody recorded. */
+export type SourceStatusKind = 'missing' | 'unaudited' | 'active' | 'demoted'
+
+export function sourceStatusKind(source: SentimentSourceAudit): SourceStatusKind {
+  if (source.statusMissing) return 'missing'
+  if (source.neverAudited || source.status === 'unaudited') return 'unaudited'
+  return source.status
+}
+
+/** A demoted source's road back, one sentence per window:
+ * "since demotion: 41 of 100 in the 1h window". Empty for any source the
+ * server is not counting toward re-promotion. */
+export function repromotionProgress(source: SentimentSourceAudit): string[] {
+  if (source.eligibility.kind !== 'repromote') return []
+  return source.eligibility.windows.map(
+    (w) => `since demotion: ${w.graded} of ${source.eligibility.floor} in the ${w.window} window`,
+  )
+}
+
+/** Whether every source is waiting on its first run — the readout's empty
+ * state, which says when the first one is due rather than drawing a table of
+ * zeros as though they were results. */
+export function nothingAuditedYet(status: SentimentAuditStatus): boolean {
+  return status.accuracyRun === null
+}
+
+/** A refused `POST /api/settings/sentiment/audit`, sorted into what the page
+ * says about it.
  *
- * Either window failing is enough. A source that is coin-flip at one hour is
- * not one to feed the scanner on the strength of its one-day figure, and
- * requiring both to fail would keep a half-broken signal live. */
-export function demotedSources(
-  rows: SentimentAccuracy[],
-  floor: number = SENTIMENT_FLOOR,
-): SentimentAccuracy[] {
-  return rows.filter((r) => r.accuracy1h < floor || r.accuracy1d < floor)
+ * - `rate_limited` (429) — when the button works again: `Retry-After` from
+ *   the refusal itself when it carried one, counted from when the request was
+ *   sent, else the readout's `manualAvailableAt`. A fact, not a fault.
+ * - `running` (409) — a run is open; the server's sentence names which.
+ * - `unavailable` (503) — a data dependency the run needs is absent or
+ *   degraded, so nothing was started. Rendered `caution`, not `error`: it is
+ *   the "unvalidated, pending" state DESIGN.md gives `caution`, and nothing
+ *   broke.
+ * - `failed` (500, unreachable, anything else) — a real fault, `error`.
+ *
+ * The server's own message is kept every time: its 503 and 500 texts are
+ * fixed sentences written for exactly this screen. */
+export type AuditTriggerRefusal =
+  | { kind: 'rate_limited'; availableAt: string | null; message: string }
+  | { kind: 'running'; message: string }
+  | { kind: 'unavailable'; message: string }
+  | { kind: 'failed'; message: string }
+
+export function auditTriggerRefusal(
+  error: unknown,
+  context: { requestedAt: number | null; manualAvailableAt: string | null },
+): AuditTriggerRefusal {
+  if (isUnreachable(error)) {
+    return {
+      kind: 'failed',
+      message: 'The engine did not answer. Check that it is running, then try again.',
+    }
+  }
+  if (!isApiError(error)) {
+    return { kind: 'failed', message: 'The audit could not be started, and no reason was given.' }
+  }
+  if (error.status === 429) {
+    const fromHeader =
+      error.retryAfterSeconds !== null && context.requestedAt !== null
+        ? new Date(context.requestedAt + error.retryAfterSeconds * 1000).toISOString()
+        : null
+    return {
+      kind: 'rate_limited',
+      availableAt: fromHeader ?? context.manualAvailableAt,
+      message: error.message,
+    }
+  }
+  if (error.status === 409) return { kind: 'running', message: error.message }
+  if (error.status === 503) return { kind: 'unavailable', message: error.message }
+  return { kind: 'failed', message: error.message }
 }

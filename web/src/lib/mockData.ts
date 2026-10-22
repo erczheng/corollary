@@ -36,7 +36,14 @@ import type {
   RiskLimit,
   SectorConsensus,
   Sentiment,
-  SentimentAccuracy,
+  SentimentAccuracyBasis,
+  SentimentAuditStatus,
+  SentimentCounts,
+  SentimentEligibility,
+  SentimentSourceAudit,
+  SentimentWindow,
+  SentimentWindowAccuracy,
+  AuditRunSummary,
   SentimentComponent,
   SentimentTier,
   SocialAttentionItem,
@@ -1824,6 +1831,9 @@ export const AUDIT_LOG: AuditLogEntry[] = [
   // Phase 3 decision 21: a manual news watch. Present so the `watchlist`
   // branch of `auditFieldLabel` is reachable on screen, not only in a test.
   { id: 'audit-4', time: '2026-05-04T13:20:00Z', category: 'watchlist', field: 'PLTR', previousValue: 'not watched', newValue: 'watched' },
+  // Phase 3 decision 13: the Saturday audit moving a source. Present so the
+  // `sentiment` branch of `auditFieldLabel` is reachable on screen.
+  { id: 'audit-5', time: '2026-04-25T14:05:00Z', category: 'sentiment', field: 'massive', previousValue: 'unaudited', newValue: 'active' },
 ]
 
 // ---------------------------------------------------------------------- //
@@ -1848,6 +1858,12 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   // Owner decision 2026-09-30, migration 0011: decision 20's info defaults
   // (a parent-session assumption).
   { event: 'spdr_seed_amended', bell: false, discord: true },
+  // Phase 3 decision 14, migration 0014: both audit transitions on both
+  // channels, so a withdrawal and its restoration arrive the same way.
+  { event: 'sentiment_demoted', bell: true, discord: true },
+  { event: 'sentiment_repromoted', bell: true, discord: true },
+  // Step 6, migration 0014: a manual audit run, on decision 20's config terms.
+  { event: 'sentiment_audit_requested', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every
@@ -1907,22 +1923,196 @@ export const DATA_FEEDS: DataFeed[] = [
   },
 ]
 
-/** Per-source accuracy against realized forward return (PRD.md §9).
+/* ---------------------------------------------------------------------- *
+ * The sentiment self-audit (GET /api/settings/sentiment, Phase 3 step 6)
  *
- * StockTwits sits below the 52% floor at 1h and above it at 1d, on purpose:
- * it makes the demotion state reachable on screen, and it pins which
- * reading of "accuracy falls below 52%" this app takes — *either* window
- * failing demotes the source, because a signal that is coin-flip at one
- * hour is not one to hand the scanner on the strength of its one-day
- * number. It is also already `degraded` in DATA_SOURCES, so the two panels
- * tell the same story about the same provider. */
-export const SENTIMENT_ACCURACY: SentimentAccuracy[] = [
-  { source: 'Finnhub', tier: 'Provider-supplied', accuracy1h: 57, accuracy1d: 61 },
-  { source: 'Alpaca', tier: 'Provider-supplied', accuracy1h: 55, accuracy1d: 58 },
-  { source: 'Rules', tier: 'Deterministic patterns', accuracy1h: 63, accuracy1d: 66 },
-  { source: 'LLM', tier: 'Tier 3', accuracy1h: 60, accuracy1d: 64 },
-  { source: 'StockTwits', tier: 'Provider-supplied', accuracy1h: 49, accuracy1d: 53 },
-]
+ * Typed to the wire shape and nothing more: integer counts, no percentage,
+ * and a status the page reads rather than derives. One payload per state the
+ * Settings readout can render — including a damaged database (`statusMissing`)
+ * and a run still open — because a state absent from the fixtures is one
+ * nobody can see.
+ * ---------------------------------------------------------------------- */
+
+function counts(graded: number, correct: number, neutral: number): SentimentCounts {
+  return { graded, correct, neutral }
+}
+
+/** One window on one basis. `watch` and `discovery` sum to `combined` —
+ * the runner writes all three and the split is decision 12's display-only
+ * view of the same labels. */
+function cell(
+  window: SentimentWindow,
+  basis: SentimentAccuracyBasis,
+  watch: SentimentCounts,
+  discovery: SentimentCounts,
+): SentimentWindowAccuracy {
+  return {
+    window,
+    basis,
+    combined: counts(
+      watch.graded + discovery.graded,
+      watch.correct + discovery.correct,
+      watch.neutral + discovery.neutral,
+    ),
+    watch,
+    discovery,
+  }
+}
+
+function eligibilityFor(
+  kind: 'demote' | 'repromote',
+  graded: Record<SentimentWindow, number>,
+  asOfRunId: number | null,
+): SentimentEligibility {
+  const floor = kind === 'demote' ? 30 : 100
+  const windows = (['1h', '1d'] as const).map((window) => ({
+    window,
+    graded: graded[window],
+    needed: Math.max(floor - graded[window], 0),
+  }))
+  return {
+    kind,
+    basis: kind === 'demote' ? 'trailing_28d' : 'since_demotion',
+    floor,
+    eligible: windows.every((w) => w.graded >= floor),
+    windows,
+    asOfRunId,
+  }
+}
+
+/** Saturday 10:00 ET — the `sentiment_audit` job's next slot. */
+const NEXT_AUDIT_AT = '2026-10-17T14:00:00Z'
+
+const SUCCEEDED_RUN: AuditRunSummary = {
+  id: 7,
+  trigger: 'scheduled',
+  status: 'succeeded',
+  startedAt: '2026-10-10T14:00:00Z',
+  finishedAt: '2026-10-10T14:06:41Z',
+}
+
+const NEVER_AUDITED_RULES: SentimentSourceAudit = {
+  source: 'rules',
+  status: 'unaudited',
+  changedAt: null,
+  neverAudited: true,
+  statusMissing: false,
+  reason: null,
+  accuracy: [],
+  eligibility: eligibilityFor('demote', { '1h': 0, '1d': 0 }, null),
+}
+
+const NEVER_AUDITED_MASSIVE: SentimentSourceAudit = { ...NEVER_AUDITED_RULES, source: 'massive' }
+
+/** Active, well past the floor in both windows, 61.7% and 64.1% — inside the
+ * dead band's upper half, which is the point: an active source there stays
+ * active. */
+const ACTIVE_RULES: SentimentSourceAudit = {
+  source: 'rules',
+  status: 'active',
+  changedAt: '2026-10-03T14:05:12Z',
+  neverAudited: false,
+  statusMissing: false,
+  reason: 'at or above 52% in both windows, at least 30 graded directional labels each over the trailing 28 days',
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(150, 94, 28), counts(62, 37, 12)),
+    cell('1d', 'trailing_28d', counts(141, 92, 22), counts(57, 35, 9)),
+  ],
+  eligibility: eligibilityFor('demote', { '1h': 212, '1d': 198 }, SUCCEEDED_RUN.id),
+}
+
+/** Demoted on its 1h window, and partway back: 41 and 37 graded since, of
+ * the 100 each that re-promotion needs. Its trailing rows are served too, and
+ * are not what it is judged on now — `actingCell` picks `since_demotion`. */
+const DEMOTED_MASSIVE: SentimentSourceAudit = {
+  source: 'massive',
+  status: 'demoted',
+  changedAt: '2026-10-03T14:05:12Z',
+  neverAudited: false,
+  statusMissing: false,
+  reason: 'below 52% in 1h',
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(88, 44, 19), counts(31, 15, 7)),
+    cell('1h', 'since_demotion', counts(29, 17, 6), counts(12, 7, 3)),
+    cell('1d', 'trailing_28d', counts(84, 46, 15), counts(30, 17, 5)),
+    cell('1d', 'since_demotion', counts(26, 15, 4), counts(11, 6, 2)),
+  ],
+  eligibility: eligibilityFor('repromote', { '1h': 41, '1d': 37 }, SUCCEEDED_RUN.id),
+}
+
+/** Audited, but short of the floor in both windows — 18 and 12 of 30 — so it
+ * stays unaudited and its percentages are not yet measurements. */
+const SHORT_SAMPLE_RULES: SentimentSourceAudit = {
+  ...NEVER_AUDITED_RULES,
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(13, 9, 4), counts(5, 2, 1)),
+    cell('1d', 'trailing_28d', counts(9, 5, 2), counts(3, 2, 0)),
+  ],
+  eligibility: eligibilityFor('demote', { '1h': 18, '1d': 12 }, SUCCEEDED_RUN.id),
+}
+
+/** No status row at all — a damaged database. The server shows it as
+ * unaudited for display and says so; it is **not** "never audited". */
+const MISSING_STATUS_MASSIVE: SentimentSourceAudit = {
+  ...NEVER_AUDITED_MASSIVE,
+  neverAudited: false,
+  statusMissing: true,
+}
+
+export type SentimentAuditFixture =
+  | 'unaudited'
+  | 'populated'
+  | 'insufficientSample'
+  | 'statusMissing'
+  | 'running'
+
+export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAuditStatus> = {
+  /** Nothing has ever run: every count is zero and nothing is a result. */
+  unaudited: {
+    sources: [NEVER_AUDITED_RULES, NEVER_AUDITED_MASSIVE],
+    lastRun: null,
+    accuracyRun: null,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  /** One active source, one demoted with re-promotion progress. */
+  populated: {
+    sources: [ACTIVE_RULES, DEMOTED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  insufficientSample: {
+    sources: [SHORT_SAMPLE_RULES, DEMOTED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  statusMissing: {
+    sources: [ACTIVE_RULES, MISSING_STATUS_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  /** A manual run open now, started 20 minutes after the last; the next
+   * manual run is an hour after it. */
+  running: {
+    sources: [ACTIVE_RULES, DEMOTED_MASSIVE],
+    lastRun: {
+      id: 8,
+      trigger: 'manual',
+      status: 'running',
+      startedAt: '2026-10-14T15:20:00Z',
+      finishedAt: null,
+    },
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: '2026-10-14T16:20:00Z',
+  },
+}
 
 // ---------------------------------------------------------------------- //
 // API key presence (Settings page, CLAUDE.md rule 6)

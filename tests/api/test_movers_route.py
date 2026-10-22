@@ -35,7 +35,14 @@ from corollary.engine.scheduler import (
     context_jobs,
 )
 
-from .news_support import add_article, add_label, add_manual_watches, add_verdict, make_seed
+from .news_support import (
+    add_article,
+    add_label,
+    add_manual_watches,
+    add_verdict,
+    make_seed,
+    set_source_status,
+)
 
 UTC = timezone.utc
 #: Saturday 2026-09-26, 11:00 EDT.
@@ -486,19 +493,17 @@ def test_the_feed_jobs_named_here_are_the_shipped_scheduler_jobs() -> None:
 
 
 def test_both_routes_read_the_one_source_status_table(
-    movers: TestClient, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+    movers: TestClient, db_engine: Engine
 ) -> None:
     """The feed and Movers state a source's audit status from one table.
 
     Pinning the string ``"unaudited"`` alone would pass a route that hardcoded
-    it -- and the day step 6 marks a source ``active`` on the feed, Movers
-    would go on saying ``unaudited``. So the table is changed here and both
+    it -- and the day a run marks a source ``active`` on the feed, Movers
+    would go on saying ``unaudited``. So the **database row** the audit writes
+    (``sentiment_source_status``, decision 13) is changed here, and both
     routes must follow it.
     """
-    from corollary.api.routes import news as news_routes
-    from corollary.data.news.labels import LabelSource
-
-    monkeypatch.setitem(news_routes.SOURCE_STATUS, LabelSource.MASSIVE, "active")
+    set_source_status(db_engine, "massive", "active", at=NOW - timedelta(days=1))
     _signal(db_engine, "a1", "ACME", direction="bearish", rule_id="analyst_downgrade")
     _signal(db_engine, "m1", "ACME", source="massive", vendor="massive", direction="bullish")
     add_verdict(db_engine, ticker="ACME", session_date=TODAY)

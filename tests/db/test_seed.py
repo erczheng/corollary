@@ -19,6 +19,7 @@ from corollary.db.seed import (
     DATA_FEED_DEFAULTS,
     NOTIFICATION_ROUTE_DEFAULTS,
     RISK_LIMIT_DEFAULTS,
+    SENTIMENT_SOURCE_STATUS_DEFAULTS,
     risk_limit_value,
     seed,
 )
@@ -105,6 +106,7 @@ def test_seed_reports_what_it_inserted(session: Session) -> None:
         len(RISK_LIMIT_DEFAULTS)
         + len(DATA_FEED_DEFAULTS)
         + len(NOTIFICATION_ROUTE_DEFAULTS)
+        + len(SENTIMENT_SOURCE_STATUS_DEFAULTS)
         + 1  # engine_state
     )
     assert inserted == expected
@@ -152,6 +154,7 @@ def test_seed_fills_only_the_gaps(session: Session) -> None:
         - 1
         + len(DATA_FEED_DEFAULTS)
         + len(NOTIFICATION_ROUTE_DEFAULTS)
+        + len(SENTIMENT_SOURCE_STATUS_DEFAULTS)
         + 1
     )
     assert inserted == expected

@@ -64,7 +64,12 @@ from corollary.db.types import ActivityId, Money, UtcDateTime
 
 __all__ = [
     "ACCOUNT_MODES",
+    "ACCURACY_BASES",
+    "ACCURACY_SCOPES",
+    "AUDIT_RUN_STATUSES",
+    "AUDIT_RUN_TRIGGERS",
     "AuditLog",
+    "AuditRun",
     "Base",
     "CLOSE_KINDS",
     "DataFeed",
@@ -75,6 +80,10 @@ __all__ = [
     "FredObservationRecord",
     "ISIN_TICKER_SOURCES",
     "IsinTicker",
+    "LABEL_MEMBERSHIP_SKIP_REASONS",
+    "LABEL_OUTCOME_SCOPES",
+    "LABEL_SKIP_REASONS",
+    "LabelOutcome",
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
@@ -95,9 +104,13 @@ __all__ = [
     "RISK_LIMIT_ABSOLUTE_MAX",
     "RISK_LIMIT_RANGES",
     "SENTIMENT_DIRECTIONS",
+    "SENTIMENT_SOURCE_STATUSES",
     "SENTIMENT_SOURCES",
     "SENTIMENT_TIERS",
+    "SENTIMENT_WINDOWS",
+    "SentimentAccuracy",
     "SentimentLabelRow",
+    "SentimentSourceStatus",
     "TickerIpoDate",
     "TickerTradeability",
     "WatchSymbol",
@@ -111,8 +124,17 @@ ENGINE_STATE_ID = 1
 #: PRD §8.7's three audited categories, matching the frontend's
 #: ``AuditCategory`` union so a row renders without translation, plus Phase 3
 #: decision 21's ``watchlist`` -- a manual watch added or removed (migration
-#: 0008). ``sentiment`` is step 5's and arrives with its own migration.
-AUDIT_CATEGORIES = ("risk", "feed", "notification", "watchlist")
+#: 0008), plus step 6's ``sentiment`` -- a source's audit status changed
+#: (decision 13, migration 0014). Only the weekly audit run writes it.
+AUDIT_CATEGORIES = ("risk", "feed", "notification", "watchlist", "sentiment")
+
+#: Decision 13's per-source state. Every source starts ``unaudited``, and
+#: **nothing transitions into it** -- the transitions go ``unaudited ->
+#: active | demoted`` and between those two only -- which is what
+#: ``ck_sentiment_source_status_transition`` and ``ck_audit_log_sentiment_row``
+#: rely on. Defined here rather than with the audit tables below because
+#: ``AuditLog``'s CHECK reads it.
+SENTIMENT_SOURCE_STATUSES: tuple[str, ...] = ("unaudited", "active", "demoted")
 
 #: ``news_article.feed``'s CHECK set. Derived from :class:`NewsFeed` rather
 #: than restated, so the record a provider builds and the row it lands in
@@ -507,6 +529,26 @@ class NotificationRoute(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
 
+#: A ``sentiment`` audit row is a source transition (migration 0014): ``field``
+#: is the source, ``previous_value`` its old status, ``new_value`` its new one,
+#: and the new one is never ``unaudited``, because nothing transitions into it.
+#: Scoped to that category -- every other category's values are unconstrained
+#: here. The sources are ``SENTIMENT_SOURCES``, restated from ``LabelSource``
+#: because that constant is defined with the label table, below this one.
+_AUDIT_LOG_SENTIMENT_ROW = (
+    "category <> 'sentiment' OR ("
+    + _in_list("field", tuple(s.value for s in LabelSource))
+    + " AND "
+    + _in_list("previous_value", SENTIMENT_SOURCE_STATUSES)
+    + " AND "
+    + _in_list("new_value", tuple(s for s in SENTIMENT_SOURCE_STATUSES if s != "unaudited"))
+    # Decision 13: an unchanged source writes no row, so a no-op transition
+    # (``active`` to ``active``) is refused rather than logged.
+    + " AND previous_value <> new_value"
+    + ")"
+)
+
+
 class AuditLog(Base):
     """Every configuration change, newest first, each row carrying what it replaced.
 
@@ -514,6 +556,11 @@ class AuditLog(Base):
     audit log records *what a human changed*, and rendering "5" → "7" needs no
     arithmetic; typing it as a decimal would also mean a feed change had no
     home in the same log.
+
+    The ``sentiment`` category is the exception to "a human changed": the
+    weekly audit run writes it, one row per source transition, and
+    ``ck_audit_log_sentiment_row`` holds its shape (see
+    :class:`SentimentSourceStatus` for how a row joins back to its run).
     """
 
     __tablename__ = "audit_log"
@@ -521,6 +568,7 @@ class AuditLog(Base):
         CheckConstraint(
             _in_list("category", AUDIT_CATEGORIES), name="ck_audit_log_category"
         ),
+        CheckConstraint(_AUDIT_LOG_SENTIMENT_ROW, name="ck_audit_log_sentiment_row"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -1755,3 +1803,498 @@ class IsinTicker(Base):
     composite_figi: Mapped[str | None] = mapped_column(String(12), nullable=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
     resolved_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+# --------------------------------------------------------------------- #
+# The self-audit (Phase 3 step 6, decisions 12 and 13, migration 0014)
+# --------------------------------------------------------------------- #
+
+#: Decision 12's two grading windows, in regular-session minutes from the
+#: reference: ``1h`` is +60, ``1d`` is +390 (``calendars.py``, never a clock
+#: offset). The spelling is the spec's.
+SENTIMENT_WINDOWS: tuple[str, ...] = ("1h", "1d")
+
+#: Why a label got an outcome row and no grade (decision 12). A label outside
+#: both graded sets is recorded rather than silently dropped, so the run says
+#: what it did not grade and never queues the label again.
+#:
+#: * ``off_watch_untradeable`` -- off the watch universe and failing decision
+#:   21's tradeability filter.
+#: * ``discovery_cap`` -- off-watch and tradeable, but its ticker fell outside
+#:   that run's 250 discovery tickers.
+#: * ``price_unavailable`` -- in a graded set, its window matured, but there is
+#:   no SIP bar for the ticker (or SPY) at the reference or outcome instant: a
+#:   renamed symbol, a vendor gap.
+#:
+#: **The third member extends the spec**, whose set is the first two only. It
+#: is an orchestrator decision from the unit 6.1 audit, and the owner is told.
+#: Without it a matured label with no price has three outcomes, all wrong: the
+#: run fails forever on it, the label stays ungraded with nothing saying so
+#: (decision 12: "never silently dropped from the audit"), or the grader
+#: invents a price. Like the other two, a ``price_unavailable`` row carries no
+#: prices (``ck_label_outcome_shape``).
+#:
+#: **When to give up and write it is unit 6.2's policy, not the schema's** --
+#: for example only once the window ended more than a week before the run, so
+#: a transient outage is retried next Saturday rather than recorded. The
+#: schema cannot tell a permanent gap from a transient one; the grader must.
+#:
+#: * ``duplicate_copy`` -- **also extends the spec** (orchestrator decision,
+#:   unit 6.4a's audit fix). One story stored twice -- an Alpaca and a Finnhub
+#:   copy linked into one canonical group by decision 3 -- is labelled once per
+#:   copy, but it is one event. The feed, Movers and the tradeability refresh
+#:   show one label per (group, ticker, source)
+#:   (:func:`corollary.data.news.signals.group_labels`), and the audit grades
+#:   that same one; every other copy gets this row, so it is recorded, never
+#:   counted toward a floor or an accuracy, and never reloaded.
+LABEL_SKIP_REASONS: tuple[str, ...] = (
+    "off_watch_untradeable",
+    "discovery_cap",
+    "price_unavailable",
+    "duplicate_copy",
+)
+
+#: The skips that are decided by **membership** -- the label is in neither
+#: graded set -- and so carry no ``scope``. ``price_unavailable`` is not one:
+#: its label was in a graded set and only the bar was missing.
+#: ``duplicate_copy`` is: the copy is in no graded set, its group's pick is.
+LABEL_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = (
+    "off_watch_untradeable",
+    "discovery_cap",
+    "duplicate_copy",
+)
+
+#: Which graded set one outcome's label was in, **as classified by the run
+#: that wrote it** (``label_outcome.scope``, unit 6.3). Not ``ACCURACY_SCOPES``:
+#: ``all`` is an aggregate of these two, never one label's classification.
+LABEL_OUTCOME_SCOPES: tuple[str, ...] = ("watch", "discovery")
+
+#: What started an audit run (decision 12's *Schedule*):
+#:
+#: * ``scheduled`` -- the Saturday 10:00 ET job.
+#: * ``manual`` -- ``POST /api/settings/sentiment/audit``, at most once an hour.
+AUDIT_RUN_TRIGGERS: tuple[str, ...] = ("scheduled", "manual")
+
+#: An audit run's lifecycle. ``running`` is the only state with no
+#: ``finished_at`` (``ck_audit_run_finished``):
+#:
+#: * ``running`` -- started, not yet finished. **At most one row is running**
+#:   (``uq_audit_run_one_running``). A row left here by a process that died
+#:   mid-run stays here and blocks the next run *loudly* -- its insert fails
+#:   the unique index -- until it is closed; see :class:`AuditRun`.
+#: * ``succeeded`` -- graded, computed accuracy, applied the transitions.
+#: * ``failed`` -- stopped short; ``detail`` says where.
+AUDIT_RUN_STATUSES: tuple[str, ...] = ("running", "succeeded", "failed")
+
+#: Which labels a ``sentiment_accuracy`` row counts (decision 13), stored so
+#: the figure a transition acted on is the figure kept:
+#:
+#: * ``trailing_28d`` -- graded labels over the trailing 28 calendar days; the
+#:   demotion check and its 30-label floor.
+#: * ``since_demotion`` -- labels graded since the source's demotion; the
+#:   re-promotion check and its 100-label floor.
+ACCURACY_BASES: tuple[str, ...] = ("trailing_28d", "since_demotion")
+
+#: Which slice of a source's labels a row counts (decision 12). Transitions
+#: act on ``all``; ``watch`` and ``discovery`` are the display splits.
+ACCURACY_SCOPES: tuple[str, ...] = ("all", "watch", "discovery")
+
+#: ``SENTIMENT_SOURCE_STATUSES`` -- decision 13's per-source state -- is
+#: defined beside ``AUDIT_CATEGORIES``, because ``AuditLog``'s CHECK reads it.
+
+
+def _non_negative_count(column: str) -> str:
+    """A whole number, zero allowed. ``typeof`` for the reason ``_positive_count`` gives."""
+    return f"typeof({column}) = 'integer' AND {column} >= 0"
+
+
+def _price_check(column: str) -> str:
+    """A nullable, non-negative money string -- a price, never a P&L."""
+    return (
+        f"({_money_shape(column, nullable=True)}) "
+        f"AND ({column} IS NULL OR substr({column}, 1, 1) <> '-')"
+    )
+
+
+#: Decision 12: "a skipped row carries no prices". Restated the other way
+#: too, because the converse is what a grader can get wrong silently: a graded
+#: row carries everything it was graded on, **``benchmark_return`` included**.
+#: Were it nullable, a grader that failed to fetch SPY could store a ticker's
+#: raw return as its excess one and the row would look graded -- crediting the
+#: label with beta, which Q5 rejects. NOT NULL makes that row unwritable; a
+#: missing SPY bar is ``price_unavailable`` instead.
+#:
+#: A ``MARKET`` label grades against SPY's *raw* return (Q5), so it stores
+#: SPY's return in ``benchmark_return`` **and the same value** in
+#: ``excess_return`` -- the column holds "the return graded" in every row, and
+#: a ``MARKET`` row is one where that return is the benchmark itself. Nothing
+#: here checks the two are equal on a ``MARKET`` row: the ticker lives on
+#: ``sentiment_label``, which a CHECK cannot read, and unit 6.2 tests it.
+#:
+#: ``correct`` is NULL on any graded neutral label (Q5), which a CHECK cannot
+#: see either, for the same reason. **A directional graded row with
+#: ``correct`` NULL silently drops out of every count** -- it is in neither
+#: ``graded`` nor ``neutral`` -- so unit 6.2 must give a zero excess return an
+#: explicit rule (correct, incorrect, or neutral) rather than leave it NULL.
+_LABEL_OUTCOME_SHAPE = (
+    "(skip_reason IS NOT NULL "
+    "AND reference_at IS NULL AND reference_price IS NULL "
+    "AND outcome_at IS NULL AND outcome_price IS NULL "
+    "AND benchmark_return IS NULL AND excess_return IS NULL "
+    "AND correct IS NULL) "
+    "OR (skip_reason IS NULL "
+    "AND reference_at IS NOT NULL AND reference_price IS NOT NULL "
+    "AND outcome_at IS NOT NULL AND outcome_price IS NOT NULL "
+    "AND benchmark_return IS NOT NULL AND excess_return IS NOT NULL)"
+)
+
+#: ``ck_label_outcome_scope``: ``label_outcome.scope`` is NULL **exactly** on
+#: the membership skips (:data:`LABEL_MEMBERSHIP_SKIP_REASONS` -- the label
+#: was in neither graded set) and one of :data:`LABEL_OUTCOME_SCOPES` on every
+#: other row, graded and ``price_unavailable`` alike. Any other skip reason
+#: matches neither branch and is refused. Every comparison is guarded with an
+#: explicit ``IS [NOT] NULL``, because a CHECK that evaluates to NULL passes in
+#: SQLite: ``scope IN (...)`` on a NULL scope is NULL, not false, and without
+#: the guard a graded row with no scope would be admitted.
+_LABEL_OUTCOME_SCOPE = (
+    "(skip_reason IS NOT NULL AND "
+    + _in_list("skip_reason", LABEL_MEMBERSHIP_SKIP_REASONS)
+    + " AND scope IS NULL) "
+    "OR ((skip_reason IS NULL OR skip_reason = 'price_unavailable') "
+    "AND scope IS NOT NULL AND "
+    + _in_list("scope", LABEL_OUTCOME_SCOPES)
+    + ")"
+)
+
+#: ``detail`` is a JSON object or absent. ``CASE`` rather than ``AND`` because
+#: ``json_type`` *raises* on malformed text instead of answering false, and
+#: SQLite does not promise to short-circuit ``AND``.
+_AUDIT_RUN_DETAIL = (
+    "detail IS NULL OR "
+    "(CASE WHEN json_valid(detail) THEN json_type(detail) = 'object' ELSE 0 END)"
+)
+
+#: A source is either untouched since its seed or carries the whole of the
+#: transition that moved it: when, why, and which run. Every state but
+#: ``unaudited`` is reached only by a run, so a row naming none was written by
+#: something that is not the audit -- decision 13 makes the run the only writer.
+_SOURCE_STATUS_TRANSITION = (
+    "(status = 'unaudited' AND changed_at IS NULL AND reason IS NULL "
+    "AND audit_run_id IS NULL) "
+    "OR (status <> 'unaudited' AND changed_at IS NOT NULL "
+    "AND reason IS NOT NULL AND reason <> '' AND audit_run_id IS NOT NULL)"
+)
+
+
+class AuditRun(Base):
+    """One self-audit run (decision 12): when, why, and how it ended.
+
+    Design, *Database*: ``audit_run(id, started_at, finished_at, trigger,
+    status, detail)``. ``trigger`` in :data:`AUDIT_RUN_TRIGGERS`, ``status``
+    in :data:`AUDIT_RUN_STATUSES`, both CHECK-constrained; ``finished_at`` is
+    NULL exactly while ``running``.
+
+    ``detail`` "carries the count of labels and tickers skipped by the
+    discovery cap" -- a JSON **object**, so a later key needs no migration,
+    and a failed run's error goes in the same place. The CHECK refuses
+    anything that is not one. Text rather than SQLAlchemy's ``JSON``, because
+    ``JSON`` writes Python ``None`` as the JSON text ``null`` rather than SQL
+    NULL, which the CHECK would then refuse.
+
+    **One run at a time.** ``uq_audit_run_one_running`` is a partial unique
+    index on ``status`` where ``status = 'running'``, so a second ``running``
+    row is refused. That matters because the manual trigger's once-an-hour
+    limit governs manual runs only: without the index a POST at Saturday 10:01
+    ET would start beside the 10:00 scheduled run, the two spans would
+    overlap, and a transition's ``audit_log.at`` would fall inside both (see
+    :class:`SentimentSourceStatus`'s history join). Finished rows, any number
+    of them, are outside the index.
+
+    **A stale ``running`` row blocks the next run loudly, by design.** A
+    process that dies mid-run leaves its row ``running`` with ``finished_at``
+    NULL, and the next run's insert fails the index rather than quietly
+    starting beside it. Unit 6.4's scheduler must close a stale row first --
+    set ``status = 'failed'`` and ``finished_at``, with ``detail`` saying it
+    was found abandoned -- and only then insert the new run. That closing
+    order puts the next run's ``started_at`` no earlier than the previous
+    run's ``finished_at``; 6.4 must take ``started_at >=`` the closed row's
+    ``finished_at`` (one clock reading may serve both), and the half-open
+    join interval keeps two such spans disjoint even when the two are equal.
+
+    Audit history is kept indefinitely (decision 21), so nothing that names a
+    run cascades: every FK onto this table has no ``ON DELETE`` action.
+    """
+
+    __tablename__ = "audit_run"
+    __table_args__ = (
+        Index(
+            "uq_audit_run_one_running",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+        ),
+        CheckConstraint(
+            _in_list('"trigger"', AUDIT_RUN_TRIGGERS), name="ck_audit_run_trigger"
+        ),
+        CheckConstraint(_in_list("status", AUDIT_RUN_STATUSES), name="ck_audit_run_status"),
+        CheckConstraint(
+            "(status = 'running' AND finished_at IS NULL) "
+            "OR (status <> 'running' AND finished_at IS NOT NULL)",
+            name="ck_audit_run_finished",
+        ),
+        CheckConstraint(_AUDIT_RUN_DETAIL, name="ck_audit_run_detail"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    #: ``trigger`` is an SQL keyword. SQLAlchemy quotes the column; the CHECK
+    #: text quotes it by hand.
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class LabelOutcome(Base):
+    """One label's grade in one window, or the record that it was not graded.
+
+    Design, *Database*: ``label_outcome(label_id, window, reference_at,
+    reference_price, outcome_at, outcome_price, benchmark_return,
+    excess_return, correct, skip_reason, audit_run_id)``, UNIQUE ``(label_id,
+    window)`` -- the primary key here, as ``ticker_tradeability``'s UNIQUE is.
+    ``window`` in :data:`SENTIMENT_WINDOWS`; ``skip_reason`` in
+    :data:`LABEL_SKIP_REASONS` or NULL when graded; a skipped row carries no
+    prices and a graded one carries all of them, ``benchmark_return``
+    included (``ck_label_outcome_shape``). ``correct`` is NULL for a neutral
+    label (Q5), and must not be NULL for a directional one -- see
+    ``_LABEL_OUTCOME_SHAPE`` for why that is unit 6.2's rule to enforce.
+
+    **``scope`` extends the spec's column list** (orchestrator decision, unit
+    6.3; migration 0014 amended in place). ``sentiment_accuracy`` stores
+    watch/discovery splits, and its trailing-28-day figure is recomputed every
+    run from *past* outcome rows, so each row must keep the classification the
+    run that graded it made. Recomputing it from today's watch universe would
+    let membership drift rewrite history: a ticker added to the watch list
+    would move every one of its old discovery grades into the watch split.
+    ``scope`` is in :data:`LABEL_OUTCOME_SCOPES`, NULL **exactly** when
+    ``skip_reason`` is one of :data:`LABEL_MEMBERSHIP_SKIP_REASONS`, and NOT
+    NULL otherwise -- graded rows and ``price_unavailable`` rows both
+    (``ck_label_outcome_scope``).
+
+    **Prices are** ``Money`` -- exact decimal TEXT, every SQL comparison
+    refused. **So are the two returns**, deliberately. A return is a ratio of
+    two ``Money`` prices, computed as ``Decimal`` in Python, and the rule is
+    that no float touches it on any path. The alternatives each break that:
+    ``Float`` is a float; ``Numeric`` on SQLite applies NUMERIC *affinity*
+    and stores a REAL (the leak ``corollary.db.types`` documents); an integer
+    of basis points rounds away exactly the small excess returns whose
+    *sign* is the grade. ``Money``'s refused comparisons cost nothing here:
+    ``correct`` is decided in Python from the ``Decimal`` and stored, and
+    accuracy is counted from ``correct``, never from comparing return text.
+    The width is ``Money``'s 40 characters, and the shape CHECK refuses
+    anything longer, so **the grader must quantize** every return to a fixed
+    exponent before storing it. A ``Decimal`` quotient carries the context's
+    28 significant digits, and a small one written out in plain notation --
+    sign, ``0.``, leading zeros, then 28 digits -- can exceed 40 characters.
+    Quantize the ticker's and SPY's returns, then subtract: the difference
+    keeps their exponent. Unit 6.2 tests the widest case it can produce.
+
+    The label and run FKs carry no ``ON DELETE`` action: outcomes and labels
+    are kept indefinitely (decision 21).
+    """
+
+    __tablename__ = "label_outcome"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list('"window"', SENTIMENT_WINDOWS), name="ck_label_outcome_window"
+        ),
+        CheckConstraint(
+            _in_list_or_null("skip_reason", LABEL_SKIP_REASONS),
+            name="ck_label_outcome_skip_reason",
+        ),
+        CheckConstraint(_LABEL_OUTCOME_SHAPE, name="ck_label_outcome_shape"),
+        CheckConstraint(_LABEL_OUTCOME_SCOPE, name="ck_label_outcome_scope"),
+        CheckConstraint(
+            _price_check("reference_price"), name="ck_label_outcome_reference_price"
+        ),
+        CheckConstraint(_price_check("outcome_price"), name="ck_label_outcome_outcome_price"),
+        CheckConstraint(
+            _money_shape("benchmark_return", nullable=True),
+            name="ck_label_outcome_benchmark_return",
+        ),
+        CheckConstraint(
+            _money_shape("excess_return", nullable=True),
+            name="ck_label_outcome_excess_return",
+        ),
+    )
+
+    label_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sentiment_label.id"), primary_key=True
+    )
+    #: ``window`` is an SQL keyword (window functions); quoted in the CHECK.
+    window: Mapped[str] = mapped_column(String(4), primary_key=True)
+    #: The instant the reference price is taken at: the label's publication
+    #: if inside the regular session, else the next session's open. UTC.
+    reference_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    reference_price: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: ``reference_at`` plus the window, in session minutes. UTC.
+    outcome_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    outcome_price: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: SPY's raw return over the same instants. Set on **every** graded row,
+    #: ``MARKET`` included; NULL only on a skipped one.
+    benchmark_return: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    #: The return graded: the ticker's in excess of SPY's, or -- on a
+    #: ``MARKET`` label -- SPY's own, equal to ``benchmark_return`` (Q5).
+    excess_return: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The graded set the label was in when this row was written; NULL on a
+    #: membership skip. See the class docstring for why it is stored.
+    scope: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    audit_run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("audit_run.id"), nullable=False
+    )
+
+
+class SentimentAccuracy(Base):
+    """One run's counts for one source, window, basis and scope (decisions 12, 13).
+
+    Design, *Database*: ``sentiment_accuracy(audit_run_id, source, window,
+    basis, scope, graded, correct, neutral)``, UNIQUE on everything but the
+    counts -- the primary key here. **Counts only; the percentage is derived
+    on read**, so no rounded figure is ever stored beside the numbers it came
+    from.
+
+    What the three counts mean, since the spec names them and no more:
+
+    * ``graded`` -- graded **directional** labels: the accuracy denominator,
+      and the number decision 13's 30 / 100 floors compare against.
+    * ``correct`` -- how many of those were correct; at most ``graded``.
+    * ``neutral`` -- graded neutral labels, reported beside the figure and
+      counted in neither of the others (Q5).
+
+    Skipped outcomes are in none of the three.
+    """
+
+    __tablename__ = "sentiment_accuracy"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("source", SENTIMENT_SOURCES), name="ck_sentiment_accuracy_source"
+        ),
+        CheckConstraint(
+            _in_list('"window"', SENTIMENT_WINDOWS), name="ck_sentiment_accuracy_window"
+        ),
+        CheckConstraint(_in_list("basis", ACCURACY_BASES), name="ck_sentiment_accuracy_basis"),
+        CheckConstraint(_in_list("scope", ACCURACY_SCOPES), name="ck_sentiment_accuracy_scope"),
+        CheckConstraint(_non_negative_count("graded"), name="ck_sentiment_accuracy_graded"),
+        CheckConstraint(
+            f"{_non_negative_count('correct')} AND correct <= graded",
+            name="ck_sentiment_accuracy_correct",
+        ),
+        CheckConstraint(_non_negative_count("neutral"), name="ck_sentiment_accuracy_neutral"),
+    )
+
+    audit_run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("audit_run.id"), primary_key=True
+    )
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    window: Mapped[str] = mapped_column(String(4), primary_key=True)
+    basis: Mapped[str] = mapped_column(String(16), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16), primary_key=True)
+    graded: Mapped[int] = mapped_column(Integer, nullable=False)
+    correct: Mapped[int] = mapped_column(Integer, nullable=False)
+    neutral: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class SentimentSourceStatus(Base):
+    """One source's audit state (decision 13): one row per source, ever.
+
+    Design, *Database*: ``sentiment_source_status(source, status, changed_at,
+    reason, audit_run_id)``, ``status`` in :data:`SENTIMENT_SOURCE_STATUSES`.
+    Both rows (``rules``, ``massive``) are seeded ``unaudited`` by migration
+    0014 and by ``db.seed.seed()``, which only fills an absent row.
+
+    **The weekly audit run is the only writer; there is no human route to
+    change it.** ``ck_sentiment_source_status_transition`` holds the part of
+    that a schema can: an ``unaudited`` row is the untouched seed -- no
+    ``changed_at``, ``reason`` or ``audit_run_id`` -- and any other status
+    carries all three.
+
+    **``changed_at`` is NULL on an ``unaudited`` row by design**, not
+    missing data: seeding is not a change, so there is no instant to record.
+    The API's "since when" must read that as **"never audited"** and say so --
+    never substitute the migration's date, the row's insert time, or "now".
+
+    **This row holds the latest transition only; history is not a table.**
+    ``reason`` -- the spec's "the reason carries the two accuracies" -- is the
+    latest transition's. ``audit_log`` has no reason column, so a *past*
+    transition's reason and run are recovered by a join instead:
+
+    1. its ``audit_log`` row: ``category = 'sentiment'``, ``field`` = the
+       source, ``previous_value`` / ``new_value`` = the two statuses
+       (``ck_audit_log_sentiment_row`` holds that shape);
+    2. joined to the **one** ``audit_run`` whose span contains that row's
+       ``at``. The interval is **half-open**: ``started_at < audit_log.at <=
+       finished_at``. Each run starts strictly after the previous finished --
+       ``uq_audit_run_one_running`` allows one ``running`` row, and a stale
+       one is closed (``finished_at`` set) before the next is inserted, see
+       :class:`AuditRun` -- so the spans are disjoint and at most one matches;
+    3. that run's ``sentiment_accuracy`` row that is "the figure a
+       transition acted on" (decision 13), selected by:
+
+       * ``source`` = ``audit_log.field``. That is also what tells two
+         sources' transitions in the same run apart.
+       * ``scope = 'all'`` -- decision 12: "Transitions act on ``all``";
+         ``watch`` and ``discovery`` are display splits only.
+       * ``basis`` from ``previous_value``: a ``demoted`` source was judged
+         for re-promotion on ``since_demotion``; an ``unaudited`` or
+         ``active`` one was judged for demotion on ``trailing_28d``.
+       * one row per ``window``, both kept.
+
+       A source transitions **at most once per run**, so ``(run, source)``
+       names at most one ``audit_log`` row and the selection is unambiguous.
+
+    Unit 6.4 (the runner) must meet three requirements for that join to hold:
+
+    * it writes the ``audit_log`` row **inside the run's span** -- strictly
+      after ``started_at``, and no later than ``finished_at``. So
+      ``audit_log.at`` is the clock reading that sets ``finished_at`` in the
+      closing transaction, **never** the transition's ``changed_at`` when the
+      run took that from the same reading as ``started_at``: equal to
+      ``started_at``, ``at`` falls outside the half-open span and the join
+      finds no run, with no error (``audit.AuditLogFields``). ``changed_at``
+      itself stays the run instant -- only ``since_demotion`` reads it;
+    * it commits the ``audit_log`` rows and the ``sentiment_source_status``
+      updates **in the same transaction** that sets the run's terminal
+      ``status`` and ``finished_at``. A run that crashes after committing a
+      transition but before closing would otherwise leave transitions whose
+      run is still ``running`` with no ``finished_at``, which the join's
+      interval cannot contain -- the join would find zero runs. In one
+      transaction, either the run closed with its transitions or neither
+      happened;
+    * it never runs beside another run, which the unique index enforces.
+    """
+
+    __tablename__ = "sentiment_source_status"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("source", SENTIMENT_SOURCES), name="ck_sentiment_source_status_source"
+        ),
+        CheckConstraint(
+            _in_list("status", SENTIMENT_SOURCE_STATUSES),
+            name="ck_sentiment_source_status_status",
+        ),
+        CheckConstraint(
+            _SOURCE_STATUS_TRANSITION, name="ck_sentiment_source_status_transition"
+        ),
+    )
+
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: When the last transition happened, UTC; NULL while ``unaudited``.
+    changed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    #: The two accuracies and their sample sizes behind the last transition.
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audit_run_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("audit_run.id"), nullable=True
+    )

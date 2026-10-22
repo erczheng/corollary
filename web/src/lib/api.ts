@@ -63,6 +63,8 @@ import type {
   Position,
   RiskLimit,
   RiskLimitKey,
+  SentimentAuditStarted,
+  SentimentAuditStatus,
   StockQuote,
   UnderlyingQuote,
   WatchList,
@@ -138,13 +140,25 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly url: string
+  /** The response's `Retry-After`, in whole seconds — `null` when it carried
+   * none, or carried something other than delay-seconds. The server sends it
+   * on a 429 (the manual sentiment audit's hourly limit); a caller that wants
+   * to say *when* it may try again reads it here rather than guessing. */
+  readonly retryAfterSeconds: number | null
 
-  constructor(params: { status: number; code: string; message: string; url: string }) {
+  constructor(params: {
+    status: number
+    code: string
+    message: string
+    url: string
+    retryAfterSeconds?: number | null
+  }) {
     super(params.message)
     this.name = 'ApiError'
     this.status = params.status
     this.code = params.code
     this.url = params.url
+    this.retryAfterSeconds = params.retryAfterSeconds ?? null
   }
 }
 
@@ -191,6 +205,16 @@ export function errorBodyOf(body: unknown): ApiErrorBody | null {
   return { code: stated.code, message: stated.message }
 }
 
+/** `Retry-After` as delay-seconds, or null. The HTTP-date form is not
+ * parsed: this server never sends it, and a misread date would state a wrong
+ * time with confidence. Optional chaining because a test stub — or a proxy's
+ * page — may carry no `headers` at all. */
+function retryAfterOf(response: Response): number | null {
+  const raw = response.headers?.get?.('Retry-After') ?? null
+  if (raw === null || !/^\s*\d+\s*$/.test(raw)) return null
+  return Number(raw.trim())
+}
+
 async function errorFor(response: Response, url: string): Promise<ApiError> {
   let code = HTTP_ERROR
   let message = `The engine answered ${response.status} for ${url}.`
@@ -204,7 +228,13 @@ async function errorFor(response: Response, url: string): Promise<ApiError> {
     // Not the envelope — a proxy page, or nothing at all. The status is
     // still true and is the whole of what we know.
   }
-  return new ApiError({ status: response.status, code, message, url })
+  return new ApiError({
+    status: response.status,
+    code,
+    message,
+    url,
+    retryAfterSeconds: retryAfterOf(response),
+  })
 }
 
 /* -------------------------------------------------------------------------
@@ -1289,6 +1319,36 @@ export function fetchAuditLog(
 ): Promise<Page<AuditLogEntry>> {
   return request<Page<AuditLogEntry>>('/settings/audit', {
     params: pageParams(params),
+    ...options,
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * The sentiment self-audit (Phase 3 step 6)
+ * ---------------------------------------------------------------------- */
+
+/** `POST /api/settings/sentiment/audit` refusal codes. A 503 and a 500 are
+ * told apart by `status`, not by code, and their `message` is the server's
+ * fixed text — which is what the page shows. */
+export const SENTIMENT_AUDIT_RATE_LIMITED = 'sentiment_audit_rate_limited'
+export const SENTIMENT_AUDIT_RUNNING = 'sentiment_audit_running'
+export const SENTIMENT_AUDIT_UNAVAILABLE = 'sentiment_audit_unavailable'
+
+/** Each source's audit status, graded counts per window and eligibility.
+ * **Counts only** — no percentage crosses the wire — and the status is the
+ * server's: nothing here or in `settings.ts` recomputes it. */
+export function fetchSentimentAudit(options: RequestOptions = {}): Promise<SentimentAuditStatus> {
+  return request<SentimentAuditStatus>('/settings/sentiment', options)
+}
+
+/** Start a manual audit run. **202 once the run has opened its row**, never
+ * a wait for the run itself; read the outcome from `lastRun`. The server
+ * enforces the hourly limit (429, `Retry-After` on the `ApiError`). There is
+ * deliberately no re-promote or reinstate call: the audit is the only writer
+ * of a source's status (Q6). */
+export function startSentimentAudit(options: RequestOptions = {}): Promise<SentimentAuditStarted> {
+  return request<SentimentAuditStarted>('/settings/sentiment/audit', {
+    method: 'POST',
     ...options,
   })
 }

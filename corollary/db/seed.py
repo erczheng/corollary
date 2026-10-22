@@ -27,12 +27,14 @@ from corollary.db.models import (
     EngineState,
     NotificationRoute,
     RiskLimit,
+    SentimentSourceStatus,
 )
 
 __all__ = [
     "DATA_FEED_DEFAULTS",
     "NOTIFICATION_ROUTE_DEFAULTS",
     "RISK_LIMIT_DEFAULTS",
+    "SENTIMENT_SOURCE_STATUS_DEFAULTS",
     "risk_limit_value",
     "risk_limits",
     "seed",
@@ -113,7 +115,27 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     # defaults -- bell off, Discord on -- a parent-session assumption.
     ("spdr_seed_amended", "bell", False),
     ("spdr_seed_amended", "discord", True),
+    # The self-audit's transitions (Phase 3 decisions 13 and 14, migration
+    # 0014). Bell on *and* Discord on for both: each changes what Phase 4's
+    # scanner may read, and a withdrawal heard on two channels with its
+    # restoration heard on one is an asymmetry nobody would design.
+    # ``sentiment_demoted`` is a warning, ``sentiment_repromoted`` info.
+    ("sentiment_demoted", "bell", True),
+    ("sentiment_demoted", "discord", True),
+    ("sentiment_repromoted", "bell", True),
+    ("sentiment_repromoted", "discord", True),
+    # A manual sentiment audit run started (step 6, migration 0014): an
+    # operator action on decision 20's config-event terms -- ``info``, bell
+    # off, Discord on.
+    ("sentiment_audit_requested", "bell", False),
+    ("sentiment_audit_requested", "discord", True),
 )
+
+#: Decision 13: every sentiment source starts ``unaudited``. Seeded here as
+#: well as by migration 0014 so a ``create_all()`` database matches a migrated
+#: one. ``seed()`` only ever inserts an *absent* row, so it can never undo a
+#: transition -- the weekly audit run stays the only writer of a status.
+SENTIMENT_SOURCE_STATUS_DEFAULTS: tuple[str, ...] = ("rules", "massive")
 
 
 def seed(session: Session) -> int:
@@ -147,6 +169,12 @@ def seed(session: Session) -> int:
             session.add(
                 NotificationRoute(event=event, channel=channel, enabled=enabled)
             )
+            inserted += 1
+
+    existing_sources = set(session.scalars(select(SentimentSourceStatus.source)).all())
+    for source in SENTIMENT_SOURCE_STATUS_DEFAULTS:
+        if source not in existing_sources:
+            session.add(SentimentSourceStatus(source=source, status="unaudited"))
             inserted += 1
 
     if session.get(EngineState, ENGINE_STATE_ID) is None:

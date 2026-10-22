@@ -19,9 +19,12 @@ from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.providers.interface import AssetDirectory, EquityAsset
 from corollary.data.seeds import SPDR_SECTORS, SpdrHolding, SpdrSeed
 from corollary.db.models import (
+    AuditRun,
     NewsArticle,
     NewsArticleTicker,
+    SentimentAccuracy,
     SentimentLabelRow,
+    SentimentSourceStatus,
     TickerTradeability,
     WatchSymbol,
 )
@@ -207,3 +210,93 @@ def add_verdict(
             )
         )
         session.commit()
+
+
+# --------------------------------------------------------------------------
+# The sentiment self-audit's tables (decisions 12-13)
+# --------------------------------------------------------------------------
+
+
+def add_audit_run(
+    engine: Engine,
+    *,
+    started_at: datetime,
+    finished_at: datetime | None,
+    trigger: str = "scheduled",
+    status: str = "succeeded",
+    detail: str | None = None,
+) -> int:
+    """One ``audit_run`` row, as a run would have left it. Returns its id."""
+    with Session(engine) as session:
+        run = AuditRun(
+            started_at=started_at,
+            finished_at=finished_at,
+            trigger=trigger,
+            status=status,
+            detail=detail,
+        )
+        session.add(run)
+        session.commit()
+        return run.id
+
+
+def add_accuracy(
+    engine: Engine,
+    run_id: int,
+    *,
+    source: str,
+    window: str,
+    basis: str = "trailing_28d",
+    watch: tuple[int, int, int] = (0, 0, 0),
+    discovery: tuple[int, int, int] = (0, 0, 0),
+) -> None:
+    """One window's three ``sentiment_accuracy`` rows: ``all`` is the sum of
+    the ``(graded, correct, neutral)`` splits, as ``compute_accuracy`` writes it."""
+    combined = tuple(w + d for w, d in zip(watch, discovery, strict=True))
+    with Session(engine) as session:
+        for scope, (graded, correct, neutral) in (
+            ("all", combined),
+            ("watch", watch),
+            ("discovery", discovery),
+        ):
+            session.add(
+                SentimentAccuracy(
+                    audit_run_id=run_id,
+                    source=source,
+                    window=window,
+                    basis=basis,
+                    scope=scope,
+                    graded=graded,
+                    correct=correct,
+                    neutral=neutral,
+                )
+            )
+        session.commit()
+
+
+def set_source_status(
+    engine: Engine,
+    source: str,
+    status: str,
+    *,
+    at: datetime,
+    run_id: int | None = None,
+    reason: str = "test transition",
+) -> int:
+    """Move one ``sentiment_source_status`` row as a run would; returns the run id.
+
+    The schema refuses a non-``unaudited`` row that names no run, so one is
+    made (succeeded, starting and finishing at ``at``) when ``run_id`` is not
+    given.
+    """
+    if run_id is None:
+        run_id = add_audit_run(engine, started_at=at, finished_at=at)
+    with Session(engine) as session:
+        row = session.get(SentimentSourceStatus, source)
+        assert row is not None, f"no seeded sentiment_source_status row for {source}"
+        row.status = status
+        row.changed_at = at
+        row.reason = reason
+        row.audit_run_id = run_id
+        session.commit()
+    return run_id

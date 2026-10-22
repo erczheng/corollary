@@ -154,6 +154,18 @@ from corollary.data.macro.risk_free import (
     refresh_dgs3mo,
 )
 from corollary.data.news.assets import AssetDirectoryHolder, AssetSource
+from corollary.data.news.audit import TransitionNotice
+from corollary.data.news.audit_runner import (
+    AuditAlreadyRunning,
+    AuditRunResult,
+    AuditTrigger,
+    MinuteBarSource,
+    NoticeSink,
+    OnOpened,
+    SentimentAuditDeps,
+    WatchUniverseUnavailable,
+    run_sentiment_audit,
+)
 from corollary.data.news.pollers import (
     AlpacaNewsPoller,
     AlpacaNewsSource,
@@ -209,6 +221,10 @@ __all__ = [
     "SPDR_HOLDINGS_AT",
     "SPDR_HOLDINGS_CATCH_UP_AFTER",
     "SPDR_HOLDINGS_DAYS",
+    "SENTIMENT_AUDIT_AT",
+    "SENTIMENT_AUDIT_DAYS",
+    "SENTIMENT_AUDIT_JOB",
+    "SentimentAuditUnavailable",
     "TRADEABILITY_EVERY",
     "AlpacaContextSource",
     "AtTime",
@@ -236,6 +252,8 @@ __all__ = [
     "every_day",
     "no_scheduler",
     "on_weekdays",
+    "run_sentiment_audit_now",
+    "sentiment_audit_deps",
     "trading_days",
 ]
 
@@ -1079,13 +1097,16 @@ class Scheduler:
 # --------------------------------------------------------------------------
 
 
-class AlpacaContextSource(AlpacaNewsSource, AssetSource, TradeabilityInputs, Protocol):
+class AlpacaContextSource(
+    AlpacaNewsSource, AssetSource, TradeabilityInputs, MinuteBarSource, Protocol
+):
     """Alpaca as the context jobs use it. ``AlpacaProvider`` satisfies it.
 
-    Benzinga news (``data.``), the day's optionable asset list (``paper-api.``)
-    and the tradeability inputs (daily bars, the standard-root lookup). Market
-    and reference data only -- **not** the broker: nothing here reads an
-    account, and nothing here can place an order.
+    Benzinga news (``data.``), the day's optionable asset list (``paper-api.``),
+    the tradeability inputs (daily bars, the standard-root lookup) and the
+    sentiment audit's historical minute bars (``stock_bars``). Market and
+    reference data only -- **not** the broker: nothing here reads an account,
+    and nothing here can place an order.
     """
 
 
@@ -2036,6 +2057,209 @@ def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> Sch
     )
 
 
+#: The sentiment self-audit (decision 12's *Schedule*): Saturday 10:00 ET,
+#: whether or not Friday was a holiday -- the week is its clock. Every window
+#: it grades ended more than fifteen minutes before, so SIP historical bars
+#: are free on Basic.
+SENTIMENT_AUDIT_AT = time(10, 0)
+SENTIMENT_AUDIT_DAYS: DayRule = on_weekdays(5)
+#: The Saturday run's job name -- the one copy. ``GET /api/settings/sentiment``
+#: imports it to serve this job's next slot; the scheduler never imports
+#: ``corollary.api``, so the dependency runs that way only.
+SENTIMENT_AUDIT_JOB: Final = "sentiment_audit"
+
+_SENTIMENT_AUDIT_NO_BARS = (
+    "no market-data provider for the audit's SIP minute bars; nothing graded, "
+    "no source's status changes"
+)
+
+
+#: Why a degraded watch universe stops a run (fix B, finding 3). Fixed text:
+#: the build's own error strings carry exception messages and are not
+#: repeated here; the universe build has already logged them.
+_SENTIMENT_AUDIT_POSITIONS_NEVER_READ = (
+    "the paper positions have not been read since start-up, so the watch "
+    "universe has no position underlyings yet; a label on a held name would "
+    "be graded as off-watch permanently. Nothing graded; the next run retries"
+)
+#: The paper positions refresher's interval -- ``POSITION_UNDERLYINGS_TTL`` in
+#: ``corollary.api.deps``, **mirrored** rather than imported: no module that
+#: contributes a context job may import ``corollary.api`` (this module's
+#: docstring), and ``tests/engine/test_scheduler_audit.py`` pins the two equal.
+_SENTIMENT_AUDIT_POSITIONS_REFRESH: Final = timedelta(minutes=5)
+#: Older than this, the holder has missed at least two refreshes in a row and
+#: its positions are not this run's: the audit does not run (follow-up F3).
+#: At exactly this age it still runs.
+# Three intervals, not two: ``as_of`` is stamped when a read starts and the
+# loop reads then sleeps, so a healthy holder runs about one interval plus
+# two read latencies old, and one failed read just before Saturday 10:00
+# would otherwise cost the week's audit.
+_SENTIMENT_AUDIT_POSITIONS_STALE_AFTER: Final = 3 * _SENTIMENT_AUDIT_POSITIONS_REFRESH
+_SENTIMENT_AUDIT_POSITIONS_STALE = (
+    "the paper positions were last read more than three refresh intervals ago, "
+    "so the watch universe's position underlyings may no longer be held; a "
+    "label would be classified against them permanently. Nothing graded; "
+    "the next run retries"
+)
+_SENTIMENT_AUDIT_POSITIONS_FAILED = (
+    "the position underlyings could not be read this cycle, so the watch "
+    "universe is missing them; nothing graded, the next run retries"
+)
+_SENTIMENT_AUDIT_SEED_MISSING = (
+    "the SPDR seed has never been built, so the watch universe has no "
+    "sector leaders; nothing graded, the next run retries"
+)
+_SENTIMENT_AUDIT_SEED_FAILED = (
+    "the SPDR seed did not parse, so the watch universe has no sector "
+    "leaders; nothing graded, the next run retries"
+)
+
+
+class SentimentAuditUnavailable(RuntimeError):
+    """The audit cannot run here: no market-data provider was configured, or
+    the watch universe is degraded (the message says which)."""
+
+
+def _audit_notice_sink(notices: ContextNotices) -> NoticeSink:
+    """A transition's notice onto the context outbox. ``put`` never blocks or raises."""
+
+    def emit(notice: TransitionNotice, at: datetime, correlation_id: str) -> None:
+        notices.put(
+            ContextNotice(
+                event=notice.event.value,
+                severity=notice.severity,
+                title=notice.title,
+                body=notice.body,
+                at=at,
+                correlation_id=correlation_id,
+            )
+        )
+
+    return emit
+
+
+def sentiment_audit_deps(
+    services: ContextServices, clock: UtcClock = _utc_now
+) -> SentimentAuditDeps | None:
+    """What one audit run reads and writes, built from the services -- or ``None``.
+
+    ``None`` when no Alpaca provider is configured. The watch universe is
+    :func:`build_watch_universe` over the same markets, positions, sessions
+    and seed every news job reads, so the audit classifies a label against
+    the universe the rest of the app shows. Notices go to
+    :attr:`ContextServices.notices`, which the lifespan drains into the one
+    notification path: emission never awaits Discord (decision 14).
+    """
+    if services.alpaca is None:
+        return None
+    seed_loader = services.seed_loader
+    assert seed_loader is not None  # filled by ContextServices.__post_init__
+
+    positions = services.position_underlyings
+
+    async def watch_universe() -> frozenset[str]:
+        # A degraded universe would classify labels permanently -- a held
+        # name's label written off-watch, a leader's graded as discovery --
+        # so it stops the run before the runner writes anything (fix B,
+        # finding 3). ``as_of`` exists only on production's holder view; any
+        # other source is taken at its word, and its raise is
+        # ``positions_error`` below.
+        if isinstance(positions, HeldPositionUnderlyings):
+            as_of = positions.holder.as_of
+            if as_of is None:
+                raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_NEVER_READ)
+            # Stale is degraded too (follow-up F3): a refresher failing since
+            # Tuesday leaves Tuesday's positions, read here as Saturday's.
+            if _require_utc(clock()) - as_of > _SENTIMENT_AUDIT_POSITIONS_STALE_AFTER:
+                raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_STALE)
+        built = await build_watch_universe(
+            markets=services.markets,
+            position_underlyings=positions,
+            session_factory=services.session_factory,
+            seed_loader=seed_loader,
+        )
+        if built.positions_error is not None:
+            raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_POSITIONS_FAILED)
+        if built.seed_error is not None:
+            raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_SEED_FAILED)
+        if built.seed_missing:
+            # Never built is the same degradation as malformed: no leaders,
+            # so every leader's label would be classified off-watch for good.
+            raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_SEED_MISSING)
+        return frozenset(built.universe.symbols)
+
+    return SentimentAuditDeps(
+        session_factory=services.session_factory,
+        bars=services.alpaca,
+        watch_universe=watch_universe,
+        emit=_audit_notice_sink(services.notices),
+        clock=clock,
+    )
+
+
+async def run_sentiment_audit_now(
+    services: ContextServices,
+    *,
+    trigger: AuditTrigger,
+    clock: UtcClock = _utc_now,
+    on_opened: OnOpened | None = None,
+) -> AuditRunResult:
+    """One audit run on demand -- what the manual ``POST`` (unit 6.4b) calls.
+
+    The once-an-hour limit on the manual trigger is the route's, not this.
+    Raises :class:`SentimentAuditUnavailable` with no provider (checked
+    first, before the runner's lock) or a degraded watch universe -- no run
+    row is written for either -- then
+    :class:`~corollary.data.news.audit_runner.AuditAlreadyRunning` while
+    another run is live, and re-raises a run's own failure after recording
+    it ``failed``. ``on_opened`` is the runner's: called with the run id once
+    its ``running`` row is committed, never for a run refused above.
+    """
+    deps = sentiment_audit_deps(services, clock)
+    if deps is None:
+        raise SentimentAuditUnavailable(_SENTIMENT_AUDIT_NO_BARS)
+    try:
+        return await run_sentiment_audit(deps, trigger=trigger, on_opened=on_opened)
+    except WatchUniverseUnavailable as exc:
+        raise SentimentAuditUnavailable(str(exc)) from exc
+
+
+async def _sentiment_audit(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+    """The Saturday ``sentiment_audit`` body."""
+    deps = sentiment_audit_deps(services, clock)
+    if deps is None:
+        return JobSkipped(_SENTIMENT_AUDIT_NO_BARS)
+    try:
+        await run_sentiment_audit(deps, trigger="scheduled")
+    except AuditAlreadyRunning:
+        return JobSkipped(
+            "another sentiment audit run is in progress (a manual one, or another "
+            "process's); it grades the same labels"
+        )
+    except WatchUniverseUnavailable as exc:
+        return JobSkipped(str(exc))
+    return None
+
+
+def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
+    return ScheduledJob(
+        name=SENTIMENT_AUDIT_JOB,
+        schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
+        run=functools.partial(_sentiment_audit, services, clock),
+        rule=(
+            "the sentiment self-audit (decisions 12-13): grades matured labels on "
+            "SIP minute bars, stores each source's accuracy and applies the "
+            "52/66 transitions; when this fails the run is recorded failed, no "
+            "source's status changes, and every ungraded window is retried next run"
+        ),
+        inputs={
+            "host": ALPACA_DATA_HOST,
+            "endpoint": "/v2/stocks/bars",
+            "timeframe": "1Min",
+        },
+    )
+
+
 def context_jobs(
     services: ContextServices,
     *,
@@ -2079,6 +2303,7 @@ def context_jobs(
         ),
         *_news_jobs(services, clock),
         _spdr_job(services, clock, sleep),
+        _sentiment_audit_job(services, clock),
     ]
 
 

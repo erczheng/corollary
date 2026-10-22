@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import App from '../App'
 import { queryClient } from '../lib/queryClient'
 import { useUIStore } from '../lib/store'
-import { SENTIMENT_ACCURACY } from '../lib/mockData'
+import { SENTIMENT_AUDIT_STATES } from '../lib/mockData'
 import type {
   AccountResponse,
   ApiKeyPresence,
@@ -13,6 +13,7 @@ import type {
   NotificationRoute,
   Page,
   RiskLimit,
+  SentimentAuditStatus,
 } from '../lib/types'
 
 /** Settings reads seven endpoints and writes three of them. Every payload
@@ -200,10 +201,15 @@ const ACCOUNT = {
   missingLiveCredentialEnvVars: ['ALPACA_LIVE_API_KEY', 'ALPACA_LIVE_SECRET_KEY'],
 } as unknown as AccountResponse
 
-function jsonResponse(status: number, body: unknown): Response {
+function jsonResponse(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: { get: (name: string) => headers[name] ?? null },
     json: () => Promise.resolve(body),
   } as unknown as Response
 }
@@ -230,6 +236,8 @@ interface Overrides {
   putLimits?: Response
   putRoutes?: Response
   putFeeds?: Response
+  sentiment?: Response
+  postAudit?: Response
 }
 
 /** A very small stand-in for the settings half of the engine.
@@ -244,6 +252,9 @@ let served: {
   feeds: DataFeed[]
   routes: NotificationRoute[]
   audit: AuditLogEntry[]
+  /** What `GET /settings/sentiment` answers. Mutable so a test can close a
+   * run between reads, the way the server would. */
+  sentiment: SentimentAuditStatus
 }
 
 let writes: { url: string; body: unknown }[] = []
@@ -267,6 +278,21 @@ function stubFetch(overrides: Overrides = {}) {
     const url = String(input)
     const method = init?.method ?? 'GET'
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null
+
+    // Before every GET branch: `/settings/sentiment/audit` would otherwise
+    // be answered as a read of `/settings/sentiment`.
+    if (method === 'POST' && url.includes('/settings/sentiment/audit')) {
+      writes.push({ url, body })
+      return Promise.resolve(
+        overrides.postAudit ??
+          jsonResponse(202, {
+            status: 'started',
+            trigger: 'manual',
+            runId: 8,
+            requestedAt: '2026-10-14T15:20:00Z',
+          }),
+      )
+    }
 
     if (method === 'PUT') {
       writes.push({ url, body })
@@ -328,6 +354,11 @@ function stubFetch(overrides: Overrides = {}) {
     if (url.includes('/settings/routes')) {
       return Promise.resolve(overrides.routes ?? jsonResponse(200, served.routes))
     }
+    if (url.includes('/settings/sentiment')) {
+      return Promise.resolve(
+        overrides.sentiment ?? jsonResponse(200, served.sentiment),
+      )
+    }
     if (url.includes('/settings/keys')) {
       return Promise.resolve(overrides.keys ?? jsonResponse(200, KEYS))
     }
@@ -362,6 +393,7 @@ beforeEach(() => {
     feeds: FEEDS.map((f) => ({ ...f })),
     routes: ROUTES.map((r) => ({ ...r })),
     audit: [],
+    sentiment: SENTIMENT_AUDIT_STATES.populated,
   }
 })
 
@@ -866,41 +898,356 @@ describe('appearance', () => {
 })
 
 describe('sentiment accuracy', () => {
-  it('lists every source against the floor', () => {
+  /** The readout has finished loading once its table is up. */
+  async function sentimentTable(): Promise<HTMLElement> {
+    // Not findByRole('table'): the loading skeleton is a table too.
+    const header = await within(section('Sentiment accuracy')).findByRole('rowheader', {
+      name: 'Corollary rules',
+    })
+    return header.closest('table') as HTMLElement
+  }
+
+  function row(table: HTMLElement, source: string): HTMLElement {
+    return within(table).getByRole('rowheader', { name: source }).closest('tr') as HTMLElement
+  }
+
+  it('shows two rows, rules and Massive, with n beside each figure', async () => {
     stubFetch()
     render(<App />)
-    const table = within(section('Sentiment accuracy')).getByRole('table')
+    const table = await sentimentTable()
 
-    for (const row of SENTIMENT_ACCURACY) {
-      expect(within(table).getByText(row.source)).toBeInTheDocument()
-    }
+    // Header row plus exactly two sources — the LLM and provider rows are gone.
+    expect(within(table).getAllByRole('row')).toHaveLength(3)
+    const rules = row(table, 'Corollary rules')
+    // 131 of 212 = 61.79…% → truncated to 61.7, never rounded up.
+    expect(rules.textContent).toContain('61.7%')
+    expect(rules.textContent).toContain('n 212')
+    expect(rules.textContent).toContain('trailing 28 days')
+    expect(row(table, 'Massive')).toBeInTheDocument()
   })
 
-  /** PRD.md §9: below 52% the source is demoted from a scanner input to
-   * display-only. Without a sub-52% fixture this state would be unreachable
-   * and therefore invisible. */
-  it('names the demoted source and says what demotion means', () => {
-    stubFetch()
+  it('renders the unaudited state as never audited, with zeros as a sample fact', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.unaudited) })
     render(<App />)
-    const banner = within(section('Sentiment accuracy')).getByRole('status')
+    const table = await sentimentTable()
+    const panel = section('Sentiment accuracy')
 
-    expect(banner.textContent).toContain('StockTwits')
-    expect(banner.textContent).toContain('display-only')
-    expect(banner.textContent).toMatch(/scanner no longer reads it/)
+    expect(within(row(table, 'Corollary rules')).getByText('Never audited.')).toBeInTheDocument()
+    expect(within(row(table, 'Massive')).getByText('Never audited.')).toBeInTheDocument()
+    expect(within(table).queryByText(/Graded, but not yet/)).not.toBeInTheDocument()
+    expect(within(table).getAllByText('insufficient sample — 0 of 30')).toHaveLength(4)
+    expect(within(panel).getByText(/No audit has completed yet/)).toBeInTheDocument()
+    expect(within(panel).getByText('No run has ever started.')).toBeInTheDocument()
+    expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
   })
 
-  /** The one panel here that is still a fixture, and the only one on the page.
-   * Unmarked, a table of invented percentages reads as measured now that
-   * every panel beside it is the engine's own configuration. */
-  it('marks itself as sample data, in the same words as the scripted chat', () => {
+  it('renders an active source with since-when in New York time', async () => {
     stubFetch()
     render(<App />)
-    const sentiment = section('Sentiment accuracy')
+    const rules = row(await sentimentTable(), 'Corollary rules')
 
-    expect(within(sentiment).getByText('Sample data — Phase 1')).toBeInTheDocument()
+    expect(within(rules).getByText('Active')).toBeInTheDocument()
+    // 2026-10-03T14:05:12Z is 10:05 AM in New York (EDT).
+    expect(rules.textContent).toMatch(/Active since Oct 3,? 10:05\sAM/)
+  })
+
+  it('renders a demoted source with its re-promotion progress, and the banner from the server', async () => {
+    stubFetch()
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+    const panel = section('Sentiment accuracy')
+
+    expect(within(massive).getByText('Demoted')).toBeInTheDocument()
     expect(
-      within(sentiment).getByText(/not the engine’s own configuration/),
+      within(massive).getByText('since demotion: 41 of 100 in the 1h window'),
     ).toBeInTheDocument()
+    expect(
+      within(massive).getByText('since demotion: 37 of 100 in the 1d window'),
+    ).toBeInTheDocument()
+    // Judged on since_demotion: 41 graded, below the 100 floor.
+    expect(within(massive).getByText('insufficient sample — 41 of 100')).toBeInTheDocument()
+
+    const banner = within(panel).getByRole('status')
+    expect(banner.textContent).toContain('Massive')
+    expect(banner.textContent).toContain('display-only')
+    expect(banner.textContent).not.toContain('Corollary rules')
+  })
+
+  /** Below the floor a percentage is not yet a measurement. The state is a
+   * sample-size fact — `on-surface-variant`, never `caution`. */
+  it('renders an insufficient sample as a fact, not a caution', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.insufficientSample) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const short = within(rules).getByText('insufficient sample — 18 of 30')
+    expect(short.className).toContain('text-on-surface-variant')
+    expect(short.className).not.toMatch(/caution|error|bearish|bullish/)
+    expect(within(rules).getByText('insufficient sample — 12 of 30')).toBeInTheDocument()
+    expect(rules.textContent).not.toContain('%')
+  })
+
+  /** A run graded it (`asOfRunId` is set) but it is short of the floor, so
+   * no status change was written and `neverAudited` is still true. "Never
+   * audited." beside figures a run produced would contradict itself. */
+  it('says a graded-but-short source was graded, not that it was never audited', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.insufficientSample) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    expect(
+      within(rules).getByText('Graded, but not yet on enough labels to be given a status.'),
+    ).toBeInTheDocument()
+    expect(within(rules).queryByText('Never audited.')).not.toBeInTheDocument()
+  })
+
+  /** The cell refuses a percentage below the floor; one click down, the
+   * split must not state one either — watch alone is 9 of 13 = 69.2%. */
+  it('expands a short cell into counts only, with no percentage', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.insufficientSample) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const toggle = within(rules).getByRole('button', {
+      name: /^insufficient sample — 18 of 30\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+    })
+    fireEvent.click(toggle)
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(rules.textContent).toContain('n 13')
+    expect(rules.textContent).toContain('n 5')
+    expect(rules.textContent).not.toContain('69.2')
+    expect(rules.textContent).not.toContain('%')
+  })
+
+  it('says a status row is missing, never that the source was never audited', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.statusMissing) })
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+    const panel = section('Sentiment accuracy')
+
+    expect(within(massive).getByText('Status missing')).toBeInTheDocument()
+    expect(within(massive).queryByText('Never audited.')).not.toBeInTheDocument()
+    expect(within(panel).getByRole('alert').textContent).toMatch(/no stored status row/)
+    // A missing row is not a demotion: no banner.
+    expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('states both thresholds and the dead band in words', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+    const text = section('Sentiment accuracy').textContent ?? ''
+
+    expect(text).toMatch(/falls below\s*52%/)
+    expect(text).toMatch(/reach\s*66%\s*or better/)
+    expect(text).toMatch(
+      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels each over the trailing 28 days/,
+    )
+    expect(text).toMatch(/Between\s*52%\s*and\s*66%\s*an active or demoted source stays where it is/)
+    expect(text).not.toMatch(/Between\s*52%\s*and\s*66%\s*a source stays/)
+  })
+
+  /** N3: every figure in the rule paragraph is set as data, including the
+   * dead band's two. */
+  it('sets the dead band figures in the data face', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+    const paragraph = within(section('Sentiment accuracy')).getByText(/Between/, {
+      selector: 'p',
+    })
+    const figures = Array.from(paragraph.querySelectorAll('span.text-data-sm')).map(
+      (el) => el.textContent,
+    )
+    expect(figures).toEqual(['52%', '30', '52%', '30', '66%', '100', '52%', '66%'])
+  })
+
+  it('expands a cell into its watch and discovery split, labelled display only', async () => {
+    stubFetch()
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    expect(within(rules).queryByText(/display only/)).not.toBeInTheDocument()
+    // The figure is the name (WCAG 2.5.3); the action follows it, hidden.
+    const toggle = within(rules).getByRole('button', {
+      name: /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+    })
+    expect(toggle).not.toHaveAttribute('aria-label')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(toggle).toHaveAccessibleName(
+      /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
+    )
+    expect(
+      within(rules).getByText('display only — transitions act on the combined figure'),
+    ).toBeInTheDocument()
+    // Watch: 94 of 150 = 62.6%; discovery: 37 of 62 = 59.6%.
+    expect(rules.textContent).toContain('62.6%')
+    expect(rules.textContent).toContain('n 150')
+    expect(rules.textContent).toContain('59.6%')
+    expect(rules.textContent).toContain('n 62')
+  })
+
+  it('shows the last and next run in New York time', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+    const text = section('Sentiment accuracy').textContent ?? ''
+
+    // Started 14:00Z = 10:00 AM EDT; next run 2026-10-17T14:00Z = Sat 10:00 AM.
+    expect(text).toMatch(/Last run\s*Oct 10,? 10:00\sAM \(scheduled, succeeded/)
+    expect(text).toMatch(/Next run\s*Oct 17,? 10:00\sAM \(scheduled\)/)
+  })
+
+  /** Q6: the audit is the only writer of a source's status. */
+  it('offers no re-promote or reinstate control anywhere on the page', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+
+    for (const button of screen.getAllByRole('button')) {
+      expect(button.textContent ?? '').not.toMatch(/re-?promot|reinstat|restore|undemot/i)
+      expect(button.getAttribute('aria-label') ?? '').not.toMatch(/re-?promot|reinstat/i)
+    }
+    const panel = section('Sentiment accuracy')
+    expect(within(panel).getAllByRole('button').map((b) => b.textContent)).toContain(
+      'Run audit now',
+    )
+  })
+
+  /** Phase 3 step 6: the readout is the engine's now, and says so by carrying
+   * no marker at all. */
+  it('carries no fixture marker', async () => {
+    stubFetch()
+    render(<App />)
+    await sentimentTable()
+
+    expect(screen.queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
+    expect(screen.queryByText(/not the engine’s own configuration/)).not.toBeInTheDocument()
+  })
+
+  it('designs its loading and failed states', async () => {
+    stubFetch({ sentiment: jsonResponse(500, { error: { code: 'internal', message: 'boom' } }) })
+    render(<App />)
+
+    expect(
+      within(section('Sentiment accuracy')).getByText('Loading the sentiment audit'),
+    ).toBeInTheDocument()
+    // A 5xx is retried once (`shouldRetry`) before it renders.
+    expect(
+      await within(section('Sentiment accuracy')).findByRole('alert', {}, { timeout: 4000 }),
+    ).toHaveTextContent('boom')
+  })
+})
+
+describe('running the audit by hand', () => {
+  async function run(overrides: Overrides = {}) {
+    const fetchMock = stubFetch(overrides)
+    render(<App />)
+    const panel = section('Sentiment accuracy')
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Run audit now' }))
+    return { panel, fetchMock }
+  }
+
+  it('says the run started on a 202, and re-reads the readout', async () => {
+    const { panel, fetchMock } = await run()
+
+    expect(await within(panel).findByText(/Audit run 8 started at/)).toBeInTheDocument()
+    expect(writesTo('/settings/sentiment/audit')).toHaveLength(1)
+    await waitFor(() => {
+      const reads = fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).includes('/settings/sentiment') && (init?.method ?? 'GET') === 'GET',
+      )
+      expect(reads.length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  /** "It takes a few minutes" is true only while the run it names is open.
+   * Once the readout shows run 8 closed, `Last run` carries its outcome. */
+  it('clears the started line once the readout shows that run closed', async () => {
+    served.sentiment = SENTIMENT_AUDIT_STATES.running
+    const { panel } = await run()
+
+    // Run 8 is still open: the line stays.
+    expect(await within(panel).findByText(/Audit run 8 started at/)).toBeInTheDocument()
+
+    const open = SENTIMENT_AUDIT_STATES.running.lastRun!
+    served.sentiment = {
+      ...SENTIMENT_AUDIT_STATES.running,
+      lastRun: { ...open, status: 'succeeded', finishedAt: '2026-10-14T15:26:00Z' },
+    }
+    await act(() => queryClient.invalidateQueries())
+
+    await waitFor(() => {
+      expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
+    })
+    expect(panel.textContent).toMatch(/started by hand, succeeded, finished/)
+  })
+
+  it('says when it is available again on a 429, from Retry-After', async () => {
+    const { panel } = await run({
+      postAudit: jsonResponse(
+        429,
+        {
+          error: {
+            code: 'sentiment_audit_rate_limited',
+            message: 'a manual sentiment audit run already started in the last hour',
+          },
+        },
+        { 'Retry-After': '1800' },
+      ),
+    })
+
+    const line = await within(panel).findByText(/manual runs are limited to one an hour/)
+    expect(line.textContent).toMatch(/next is available at/)
+    expect(line.className).toContain('text-on-surface-variant')
+  })
+
+  it('says a run is in progress on a 409', async () => {
+    const { panel } = await run({
+      postAudit: jsonResponse(409, {
+        error: {
+          code: 'sentiment_audit_running',
+          message: 'sentiment audit run 8 (scheduled) is still in progress',
+        },
+      }),
+    })
+
+    const line = await within(panel).findByText(/a run is already in progress/)
+    expect(line.textContent).toContain('sentiment audit run 8 (scheduled) is still in progress')
+    expect(line.className).not.toMatch(/error/)
+  })
+
+  /** A degraded data dependency is not a fault and not a loss: `caution`. */
+  it('shows the server reason on a 503, in caution', async () => {
+    const { panel } = await run({
+      postAudit: jsonResponse(503, {
+        error: {
+          code: 'sentiment_audit_unavailable',
+          message: 'the watch universe is degraded; nothing was started',
+        },
+      }),
+    })
+
+    const line = await within(panel).findByRole('alert')
+    expect(line.textContent).toContain('the watch universe is degraded; nothing was started')
+    expect(line.className).toContain('text-caution')
+  })
+
+  it('shows the server reason on a 500, in error', async () => {
+    const { panel } = await run({
+      postAudit: jsonResponse(500, {
+        error: { code: 'internal_error', message: 'the universe read failed' },
+      }),
+    })
+
+    const line = await within(panel).findByRole('alert')
+    expect(line.textContent).toContain('the universe read failed')
+    expect(line.className).toContain('text-error')
   })
 })
 
@@ -993,60 +1340,5 @@ describe('audit log', () => {
     const log = section('Configuration audit log')
 
     expect(await within(log).findByText(/most recent 1 of 240/)).toBeInTheDocument()
-  })
-})
-
-/** Phase 2 decision 8, and the half of it that is specific to this page:
- * Settings mixes real and mock inside one page, so the marker sits on the
- * affected panel. Over the title it would label the engine's own risk
- * ceilings as invented, which is worse than no marker at all. */
-describe('the fixture marker', () => {
-  it('is scoped to the sentiment panel and marks nothing that the server serves', async () => {
-    stubFetch()
-    render(<App />)
-
-    // Wait for the served panels to finish loading first: a skeleton carries
-    // no marker either, so an unawaited assertion would pass for the wrong
-    // reason.
-    await within(section('Risk limits')).findByLabelText('Max daily loss')
-
-    const marker = screen.getByText('Sample data — Phase 1')
-    expect(marker.closest('section')).toBe(section('Sentiment accuracy'))
-
-    for (const name of [
-      'API keys',
-      'Risk limits',
-      'Notification routing',
-      'Data sources',
-      'Configuration audit log',
-    ]) {
-      expect(within(section(name)).queryByText('Sample data — Phase 1')).not.toBeInTheDocument()
-    }
-  })
-
-  it('appears exactly once on a page that is mostly server-backed', async () => {
-    stubFetch()
-    render(<App />)
-    await within(section('Risk limits')).findByLabelText('Max daily loss')
-
-    expect(screen.getAllByText('Sample data — Phase 1')).toHaveLength(1)
-  })
-
-  /** News and Research carry a screen-reader copy of the marker's detail,
-   * because a tooltip on a non-focusable span is mouse-only and neither page
-   * restates it. This panel does restate it, visibly and to everyone, so the
-   * copy is suppressed here — a description repeated verbatim a second later
-   * is how a screen-reader user learns to stop listening to them. */
-  it('does not say in a screen reader what the panel already says in prose', async () => {
-    stubFetch()
-    render(<App />)
-    await within(section('Risk limits')).findByLabelText('Max daily loss')
-    const sentiment = section('Sentiment accuracy')
-
-    expect(within(sentiment).getByText('Sample data — Phase 1').getAttribute('title')).toMatch(
-      /Nothing has scored a sentiment label/,
-    )
-    expect(screen.queryByText(/Nothing has scored a sentiment label/)).not.toBeInTheDocument()
-    expect(within(sentiment).getByText(/not the engine’s own configuration/)).toBeInTheDocument()
   })
 })

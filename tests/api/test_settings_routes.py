@@ -681,6 +681,9 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "notification_routes_changed",
         "watchlist_changed",
         "spdr_seed_amended",
+        "sentiment_demoted",
+        "sentiment_repromoted",
+        "sentiment_audit_requested",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {
@@ -699,6 +702,18 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
     # decision 20's info-event defaults -- a parent-session assumption.
     assert routed["spdr_seed_amended"] == {
         "event": "spdr_seed_amended",
+        "bell": False,
+        "discord": True,
+    }
+    # Phase 3 decision 14 (migration 0014): both audit transitions ring the
+    # bell *and* reach Discord, so a withdrawal and its restoration arrive on
+    # the same channels.
+    for event in ("sentiment_demoted", "sentiment_repromoted"):
+        assert routed[event] == {"event": event, "bell": True, "discord": True}
+    # Step 6's manual audit trigger (migration 0015): an operator action on
+    # decision 20's config-event terms -- a record for Discord, not a bell.
+    assert routed["sentiment_audit_requested"] == {
+        "event": "sentiment_audit_requested",
         "bell": False,
         "discord": True,
     }

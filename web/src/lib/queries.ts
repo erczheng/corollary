@@ -47,6 +47,8 @@ import {
   fetchNotifications,
   fetchPositions,
   fetchRiskLimits,
+  fetchSentimentAudit,
+  startSentimentAudit,
   fetchStocks,
   fetchTransfers,
   fetchUnderlyings,
@@ -150,6 +152,7 @@ export const queryKeys = {
   auditLog: (params: PageParams = {}) =>
     ['settings', 'audit', params.page ?? null, params.pageSize ?? null] as const,
   dataSources: () => ['settings', 'sources'] as const,
+  sentimentAudit: () => ['settings', 'sentiment'] as const,
 
   /** Every filter is part of the key, normalised to null — see above. */
   news: (query: NewsQuery = {}) =>
@@ -582,6 +585,40 @@ export function useDataSources() {
   return useQuery({
     queryKey: queryKeys.dataSources(),
     queryFn: ({ signal }) => fetchDataSources({ signal }),
+  })
+}
+
+/* -------------------------------------------------------------------------
+ * The sentiment self-audit (Phase 3 step 6)
+ * ---------------------------------------------------------------------- */
+
+/** How often the audit readout re-reads **while a run is open** (`lastRun`
+ * is `running`). A run takes minutes and the readout has nothing new to
+ * say until it closes, so this is a check-in, not a stream; with no run open
+ * nothing changes between Saturdays and the query does not poll at all. */
+export const SENTIMENT_AUDIT_RUNNING_POLL_MS = 10_000
+
+export function useSentimentAudit() {
+  return useQuery({
+    queryKey: queryKeys.sentimentAudit(),
+    queryFn: ({ signal }) => fetchSentimentAudit({ signal }),
+    refetchInterval: (query) =>
+      query.state.data?.lastRun?.status === 'running' ? SENTIMENT_AUDIT_RUNNING_POLL_MS : false,
+  })
+}
+
+/** Start a manual run. On a 202 the readout is re-read, so `lastRun` shows
+ * the run that just opened and `manualAvailableAt` the hour it now costs.
+ * A refusal writes no row, but it is re-read too: a 409 means a run the
+ * readout may not know about yet is open, and a 429 means `manualAvailableAt`
+ * is due a refresh. The page renders the `ApiError` itself. */
+export function useStartSentimentAudit() {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => startSentimentAudit(),
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.sentimentAudit() })
+    },
   })
 }
 
