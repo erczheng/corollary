@@ -51,6 +51,7 @@ const PAPER: AccountResponse = {
   cashAccountUnavailableReason:
     'Cash trading is unavailable: ALPACA_LIVE_API_KEY and ALPACA_LIVE_SECRET_KEY are not set.',
   missingLiveCredentialEnvVars: ['ALPACA_LIVE_API_KEY', 'ALPACA_LIVE_SECRET_KEY'],
+  accountNumberMasked: '••••0000',
 }
 
 /** A configured Cash book, for the one thing that cannot be tested with the

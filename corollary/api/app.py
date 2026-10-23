@@ -125,6 +125,7 @@ from corollary.data.providers.interface import (
 from corollary.data.macro.risk_free import seed_rate_source
 from corollary.db.seed import seed
 from corollary.db.session import get_engine
+from corollary.engine.cash_session import CashSessionHolder
 from corollary.engine.execution.interface import (
     BrokerAuthError,
     BrokerError,
@@ -300,6 +301,33 @@ def _vendor_handler(
 def _api_error_handler(request: Request, exc: Exception) -> Response:
     assert isinstance(exc, ApiError)
     return _envelope(exc.status_code, exc.code, _scrub(request, exc.message), exc.headers)
+
+
+def _end_cash_session(app: FastAPI, cause: str) -> None:
+    """End the in-memory Cash session, if any, at a lifespan edge. Never raises.
+
+    No audit row and no notice: a process start or stop is not an operator's
+    end, and at startup the runtime that delivers notices does not exist yet.
+    The log line is the record. At startup there is normally nothing to end
+    -- ``create_app`` built the holder empty -- so a line there means an app
+    object re-entered its lifespan with a session still held.
+    """
+    holder = getattr(app.state, "cash_session", None)
+    if not isinstance(holder, CashSessionHolder):
+        return
+    ended = holder.end()
+    if ended is not None:
+        logger.info(
+            "cash session ended for %s at a lifespan edge",
+            ended.account_number_masked,
+            extra={
+                "event": "cash_session_ended",
+                "cause": cause,
+                "account": ended.account_number_masked,
+                "confirmed_at": ended.confirmed_at.isoformat(),
+                "correlation_id": ended.correlation_id,
+            },
+        )
 
 
 def _database_handler(request: Request, exc: Exception) -> Response:
@@ -997,6 +1025,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Rule 5: a lifespan is a start, even on an app object that has run
+        # one before, so no Cash session may carry into it. ``create_app``
+        # builds the holder empty; this covers re-entry (audit L4).
+        _end_cash_session(app, "lifespan_startup")
         if getattr(app.state, "registry", None) is None:
             app.state.registry = ServiceRegistry.from_env()
         if getattr(app.state, "db_engine", None) is None:
@@ -1184,6 +1216,9 @@ def create_app(
         try:
             yield
         finally:
+            # Cash off before anything else stops: nothing reads Cash past
+            # this lifespan, and the next one starts in Paper (rule 5).
+            _end_cash_session(app, "lifespan_shutdown")
             # The context jobs first: they write through the database and,
             # from later steps, the registry's providers, both closed below.
             # ``aclose`` never raises -- a job task that died was logged when
@@ -1294,6 +1329,9 @@ def create_app(
     # seed directly.
     app.state.asset_directory = AssetDirectoryHolder()
     app.state.position_underlyings = PositionUnderlyings()
+    # Rule 5: a fresh app -- a cold start -- has no Cash session. The holder
+    # is in memory only and nothing restores it; see corollary.engine.cash_session.
+    app.state.cash_session = CashSessionHolder()
     app.state.spdr_seed_loader = DatabaseSeedLoader(
         None if db_engine is None else functools.partial(Session, db_engine)
     )

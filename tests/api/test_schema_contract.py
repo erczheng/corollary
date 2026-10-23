@@ -26,6 +26,7 @@ TYPES_TS = (
 #: Every interface this API serves, and the model that mirrors it.
 MIRRORED: Mapping[str, type[ApiModel]] = {
     "AccountSnapshot": schemas.AccountSnapshot,
+    "CashSessionState": schemas.CashSessionState,
     "ActivityItem": schemas.ActivityItem,
     "ActivityStats": schemas.ActivityStats,
     "ApiKeyPresence": schemas.ApiKeyPresence,

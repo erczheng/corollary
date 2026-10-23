@@ -685,6 +685,8 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "sentiment_repromoted",
         "sentiment_audit_requested",
         "calendar_changed",
+        "cash_session_confirmed",
+        "cash_session_ended",
     ]
     routed = {row["event"]: row for row in body}
     assert routed["order_filled"] == {

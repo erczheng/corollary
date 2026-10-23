@@ -16,7 +16,16 @@ event                                     emitted by
 ``sentiment_audit_requested``             ``POST /api/settings/sentiment/audit``
 ``calendar_changed``                      ``POST``/``PUT``/``DELETE
                                           /api/calendar/manual``
+``cash_session_confirmed``                ``POST /api/account/cash-session``
+``cash_session_ended``                    ``DELETE /api/account/cash-session``
 ========================================  ====================================
+
+``cash_session_confirmed`` and ``cash_session_ended`` are rule 5's Cash
+session (``corollary.engine.cash_session``): ``info``, **bell on and Discord
+on** -- which book the engine may read is worth the bell. Built from the
+``audit_log`` row the route wrote and the server's own read of the account,
+never the request body; the account appears masked (``••••1234``) only.
+An end that ended nothing writes no row and says nothing.
 
 ``watchlist_changed`` is Phase 3 decision 21's, on decision 20's terms for the
 config events: ``info``, built from the one ``audit_log`` row the route wrote.
@@ -61,6 +70,7 @@ secret or webhook URL can reach a message (rule 6).
 import logging
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Final, NamedTuple, Protocol
 from zoneinfo import ZoneInfo
@@ -71,11 +81,14 @@ from corollary.engine.runtime import OperatorNotice
 
 __all__ = [
     "AuditChange",
+    "NoticeSink",
     "OperatorEvent",
     "deliver_notice",
     "halt_notice",
     "notify_after_response",
     "calendar_notice",
+    "cash_session_confirmed_notice",
+    "cash_session_ended_notice",
     "resume_notice",
     "sentiment_audit_notice",
     "settings_notice",
@@ -100,6 +113,9 @@ class OperatorEvent(StrEnum):
     SENTIMENT_AUDIT_REQUESTED = "sentiment_audit_requested"
     #: A manual calendar entry added, edited or removed (decisions 9 and 20).
     CALENDAR_CHANGED = "calendar_changed"
+    #: Rule 5's Cash session confirmed, or ended, by the owner.
+    CASH_SESSION_CONFIRMED = "cash_session_confirmed"
+    CASH_SESSION_ENDED = "cash_session_ended"
 
 
 #: A halt is worth a glance; everything else is a record.
@@ -112,6 +128,8 @@ _SEVERITY: Final[dict[OperatorEvent, str]] = {
     OperatorEvent.WATCHLIST_CHANGED: "info",
     OperatorEvent.SENTIMENT_AUDIT_REQUESTED: "info",
     OperatorEvent.CALENDAR_CHANGED: "info",
+    OperatorEvent.CASH_SESSION_CONFIRMED: "info",
+    OperatorEvent.CASH_SESSION_ENDED: "info",
 }
 
 _SETTINGS_TITLE: Final[dict[OperatorEvent, str]] = {
@@ -291,6 +309,64 @@ def calendar_notice(
         severity=_SEVERITY[OperatorEvent.CALENDAR_CHANGED],
         title=f"Calendar entry {action}",
         body="\n".join(lines),
+        at=at,
+        correlation_id=correlation_id,
+    )
+
+
+def cash_session_confirmed_notice(
+    *,
+    account_number_masked: str,
+    balance: Decimal,
+    replaced: bool,
+    at: datetime,
+    correlation_id: str,
+) -> OperatorNotice:
+    """``cash_session_confirmed``: which account, its balance as read, and when.
+
+    ``account_number_masked`` and ``balance`` are the server's read of the
+    live account, never the request body. ``replaced`` says a session was
+    already active and this confirmation restarted it.
+    """
+    event = OperatorEvent.CASH_SESSION_CONFIRMED
+    body = (
+        f"Cash session confirmed for live account {account_number_masked} at "
+        f"{_eastern(at)}. Equity as the server read it: {balance} USD."
+    )
+    if replaced:
+        body += "\nThis replaced a Cash session that was already active."
+    body += (
+        "\nThe session ends on an explicit end or on any restart; it is "
+        "never restored."
+    )
+    return OperatorNotice(
+        event=event.value,
+        severity=_SEVERITY[event],
+        title="Cash session confirmed",
+        body=body,
+        at=at,
+        correlation_id=correlation_id,
+    )
+
+
+def cash_session_ended_notice(
+    *,
+    account_number_masked: str,
+    confirmed_at: datetime,
+    at: datetime,
+    correlation_id: str,
+) -> OperatorNotice:
+    """``cash_session_ended``: which session ended, and when it had begun."""
+    event = OperatorEvent.CASH_SESSION_ENDED
+    return OperatorNotice(
+        event=event.value,
+        severity=_SEVERITY[event],
+        title="Cash session ended",
+        body=(
+            f"Ended the Cash session for live account {account_number_masked} "
+            f"at {_eastern(at)}; it was confirmed {_eastern(confirmed_at)}. "
+            "Nothing reads Cash until it is confirmed again."
+        ),
         at=at,
         correlation_id=correlation_id,
     )

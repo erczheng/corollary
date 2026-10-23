@@ -102,6 +102,7 @@ from corollary.wire import (
     as_int,
     clean_params,
     decode_json,
+    mask_account_number,
     require_aware,
     rfc3339,
     translating,
@@ -316,6 +317,9 @@ def _account(payload: Any) -> Account:
         transfers_blocked=bool(raw.get("transfers_blocked", False)),
         trade_suspended_by_user=bool(raw.get("trade_suspended_by_user", False)),
         shorting_enabled=bool(raw.get("shorting_enabled", False)),
+        # Masked here and only here: the full number is not kept on any
+        # object this module returns (rule 6).
+        account_number_masked=mask_account_number(raw.get("account_number")),
     )
 
 

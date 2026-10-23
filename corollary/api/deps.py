@@ -64,6 +64,7 @@ from corollary.data.providers.interface import MarketDataProvider
 from corollary.data.providers.openfigi import OPENFIGI_API_KEY_ENV, OpenFigiProvider
 from corollary.data.providers.sec import SEC_USER_AGENT_ENV, SecProvider
 from corollary.data.seeds import SeedError, SpdrSeed
+from corollary.engine.cash_session import CashSessionHolder, CashSessionReader
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 # Re-exported: the holder lives beside the jobs that read it, so the object a
@@ -79,6 +80,7 @@ __all__ = [
     "ApiError",
     "AssetDirectoryDep",
     "BrokerDep",
+    "CashSessionDep",
     "FundamentalsDep",
     "LIVE_CREDENTIAL_ENV_VARS",
     "POSITION_UNDERLYINGS_TTL",
@@ -94,6 +96,8 @@ __all__ = [
     "account_mode",
     "asset_directory",
     "broker_for_account",
+    "cash_session_holder",
+    "confirmed_cash_broker",
     "db_session",
     "fundamentals_data",
     "market_data",
@@ -328,6 +332,16 @@ class ServiceRegistry:
             sec=lambda: SecProvider.from_env(source),
             openfigi=lambda: OpenFigiProvider.from_env(source),
         )
+
+    def configured(self, mode: AccountMode) -> bool:
+        """Whether this registry can build a broker for ``mode`` at all.
+
+        Cash is configured exactly when both live variables were set; paper
+        always is (its keys are checked on first use). Asking never builds a
+        broker and never logs, which is what lets the Cash-session route
+        answer "no live credentials" with its own status.
+        """
+        return mode in self._factories
 
     def broker(self, mode: AccountMode) -> BrokerAccount:
         """The broker for one book, built on first use and cached after.
@@ -872,6 +886,38 @@ def asset_directory(request: Request) -> AssetDirectoryHolder:
     holder = request.app.state.asset_directory
     assert isinstance(holder, AssetDirectoryHolder)
     return holder
+
+
+def cash_session_holder(request: Request) -> CashSessionHolder:
+    """The process's Cash session holder (rule 5). Built empty by ``create_app``."""
+    holder = request.app.state.cash_session
+    assert isinstance(holder, CashSessionHolder)
+    return holder
+
+
+CashSessionDep = Annotated[CashSessionHolder, Depends(cash_session_holder)]
+
+
+def confirmed_cash_broker(
+    registry: ServiceRegistry, session: CashSessionReader
+) -> BrokerAccount | None:
+    """The Cash ``BrokerAccount``, **only** while a confirmed session is active.
+
+    For unit 2's lifespan-owned Cash positions reader, which calls this on
+    every read rather than holding the broker: rule 5 says nothing reads Cash
+    without a confirmation, so the gate is checked per read, and ending the
+    session stops the very next read. ``None`` -- never paper, never a
+    substitute -- when no session is active or the live keys are absent.
+
+    The broker is the read half only (``BrokerAccount``); there is no
+    ``BrokerExecution`` (rule 1). A context job must never be handed this
+    function or its result: hand it a :class:`CashSessionReader` if it needs
+    to know whether Cash is confirmed, and read positions through a holder
+    the way :class:`PaperPositionsRefresher` does.
+    """
+    if not session.active() or not registry.configured(AccountMode.CASH):
+        return None
+    return registry.broker(AccountMode.CASH)
 
 
 def position_underlyings(request: Request) -> PositionUnderlyings:

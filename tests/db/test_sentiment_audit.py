@@ -216,7 +216,8 @@ def test_the_vocabularies_are_the_specs() -> None:
     # ``all`` is an accuracy aggregate, never one outcome's classification.
     assert LABEL_OUTCOME_SCOPES == ("watch", "discovery")
     assert SENTIMENT_SOURCE_STATUSES == ("unaudited", "active", "demoted")
-    assert AUDIT_CATEGORIES == ("risk", "feed", "notification", "watchlist", "sentiment")
+    # ``account`` follows, from 0016 (the Cash session; test_cash_session_migration.py).
+    assert AUDIT_CATEGORIES[:5] == ("risk", "feed", "notification", "watchlist", "sentiment")
 
 
 def test_the_tables_have_exactly_the_specs_columns(any_engine: Engine) -> None:

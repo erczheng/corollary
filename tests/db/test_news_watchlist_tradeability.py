@@ -111,9 +111,10 @@ def test_vendor_vocabulary_is_the_feed_vendor_map() -> None:
 
 def test_audit_categories_gain_watchlist_only() -> None:
     """0008 added ``watchlist`` and nothing else; step 6's ``sentiment`` (0014)
-    is the only category since, and is tested in test_sentiment_audit.py."""
+    and the Cash session's ``account`` (0016) are the only categories since,
+    tested in test_sentiment_audit.py and test_cash_session_migration.py."""
     assert AUDIT_CATEGORIES[:4] == ("risk", "feed", "notification", "watchlist")
-    assert AUDIT_CATEGORIES[4:] == ("sentiment",)
+    assert AUDIT_CATEGORIES[4:] == ("sentiment", "account")
 
 
 # --------------------------------------------------------------- news_article

@@ -81,6 +81,9 @@ __all__ = [
     "CALENDAR_EVENT_KINDS",
     "CALENDAR_EVENT_SOURCES",
     "CalendarEvent",
+    "CASH_SESSION_ACTIVE_PREFIX",
+    "CASH_SESSION_AUDIT_FIELD",
+    "CASH_SESSION_INACTIVE",
     "Base",
     "EARNINGS_SESSIONS",
     "IPO_STATUSES",
@@ -138,8 +141,24 @@ ENGINE_STATE_ID = 1
 #: ``AuditCategory`` union so a row renders without translation, plus Phase 3
 #: decision 21's ``watchlist`` -- a manual watch added or removed (migration
 #: 0008), plus step 6's ``sentiment`` -- a source's audit status changed
-#: (decision 13, migration 0014). Only the weekly audit run writes it.
-AUDIT_CATEGORIES = ("risk", "feed", "notification", "watchlist", "sentiment")
+#: (decision 13, migration 0014). Only the weekly audit run writes it. Plus
+#: ``account`` -- a Cash session confirmed or ended (rule 5, migration 0016).
+AUDIT_CATEGORIES = (
+    "risk",
+    "feed",
+    "notification",
+    "watchlist",
+    "sentiment",
+    "account",
+)
+
+#: The one ``field`` an ``account`` audit row may carry, and its two value
+#: shapes: ``inactive``, or ``active ••••1234`` -- the masked tail the
+#: confirmation was checked against. ``ck_audit_log_account_row`` holds the
+#: shape, so no ``account`` row can carry a full account number (rule 6).
+CASH_SESSION_AUDIT_FIELD = "cash_session"
+CASH_SESSION_INACTIVE = "inactive"
+CASH_SESSION_ACTIVE_PREFIX = "active "
 
 #: Decision 13's per-source state. Every source starts ``unaudited``, and
 #: **nothing transitions into it** -- the transitions go ``unaudited ->
@@ -561,6 +580,31 @@ _AUDIT_LOG_SENTIMENT_ROW = (
     + ")"
 )
 
+#: GLOB, not LIKE: GLOB is case-sensitive and has character classes, so the
+#: tail is four ASCII letters or digits and nothing else.
+_CASH_SESSION_ACTIVE_GLOB = CASH_SESSION_ACTIVE_PREFIX + "••••" + "[A-Za-z0-9]" * 4
+
+
+def _cash_session_value(column: str) -> str:
+    return (
+        f"({column} = '{CASH_SESSION_INACTIVE}' "
+        f"OR {column} GLOB '{_CASH_SESSION_ACTIVE_GLOB}')"
+    )
+
+
+_AUDIT_LOG_ACCOUNT_ROW = (
+    "category <> 'account' OR ("
+    f"field = '{CASH_SESSION_AUDIT_FIELD}'"
+    + " AND "
+    + _cash_session_value("previous_value")
+    + " AND "
+    + _cash_session_value("new_value")
+    # Ending a session that did not exist changes nothing, and writes nothing.
+    + f" AND NOT (previous_value = '{CASH_SESSION_INACTIVE}'"
+    + f" AND new_value = '{CASH_SESSION_INACTIVE}')"
+    + ")"
+)
+
 
 class AuditLog(Base):
     """Every configuration change, newest first, each row carrying what it replaced.
@@ -574,6 +618,11 @@ class AuditLog(Base):
     weekly audit run writes it, one row per source transition, and
     ``ck_audit_log_sentiment_row`` holds its shape (see
     :class:`SentimentSourceStatus` for how a row joins back to its run).
+
+    The ``account`` category records a Cash session confirmed or ended
+    (rule 5), ``field`` ``cash_session``, values ``inactive`` or ``active
+    ••••1234``. It is a record only: the session itself is never read back
+    from here, so a restart has no session whatever this table says.
     """
 
     __tablename__ = "audit_log"
@@ -582,6 +631,7 @@ class AuditLog(Base):
             _in_list("category", AUDIT_CATEGORIES), name="ck_audit_log_category"
         ),
         CheckConstraint(_AUDIT_LOG_SENTIMENT_ROW, name="ck_audit_log_sentiment_row"),
+        CheckConstraint(_AUDIT_LOG_ACCOUNT_ROW, name="ck_audit_log_account_row"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -191,6 +191,15 @@ describe('auditFieldLabel', () => {
     ).toBe('Per-trade ceiling')
   })
 
+  /** Rule 5's confirm/end rows are `category: 'account'`, `field:
+   * 'cash_session'`. Falling through to the notification split below printed
+   * the raw `cash_session` key in a column that promises readable settings. */
+  it('labels a Cash session row', () => {
+    expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'account', field: 'cash_session' })).toBe(
+      'Cash session',
+    )
+  })
+
   it('resolves a notification route to its event and channel', () => {
     const field = notificationAuditField('order_filled', 'discord')
     expect(auditFieldLabel({ ...AUDIT_LOG[0], category: 'notification', field })).toBe(

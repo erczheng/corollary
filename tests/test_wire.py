@@ -568,3 +568,23 @@ def test_the_rfc3339_path_is_unchanged() -> None:
     )
     with pytest.raises(WireFormatError):
         as_datetime("not a timestamp")
+
+
+# --------------------------------------------------------------------------
+# mask_account_number -- the cash-session confirm's one identifier
+# --------------------------------------------------------------------------
+
+
+def test_an_account_number_masks_to_its_last_four() -> None:
+    from corollary.wire import mask_account_number
+
+    assert mask_account_number("PA3ABCD1234") == "••••1234"
+    assert mask_account_number("  612345678 ") == "••••5678"
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "1234", "123", 12345678])
+def test_an_account_number_too_short_or_absent_has_no_mask(raw: object) -> None:
+    """Four characters or fewer would *be* the number, so there is no mask."""
+    from corollary.wire import mask_account_number
+
+    assert mask_account_number(raw) is None

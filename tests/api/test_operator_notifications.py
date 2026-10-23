@@ -136,6 +136,10 @@ def test_the_five_events_are_the_contract_the_web_codes_against() -> None:
         # Phase 3 decisions 9 and 20, emitted by the calendar's manual
         # routes; its own suite is ``tests/api/test_calendar_routes.py``.
         "calendar_changed",
+        # Rule 5: the Cash session confirmed or ended; its own suite is
+        # ``tests/api/test_cash_session_routes.py``.
+        "cash_session_confirmed",
+        "cash_session_ended",
     }
 
 
@@ -620,6 +624,8 @@ def test_no_runtime_means_the_action_succeeds_and_the_log_says_so(
         OperatorEvent.WATCHLIST_CHANGED,
         OperatorEvent.CALENDAR_CHANGED,
         OperatorEvent.SENTIMENT_AUDIT_REQUESTED,
+        OperatorEvent.CASH_SESSION_CONFIRMED,
+        OperatorEvent.CASH_SESSION_ENDED,
     }
     assert sorted(r.__dict__["notification_event"] for r in skipped) == sorted(
         event.value for event in OperatorEvent if event not in elsewhere

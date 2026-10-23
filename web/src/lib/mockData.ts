@@ -1833,6 +1833,8 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   { event: 'sentiment_audit_requested', bell: false, discord: true },
   // Phase 3 decisions 9 and 20, migration 0015: a manual calendar entry.
   { event: 'calendar_changed', bell: false, discord: true },
+  { event: 'cash_session_confirmed', bell: true, discord: true },
+  { event: 'cash_session_ended', bell: true, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

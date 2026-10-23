@@ -92,6 +92,8 @@ __all__ = [
     "AuditCategory",
     "AuditLogEntry",
     "CalendarDate",
+    "CashSessionConfirm",
+    "CashSessionState",
     "CalendarDay",
     "CalendarEventItem",
     "CalendarEventKind",
@@ -329,10 +331,11 @@ RiskLimitUnit: TypeAlias = Literal["%", "count"]
 #: ``ck_audit_log_category`` admits, or the first row of a new one fails
 #: validation and 500s every audit page holding it. ``watchlist`` is Phase 3
 #: decision 21's (migration 0008); ``sentiment`` is decision 13's, a source's
-#: audit status changing (migration 0014). ``test_settings_routes.py`` pins
-#: the two.
+#: audit status changing (migration 0014); ``account`` is a Cash session
+#: confirmed or ended (rule 5, migration 0016). ``test_settings_routes.py``
+#: pins the two.
 AuditCategory: TypeAlias = Literal[
-    "risk", "feed", "notification", "watchlist", "sentiment"
+    "risk", "feed", "notification", "watchlist", "sentiment", "account"
 ]
 
 #: Exactly the events ``db.seed.NOTIFICATION_ROUTE_DEFAULTS`` routes. An event
@@ -372,6 +375,10 @@ NotificationEvent: TypeAlias = Literal[
     # A manual calendar entry added, edited or removed (Phase 3 decisions 9
     # and 20, migration 0015), emitted by the calendar's manual routes.
     "calendar_changed",
+    # A Cash session confirmed or ended (rule 5, migration 0016): ``info``,
+    # emitted by ``POST``/``DELETE /api/account/cash-session``.
+    "cash_session_confirmed",
+    "cash_session_ended",
 ]
 
 FeedKey: TypeAlias = Literal["options", "stockHistorical", "stockRealtime"]
@@ -1124,6 +1131,12 @@ class AccountResponse(ApiModel):
     #: Variable **names**, never values. Rule 6: the UI shows masked presence
     #: only, and a name is not a mask of anything.
     missing_live_credential_env_vars: list[str]
+    #: ``••••1234``: the last four characters of *this* account's number, and
+    #: the only form of it the server ever sends (rule 6). ``None`` when the
+    #: broker reported no number long enough to mask. Rule 5's Cash confirm
+    #: shows it, and ``POST /api/account/cash-session`` takes it back as
+    #: ``accountNumber`` and refuses unless it matches the live account.
+    account_number_masked: str | None = None
 
 
 class EquityCurvePoint(ApiModel):
@@ -2679,3 +2692,39 @@ class SentimentAuditStarted(ApiModel):
     trigger: Literal["manual"] = "manual"
     run_id: int
     requested_at: datetime
+
+
+# --------------------------------------------------------------------------
+# The confirmed Cash session (rule 5)
+# --------------------------------------------------------------------------
+
+
+class CashSessionConfirm(ApiModel):
+    """``POST /api/account/cash-session``'s body: what the confirm dialog showed.
+
+    ``accountNumber`` is the **masked** number (``••••1234``) the dialog read
+    from ``GET /api/account?account=cash`` -- ``accountNumberMasked`` there.
+    The full number is never sent to the browser, so it cannot be echoed. The
+    server reads the live account itself and refuses unless the two match
+    (rule 4: a value from the client is a claim, never a fact). Bounded so a
+    pasted essay is a 422, not a log line.
+    """
+
+    account_number: str = Field(min_length=1, max_length=64)
+
+
+class CashSessionState(ApiModel):
+    """The engine's Cash session: ``GET``, and a successful ``POST``.
+
+    ``active`` false means every other field is ``None``. Active means a
+    human confirmed the live account ``accountNumberMasked`` at
+    ``confirmedAt``, and ``balance`` is that account's **equity as the server
+    read it at that confirmation** -- a decimal string, never a JSON number,
+    and never re-read by ``GET``. The session is in memory only: a restart has
+    none (rule 5).
+    """
+
+    active: bool
+    account_number_masked: str | None
+    confirmed_at: datetime | None
+    balance: DecimalString | None

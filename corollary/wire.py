@@ -107,6 +107,7 @@ __all__ = [
     "clean_params",
     "decode_json",
     "decode_msgpack",
+    "mask_account_number",
     "operator_text",
     "require_aware",
     "rfc3339",
@@ -763,3 +764,33 @@ def clean_params(params: Mapping[str, Any] | None) -> dict[str, str]:
         else:
             cleaned[key] = str(value)
     return cleaned
+
+
+#: The mask's visible tail. Four characters: enough for a human to tell two
+#: accounts apart in a confirm dialog, too few to be the number.
+_ACCOUNT_TAIL = 4
+#: ASCII letters and digits only, which is every Alpaca account number. A
+#: tail of anything else is not a shape this codebase has seen, and is refused
+#: rather than shown.
+_ACCOUNT_TAIL_SHAPE = re.compile(r"^[A-Za-z0-9]{4}$")
+
+
+def mask_account_number(raw: object) -> str | None:
+    """``••••1234`` -- the last four characters of an account number, or ``None``.
+
+    The one place a full account number is turned into something a response
+    or a log line may carry (rule 6). The vendor decode calls it and keeps
+    only the result, so no model downstream ever holds the full number.
+
+    ``None`` when there is nothing safe to show: absent, not a string, blank,
+    or so short that its last four characters *are* the number. A caller that
+    needs to name the account -- the Cash confirm -- refuses on ``None``
+    rather than inventing a label.
+    """
+    if not isinstance(raw, str):
+        return None
+    number = raw.strip()
+    tail = number[-_ACCOUNT_TAIL:]
+    if len(number) <= _ACCOUNT_TAIL or not _ACCOUNT_TAIL_SHAPE.match(tail):
+        return None
+    return "•" * _ACCOUNT_TAIL + tail
