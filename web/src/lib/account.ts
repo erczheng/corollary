@@ -66,3 +66,16 @@ export function positionsValue(positions: Position[]): number {
 export function totalEquity(cash: number, positions: Position[]): number {
   return cash + positionsValue(positions)
 }
+
+/** Cash the broker does not count in buying power: `cash − buyingPower`,
+ * floored at zero.
+ *
+ * **States the gap, never a reason.** Alpaca reports buying power without
+ * reporting what it holds back — unsettled proceeds, open-order holds, or
+ * something else — so the Cash confirm says how much and stops there. A
+ * negative difference (buying power above cash, as on a margin account) is
+ * not a gap in the cash and reports as zero, which the caller reads as
+ * "nothing to state". */
+export function cashOutsideBuyingPower(cash: number, buyingPower: number): number {
+  return Math.max(0, cash - buyingPower)
+}

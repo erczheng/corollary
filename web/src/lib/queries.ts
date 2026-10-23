@@ -228,6 +228,25 @@ export function useAccount(account?: AccountMode) {
   })
 }
 
+/** The live account the Cash confirm names, read only while the dialog is
+ * open.
+ *
+ * Always re-read on open (`staleTime: 0`): the balance quoted before real
+ * trading must be the one the broker reports now, not a cached figure from
+ * whenever the Account page last ran. No retry — a dialog that sits on a
+ * spinner through a backoff is worse than one that says it could not read
+ * the account and offers to try again. Shares `queryKeys.account('cash')`
+ * with the Account page, so the two never cache two answers. */
+export function useCashConfirmAccount(enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.account('cash'),
+    queryFn: ({ signal }) => fetchAccount('cash', { signal }),
+    enabled,
+    staleTime: 0,
+    retry: false,
+  })
+}
+
 /** The broker's own equity curve, with t₀ marked. Nothing is reconstructed
  * and nothing is stored; `pointsBeforeT0` is how much of the curve predates
  * Corollary, so the chart cannot claim credit for manual trading. */

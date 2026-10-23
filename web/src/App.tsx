@@ -8,6 +8,7 @@ import { useCommandPaletteShortcut } from './hooks/useCommandPaletteShortcut'
 import { useFocusModality } from './hooks/useFocusModality'
 import { MARKETS_BACKGROUND_POLL_MS, useMarketPoll } from './hooks/useMarketPoll'
 import { useLiveSocket } from './hooks/useLiveSocket'
+import { useCashSessionReconcile } from './hooks/useCashSessionReconcile'
 import { Dashboard } from './pages/Dashboard'
 import { Activity } from './pages/Activity'
 import { News } from './pages/News'
@@ -32,6 +33,10 @@ function AppShell() {
   // two connections and two viewport hints overwriting each other. The hook
   // holds the StrictMode reasoning and the reason it registers no cleanup.
   useLiveSocket()
+  // Rule 5, at boot and standing: a Cash session the engine kept across a
+  // reload is ended, never resumed, and a Cash tab whose session the engine
+  // dropped falls back to Paper. One mount, here.
+  useCashSessionReconcile()
 
   return (
     <BrowserRouter>

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { ACCOUNT_SNAPSHOTS, CONTRACT_MULTIPLIER, isOrderAction } from './mockData'
 import { type AccountMode } from './types'
-import { cashTransfers, netTransfers, positionsValue, totalEquity } from './account'
+import { cashOutsideBuyingPower, cashTransfers, netTransfers, positionsValue, totalEquity } from './account'
 
 const MODES: AccountMode[] = ['paper', 'cash']
 
@@ -146,5 +146,19 @@ describe('totalEquity', () => {
     const paper = totalEquity(ACCOUNT_SNAPSHOTS.paper.cash, ACCOUNT_SNAPSHOTS.paper.positions)
     const cash = totalEquity(ACCOUNT_SNAPSHOTS.cash.cash, ACCOUNT_SNAPSHOTS.cash.positions)
     expect(paper).not.toBeCloseTo(cash, 2)
+  })
+})
+
+describe('cashOutsideBuyingPower', () => {
+  it('is cash minus buying power when cash exceeds it', () => {
+    expect(cashOutsideBuyingPower(21_337.12, 18_100.55)).toBeCloseTo(3_236.57, 2)
+  })
+
+  it('is zero when buying power covers all the cash', () => {
+    expect(cashOutsideBuyingPower(10_000, 10_000)).toBe(0)
+  })
+
+  it('is zero, not negative, when buying power exceeds cash (margin)', () => {
+    expect(cashOutsideBuyingPower(10_000, 40_000)).toBe(0)
   })
 })
