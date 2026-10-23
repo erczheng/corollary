@@ -73,12 +73,13 @@ discovery tier; the watch tier's previous-day window covers the watch
 universe. Finnhub's market feed recovers its ``minId`` from the stored ids and
 has only one page to give.
 
-**For step 5 (sentiment audit).** Backfilled and restart-late articles are
-ingested *after* publication -- up to the cap, hours or days late. Step 5's
-audit must grade from first-seen (``ingested_at``), or exclude articles whose
-first-seen minus ``published_at`` gap is large; grading them from
-``published_at`` would score news the engine could not have acted on when it
-was published (Q7's no-backfill rule).
+**For the sentiment audit (step 6).** Backfilled and restart-late articles
+are ingested *after* publication -- up to the cap, hours or days late. The
+audit grades every label from ``published_at`` regardless (owner decision,
+2026-10-22): the audit asks whether a source's story moved the price, so a
+source whose story drove a move is credited for it even when Corollary picked
+the story up late. The owner accepted the known cost: a story fetched because
+the move had already drawn attention is graded on that move.
 """
 
 from __future__ import annotations

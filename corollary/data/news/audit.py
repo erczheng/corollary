@@ -40,6 +40,25 @@ Decision 12, as the spec states it
 * **The windows are in regular-session minutes**: 1h is the reference plus
   60, 1d plus 390, from :func:`corollary.calendars.add_session_minutes`.
   Half-days are real.
+* **Prices are adjusted, not as printed.** The runner fetches bars adjusted
+  for splits, cash dividends and spin-offs
+  (:data:`~corollary.data.news.audit_runner.AUDIT_BAR_ADJUSTMENT`), so a
+  stored ``reference_price`` / ``outcome_price`` is the print rescaled by
+  every corporate action between it and the run -- adjusted *as of fetch
+  time*. That is right for a return and wrong for anything else. An ex-date
+  drop is value paid to the holder, not a move: split-only, a 1d window over
+  a ticker's ex-date reads the dividend as a loss, and SPY's ex-date shifts
+  every excess return that session. And an ex-date *after* a window scales
+  its two prices by the same factor, so their ratio is unchanged. Do not read
+  the stored levels as prints.
+
+  The two ends of a 1d window come from **two requests**, one per session
+  (:class:`BarRequest` never spans an overnight), within the same run.
+  They are consistently adjusted because the vendor's adjustment factors
+  change only when a new ex-date takes effect, and a run lasts minutes. A
+  run that straddled that moment -- a manual run across midnight before an
+  ex-date -- could pair one end adjusted for it with one not. The Saturday
+  run cannot.
 
 Decisions the spec leaves open -- for the owner's review
 --------------------------------------------------------
@@ -50,22 +69,20 @@ always cited as "the design's decision N" to keep the two apart.
 Each was set by the orchestrator for unit 6.2 unless marked otherwise, and
 each is a parent-session assumption the owner can override.
 
-1. **The reference instant is ``max(published_at, labeled_at)``.** Corollary
-   must not be credited with a move that happened before it saw the story. A
-   pre-0013 article re-fetched in overlap is labelled late; for a label seen
-   live the two are near-equal and this is the spec's rule.
-   **Amended (fifth pass): ``max`` holds unless ``published_at`` is more
-   than :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at``**, and then the
-   reference is ``labeled_at``. ``labeled_at`` is the *poll's* start
-   (``label_stored`` is given the poll's ``now``, read before the fetch), so
-   ``published_at`` can honestly fall a few seconds after it -- a story
-   arriving on a later page of the same fetch. Using ``labeled_at`` there
-   would put the reference before publication and credit the label with
-   the minute before the story existed, which is the move decision 1
-   exists to refuse. Far past ``labeled_at`` (a 2062 typo) the vendor stamp
-   is an error, and ``labeled_at`` is when the story demonstrably existed.
-   Decision 18's per-label catch covers any instant past the calendar's
-   schedule either way. Flagged for the owner.
+1. **The reference instant is ``published_at``** -- owner decision,
+   2026-10-22: a label is graded from when the story was published, since
+   that is when the price reacts. (It was ``max(published_at, labeled_at)``,
+   which graded a late-fetched story from when Corollary saw it; the owner
+   chose the signal's quality over Corollary's delay. The label itself is a
+   function of the headline alone, so grading from publication lets no
+   outcome into the label.) **One guard stays:** a ``published_at`` more than
+   :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at`` is impossible -- no
+   poll fetches a story that far ahead of its own start -- so the vendor's
+   stamp is wrong (a 2062 typo, say) and ``labeled_at``, when the story
+   demonstrably existed, is the reference. A few seconds after
+   ``labeled_at`` is honest (``labeled_at`` is the poll's start), and is
+   published_at as usual. Decision 18's per-label catch covers any instant
+   past the calendar's schedule either way.
 2. **In session, past the first minute, the reference price is the close of
    the last completed 1Min bar** -- ``bar.at + 1 minute <= instant`` --
    within that session. No look-ahead: a bar stamped 10:15 is not known
@@ -282,7 +299,7 @@ Three definitions the spec leaves to this unit, **set by the orchestrator**:
     rather than the grading run's instant, because it is a fact about the
     label that no later run can move.
 20. **``since_demotion`` is outcomes with ``reference_at`` in ``(changed_at,
-    run_at]``** -- labels produced after the demotion -- computed only for a
+    run_at]``** -- stories published after the demotion -- computed only for a
     ``demoted`` source, with no lookback. A transition's ``changed_at`` is the run
     instant, and every outcome a run counted had matured by it (its window
     ended at least :data:`MATURITY_DELAY` earlier), so its ``reference_at``
@@ -637,14 +654,13 @@ def _require_aware(instant: datetime, what: str) -> None:
 
 
 def reference_instant(label: AuditLabel) -> datetime:
-    """Decision 1 as amended, in UTC.
+    """Decision 1 as the owner set it (2026-10-22), in UTC.
 
-    ``max(published_at, labeled_at)`` -- never before the story was
-    published, never before Corollary wrote the label -- except when
-    ``published_at`` is more than :data:`VENDOR_STAMP_TOLERANCE` after
-    ``labeled_at``: no poll fetches a story that far ahead of its own start,
-    so the vendor's stamp is wrong and ``labeled_at`` is used. Both must be
-    aware.
+    ``published_at`` -- the price reacts to the story when it is published,
+    so that is where the grade starts -- except when ``published_at`` is
+    more than :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at``: no poll
+    fetches a story that far ahead of its own start, so the vendor's stamp is
+    wrong and ``labeled_at`` is used. Both must be aware.
     """
     _require_aware(label.published_at, "published_at")
     _require_aware(label.labeled_at, "labeled_at")
@@ -652,7 +668,7 @@ def reference_instant(label: AuditLabel) -> datetime:
     labeled = label.labeled_at.astimezone(timezone.utc)
     if published - labeled > VENDOR_STAMP_TOLERANCE:
         return labeled
-    return max(published, labeled)
+    return published
 
 
 def reference_at(label: AuditLabel) -> datetime:
@@ -1093,7 +1109,7 @@ def _reference(
     * at the open exactly (an out-of-session label, or one stamped at the
       open to the microsecond), the open print, at the open;
     * inside the first minute, the open-stamped bar's close, at open + 1
-      minute -- the open print predates the label;
+      minute -- the open print predates the reference instant;
     * with no open-stamped bar, the first bar's open at its stamp, provided
       it is within :data:`FALLBACK_MAX_LAG` of the open and before the
       window's end.

@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Final, Literal, get_args
 
 from corollary.data.seeds import normalize_symbol
 from corollary.instruments import OptionType, is_adjusted_root
@@ -55,7 +56,9 @@ from corollary.pricing.rates import RiskFreeRate, RiskFreeRateSource
 __all__ = [
     "AnalyticsSource",
     "AssetDirectory",
+    "BAR_ADJUSTMENTS",
     "Bar",
+    "BarAdjustment",
     "BarTimeframe",
     "ContractStatus",
     "EquityAsset",
@@ -112,6 +115,35 @@ class BarTimeframe(StrEnum):
     DAY = "1Day"
     WEEK = "1Week"
     MONTH = "1Month"
+
+
+#: Which corporate actions a historical equity bar series is adjusted for.
+#:
+#: The values are the ones Alpaca's ``GET /v2/stocks/bars`` reference
+#: documents for its ``adjustment`` parameter (checked 2026-10-22 at
+#: ``https://docs.alpaca.markets/us/reference/stockbars.md``):
+#:
+#: - ``raw`` -- no adjustment; prices and volume as printed.
+#: - ``split`` -- price *and volume* for forward and reverse splits.
+#: - ``dividend`` -- price for cash dividends.
+#: - ``spin-off`` -- price for spin-offs.
+#: - ``all`` -- every one of the above.
+#:
+#: A ``Literal`` rather than a free string so a typo is a type error, not a
+#: vendor 400 -- or a vendor that silently applies its own default, which for
+#: Alpaca is ``raw``. The vendor also accepts comma-joined combinations
+#: (``split,spin-off``); none is needed, so none is representable.
+#:
+#: :meth:`MarketDataProvider.stock_bars` defaults to ``split``: anything
+#: comparing volume or drawing a chart wants split-adjusted, dividend-raw
+#: prices, which agree with what printed on the day. A caller measuring a
+#: *return* across a window -- the sentiment audit -- wants ``all``, because
+#: an ex-date's price drop is a transfer to the holder, not a loss.
+BarAdjustment = Literal["raw", "split", "dividend", "spin-off", "all"]
+
+#: The runtime view of :data:`BarAdjustment`, for providers to refuse a value
+#: that reached them past the type checker.
+BAR_ADJUSTMENTS: Final[frozenset[str]] = frozenset(get_args(BarAdjustment))
 
 
 class ContractStatus(StrEnum):
@@ -541,6 +573,7 @@ class MarketDataProvider(ABC):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> dict[str, list[Bar]]:
         """Historical equity bars, oldest first, paginated to completion.
 
@@ -557,6 +590,15 @@ class MarketDataProvider(ABC):
         ``end`` is *historical*. A provider whose free tier embargoes recent
         data must not silently answer from a thinner feed — see
         :meth:`option_bars` and CLAUDE.md on ``min_avg_volume``.
+
+        ``adjustment`` is :data:`BarAdjustment`, and the default ``split`` is
+        what every caller except the sentiment audit wants: a pre-split bar
+        reports a fraction of the share count at a multiple of the price, so
+        unadjusted volume is wrong by the ratio across the boundary, while
+        dividend adjustment would rewrite historical prices so a chart
+        disagrees with what printed. The audit passes ``all`` -- see
+        :mod:`corollary.data.news.audit`. A value outside
+        :data:`BAR_ADJUSTMENTS` is a ``ValueError`` before any request.
         """
 
     @abstractmethod

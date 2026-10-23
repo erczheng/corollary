@@ -239,11 +239,13 @@ def test_the_reference_out_of_session_is_the_next_sessions_first_open() -> None:
     assert record.benchmark_return == Decimal("0.010000000000")
 
 
-def test_the_reference_is_the_later_of_published_and_labeled() -> None:
-    """Corollary is not credited with a move that happened before it saw the story."""
+def test_a_late_labelled_story_is_graded_from_its_publication() -> None:
+    """Owner decision (2026-10-22): the grade starts when the story was
+    published -- when the price reacts -- even if Corollary saw it an hour
+    later. The 09:59 close is the reference, not the 10:59."""
     published = et(2026, 10, 6, 10, 0)
     labeled = et(2026, 10, 6, 11, 0)
-    assert reference_at(label(1, "AAPL", BULL, published, labeled)) == labeled
+    assert reference_at(label(1, "AAPL", BULL, published, labeled)) == published
     bars = [
         bar("AAPL", et(2026, 10, 6, 9, 59), "90", "90"),
         bar("AAPL", et(2026, 10, 6, 10, 59), "100", "100"),
@@ -254,9 +256,11 @@ def test_the_reference_is_the_later_of_published_and_labeled() -> None:
     ]
     _, result = run([label(1, "AAPL", BULL, published, labeled)], bars)
     record = by_key(result)[(1, "1h")]
-    assert record.reference_at == labeled
-    assert record.reference_price == Decimal("100")
-    assert record.excess_return == Decimal("0.030000000000")
+    assert record.reference_at == published.astimezone(timezone.utc)
+    assert record.reference_price == Decimal("90")
+    # 100/90 - 1 = 0.111111111111 against SPY's 500/400 - 1 = 0.25.
+    assert record.excess_return == Decimal("-0.138888888889")
+    assert record.correct is False
 
 
 def test_a_published_at_far_after_labeled_at_yields_to_labeled_at() -> None:
@@ -306,7 +310,7 @@ def test_a_far_future_published_at_grades_from_labeled_at() -> None:
     assert record.excess_return == Decimal("0.100000000000")
 
 
-def test_a_labeled_at_past_the_schedule_is_unschedulable_not_raised() -> None:
+def test_a_story_published_past_the_schedule_is_unschedulable_not_raised() -> None:
     """The calendar's past-the-schedule error is caught per label, never per run."""
     far = datetime(2062, 3, 1, 15, 0, tzinfo=timezone.utc)
     bars = _two_point_bars("AAPL", "100", "110") + _two_point_bars("SPY", "500", "500")
@@ -316,11 +320,15 @@ def test_a_labeled_at_past_the_schedule_is_unschedulable_not_raised() -> None:
         label(3, "MSFT", BEAR, far, far),
     ]
     plan, result = run(labels, bars)
-    assert plan.unschedulable_label_ids == (2, 3)
-    assert {item.label.label_id for item in plan.to_grade} == {1}
-    assert {r.label_id for r in result.records} == {1}
+    # Graded from publication (owner, 2026-10-22): label 2's corrupt
+    # labeled_at no longer matters, and only label 3 -- published past the
+    # schedule as well -- is unschedulable.
+    assert plan.unschedulable_label_ids == (3,)
+    assert {item.label.label_id for item in plan.to_grade} == {1, 2}
+    assert {r.label_id for r in result.records} == {1, 2}
     assert by_key(result)[(1, "1h")].correct is True
-    assert all(key[0] == 1 for key in result.awaiting_bars)
+    assert by_key(result)[(2, "1h")].correct is True
+    assert all(key[0] in (1, 2) for key in result.awaiting_bars)
 
 
 def test_an_unschedulable_label_with_every_window_written_is_not_named() -> None:
@@ -339,8 +347,8 @@ def test_a_label_late_into_the_session_open_out_of_session_uses_the_next_open() 
 def test_inside_the_first_minute_the_reference_waits_for_the_first_completed_bar() -> None:
     """09:30:20 is after the open print: the 09:30 bar's close at 09:31, never its open.
 
-    The open would credit the label with movement from before it was seen
-    (decision 1). SPY is priced at the same 09:31, by the same rule.
+    The open would credit the label with movement from before its reference
+    instant (decision 1). SPY is priced at the same 09:31, by the same rule.
     """
     published = et(2026, 10, 6, 9, 30, 20)
     bars = [

@@ -32,7 +32,8 @@ b. **Plan.** The labels with an unwritten window, the keys already written,
    than its reference session, so each label's own verdict is loaded
    (decision 25).
 c. **Fetch.** One ``stock_bars`` call per session per
-   :data:`BAR_BATCH_MAX_SYMBOLS` symbols (decision 6), through
+   :data:`BAR_BATCH_MAX_SYMBOLS` symbols (decision 6), adjusted for splits,
+   dividends and spin-offs (:data:`AUDIT_BAR_ADJUSTMENT`), through
    :class:`MinuteBarSource` -- the provider interface, whose implementation
    meters the shared ``data.`` bucket and **waits** on it rather than
    refusing. A failed batch is retried one symbol at a time, and a raise
@@ -171,7 +172,7 @@ from corollary.data.news.audit import (
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels, verdict_histories
 from corollary.data.news.watchlist import MARKET_TICKER
-from corollary.data.providers.interface import Bar, BarTimeframe
+from corollary.data.providers.interface import Bar, BarAdjustment, BarTimeframe
 from corollary.db.models import (
     AuditLog,
     AuditRun,
@@ -185,6 +186,7 @@ from corollary.wire import WireFormatError
 
 __all__ = [
     "ABANDONED_RUN_AFTER",
+    "AUDIT_BAR_ADJUSTMENT",
     "BAR_BATCH_MAX_SYMBOLS",
     "FETCH_ABORT_AFTER",
     "AuditAlreadyRunning",
@@ -231,6 +233,24 @@ FETCH_ABORT_AFTER: Final = 5
 #: at the spec's request budget -- so a slow run is never closed under itself.
 ABANDONED_RUN_AFTER: Final = timedelta(hours=2)
 
+#: The audit's bars are adjusted for **every** corporate action -- splits,
+#: cash dividends and spin-offs (Alpaca's ``all``; see
+#: :data:`~corollary.data.providers.interface.BarAdjustment`) -- never the
+#: provider's ``split`` default. A stock opens lower on its ex-date by about
+#: the dividend, and that drop is a transfer to the holder, not a loss: with
+#: split-only bars a 1d window spanning a ticker's ex-date reads a 0.2--1%
+#: decline that never happened to anyone holding it, and SPY's quarterly
+#: ex-date shifts every excess return that session, so a correct bullish
+#: label could grade wrong. A spin-off is the same artefact, larger.
+#:
+#: The cost, stated where it is paid: the stored ``reference_price`` and
+#: ``outcome_price`` are **adjusted as of the run**, not as printed. Every
+#: ex-date after a window scales both of its prices by the same factor, so
+#: their ratio -- the return, the only thing graded -- is unchanged; it is
+#: only the levels that drift from the tape. They are never to be read as
+#: prints. See :mod:`corollary.data.news.audit`.
+AUDIT_BAR_ADJUSTMENT: Final[BarAdjustment] = "all"
+
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -241,6 +261,8 @@ class MinuteBarSource(Protocol):
     Bars come from the provider's **historical** feed -- SIP, from
     ``ALPACA_STOCK_FEED_HISTORICAL`` inside the provider; no feed name is
     spelled here -- and the request waits on the shared ``data.`` bucket.
+    The audit always passes ``adjustment=``:data:`AUDIT_BAR_ADJUSTMENT`, so
+    an implementation must honour it rather than accept and ignore it.
     """
 
     async def stock_bars(
@@ -251,6 +273,7 @@ class MinuteBarSource(Protocol):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> Mapping[str, Sequence[Bar]]: ...
 
 
@@ -843,6 +866,7 @@ async def _fetch(bars: MinuteBarSource, plan: AuditPlan, correlation_id: str) ->
                 timeframe=BarTimeframe.MINUTE,
                 start=start,
                 end=end,
+                adjustment=AUDIT_BAR_ADJUSTMENT,
             )
         except Exception as exc:  # per batch, by design: see step c
             data_fault = _is_data_fault(exc)

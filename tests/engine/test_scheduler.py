@@ -992,6 +992,7 @@ class FakeAlpacaContext(FakeAlpaca):
     directory: AssetDirectory = DIRECTORY
     directory_calls: int = 0
     minute_bar_calls: int = 0
+    minute_bar_adjustments: list[str] = dataclasses.field(default_factory=list)
 
     async def active_equities(self) -> AssetDirectory:
         self.directory_calls += 1
@@ -1013,8 +1014,15 @@ class FakeAlpacaContext(FakeAlpaca):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: str = "split",
     ) -> dict[str, list[object]]:
-        """The sentiment audit's minute bars: none, so every window waits."""
+        """The sentiment audit's minute bars: none, so every window waits.
+
+        Accepts ``adjustment`` because the audit always passes it (``all``);
+        it is recorded, not asserted, since the runner's per-batch ``except``
+        would turn a raise here into a fetch fault rather than a failure.
+        """
+        self.minute_bar_adjustments.append(adjustment)
         self.minute_bar_calls += 1
         return {}
 

@@ -90,9 +90,11 @@ from corollary.data.news.article import (
 )
 from corollary.data.news.tradeability import adv_request_start, has_standard_contract
 from corollary.data.providers.interface import (
+    BAR_ADJUSTMENTS,
     AnalyticsSource,
     AssetDirectory,
     Bar,
+    BarAdjustment,
     BarTimeframe,
     ContractStatus,
     EquityAsset,
@@ -1089,7 +1091,16 @@ class AlpacaProvider(MarketDataProvider):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> dict[str, list[Bar]]:
+        # Checked before anything else, the empty list included: `Literal` is
+        # static only, and an unknown value sent anyway is either a 400 or --
+        # worse -- the vendor's own default, which is `raw`.
+        if adjustment not in BAR_ADJUSTMENTS:
+            raise ValueError(
+                f"stock_bars: adjustment {adjustment!r} is not one of "
+                f"{sorted(BAR_ADJUSTMENTS)}"
+            )
         if not symbols:
             return {}
         # Resolved first: `_historical_end` validates both bounds by name, and
@@ -1104,14 +1115,17 @@ class AlpacaProvider(MarketDataProvider):
                 "end": _rfc3339(resolved_end),
                 # Always the historical feed. See `_historical_end`.
                 "feed": self._feeds.stock_historical,
-                # Split adjustment is not optional for anything that compares
-                # volume: a pre-split bar reports a quarter of the share count
-                # at four times the price, so an unadjusted average volume is
-                # wrong by the split ratio across the boundary. Dividend
-                # adjustment is deliberately *not* applied — it rewrites
-                # historical prices so a chart disagrees with what printed on
-                # the day.
-                "adjustment": "split",
+                # The caller's choice, defaulting to `split` (see
+                # `MarketDataProvider.stock_bars`). Split adjustment is not
+                # optional for anything that compares volume: a pre-split bar
+                # reports a quarter of the share count at four times the
+                # price, so an unadjusted average volume is wrong by the split
+                # ratio across the boundary. Dividend adjustment is *not* the
+                # default -- it rewrites historical prices so a chart
+                # disagrees with what printed on the day -- but the sentiment
+                # audit asks for `all`, because a return across an ex-date
+                # must not read the dividend as a loss.
+                "adjustment": adjustment,
                 "sort": "asc",
             },
             limit=limit,

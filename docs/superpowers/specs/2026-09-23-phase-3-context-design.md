@@ -2868,8 +2868,11 @@ discovery panel.**
   (watch/discovery) is stored so a later watch-list change cannot rewrite
   an old split; one label is graded per story, ticker and source, so a
   syndicated story is not counted once per vendor; the reference instant is
-  `max(published_at, labeled_at)`, falling back to `labeled_at` when the
-  vendor stamp is over 15 minutes later; a fallback first trade is bounded
+  `published_at` -- **owner decision 2026-10-22: graded from publication even
+  for a story Corollary fetched late, so a source whose story drove a move is
+  credited for it** -- falling back to `labeled_at` only when the vendor stamp
+  is over 15 minutes after it (an impossible stamp); audit prices are
+  dividend- and split-adjusted; a fallback first trade is bounded
   at 30 minutes and SPY is taken at that same instant; an exact-zero excess
   is incorrect; a discovery label is graded on the tradeability verdict
   dated on or before its own session; missing prices wait 7 days (28 for a
