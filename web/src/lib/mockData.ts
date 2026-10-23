@@ -18,7 +18,6 @@ import type {
   ApiKeyPresence,
   ArchivedChat,
   AuditLogEntry,
-  CalendarEvent,
   ChainSpec,
   ChartRange,
   ChatScript,
@@ -1212,38 +1211,6 @@ export const SECTOR_CONSENSUS: SectorConsensus[] = [
 ]
 
 // ---------------------------------------------------------------------- //
-// Market calendar (News page)
-// ---------------------------------------------------------------------- //
-
-/** Forward-looking only, per PRD.md §8.3 — a calendar of what has not
- * happened yet. `upcomingEvents` in `lib/news.ts` enforces that against the
- * clock rather than trusting the fixture to stay ahead of it.
- *
- * Three weeks out, which reaches past the near expirations in
- * `CHAIN_EXPIRATIONS`: the point of the panel is seeing the event risk that
- * sits inside a contract you are already holding. */
-export const CALENDAR_EVENTS: CalendarEvent[] = [
-  { id: 'cal-1', date: '2026-08-10', at: '2026-08-10T14:00:00Z', type: 'economic', title: 'Wholesale inventories' },
-  { id: 'cal-2', date: '2026-08-10', at: '2026-08-10T20:05:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'RBRK' },
-  { id: 'cal-3', date: '2026-08-11', at: '2026-08-11T12:30:00Z', type: 'economic', title: 'CPI, July' },
-  { id: 'cal-4', date: '2026-08-11', at: '2026-08-11T18:00:00Z', type: 'central-bank', title: 'FOMC rate decision' },
-  { id: 'cal-5', date: '2026-08-11', at: '2026-08-11T18:30:00Z', type: 'central-bank', title: 'Fed chair press conference' },
-  // No time at all. An ex-dividend date is a property of the session, and
-  // the row reads "All day" rather than inventing an 8:00 PM.
-  { id: 'cal-6', date: '2026-08-12', at: null, type: 'dividend', title: 'Ex-dividend date', ticker: 'JNJ' },
-  { id: 'cal-7', date: '2026-08-12', at: '2026-08-12T12:30:00Z', type: 'economic', title: 'PPI, July' },
-  { id: 'cal-8', date: '2026-08-13', at: null, type: 'geopolitical', title: 'EU trade council session' },
-  { id: 'cal-9', date: '2026-08-13', at: '2026-08-13T20:05:00Z', type: 'earnings', title: 'Q3 earnings call', ticker: 'AAPL' },
-  { id: 'cal-10', date: '2026-08-14', at: '2026-08-14T12:30:00Z', type: 'economic', title: 'Retail sales, July' },
-  { id: 'cal-11', date: '2026-08-17', at: '2026-08-17T20:05:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'HD' },
-  { id: 'cal-12', date: '2026-08-18', at: null, type: 'dividend', title: 'Ex-dividend date', ticker: 'XOM' },
-  { id: 'cal-13', date: '2026-08-19', at: '2026-08-19T18:00:00Z', type: 'central-bank', title: 'FOMC minutes' },
-  { id: 'cal-14', date: '2026-08-20', at: '2026-08-20T20:20:00Z', type: 'earnings', title: 'Q2 earnings call', ticker: 'NVDA' },
-  { id: 'cal-15', date: '2026-08-21', at: '2026-08-21T13:00:00Z', type: 'geopolitical', title: 'G20 finance ministers meet' },
-  { id: 'cal-16', date: '2026-08-25', at: '2026-08-25T14:00:00Z', type: 'economic', title: 'Consumer confidence' },
-]
-
-// ---------------------------------------------------------------------- //
 // Option chains + stocks/ETFs (Markets page)
 // ---------------------------------------------------------------------- //
 
@@ -1864,6 +1831,8 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   { event: 'sentiment_repromoted', bell: true, discord: true },
   // Step 6, migration 0014: a manual audit run, on decision 20's config terms.
   { event: 'sentiment_audit_requested', bell: false, discord: true },
+  // Phase 3 decisions 9 and 20, migration 0015: a manual calendar entry.
+  { event: 'calendar_changed', bell: false, discord: true },
 ]
 
 /** Seeded bell feed — one of every event type in PRD.md §10, so every

@@ -74,15 +74,21 @@ EXPECTED_TABLES = {
     "label_outcome",
     "sentiment_accuracy",
     "sentiment_source_status",
+    # 0015 -- step 7: the News calendar (Q22: merged second, renumbered from 0014).
+    "calendar_event",
 }
 
-#: Everything 0014 created.
+#: Everything 0015 created.
+_0015_TABLES = {"calendar_event"}
+
+#: Everything 0014 created -- and 0015's table with it, which revises it, so
+#: every downgrade below 0014 that subtracts this subtracts both.
 _0014_TABLES = {
     "audit_run",
     "label_outcome",
     "sentiment_accuracy",
     "sentiment_source_status",
-}
+} | _0015_TABLES
 
 #: Everything 0013 created -- and 0014's tables with it, which revise it, so
 #: every downgrade below 0013 that subtracts this subtracts both.
@@ -145,7 +151,7 @@ def test_0005_downgrades_to_0004_and_back(db_path: Path) -> None:
         "notification_delivery",
         "fred_observation",
         "ticker_ipo_date",
-    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    } - _0008_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -172,7 +178,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0014"]
+    assert script.get_heads() == ["0015"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -185,7 +191,7 @@ def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert "ticker_ipo_date" not in tables
-    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    assert EXPECTED_TABLES - {"ticker_ipo_date"} - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -212,7 +218,9 @@ def test_0014_seeds_the_sentiment_audit_requested_routes_and_downgrades_to_0013(
     assert not {event for event, _channel in routes} & {
         "sentiment_audit_requested", "sentiment_demoted", "sentiment_repromoted"
     }
-    assert len(routes) == at_head - 6
+    # 0014's six sentiment rows, and 0015's two ``calendar_changed`` rows
+    # with them, since 0015 revises 0014.
+    assert len(routes) == at_head - 8
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("sentiment_audit_requested", "discord")] is True
@@ -236,7 +244,7 @@ def test_0011_seeds_the_spdr_seed_amended_routes_and_downgrades_to_0010(
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables  # 0011 dropped nothing
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables  # 0011 dropped nothing
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
@@ -268,8 +276,8 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
-    assert tables & (_0012_TABLES | _0013_TABLES) == set()
-    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    assert tables & (_0012_TABLES | _0013_TABLES | _0014_TABLES) == set()
+    assert EXPECTED_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
     assert _route_rows(url)[("spdr_seed_amended", "discord")] is True
 
     command.upgrade(cfg, "head")
@@ -277,6 +285,84 @@ def test_0012_downgrades_to_0011_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert EXPECTED_TABLES <= tables
+
+
+def test_0015_seeds_the_calendar_changed_routes_and_downgrades_them(
+    db_path: Path,
+) -> None:
+    """Unit 7.3: decision 20's info defaults."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("calendar_changed", "bell")] is False
+    assert routes[("calendar_changed", "discord")] is True
+
+    command.downgrade(cfg, "0014")
+    routes = _route_rows(url)
+    assert not {event for event, _channel in routes} & {"calendar_changed"}
+    # 0014's 36, every one of 0014's sentiment rows still there.
+    assert len(routes) == 36
+
+    command.upgrade(cfg, "head")
+    assert _route_rows(url)[("calendar_changed", "discord")] is True
+
+
+def test_0015_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> None:
+    """``seed.py`` runs on every startup; an edited row must survive 0015."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "0014")
+    eng = create_db_engine(url)
+    with Session(eng) as sess:
+        sess.add(NotificationRoute(event="calendar_changed", channel="discord", enabled=False))
+        sess.commit()
+    eng.dispose()
+
+    command.upgrade(cfg, "head")
+    routes = _route_rows(url)
+    assert routes[("calendar_changed", "discord")] is False
+    assert routes[("calendar_changed", "bell")] is False
+
+
+def test_0015_downgrades_to_0014_and_back(db_path: Path) -> None:
+    """``calendar_event`` comes and goes alone; 0014's audit tables, 0013's
+    labels and 0012's cache stay."""
+    url = sqlite_url(db_path)
+    cfg = _config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0014")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    eng.dispose()
+    assert tables & _0015_TABLES == set()
+    assert EXPECTED_TABLES - _0015_TABLES <= tables
+
+    command.upgrade(cfg, "head")
+    eng = create_db_engine(url)
+    tables = set(inspect(eng).get_table_names())
+    indexes = {ix["name"] for ix in inspect(eng).get_indexes("calendar_event")}
+    columns = {c["name"]: c for c in inspect(eng).get_columns("calendar_event")}
+    checks = {ck["name"] for ck in inspect(eng).get_check_constraints("calendar_event")}
+    eng.dispose()
+    assert EXPECTED_TABLES <= tables
+    assert "ix_calendar_event_date" in indexes
+    # Decision 7's earnings session survives the round trip, nullable.
+    assert columns["session"]["nullable"] is True
+    # Q15's IPO-only columns (amended into the calendar migration in-branch,
+    # unit 7.2b-F, when it was still numbered 0013) come
+    # back too, every one nullable.
+    for name in ("exchange", "shares", "price_low", "price_high", "ipo_status"):
+        assert columns[name]["nullable"] is True, name
+    assert {
+        "ck_calendar_event_ipo_fields",
+        "ck_calendar_event_exchange",
+        "ck_calendar_event_shares",
+        "ck_calendar_event_price_low",
+        "ck_calendar_event_price_high",
+        "ck_calendar_event_price_pair",
+        "ck_calendar_event_ipo_status",
+    } <= checks
 
 
 # Autogenerate does not compare CHECK constraints; run the same rows against
@@ -356,7 +442,7 @@ def test_0010_downgrades_to_0009_and_back(db_path: Path) -> None:
     tables = set(inspect(eng).get_table_names())
     eng.dispose()
     assert tables & _0010_TABLES == set()
-    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES <= tables
+    assert EXPECTED_TABLES - _0010_TABLES - _0012_TABLES - _0013_TABLES - _0014_TABLES <= tables
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)
@@ -404,9 +490,10 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
 
     command.upgrade(cfg, "head")
     # 0006's ten back, plus 0008's two ``watchlist_changed`` rows,
-    # 0011's two ``spdr_seed_amended`` rows, and 0014's four sentiment rows
-    # plus its two ``sentiment_audit_requested`` rows.
-    assert len(_route_rows(url)) == 36
+    # 0011's two ``spdr_seed_amended`` rows, 0014's four sentiment rows
+    # plus its two ``sentiment_audit_requested`` rows, and 0015's two
+    # ``calendar_changed`` rows.
+    assert len(_route_rows(url)) == 38
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
@@ -441,7 +528,9 @@ def test_0007_downgrades_to_0006_and_back(db_path: Path) -> None:
         - {"fred_observation", "ticker_ipo_date"}
         - _0008_TABLES
         - _0010_TABLES
-        - _0012_TABLES - _0013_TABLES
+        - _0012_TABLES
+        - _0013_TABLES
+        - _0014_TABLES
         <= tables
     )
 

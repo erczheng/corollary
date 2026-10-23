@@ -129,6 +129,10 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     # off, Discord on.
     ("sentiment_audit_requested", "bell", False),
     ("sentiment_audit_requested", "discord", True),
+    # A manual calendar entry added, edited or removed (Phase 3 decisions 9
+    # and 20, migration 0015): ``info``, a record for Discord, not the bell.
+    ("calendar_changed", "bell", False),
+    ("calendar_changed", "discord", True),
 )
 
 #: Decision 13: every sentiment source starts ``unaudited``. Seeded here as

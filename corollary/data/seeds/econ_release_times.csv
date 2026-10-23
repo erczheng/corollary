@@ -1,0 +1,16 @@
+release_id,release_name,et_time,fred_url,time_source_url,note
+10,Consumer Price Index,08:30,https://fred.stlouisfed.org/release?rid=10,https://www.bls.gov/schedule/news_release/,
+50,Employment Situation,08:30,https://fred.stlouisfed.org/release?rid=50,https://www.bls.gov/schedule/news_release/,
+46,Producer Price Index,08:30,https://fred.stlouisfed.org/release?rid=46,https://www.bls.gov/schedule/news_release/,
+192,Job Openings and Labor Turnover Survey,10:00,https://fred.stlouisfed.org/release?rid=192,https://www.bls.gov/schedule/news_release/,
+11,Employment Cost Index,08:30,https://fred.stlouisfed.org/release?rid=11,https://www.bls.gov/schedule/news_release/,
+188,U.S. Import and Export Price Indexes,08:30,https://fred.stlouisfed.org/release?rid=188,https://www.bls.gov/schedule/news_release/,
+53,Gross Domestic Product,08:30,https://fred.stlouisfed.org/release?rid=53,https://www.bea.gov/news/schedule,
+54,Personal Income and Outlays,08:30,https://fred.stlouisfed.org/release?rid=54,https://www.bea.gov/news/schedule,
+51,U.S. International Trade in Goods and Services,08:30,https://fred.stlouisfed.org/release?rid=51,https://www.bea.gov/news/schedule,
+9,Advance Monthly Sales for Retail and Food Services,08:30,https://fred.stlouisfed.org/release?rid=9,https://www.census.gov/economic-indicators/calendar-listview.html,
+27,New Residential Construction,08:30,https://fred.stlouisfed.org/release?rid=27,https://www.census.gov/economic-indicators/calendar-listview.html,
+97,New Residential Sales,10:00,https://fred.stlouisfed.org/release?rid=97,https://www.census.gov/economic-indicators/calendar-listview.html,
+229,Construction Spending,10:00,https://fred.stlouisfed.org/release?rid=229,https://www.census.gov/economic-indicators/calendar-listview.html,
+13,G.17 Industrial Production and Capacity Utilization,09:15,https://fred.stlouisfed.org/release?rid=13,https://www.federalreserve.gov/releases/g17/default.htm,"09:15 is the monthly release. The Fed's page: 'The annual revision is issued at noon.' FRED's release dates do not mark which date is the annual revision, so that day is not distinguished and shows 09:15."
+291,Existing Home Sales,10:00,https://fred.stlouisfed.org/release?rid=291,https://www.nar.realtor/research-and-statistics/housing-statistics/existing-home-sales,

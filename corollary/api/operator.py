@@ -1,7 +1,7 @@
 """The owner's actions, told to the bell and Discord.
 
 The owner, 2026-09-24: *"put it on the bell and discord, any action i do
-should be put into the discord."* Seven routes change state, and each emits one
+should be put into the discord."* Ten routes change state, and each emits one
 notification after its commit:
 
 ========================================  ====================================
@@ -14,6 +14,8 @@ event                                     emitted by
 ``notification_routes_changed``           ``PUT /api/settings/routes``
 ``watchlist_changed``                     ``POST``/``DELETE /api/news/watch/{t}``
 ``sentiment_audit_requested``             ``POST /api/settings/sentiment/audit``
+``calendar_changed``                      ``POST``/``PUT``/``DELETE
+                                          /api/calendar/manual``
 ========================================  ====================================
 
 ``watchlist_changed`` is Phase 3 decision 21's, on decision 20's terms for the
@@ -22,6 +24,15 @@ config events: ``info``, built from the one ``audit_log`` row the route wrote.
 terms (decision 20: an operator action notifies once it has an endpoint). It
 writes no ``audit_log`` row -- the ``audit_run`` row is its record -- so its
 words are the request instant and nothing else.
+
+``calendar_changed`` is a manual geopolitical calendar entry added, edited or
+removed (Phase 3 decision 9). Decision 20 is *"every operator action
+notifies"*, and Q8's reading of the owner's words is that *"every other
+state-changing request goes to Discord, with the bell off by default"*; the
+only exclusions are bell reads. So it notifies on the info terms -- but
+decision 9 keeps it **out of** the audit log, so it is built from the stored
+row (old and new values read back from ``calendar_event``), not from an audit
+row. Still stored values, never the request body.
 
 Reading or dismissing a bell entry is not in the table and must never be: it
 would page Discord for reading Discord, and loop.
@@ -64,6 +75,7 @@ __all__ = [
     "deliver_notice",
     "halt_notice",
     "notify_after_response",
+    "calendar_notice",
     "resume_notice",
     "sentiment_audit_notice",
     "settings_notice",
@@ -86,6 +98,8 @@ class OperatorEvent(StrEnum):
     WATCHLIST_CHANGED = "watchlist_changed"
     #: A sentiment self-audit run started by hand (Phase 3 step 6).
     SENTIMENT_AUDIT_REQUESTED = "sentiment_audit_requested"
+    #: A manual calendar entry added, edited or removed (decisions 9 and 20).
+    CALENDAR_CHANGED = "calendar_changed"
 
 
 #: A halt is worth a glance; everything else is a record.
@@ -97,6 +111,7 @@ _SEVERITY: Final[dict[OperatorEvent, str]] = {
     OperatorEvent.NOTIFICATION_ROUTES_CHANGED: "info",
     OperatorEvent.WATCHLIST_CHANGED: "info",
     OperatorEvent.SENTIMENT_AUDIT_REQUESTED: "info",
+    OperatorEvent.CALENDAR_CHANGED: "info",
 }
 
 _SETTINGS_TITLE: Final[dict[OperatorEvent, str]] = {
@@ -255,6 +270,27 @@ def sentiment_audit_notice(*, at: datetime, correlation_id: str) -> OperatorNoti
             "every matured label and may demote or re-promote a source; its "
             "result is on Settings."
         ),
+        at=at,
+        correlation_id=correlation_id,
+    )
+
+
+def calendar_notice(
+    action: str, lines: Sequence[str], *, at: datetime, correlation_id: str
+) -> OperatorNotice | None:
+    """``calendar_changed``: one notice per request, ``None`` if it changed nothing.
+
+    ``lines`` are the route's renderings of the stored row (the calendar
+    route builds them from ``calendar_event`` as read back, never from the
+    request body). ``action`` is ``added``, ``edited`` or ``removed``.
+    """
+    if not lines:
+        return None
+    return OperatorNotice(
+        event=OperatorEvent.CALENDAR_CHANGED.value,
+        severity=_SEVERITY[OperatorEvent.CALENDAR_CHANGED],
+        title=f"Calendar entry {action}",
+        body="\n".join(lines),
         at=at,
         correlation_id=correlation_id,
     )

@@ -141,12 +141,44 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from typing import Final, Protocol
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
+from corollary.data.calendar import (
+    WindowReplace,
+    count_live_in_window,
+    import_central_bank_year,
+    replace_window,
+    upsert_events,
+)
+from corollary.data.calendar_dividends import (
+    DIVIDEND_EX_DATE_HORIZON,
+    CashDividendSource,
+    DividendOutcome,
+    fetch_dividends,
+)
+from corollary.data.calendar_event import CalendarEventInput, CalendarKind, CalendarSource
+from corollary.data.calendar_finnhub import (
+    EARNINGS_POSSIBLY_TRUNCATED_AT,
+    EARNINGS_WINDOW,
+    FINNHUB_EARNINGS_ROW_CAP,
+    IPO_WINDOW,
+    EarningsRead,
+    earnings_events,
+    ipo_events,
+    possibly_truncated,
+    read_earnings_by_day,
+)
+from corollary.data.calendar_releases import (
+    FRED_RELEASES_HORIZON_DAYS,
+    ReleaseDatesSource,
+    ReleasesNotFetched,
+    fetch_release_events,
+)
 from corollary.data.macro.risk_free import (
     NotRefreshed,
     ObservationSource,
@@ -169,6 +201,7 @@ from corollary.data.news.audit_runner import (
 from corollary.data.news.pollers import (
     AlpacaNewsPoller,
     AlpacaNewsSource,
+    BuiltUniverse,
     CompanyNewsSource,
     FinnhubMarketNewsPoller,
     MarketNewsSource,
@@ -186,7 +219,9 @@ from corollary.data.news.pollers import (
     watch_interval,
 )
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
+from corollary.data.providers.finnhub import CalendarAccessDenied
 from corollary.data.seeds import SpdrSeed
+from corollary.data.seeds.calendar_seeds import load_econ_release_times
 from corollary.data.seeds.isin import IsinMappingSource, OpenFigiIsinResolver
 from corollary.data.seeds.nport import (
     CusipResolver,
@@ -209,12 +244,21 @@ from corollary.ratelimit import (
     SEC_DATA_HOST,
     SEC_WWW_HOST,
 )
+from corollary.db.models import CalendarEvent
 from corollary.wire import vendor_detail
 
 __all__ = [
     "ALPACA_NEWS_IN_SESSION",
     "ALPACA_NEWS_OTHERWISE",
     "ASSET_DIRECTORY_AT",
+    "CALENDAR_CATCH_UP_AFTER",
+    "CALENDAR_CENTRAL_BANKS_AT",
+    "CALENDAR_DIVIDENDS_AT",
+    "CALENDAR_EARNINGS_AT",
+    "CALENDAR_IPO_AT",
+    "CALENDAR_RELEASES_AT",
+    "DividendsNotFetched",
+    "FinnhubCalendarSource",
     "FINNHUB_MARKET_NEWS_EVERY",
     "MASSIVE_NEWS_EVERY",
     "NEWS_PRUNE_AT",
@@ -237,6 +281,7 @@ __all__ = [
     "FinnhubNewsSource",
     "JobSkipped",
     "JobStatus",
+    "HELD_POSITIONS_STALE_AFTER",
     "HeldPositionUnderlyings",
     "PositionUnderlyings",
     "PositionUnderlyingsSource",
@@ -589,9 +634,16 @@ class JobSkipped:
 
     Recorded as a skip with ``reason`` -- never as a success. See the module
     docstring's *A run that fetched nothing is skipped*.
+
+    ``fresh_as_of`` is set only by a calendar catch-up that did not fetch
+    because the stored rows were already fresh: the newest row's write
+    instant, UTC. That is a different state from a skip for want of a key,
+    and a reader says "up to date as of" from it rather than quoting
+    ``reason`` (whose instant is UTC text, for the log).
     """
 
     reason: str
+    fresh_as_of: datetime | None = None
 
 
 #: A job body: ``None`` for work done, :class:`JobSkipped` for nothing to do,
@@ -647,6 +699,14 @@ class JobStatus:
     skips: int = 0
     last_skipped: datetime | None = None
     last_skip_reason: str | None = None
+    #: :attr:`JobSkipped.fresh_as_of` of the newest skip; ``None`` for a
+    #: skip that was not "already fresh at start".
+    last_skip_fresh_as_of: datetime | None = None
+    #: When the run that set :attr:`last_success` *started*, recorded at the
+    #: moment it succeeded. Not :attr:`last_started`, which every later run
+    #: overwrites as it begins: a calendar fetch takes "today" at its start,
+    #: so this -- and only this -- dates what that success asked about.
+    last_success_started: datetime | None = None
     #: The job's task has ended and the job will not run again in this
     #: process: it died (``context_job_task_died``) or its calendar ran out
     #: (``context_job_unscheduled``). ``next_run`` is then ``None``.
@@ -678,6 +738,8 @@ class _JobRecord:
     skips: int = 0
     last_skipped: datetime | None = None
     last_skip_reason: str | None = None
+    last_skip_fresh_as_of: datetime | None = None
+    last_success_started: datetime | None = None
     stopped: bool = False
 
 
@@ -838,6 +900,8 @@ class Scheduler:
                 skips=record.skips,
                 last_skipped=record.last_skipped,
                 last_skip_reason=record.last_skip_reason,
+                last_skip_fresh_as_of=record.last_skip_fresh_as_of,
+                last_success_started=record.last_success_started,
                 stopped=record.stopped,
             )
             for job in self._jobs
@@ -942,7 +1006,8 @@ class Scheduler:
                 return
             await self._sleep_until(upcoming)
             due = upcoming
-            record.last_started = self._now()
+            started = self._now()
+            record.last_started = started
             try:
                 outcome = await job.run()
             except asyncio.CancelledError:
@@ -955,6 +1020,7 @@ class Scheduler:
                     continue
                 record.runs += 1
                 record.last_success = self._now()
+                record.last_success_started = started
                 logger.debug(
                     "context job ran",
                     extra={
@@ -972,7 +1038,8 @@ class Scheduler:
         record: _JobRecord,
     ) -> None:
         """The job's start-up catch-up, once. A failure is stated, never fatal."""
-        record.last_started = self._now()
+        started = self._now()
+        record.last_started = started
         try:
             outcome = await catch_up()
         except asyncio.CancelledError:
@@ -987,6 +1054,7 @@ class Scheduler:
                 return
             record.runs += 1
             record.last_success = self._now()
+            record.last_success_started = started
             logger.debug(
                 "context job caught up at start",
                 extra={
@@ -1019,6 +1087,8 @@ class Scheduler:
         except Exception:
             reason = "(the skip reason could not be rendered)"
         record.last_skip_reason = reason
+        fresh_as_of = getattr(skipped, "fresh_as_of", None)
+        record.last_skip_fresh_as_of = fresh_as_of if isinstance(fresh_as_of, datetime) else None
         try:
             logger.info(
                 "a context job had nothing to fetch; recorded as skipped, not "
@@ -1117,6 +1187,23 @@ class FinnhubNewsSource(CompanyNewsSource, MarketNewsSource, IpoDateSource, Prot
     (owner decision Q12, for a partial ADV window) -- one instance, the same
     one the market-cap column reads, so Finnhub's 60/min is counted once.
     """
+
+
+class FinnhubCalendarSource(Protocol):
+    """Finnhub's two calendar reads, as the calendar jobs use them.
+
+    ``FinnhubProvider`` satisfies it -- the same instance as
+    :class:`FinnhubNewsSource`, so both draw on the one ``finnhub.io`` bucket.
+    A structural type rather than the provider class, because
+    ``calendar_finnhub.fetch_ipos`` is annotated with the concrete provider:
+    the jobs read over this protocol -- one request per day for earnings
+    (``read_earnings_by_day``), one for the IPO window -- then map with
+    :func:`earnings_events` / :func:`ipo_events`, so a test passes a fake.
+    """
+
+    async def earnings_calendar(self, start: date, end: date) -> Sequence[object]: ...
+
+    async def ipo_calendar(self, start: date, end: date) -> Sequence[object]: ...
 
 
 #: The open-position underlyings, as the watch universe's position members.
@@ -1478,6 +1565,17 @@ class ContextServices:
     #: private default is an outbox nobody delivers, which is what a test's
     #: services want.
     notices: ContextNotices = field(default_factory=ContextNotices)
+    #: Finnhub's earnings and IPO calendars (step 7), or ``None`` when
+    #: ``FINNHUB_API_KEY`` is unset; the two Finnhub calendar jobs then skip.
+    finnhub_calendar: FinnhubCalendarSource | None = None
+    #: Alpaca corporate actions' cash dividends (step 7) -- the market-data
+    #: provider, never the broker -- or ``None`` without the paper keys; the
+    #: dividends job then skips.
+    dividends: CashDividendSource | None = None
+    #: FRED's release calendar (step 7, Q3), or ``None`` when ``FRED_API_KEY``
+    #: is unset; the releases job then skips. In production the same
+    #: ``FredProvider`` as :attr:`fred`.
+    fred_releases: ReleaseDatesSource | None = None
 
     def __post_init__(self) -> None:
         if self.seed_loader is None:
@@ -1632,6 +1730,24 @@ async def _news_prune(store: NewsStore, clock: UtcClock) -> JobSkipped | None:
     return None
 
 
+def _watch_universe_source(services: ContextServices) -> UniverseSource:
+    """Decision 12's watch-universe build over ``services`` -- the news and calendar jobs'.
+
+    A fresh build per call (positions, seed and manual watches as they are
+    now), never a cached set; one partial per job set, so the earnings and
+    dividends jobs ask exactly the universe the watch tier polls.
+    """
+    seed_loader = services.seed_loader
+    assert seed_loader is not None  # filled by ContextServices.__post_init__
+    return functools.partial(
+        build_watch_universe,
+        markets=services.markets,
+        position_underlyings=services.position_underlyings,
+        session_factory=services.session_factory,
+        seed_loader=seed_loader,
+    )
+
+
 def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]:
     """The step 4 news jobs, over one store and one poller per feed.
 
@@ -1658,13 +1774,8 @@ def _news_jobs(services: ContextServices, clock: UtcClock) -> list[ScheduledJob]
             ),
         )
     )
-    universe: UniverseSource = functools.partial(
-        build_watch_universe,
-        markets=services.markets,
-        position_underlyings=services.position_underlyings,
-        session_factory=services.session_factory,
-        seed_loader=seed_loader,
-    )
+    universe = _watch_universe_source(services)
+    universe = _watch_universe_source(services)
     watch = WatchTierPoller(provider=services.finnhub, universe=universe, store=store)
     alpaca_news = AlpacaNewsPoller(provider=services.alpaca, store=store)
     finnhub_market = FinnhubMarketNewsPoller(provider=services.finnhub, store=store)
@@ -2260,6 +2371,720 @@ def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> Schedule
     )
 
 
+# -- the calendar jobs (Phase 3 step 7, unit 7.2c-2) ------------------------
+#
+# Five jobs, one per producer of ``calendar_event`` rows other than the human:
+# Finnhub earnings and IPOs, Alpaca's announced cash dividends, FRED's release
+# dates, and the committed central-bank seed. Each **fetches first and writes
+# only on a complete, successful fetch** -- and only then through
+# :func:`~corollary.data.calendar.replace_window`, which withdraws the rows of
+# its window the fetch no longer lists. Anything less withdraws nothing:
+#
+# * a vendor error (including a 403 premium refusal, Q15) raises, and the
+#   scheduler records the failure with the job's rule and inputs;
+# * a fetch that produced nothing usable (no key; FRED listing no timed
+#   release) is a :class:`JobSkipped`, never a success;
+# * a fetch that is **partial** -- a row the mapper could not read (its key
+#   is unknown) or refused (its row is not written), a watch universe built
+#   without its seed or without a *current* read of the held positions (the
+#   read failed, has never happened since start, or is older than
+#   :data:`HELD_POSITIONS_STALE_AFTER`) -- upserts what it read through
+#   :func:`~corollary.data.calendar.upsert_events` and withdraws nothing, said
+#   at WARNING as ``calendar_window_kept``. Replaced, an unreadable row would
+#   withdraw its own stored predecessor, and a universe missing TSLA for one
+#   cycle would withdraw TSLA's earnings.
+#
+# And even a complete fetch withdraws **only the tickers it was asked about**.
+# Earnings and dividends pass the built watch universe to ``replace_window``
+# as ``tickers``; a stored row for a ticker outside it is never withdrawn,
+# because a response that never asked about a ticker says nothing about it.
+# IPOs and FRED releases are market-wide and pass ``None``.
+#
+# **The Cash book is not in the universe, and that is a known limit.** The
+# held-position members come from ``PaperPositionsRefresher`` alone. The app
+# has no server-side record that Cash was confirmed this session (rule 5's
+# confirmation lives in the browser; the server answers ``?account=cash``
+# per request whenever the live keys are set), so a background job reading
+# the Cash book would be a live-credential read nobody confirmed -- it is
+# deliberately not built. An underlying held only in Cash, and not otherwise
+# watched, therefore gets **no new** earnings or ex-dividend rows; the ticker
+# scope above only guarantees that rows it already had are not withdrawn.
+# Closing that needs an owner decision: a confirmed-Cash session state the
+# engine can read.
+#
+# The FRED "actual about ten minutes after each release" job is **not** here:
+# prior and actual are blocked on an owner question (unit 7.2b-R's
+# ``actual_for``). Nothing in this section is a rule 9 input; every database
+# write runs on a worker thread.
+
+#: *Feeds and budgets*: earnings daily at 07:00 ET. The IPO calendar and the
+#: dividends read take the next two five-minute slots, so the two Finnhub
+#: requests are never in the ``finnhub.io`` bucket at once and the dividends
+#: read is not stacked on the same minute either. The central-bank seed is a
+#: local file and goes first, at 06:45. **Every day**, not trading days only:
+#: these are forward calendars whose window starts today, and the panel is
+#: read at the weekend while the week is planned. One request a day for IPOs
+#: and dividends; earnings is one *sweep* a day, a request per day of its
+#: window (22), because Finnhub caps a response at 1500 rows -- the sweep is
+#: paced by the provider's 60/min limiter and ends well before 07:05.
+CALENDAR_EARNINGS_AT: Final = time(7, 0)
+CALENDAR_IPO_AT: Final = time(7, 5)
+CALENDAR_DIVIDENDS_AT: Final = time(7, 10)
+CALENDAR_CENTRAL_BANKS_AT: Final = time(6, 45)
+#: FRED's release dates: the feeds table's FRED row, 10:00 ET on trading days
+#: -- the same clock as ``fred_dgs3mo``, the other half of that row.
+CALENDAR_RELEASES_AT: Final = FRED_DAILY_AT
+#: The start-up catch-up fetches when the newest stored row of the job's
+#: source and kind was written longer ago than this -- its period. See
+#: :func:`_calendar_catch_up` for why "written" and not "fetched".
+CALENDAR_CATCH_UP_AFTER: Final = timedelta(days=1)
+#: How old the held-position read may be before a calendar fetch counts the
+#: watch universe as missing its positions: twice the paper refresher's
+#: interval (``corollary.api.deps.POSITION_UNDERLYINGS_TTL``, five minutes;
+#: this module may not import ``corollary.api``, so a test pins the two
+#: together). One missed refresh is tolerated, two in a row is a gap.
+HELD_POSITIONS_STALE_AFTER: Final = timedelta(minutes=10)
+#: *The earnings drop guard.* A complete earnings fetch whose window holds
+#: fewer than this fraction of the live rows already stored for the same
+#: window withdraws nothing: its rows are upserted and the drop is logged as
+#: a ``calendar_window_kept`` gap. Earnings reports do not vanish in bulk --
+#: a cancellation or a reschedule is one row -- so a window that shrinks by
+#: more than half overnight is far likelier a vendor that answered short
+#: (the silent row cap, ``FINNHUB_EARNINGS_ROW_CAP``, was exactly that) than
+#: a market that changed. Exactly the fraction is permitted. Counted after the
+#: watch filter on the fetch side, against the stored rows the replace would
+#: read for withdrawal on the other.
+EARNINGS_SHARP_DROP_KEEPS_BELOW: Final = Decimal("0.5")
+#: The drop guard only applies when at least this many rows are stored for
+#: the window: below it a ratio is noise (two reports rescheduled out of
+#: three is a real week), and a genuinely emptied small window must still be
+#: able to empty.
+EARNINGS_SHARP_DROP_MIN_STORED: Final = 10
+#: The central-bank job imports this year's seed and this many following
+#: years'. ``corollary.api.routes.calendar`` reads it to know which dates the
+#: job covers, so the number lives here once.
+CALENDAR_CENTRAL_BANK_YEARS_AHEAD: Final = 1
+
+#: Q15, as a failure log leads with it.
+_CALENDAR_ACCESS_DENIED_RULE: Final = (
+    "Q15: Finnhub refused a calendar on this key (401/403) -- a premium "
+    "endpoint, or a key that is not accepted. The refusal goes back to the "
+    "owner and is never worked around; nothing was withdrawn"
+)
+_NO_FINNHUB_CALENDAR: Final = (
+    "Finnhub is unavailable (FINNHUB_API_KEY is unset, or the provider offers "
+    "no calendar); nothing was fetched and the stored rows stay"
+)
+_NO_DIVIDEND_SOURCE: Final = (
+    "Alpaca market data is unavailable (ALPACA_PAPER_API_KEY / "
+    "ALPACA_PAPER_SECRET_KEY unset, or the provider offers no corporate "
+    "actions); nothing was fetched and the stored rows stay"
+)
+
+
+class DividendsNotFetched(Exception):
+    """The corporate-actions read ``FAILED``: the dividends job's failure.
+
+    ``fetch_dividends`` turns a provider error into an outcome rather than a
+    raise, so the job raises this to make it a recorded failure -- never an
+    empty window, and never a withdrawal. The fetcher has already logged it.
+    """
+
+    def __init__(self, error: str | None) -> None:
+        super().__init__(error or "the corporate-actions read failed")
+        self.error = error
+
+
+def _et_date(moment: datetime) -> date:
+    """The Eastern session date ``moment`` falls on -- what a calendar window starts at."""
+    return _require_utc(moment).astimezone(NYSE_TZ).date()
+
+
+def _universe_gaps(built: BuiltUniverse) -> list[str]:
+    """What the watch universe was built without this cycle, as reasons not to withdraw."""
+    gaps: list[str] = []
+    if built.positions_error is not None:
+        gaps.append(
+            f"the position underlyings could not be read ({built.positions_error})"
+        )
+    if built.seed_error is not None:
+        gaps.append(f"the SPDR seed did not parse ({built.seed_error})")
+    return gaps
+
+
+def _held_positions_gaps(source: PositionUnderlyingsSource, now: datetime) -> list[str]:
+    """Whether the held positions the watch universe is built from are current.
+
+    Production's reader, :class:`HeldPositionUnderlyings`, **never raises**:
+    it returns whatever the holder has, which is empty until the paper
+    refresher's first successful read and unchanged while every later read
+    fails. So the build's ``positions_error`` can never say "never read" or
+    "stale" -- the holder's ``as_of`` can, and this reads it. Without it, a
+    restart whose catch-up beats the first read would build a universe
+    missing every held underlying and withdraw their earnings and ex-dates
+    (unit 7.2c-2 audit).
+
+    Called **before** the universe is built: a refresh landing in between
+    makes the build newer than this check says, never older. A source that is
+    not a holder read (a test's coroutine, or none configured) has no read
+    time and reports a failure only by raising, which ``positions_error``
+    already carries.
+    """
+    if not isinstance(source, HeldPositionUnderlyings):
+        return []
+    as_of = source.holder.as_of
+    if as_of is None:
+        return [
+            "the held positions have never been read since start (no successful "
+            "paper positions read yet), so a held underlying may be missing"
+        ]
+    age = now - as_of
+    if age > HELD_POSITIONS_STALE_AFTER:
+        return [
+            f"the held positions were last read at {as_of.isoformat()}, {age} ago, "
+            f"past the {HELD_POSITIONS_STALE_AFTER} bound, so a held underlying "
+            "may be missing"
+        ]
+    return []
+
+
+def _row_gaps(skipped: int) -> list[str]:
+    """A fetched row left out of the events -- unreadable, so its key is unknown,
+    or refused, so its row is not written. Either way replacing would withdraw
+    the stored row it stands for."""
+    if skipped == 0:
+        return []
+    return [f"{skipped} fetched row(s) could not be written as events"]
+
+
+def _truncation_gaps(read: EarningsRead) -> list[str]:
+    """Each requested day whose response may have been cut at Finnhub's row cap."""
+    return [
+        f"the /calendar/earnings response for {day.isoformat()} carried {count} rows, "
+        f"at or above {EARNINGS_POSSIBLY_TRUNCATED_AT} (90% of the measured "
+        f"{FINNHUB_EARNINGS_ROW_CAP}-row cap), so it may be truncated"
+        for day, count in read.possibly_truncated
+    ]
+
+
+def _response_size_gaps(endpoint: str, rows: int) -> list[str]:
+    """One whole-window response that may have been cut at a Finnhub row cap.
+
+    The cap was measured on ``/calendar/earnings``; ``/calendar/ipo`` has
+    never come near it (tens of rows), and is held to the same bound because
+    a vendor cap is silent and can appear on any list endpoint.
+    """
+    if not possibly_truncated(rows):
+        return []
+    return [
+        f"the {endpoint} response carried {rows} rows, at or above "
+        f"{EARNINGS_POSSIBLY_TRUNCATED_AT} (90% of Finnhub's measured "
+        f"{FINNHUB_EARNINGS_ROW_CAP}-row cap), so it may be truncated"
+    ]
+
+
+def _sharp_drop_gaps(fetched: int, stored: int) -> list[str]:
+    """The earnings drop guard (:data:`EARNINGS_SHARP_DROP_KEEPS_BELOW`)."""
+    if stored < EARNINGS_SHARP_DROP_MIN_STORED:
+        return []
+    if Decimal(fetched) >= Decimal(stored) * EARNINGS_SHARP_DROP_KEEPS_BELOW:
+        return []
+    return [
+        f"the fetch listed {fetched} rows for a window holding {stored} stored rows, "
+        f"under {EARNINGS_SHARP_DROP_KEEPS_BELOW} of them; a drop that sharp is "
+        "taken as a short answer, not as cancellations"
+    ]
+
+
+def _write_calendar_blocking(
+    session_factory: Callable[[], Session],
+    events: Sequence[CalendarEventInput],
+    *,
+    job: str,
+    source: CalendarSource,
+    kinds: frozenset[CalendarKind],
+    window_start: date,
+    window_end: date,
+    tickers: frozenset[str] | None,
+    now: datetime,
+    gaps: Sequence[str],
+    drop_guard: bool = False,
+) -> None:
+    """Write one fetch's rows and commit. **Blocks**; called through ``asyncio.to_thread``.
+
+    No ``gaps``: the fetch was complete, so :func:`replace_window` makes it
+    the window's whole truth. Any gap: :func:`upsert_events` only, and the
+    gaps are logged -- the stored rows the fetch did not list stay live.
+    ``tickers`` is what the fetch was asked about, passed straight to
+    :func:`replace_window`: the built watch universe for earnings and
+    dividends, so a ticker outside it is never withdrawn; ``None`` for the
+    market-wide feeds. ``drop_guard`` adds one more gap, read in the same session as the write:
+    the fetch is much smaller than what is stored (:func:`_sharp_drop_gaps`).
+    """
+    window = {
+        "job": job,
+        "source": source.value,
+        "kinds": sorted(kind.value for kind in kinds),
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "tickers": None if tickers is None else len(tickers),
+        "at": now.isoformat(),
+    }
+    with session_factory() as session:
+        if drop_guard and not gaps:
+            stored = count_live_in_window(
+                session,
+                source=source,
+                kinds=kinds,
+                window_start=window_start,
+                window_end=window_end,
+                tickers=tickers,
+            )
+            gaps = _sharp_drop_gaps(len(events), stored)
+        if gaps:
+            counts = upsert_events(session, events, now=now)
+            session.commit()
+            logger.warning(
+                "a calendar fetch was partial; its rows were upserted and nothing "
+                "was withdrawn",
+                extra={
+                    "event": "calendar_window_kept",
+                    "rule": (
+                        "a calendar window is replaced only by a complete fetch; a "
+                        "partial one withdraws nothing"
+                    ),
+                    **window,
+                    "gaps": list(gaps),
+                    "inserted": counts.inserted,
+                    "updated": counts.updated,
+                    "unchanged": counts.unchanged,
+                },
+            )
+            return
+        result: WindowReplace = replace_window(
+            session,
+            events,
+            source=source,
+            kinds=kinds,
+            window_start=window_start,
+            window_end=window_end,
+            tickers=tickers,
+            now=now,
+        )
+        session.commit()
+    logger.info(
+        "calendar window replaced",
+        extra={
+            "event": "calendar_window_replaced",
+            **window,
+            "inserted": result.inserted,
+            "updated": result.updated,
+            "unchanged": result.unchanged,
+            "revived": result.revived,
+            "withdrawn": result.withdrawn,
+            "withdrawn_keys": [f"{kind.value}:{key}" for kind, key in result.withdrawn_keys],
+        },
+    )
+
+
+async def _read_finnhub_calendar(
+    job: str,
+    read: Callable[[date, date], Awaitable[Sequence[object]]],
+    start: date,
+    end: date,
+) -> Sequence[object]:
+    """One Finnhub calendar request; a premium refusal is logged as itself, then raised.
+
+    The scheduler records the raise with ``last_error_type ==
+    "CalendarAccessDenied"``, which is what tells a refusal (Q15: the owner's
+    question) apart from an outage (wait for the next slot). The exception's
+    text is not logged here -- the scheduler's failure line carries it,
+    redacted.
+    """
+    try:
+        return await read(start, end)
+    except CalendarAccessDenied:
+        logger.error(
+            "Finnhub refused a calendar on this key; the owner decides (Q15). "
+            "Nothing was withdrawn and the job runs again at its next slot",
+            extra={
+                "event": "calendar_access_denied",
+                "job": job,
+                "rule": _CALENDAR_ACCESS_DENIED_RULE,
+                "host": FINNHUB_HOST,
+                "variable": "FINNHUB_API_KEY",
+                "window_start": start.isoformat(),
+                "window_end": end.isoformat(),
+            },
+        )
+        raise
+
+
+async def _calendar_earnings(
+    services: ContextServices, universe: UniverseSource, clock: UtcClock
+) -> JobSkipped | None:
+    """Earnings for the watch universe, today -> ``EARNINGS_WINDOW``: one ``/calendar/earnings`` request **per day**.
+
+    Never one request for the window: Finnhub silently caps a response at
+    ``FINNHUB_EARNINGS_ROW_CAP`` rows and drops the *nearest* dates (measured
+    in peak season, 2026-10-22), so a single window request would withdraw
+    every near-term report. 22 requests a day on the 60/min ``finnhub.io``
+    bucket, paced by the provider's limiter. Any request raising fails the
+    whole run and writes nothing. A day still answering near the cap, or a
+    window that shrank sharply against the store (``drop_guard``), upserts
+    and withdraws nothing.
+    """
+    source = services.finnhub_calendar
+    if source is None:
+        return JobSkipped(_NO_FINNHUB_CALENDAR)
+    now = _require_utc(clock())
+    start = _et_date(now)
+    end = start + EARNINGS_WINDOW
+    held_gaps = _held_positions_gaps(services.position_underlyings, now)
+    built = await universe()
+
+    async def read_day(day_start: date, day_end: date) -> Sequence[object]:
+        return await _read_finnhub_calendar(
+            "calendar_earnings", source.earnings_calendar, day_start, day_end
+        )
+
+    read = await read_earnings_by_day(read_day, start=start, end=end)
+    batch = await asyncio.to_thread(earnings_events, read.rows, built.universe.symbols)
+    await asyncio.to_thread(
+        _write_calendar_blocking,
+        services.session_factory,
+        batch.events,
+        job="calendar_earnings",
+        source=CalendarSource.FINNHUB,
+        kinds=frozenset({CalendarKind.EARNINGS}),
+        window_start=start,
+        window_end=end,
+        tickers=frozenset(built.universe.symbols),
+        now=now,
+        gaps=[
+            *held_gaps,
+            *_universe_gaps(built),
+            *_row_gaps(len(batch.skipped)),
+            *_truncation_gaps(read),
+        ],
+        drop_guard=True,
+    )
+    return None
+
+
+async def _calendar_ipos(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+    """Upcoming IPOs, market-wide, today -> ``IPO_WINDOW``: one ``/calendar/ipo`` request (Q15)."""
+    source = services.finnhub_calendar
+    if source is None:
+        return JobSkipped(_NO_FINNHUB_CALENDAR)
+    now = _require_utc(clock())
+    start = _et_date(now)
+    end = start + IPO_WINDOW
+    rows = await _read_finnhub_calendar("calendar_ipo", source.ipo_calendar, start, end)
+    batch = await asyncio.to_thread(ipo_events, rows)
+    await asyncio.to_thread(
+        _write_calendar_blocking,
+        services.session_factory,
+        batch.events,
+        job="calendar_ipo",
+        source=CalendarSource.FINNHUB,
+        kinds=frozenset({CalendarKind.IPO}),
+        window_start=start,
+        window_end=end,
+        tickers=None,
+        now=now,
+        gaps=[*_row_gaps(len(batch.skipped)), *_response_size_gaps("/calendar/ipo", len(rows))],
+    )
+    return None
+
+
+async def _calendar_dividends(
+    services: ContextServices, universe: UniverseSource, clock: UtcClock
+) -> JobSkipped | None:
+    """Announced cash dividends for the watch universe, over the kept ex-date window.
+
+    Only ``ANNOUNCED`` and ``NONE_ANNOUNCED`` write -- the second empties the
+    window, which is what "none announced" means. ``FAILED`` raises
+    :class:`DividendsNotFetched`: a failure, nothing withdrawn.
+    """
+    source = services.dividends
+    if source is None:
+        return JobSkipped(_NO_DIVIDEND_SOURCE)
+    now = _require_utc(clock())
+    held_gaps = _held_positions_gaps(services.position_underlyings, now)
+    built = await universe()
+    fetched = await fetch_dividends(source, today=_et_date(now), watch=built.universe.symbols)
+    if fetched.outcome is DividendOutcome.FAILED:
+        raise DividendsNotFetched(fetched.error)
+    await asyncio.to_thread(
+        _write_calendar_blocking,
+        services.session_factory,
+        fetched.events,
+        job="calendar_dividends",
+        source=CalendarSource.ALPACA,
+        kinds=frozenset({CalendarKind.DIVIDEND}),
+        window_start=fetched.first_ex_date,
+        window_end=fetched.last_ex_date,
+        tickers=frozenset(built.universe.symbols),
+        now=now,
+        gaps=[*held_gaps, *_universe_gaps(built), *_row_gaps(len(fetched.skipped))],
+    )
+    return None
+
+
+async def _calendar_releases(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+    """FRED's release dates, ``FRED_RELEASES_HORIZON_DAYS`` ahead, at the committed table's ET times (Q3).
+
+    ``ReleasesNotFetched`` -- no key, or nothing FRED listed is a timed
+    release -- is a skip and withdraws nothing. The times table is read on a
+    worker thread, so the fetcher does not read the file on the loop.
+    """
+    now = _require_utc(clock())
+    today = _et_date(now)
+    fred = services.fred_releases
+    if fred is None:
+        outcome = await fetch_release_events(None, today=today)
+    else:
+        times = await asyncio.to_thread(load_econ_release_times)
+        outcome = await fetch_release_events(fred, today=today, times=times)
+    if isinstance(outcome, ReleasesNotFetched):
+        return JobSkipped(outcome.reason)
+    await asyncio.to_thread(
+        _write_calendar_blocking,
+        services.session_factory,
+        outcome.events,
+        job="calendar_releases",
+        source=CalendarSource.FRED,
+        kinds=frozenset({CalendarKind.ECONOMIC}),
+        window_start=outcome.start,
+        window_end=outcome.end,
+        tickers=None,
+        now=now,
+        gaps=_row_gaps(len(outcome.skipped)),
+    )
+    return None
+
+
+def _import_central_banks_blocking(
+    session_factory: Callable[[], Session], years: Sequence[int], now: datetime
+) -> list[tuple[int, bool, list[str]]]:
+    """Import each year's committed seed in **one** transaction. **Blocks.**
+
+    A malformed seed raises ``SeedError`` and, with the session closed
+    uncommitted, nothing of any year is written. Returns, per year, whether a
+    file existed and the gaps the panel must state.
+    """
+    with session_factory() as session:
+        imports = [import_central_bank_year(session, year, now=now) for year in years]
+        session.commit()
+    return [
+        (item.year, item.counts is not None, [gap.reason for gap in item.gaps])
+        for item in imports
+    ]
+
+
+async def _calendar_central_banks(
+    services: ContextServices, clock: UtcClock
+) -> JobSkipped | None:
+    """The committed central-bank seed for this year and ``CALENDAR_CENTRAL_BANK_YEARS_AHEAD`` more, at start and daily.
+
+    A local file, so no vendor and no budget: running at every start costs a
+    file read and an upsert that leaves unchanged rows untouched.
+    """
+    now = _require_utc(clock())
+    year = _et_date(now).year
+    last_year = year + CALENDAR_CENTRAL_BANK_YEARS_AHEAD
+    imported = await asyncio.to_thread(
+        _import_central_banks_blocking,
+        services.session_factory,
+        tuple(range(year, last_year + 1)),
+        now,
+    )
+    for seed_year, found, gaps in imported:
+        if gaps:
+            logger.info(
+                "the central-bank seed has gaps the calendar panel states",
+                extra={
+                    "event": "calendar_central_bank_gaps",
+                    "year": seed_year,
+                    "file": found,
+                    "gaps": gaps,
+                },
+            )
+    if not any(found for _, found, _ in imported):
+        return JobSkipped(
+            f"no central-bank seed file for {year} through {last_year}; nothing imported"
+        )
+    return None
+
+
+def _central_bank_years_in_words(years_ahead: int) -> str:
+    """``this year``, ``this year and next``, ``this year and the 2 after``."""
+    if years_ahead <= 0:
+        return "this year"
+    if years_ahead == 1:
+        return "this year and next"
+    return f"this year and the {years_ahead} after"
+
+
+def days_in_words(span: timedelta) -> str:
+    """``1 day``, ``21 days`` -- never ``str(timedelta)``'s ``1 day, 0:00:00``."""
+    days = span.days
+    return f"{days} day" if days == 1 else f"{days} days"
+
+
+def _newest_calendar_write_blocking(
+    session_factory: Callable[[], Session], source: CalendarSource, kind: CalendarKind
+) -> datetime | None:
+    """The latest ``updated_at`` of any row, live or withdrawn, of ``source``/``kind``. **Blocks.**
+
+    Compared in Python: the instants are few (a few hundred rows), and SQL's
+    ``MAX`` over a text-stored column is the comparison ``corollary.db.types``
+    warns about.
+    """
+    with session_factory() as session:
+        stamps = session.scalars(
+            select(CalendarEvent.updated_at).where(
+                CalendarEvent.source == source.value,
+                CalendarEvent.kind == kind.value,
+            )
+        ).all()
+    return max(stamps, default=None)
+
+
+async def _calendar_catch_up(
+    services: ContextServices,
+    clock: UtcClock,
+    run: JobBody,
+    *,
+    source: CalendarSource,
+    kind: CalendarKind,
+) -> JobSkipped | None:
+    """At start: fetch only when the stored rows are older than the job's period.
+
+    The FRED/SPDR pattern -- decide from the rows. There is no fetch log, so
+    the evidence is the newest ``updated_at`` of the job's source and kind
+    (an insert, a change and a withdrawal all stamp it; an unchanged row does
+    not). That is never *later* than the last successful fetch, so it errs
+    only towards fetching, and a stale window is never mistaken for a fresh
+    one.
+
+    **A stated deviation from "catch up only when stale".** A *quiet* feed --
+    the vendor answered and changed nothing for a day -- leaves no newer
+    stamp, so every restart fetches again until something changes. An
+    *empty* feed -- nothing ever stored for this source and kind, say no IPO
+    in the window -- has no stamp at all and costs exactly the same: one
+    request per restart per job, never more (pinned by
+    ``test_a_quiet_feed_and_an_empty_feed_each_cost_one_request_per_restart``).
+    That is within the feeds table's budget: each of these jobs is one
+    request against a bucket that allows dozens a minute, and restarts are
+    rare. The proper fix is a persisted per-job fetch record, read here
+    instead of the rows' stamps; it is **deferred** (a new table, unit
+    7.2c-2 review), not forgotten.
+    """
+    newest = await asyncio.to_thread(
+        _newest_calendar_write_blocking, services.session_factory, source, kind
+    )
+    now = _require_utc(clock())
+    if newest is not None and now - newest < CALENDAR_CATCH_UP_AFTER:
+        return JobSkipped(
+            f"the newest stored {source.value} {kind.value} row was written at "
+            f"{newest.isoformat()}, less than {days_in_words(CALENDAR_CATCH_UP_AFTER)} "
+            "ago; the start-up catch-up does not fetch again, and the daily slot will",
+            fresh_as_of=newest,
+        )
+    return await run()
+
+
+def _calendar_jobs(
+    services: ContextServices, universe: UniverseSource, clock: UtcClock
+) -> list[ScheduledJob]:
+    """The five calendar jobs. ``universe`` is the news jobs' watch-universe build."""
+
+    def catch_up(run: JobBody, source: CalendarSource, kind: CalendarKind) -> JobBody:
+        return functools.partial(
+            _calendar_catch_up, services, clock, run, source=source, kind=kind
+        )
+
+    earnings: JobBody = functools.partial(_calendar_earnings, services, universe, clock)
+    ipos: JobBody = functools.partial(_calendar_ipos, services, clock)
+    dividends: JobBody = functools.partial(_calendar_dividends, services, universe, clock)
+    releases: JobBody = functools.partial(_calendar_releases, services, clock)
+    central_banks: JobBody = functools.partial(_calendar_central_banks, services, clock)
+    return [
+        ScheduledJob(
+            name="calendar_earnings",
+            schedule=AtTime(CALENDAR_EARNINGS_AT, every_day),
+            run=earnings,
+            catch_up=catch_up(earnings, CalendarSource.FINNHUB, CalendarKind.EARNINGS),
+            rule=(
+                "decision 7's earnings calendar for the watch universe, today to "
+                f"+{days_in_words(EARNINGS_WINDOW)}; when this fails the stored "
+                "earnings rows stay as they were and the panel reads them stale"
+            ),
+            inputs={"host": FINNHUB_HOST, "endpoint": "/calendar/earnings"},
+        ),
+        ScheduledJob(
+            name="calendar_ipo",
+            schedule=AtTime(CALENDAR_IPO_AT, every_day),
+            run=ipos,
+            catch_up=catch_up(ipos, CalendarSource.FINNHUB, CalendarKind.IPO),
+            rule=(
+                "Q15's upcoming IPOs, market-wide, today to "
+                f"+{days_in_words(IPO_WINDOW)}; a 403 is a "
+                "premium refusal for the owner (CalendarAccessDenied); when this "
+                "fails the stored IPO rows stay as they were"
+            ),
+            inputs={"host": FINNHUB_HOST, "endpoint": "/calendar/ipo"},
+        ),
+        ScheduledJob(
+            name="calendar_dividends",
+            schedule=AtTime(CALENDAR_DIVIDENDS_AT, every_day),
+            run=dividends,
+            catch_up=catch_up(dividends, CalendarSource.ALPACA, CalendarKind.DIVIDEND),
+            rule=(
+                "decision 7's announced cash dividends for the watch universe, "
+                f"ex-dates today to +{days_in_words(DIVIDEND_EX_DATE_HORIZON)}; a "
+                "failed read is a failure, never 'none announced', and the stored "
+                "rows stay. REST corporate "
+                "actions, never a rule 9 input"
+            ),
+            inputs={
+                "host": ALPACA_DATA_HOST,
+                "endpoint": "/v1/corporate-actions",
+                "types": "cash_dividend",
+            },
+        ),
+        ScheduledJob(
+            name="calendar_releases",
+            schedule=AtTime(CALENDAR_RELEASES_AT, trading_days),
+            run=releases,
+            catch_up=catch_up(releases, CalendarSource.FRED, CalendarKind.ECONOMIC),
+            rule=(
+                "Q3's economic calendar: FRED release dates for the next "
+                f"{days_in_words(timedelta(days=FRED_RELEASES_HORIZON_DAYS))} "
+                "at the committed table's ET times; when this fails the stored "
+                "release rows stay as they were"
+            ),
+            inputs={"host": FRED_HOST, "endpoint": "/fred/releases/dates"},
+        ),
+        ScheduledJob(
+            name="calendar_central_banks",
+            schedule=AtTime(CALENDAR_CENTRAL_BANKS_AT, every_day),
+            run=central_banks,
+            # A local file: imported at every start, unconditionally.
+            catch_up=central_banks,
+            rule=(
+                "decision 8's committed central-bank seed for "
+                f"{_central_bank_years_in_words(CALENDAR_CENTRAL_BANK_YEARS_AHEAD)}; "
+                "when this fails (a malformed file) nothing of any of those years "
+                "is written and the stored rows stay"
+            ),
+            inputs={"host": "local", "seed": "corollary/data/seeds/central_banks_<year>.csv"},
+        ),
+    ]
+
+
 def context_jobs(
     services: ContextServices,
     *,
@@ -2304,6 +3129,7 @@ def context_jobs(
         *_news_jobs(services, clock),
         _spdr_job(services, clock, sleep),
         _sentiment_audit_job(services, clock),
+        *_calendar_jobs(services, _watch_universe_source(services), clock),
     ]
 
 

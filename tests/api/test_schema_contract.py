@@ -31,6 +31,7 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "ApiKeyPresence": schemas.ApiKeyPresence,
     "AttachedExit": schemas.AttachedExit,
     "AuditLogEntry": schemas.AuditLogEntry,
+    "CalendarEvent": schemas.CalendarEventItem,
     "ChainSpec": schemas.ChainSpec,
     "DataFeed": schemas.DataFeed,
     "DataSourceStatus": schemas.DataSourceStatus,

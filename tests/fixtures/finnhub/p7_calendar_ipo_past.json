@@ -1,0 +1,615 @@
+{
+  "recorded_at": "2026-10-10T05:00:37+00:00",
+  "request": "https://finnhub.io/api/v1/calendar/ipo?from=2026-09-10&to=2026-10-10",
+  "status_code": 200,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {
+    ".ipoCalendar": 58
+  },
+  "summary": {
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "window": [
+      "2026-09-10",
+      "2026-10-10"
+    ],
+    "top_level_keys": [
+      "ipoCalendar"
+    ],
+    "rows": 58,
+    "row_keys": [
+      "date",
+      "exchange",
+      "name",
+      "numberOfShares",
+      "price",
+      "status",
+      "symbol",
+      "totalSharesValue"
+    ],
+    "value_types_in_raw_text": {
+      "date": {
+        "str": 58
+      },
+      "exchange": {
+        "str": 15,
+        "NoneType": 43
+      },
+      "name": {
+        "str": 58
+      },
+      "numberOfShares": {
+        "int": 15,
+        "NoneType": 43
+      },
+      "price": {
+        "str": 14,
+        "NoneType": 44
+      },
+      "status": {
+        "str": 58
+      },
+      "symbol": {
+        "str": 50,
+        "NoneType": 8
+      },
+      "totalSharesValue": {
+        "int": 50,
+        "NoneType": 8
+      }
+    },
+    "status_values": {
+      "'expected'": 3,
+      "'withdrawn'": 8,
+      "'filed'": 35,
+      "'priced'": 12
+    },
+    "exchange_values": {
+      "'NASDAQ Global Select'": 5,
+      "'NASDAQ Capital'": 3,
+      "None": 43,
+      "'NASDAQ Global'": 5,
+      "'NYSE'": 2
+    },
+    "price_values_sample": [
+      "14.00-16.00",
+      "11.00-13.00",
+      null,
+      null,
+      null,
+      "10.00",
+      "10.00",
+      null,
+      null,
+      null
+    ],
+    "dates": [
+      "2026-09-10",
+      "2026-09-11",
+      "2026-09-15",
+      "2026-09-16",
+      "2026-09-17",
+      "2026-09-18",
+      "2026-09-21",
+      "2026-09-23",
+      "2026-09-24",
+      "2026-09-25",
+      "2026-09-28",
+      "2026-09-29",
+      "2026-09-30",
+      "2026-10-01",
+      "2026-10-02",
+      "2026-10-05",
+      "2026-10-06",
+      "2026-10-07",
+      "2026-10-09"
+    ],
+    "rows_with_empty_symbol": 9,
+    "head": null
+  },
+  "body": {
+    "ipoCalendar": [
+      {
+        "date": "2026-10-09",
+        "exchange": "NASDAQ Global Select",
+        "name": "TRex Bio, Inc.",
+        "numberOfShares": 8333334,
+        "price": "14.00-16.00",
+        "status": "expected",
+        "symbol": "TRXB",
+        "totalSharesValue": 153333344
+      },
+      {
+        "date": "2026-10-09",
+        "exchange": "NASDAQ Capital",
+        "name": "Retension Pharmaceuticals, Inc.",
+        "numberOfShares": 3300000,
+        "price": "11.00-13.00",
+        "status": "expected",
+        "symbol": "RTSN",
+        "totalSharesValue": 49335000
+      },
+      {
+        "date": "2026-10-07",
+        "exchange": null,
+        "name": "SIYATA PTT",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-10-07",
+        "exchange": null,
+        "name": "FireFly Robotics, Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "FFLY",
+        "totalSharesValue": 0
+      },
+      {
+        "date": "2026-10-07",
+        "exchange": null,
+        "name": "Centinel Spine Holdco, Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "CNTL",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-10-07",
+        "exchange": "NASDAQ Global",
+        "name": "AfterNext Acquisition I Corp.",
+        "numberOfShares": 10000000,
+        "price": "10.00",
+        "status": "expected",
+        "symbol": "AFNXU",
+        "totalSharesValue": 115000000
+      },
+      {
+        "date": "2026-10-06",
+        "exchange": "NASDAQ Global",
+        "name": "Pine Tree Acquisition Corp.",
+        "numberOfShares": 10000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "PAXGU",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-10-06",
+        "exchange": null,
+        "name": "TANG CAPITAL ACQUISITION CORP.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "TCAA",
+        "totalSharesValue": 75000000
+      },
+      {
+        "date": "2026-10-05",
+        "exchange": null,
+        "name": "New Iceland Arctic Acquisition Corp.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-10-05",
+        "exchange": null,
+        "name": "New Iceland Arctic Acquisition Corp.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "NIAAU",
+        "totalSharesValue": 115000000
+      },
+      {
+        "date": "2026-10-05",
+        "exchange": null,
+        "name": "DayOne Data Centers Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "DODC",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-10-05",
+        "exchange": null,
+        "name": "Lycia Therapeutics, Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "LYCA",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-10-02",
+        "exchange": null,
+        "name": "Arca Nova Acquisition Corp",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "ANACU",
+        "totalSharesValue": 115000000
+      },
+      {
+        "date": "2026-10-02",
+        "exchange": null,
+        "name": "LPC LTD",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "LPCI",
+        "totalSharesValue": 25875000
+      },
+      {
+        "date": "2026-10-02",
+        "exchange": null,
+        "name": "GEORGIA BANKING CO INC",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "GBC",
+        "totalSharesValue": 0
+      },
+      {
+        "date": "2026-10-01",
+        "exchange": "NYSE",
+        "name": "Southport Acquisition Corp. II",
+        "numberOfShares": 20000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "PORTU",
+        "totalSharesValue": 200000000
+      },
+      {
+        "date": "2026-10-01",
+        "exchange": "NASDAQ Capital",
+        "name": "Chilwa Minerals Ltd",
+        "numberOfShares": 625000,
+        "price": "5.60",
+        "status": "priced",
+        "symbol": "CHWM",
+        "totalSharesValue": 3500000
+      },
+      {
+        "date": "2026-10-01",
+        "exchange": null,
+        "name": "POP GLOBAL ACQUISITION Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "PGA",
+        "totalSharesValue": 115000000
+      },
+      {
+        "date": "2026-09-30",
+        "exchange": "NASDAQ Global Select",
+        "name": "Accelevation Holdings Corp.",
+        "numberOfShares": 30000000,
+        "price": "18.00",
+        "status": "priced",
+        "symbol": "ACCV",
+        "totalSharesValue": 540000000
+      },
+      {
+        "date": "2026-09-30",
+        "exchange": null,
+        "name": "Primagrove Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "YHTE",
+        "totalSharesValue": 43125000
+      },
+      {
+        "date": "2026-09-30",
+        "exchange": null,
+        "name": "BHAV Acquisition Corp II",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "BHAIU",
+        "totalSharesValue": 172500000
+      },
+      {
+        "date": "2026-09-29",
+        "exchange": "NASDAQ Capital",
+        "name": "ROZE AI INC.",
+        "numberOfShares": 13878565,
+        "price": null,
+        "status": "priced",
+        "symbol": "RZAI",
+        "totalSharesValue": 0
+      },
+      {
+        "date": "2026-09-29",
+        "exchange": null,
+        "name": "MNBS Acquisition Corp.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "MNBSU",
+        "totalSharesValue": 86250000
+      },
+      {
+        "date": "2026-09-28",
+        "exchange": null,
+        "name": "Calm Seas Acquisition Corp.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "CSEAU",
+        "totalSharesValue": 230000000
+      },
+      {
+        "date": "2026-09-28",
+        "exchange": null,
+        "name": "Orange Street Acquisition Corp",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "OSACU",
+        "totalSharesValue": 74750000
+      },
+      {
+        "date": "2026-09-28",
+        "exchange": null,
+        "name": "Source Agriventures Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "SRAV",
+        "totalSharesValue": 15000000
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": null,
+        "name": "Holtec Nuclear Corp",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": "NASDAQ Global Select",
+        "name": "ADARx Pharmaceuticals, Inc.",
+        "numberOfShares": 26250000,
+        "price": "17.00",
+        "status": "priced",
+        "symbol": "ADRX",
+        "totalSharesValue": 446250000
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": "NASDAQ Global",
+        "name": "Bluerock Acquisition Corp. II",
+        "numberOfShares": 15000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "BRRKU",
+        "totalSharesValue": 150000000
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": null,
+        "name": "MED-X, INC.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "MXRX",
+        "totalSharesValue": 0
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": null,
+        "name": "TFP Group Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "TFP",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": null,
+        "name": "Regenlab USA Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "RGNA",
+        "totalSharesValue": 34500000
+      },
+      {
+        "date": "2026-09-25",
+        "exchange": null,
+        "name": "TCGX Acquisition Corp. II",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "TCXB",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-09-24",
+        "exchange": null,
+        "name": "Frazier Life Sciences Acquisition Corp. II",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "FLSC",
+        "totalSharesValue": 75000000
+      },
+      {
+        "date": "2026-09-24",
+        "exchange": null,
+        "name": "CITY THERAPEUTICS, INC.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "CTY",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-09-23",
+        "exchange": "NASDAQ Global",
+        "name": "Live Oak Acquisition Corp. VI",
+        "numberOfShares": 20000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "LOVIU",
+        "totalSharesValue": 200000000
+      },
+      {
+        "date": "2026-09-21",
+        "exchange": null,
+        "name": "Sprout Red International Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "FYH",
+        "totalSharesValue": 1000000
+      },
+      {
+        "date": "2026-09-21",
+        "exchange": null,
+        "name": "Silicon Valley Acquisition Corp. II",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "SVATU",
+        "totalSharesValue": 253000000
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": null,
+        "name": "GEBE Environmental Technology Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": null,
+        "name": "Rise Smart Group Holdings Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": "NASDAQ Global Select",
+        "name": "Electra Therapeutics, Inc.",
+        "numberOfShares": 23333334,
+        "price": "15.00",
+        "status": "priced",
+        "symbol": "ETRA",
+        "totalSharesValue": 350000010
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": "NASDAQ Global Select",
+        "name": "Orion180 Insurance Group Inc.",
+        "numberOfShares": 20000000,
+        "price": "12.00",
+        "status": "priced",
+        "symbol": "OIG",
+        "totalSharesValue": 240000000
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": "NASDAQ Global",
+        "name": "Leader's Advantage Acquisition Corp.",
+        "numberOfShares": 15000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "LEDRU",
+        "totalSharesValue": 150000000
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": null,
+        "name": "VME Companies, Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "VME",
+        "totalSharesValue": 30000000
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": null,
+        "name": "NSCALE Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "NSCL",
+        "totalSharesValue": 100000000
+      },
+      {
+        "date": "2026-09-18",
+        "exchange": null,
+        "name": "Santa Ana Global Enterprises, S.A.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "STNF",
+        "totalSharesValue": 19906500
+      },
+      {
+        "date": "2026-09-17",
+        "exchange": null,
+        "name": "C2 Capital Group, Inc.",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      },
+      {
+        "date": "2026-09-17",
+        "exchange": "NYSE",
+        "name": "Haymaker Acquisition Corp V",
+        "numberOfShares": 25000000,
+        "price": "10.00",
+        "status": "priced",
+        "symbol": "HYACU",
+        "totalSharesValue": 250000000
+      },
+      {
+        "date": "2026-09-16",
+        "exchange": null,
+        "name": "Lower Cross Acquisitions Corp",
+        "numberOfShares": null,
+        "price": null,
+        "status": "filed",
+        "symbol": "LCACU",
+        "totalSharesValue": 230000000
+      },
+      {
+        "date": "2026-09-15",
+        "exchange": null,
+        "name": "OTSAW Ltd",
+        "numberOfShares": null,
+        "price": null,
+        "status": "withdrawn",
+        "symbol": null,
+        "totalSharesValue": null
+      }
+    ]
+  },
+  "body_raw": "{\"ipoCalendar\":[{\"date\":\"2026-10-09\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"TRex Bio, Inc.\",\"numberOfShares\":8333334,\"price\":\"14.00-16.00\",\"status\":\"expected\",\"symbol\":\"TRXB\",\"totalSharesValue\":153333344},{\"date\":\"2026-10-09\",\"exchange\":\"NASDAQ Capital\",\"name\":\"Retension Pharmaceuticals, Inc.\",\"numberOfShares\":3300000,\"price\":\"11.00-13.00\",\"status\":\"expected\",\"symbol\":\"RTSN\",\"totalSharesValue\":49335000},{\"date\":\"2026-10-07\",\"exchange\":null,\"name\":\"SIYATA PTT\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-10-07\",\"exchange\":null,\"name\":\"FireFly Robotics, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"FFLY\",\"totalSharesValue\":0},{\"date\":\"2026-10-07\",\"exchange\":null,\"name\":\"Centinel Spine Holdco, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"CNTL\",\"totalSharesValue\":100000000},{\"date\":\"2026-10-07\",\"exchange\":\"NASDAQ Global\",\"name\":\"AfterNext Acquisition I Corp.\",\"numberOfShares\":10000000,\"price\":\"10.00\",\"status\":\"expected\",\"symbol\":\"AFNXU\",\"totalSharesValue\":115000000},{\"date\":\"2026-10-06\",\"exchange\":\"NASDAQ Global\",\"name\":\"Pine Tree Acquisition Corp.\",\"numberOfShares\":10000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"PAXGU\",\"totalSharesValue\":100000000},{\"date\":\"2026-10-06\",\"exchange\":null,\"name\":\"TANG CAPITAL ACQUISITION CORP.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"TCAA\",\"totalSharesValue\":75000000},{\"date\":\"2026-10-05\",\"exchange\":null,\"name\":\"New Iceland Arctic Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-10-05\",\"exchange\":null,\"name\":\"New Iceland Arctic Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"NIAAU\",\"totalSharesValue\":115000000},{\"date\":\"2026-10-05\",\"exchange\":null,\"name\":\"DayOne Data Centers Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"DODC\",\"totalSharesValue\":100000000},{\"date\":\"2026-10-05\",\"exchange\":null,\"name\":\"Lycia Therapeutics, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"LYCA\",\"totalSharesValue\":100000000},{\"date\":\"2026-10-02\",\"exchange\":null,\"name\":\"Arca Nova Acquisition Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"ANACU\",\"totalSharesValue\":115000000},{\"date\":\"2026-10-02\",\"exchange\":null,\"name\":\"LPC LTD\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"LPCI\",\"totalSharesValue\":25875000},{\"date\":\"2026-10-02\",\"exchange\":null,\"name\":\"GEORGIA BANKING CO INC\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"GBC\",\"totalSharesValue\":0},{\"date\":\"2026-10-01\",\"exchange\":\"NYSE\",\"name\":\"Southport Acquisition Corp. II\",\"numberOfShares\":20000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"PORTU\",\"totalSharesValue\":200000000},{\"date\":\"2026-10-01\",\"exchange\":\"NASDAQ Capital\",\"name\":\"Chilwa Minerals Ltd\",\"numberOfShares\":625000,\"price\":\"5.60\",\"status\":\"priced\",\"symbol\":\"CHWM\",\"totalSharesValue\":3500000},{\"date\":\"2026-10-01\",\"exchange\":null,\"name\":\"POP GLOBAL ACQUISITION Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"PGA\",\"totalSharesValue\":115000000},{\"date\":\"2026-09-30\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"Accelevation Holdings Corp.\",\"numberOfShares\":30000000,\"price\":\"18.00\",\"status\":\"priced\",\"symbol\":\"ACCV\",\"totalSharesValue\":540000000},{\"date\":\"2026-09-30\",\"exchange\":null,\"name\":\"Primagrove Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"YHTE\",\"totalSharesValue\":43125000},{\"date\":\"2026-09-30\",\"exchange\":null,\"name\":\"BHAV Acquisition Corp II\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"BHAIU\",\"totalSharesValue\":172500000},{\"date\":\"2026-09-29\",\"exchange\":\"NASDAQ Capital\",\"name\":\"ROZE AI INC.\",\"numberOfShares\":13878565,\"price\":null,\"status\":\"priced\",\"symbol\":\"RZAI\",\"totalSharesValue\":0},{\"date\":\"2026-09-29\",\"exchange\":null,\"name\":\"MNBS Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"MNBSU\",\"totalSharesValue\":86250000},{\"date\":\"2026-09-28\",\"exchange\":null,\"name\":\"Calm Seas Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"CSEAU\",\"totalSharesValue\":230000000},{\"date\":\"2026-09-28\",\"exchange\":null,\"name\":\"Orange Street Acquisition Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"OSACU\",\"totalSharesValue\":74750000},{\"date\":\"2026-09-28\",\"exchange\":null,\"name\":\"Source Agriventures Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"SRAV\",\"totalSharesValue\":15000000},{\"date\":\"2026-09-25\",\"exchange\":null,\"name\":\"Holtec Nuclear Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-25\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"ADARx Pharmaceuticals, Inc.\",\"numberOfShares\":26250000,\"price\":\"17.00\",\"status\":\"priced\",\"symbol\":\"ADRX\",\"totalSharesValue\":446250000},{\"date\":\"2026-09-25\",\"exchange\":\"NASDAQ Global\",\"name\":\"Bluerock Acquisition Corp. II\",\"numberOfShares\":15000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"BRRKU\",\"totalSharesValue\":150000000},{\"date\":\"2026-09-25\",\"exchange\":null,\"name\":\"MED-X, INC.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"MXRX\",\"totalSharesValue\":0},{\"date\":\"2026-09-25\",\"exchange\":null,\"name\":\"TFP Group Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"TFP\",\"totalSharesValue\":100000000},{\"date\":\"2026-09-25\",\"exchange\":null,\"name\":\"Regenlab USA Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"RGNA\",\"totalSharesValue\":34500000},{\"date\":\"2026-09-25\",\"exchange\":null,\"name\":\"TCGX Acquisition Corp. II\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"TCXB\",\"totalSharesValue\":100000000},{\"date\":\"2026-09-24\",\"exchange\":null,\"name\":\"Frazier Life Sciences Acquisition Corp. II\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"FLSC\",\"totalSharesValue\":75000000},{\"date\":\"2026-09-24\",\"exchange\":null,\"name\":\"CITY THERAPEUTICS, INC.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"CTY\",\"totalSharesValue\":100000000},{\"date\":\"2026-09-23\",\"exchange\":\"NASDAQ Global\",\"name\":\"Live Oak Acquisition Corp. VI\",\"numberOfShares\":20000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"LOVIU\",\"totalSharesValue\":200000000},{\"date\":\"2026-09-21\",\"exchange\":null,\"name\":\"Sprout Red International Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"FYH\",\"totalSharesValue\":1000000},{\"date\":\"2026-09-21\",\"exchange\":null,\"name\":\"Silicon Valley Acquisition Corp. II\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"SVATU\",\"totalSharesValue\":253000000},{\"date\":\"2026-09-18\",\"exchange\":null,\"name\":\"GEBE Environmental Technology Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-18\",\"exchange\":null,\"name\":\"Rise Smart Group Holdings Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-18\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"Electra Therapeutics, Inc.\",\"numberOfShares\":23333334,\"price\":\"15.00\",\"status\":\"priced\",\"symbol\":\"ETRA\",\"totalSharesValue\":350000010},{\"date\":\"2026-09-18\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"Orion180 Insurance Group Inc.\",\"numberOfShares\":20000000,\"price\":\"12.00\",\"status\":\"priced\",\"symbol\":\"OIG\",\"totalSharesValue\":240000000},{\"date\":\"2026-09-18\",\"exchange\":\"NASDAQ Global\",\"name\":\"Leader's Advantage Acquisition Corp.\",\"numberOfShares\":15000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"LEDRU\",\"totalSharesValue\":150000000},{\"date\":\"2026-09-18\",\"exchange\":null,\"name\":\"VME Companies, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"VME\",\"totalSharesValue\":30000000},{\"date\":\"2026-09-18\",\"exchange\":null,\"name\":\"NSCALE Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"NSCL\",\"totalSharesValue\":100000000},{\"date\":\"2026-09-18\",\"exchange\":null,\"name\":\"Santa Ana Global Enterprises, S.A.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"STNF\",\"totalSharesValue\":19906500},{\"date\":\"2026-09-17\",\"exchange\":null,\"name\":\"C2 Capital Group, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-17\",\"exchange\":\"NYSE\",\"name\":\"Haymaker Acquisition Corp V\",\"numberOfShares\":25000000,\"price\":\"10.00\",\"status\":\"priced\",\"symbol\":\"HYACU\",\"totalSharesValue\":250000000},{\"date\":\"2026-09-16\",\"exchange\":null,\"name\":\"Lower Cross Acquisitions Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"LCACU\",\"totalSharesValue\":230000000},{\"date\":\"2026-09-15\",\"exchange\":null,\"name\":\"OTSAW Ltd\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-15\",\"exchange\":null,\"name\":\"Oceanhawk Acquisition II Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"OHIIU\",\"totalSharesValue\":172500000},{\"date\":\"2026-09-15\",\"exchange\":null,\"name\":\"SPACCircle Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"SCQCU\",\"totalSharesValue\":172500000},{\"date\":\"2026-09-11\",\"exchange\":null,\"name\":\"Hao Feng Group Ltd.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"HFE\",\"totalSharesValue\":29440000},{\"date\":\"2026-09-11\",\"exchange\":null,\"name\":\"FutureCore Acquisition Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"FTCRU\",\"totalSharesValue\":86250000},{\"date\":\"2026-09-11\",\"exchange\":null,\"name\":\"Meey Global Corp\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"\",\"totalSharesValue\":34500000},{\"date\":\"2026-09-10\",\"exchange\":null,\"name\":\"Motive Technologies, Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"withdrawn\",\"symbol\":null,\"totalSharesValue\":null},{\"date\":\"2026-09-10\",\"exchange\":null,\"name\":\"Elevation Acquisition Group Inc.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"ELEVU\",\"totalSharesValue\":115000000},{\"date\":\"2026-09-10\",\"exchange\":null,\"name\":\"Allarity Acquisition Corp.\",\"numberOfShares\":null,\"price\":null,\"status\":\"filed\",\"symbol\":\"ALLNU\",\"totalSharesValue\":92000000}]}"
+}

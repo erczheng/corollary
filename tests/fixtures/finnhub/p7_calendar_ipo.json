@@ -1,0 +1,84 @@
+{
+  "recorded_at": "2026-10-10T05:00:36+00:00",
+  "request": "https://finnhub.io/api/v1/calendar/ipo?from=2026-10-10&to=2026-11-09",
+  "status_code": 200,
+  "content_type": "application/json; charset=utf-8",
+  "truncated": {},
+  "summary": {
+    "status": 200,
+    "content_type": "application/json; charset=utf-8",
+    "window": [
+      "2026-10-10",
+      "2026-11-09"
+    ],
+    "top_level_keys": [
+      "ipoCalendar"
+    ],
+    "rows": 1,
+    "row_keys": [
+      "date",
+      "exchange",
+      "name",
+      "numberOfShares",
+      "price",
+      "status",
+      "symbol",
+      "totalSharesValue"
+    ],
+    "value_types_in_raw_text": {
+      "date": {
+        "str": 1
+      },
+      "exchange": {
+        "str": 1
+      },
+      "name": {
+        "str": 1
+      },
+      "numberOfShares": {
+        "int": 1
+      },
+      "price": {
+        "str": 1
+      },
+      "status": {
+        "str": 1
+      },
+      "symbol": {
+        "str": 1
+      },
+      "totalSharesValue": {
+        "int": 1
+      }
+    },
+    "status_values": {
+      "'expected'": 1
+    },
+    "exchange_values": {
+      "'NASDAQ Global Select'": 1
+    },
+    "price_values_sample": [
+      "15.00-17.00"
+    ],
+    "dates": [
+      "2026-10-15"
+    ],
+    "rows_with_empty_symbol": 0,
+    "head": null
+  },
+  "body": {
+    "ipoCalendar": [
+      {
+        "date": "2026-10-15",
+        "exchange": "NASDAQ Global Select",
+        "name": "Iambic Therapeutics, Inc.",
+        "numberOfShares": 9375000,
+        "price": "15.00-17.00",
+        "status": "expected",
+        "symbol": "IAM",
+        "totalSharesValue": 183281250
+      }
+    ]
+  },
+  "body_raw": "{\"ipoCalendar\":[{\"date\":\"2026-10-15\",\"exchange\":\"NASDAQ Global Select\",\"name\":\"Iambic Therapeutics, Inc.\",\"numberOfShares\":9375000,\"price\":\"15.00-17.00\",\"status\":\"expected\",\"symbol\":\"IAM\",\"totalSharesValue\":183281250}]}"
+}

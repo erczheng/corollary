@@ -133,6 +133,9 @@ def test_the_five_events_are_the_contract_the_web_codes_against() -> None:
         # Phase 3 step 6's manual audit trigger; its own suite is
         # ``tests/api/test_sentiment_routes.py``.
         "sentiment_audit_requested",
+        # Phase 3 decisions 9 and 20, emitted by the calendar's manual
+        # routes; its own suite is ``tests/api/test_calendar_routes.py``.
+        "calendar_changed",
     }
 
 
@@ -608,11 +611,16 @@ def test_no_runtime_means_the_action_succeeds_and_the_log_says_so(
         if r.__dict__.get("event") == "operator_notice_not_emitted"
     ]
     # ``_each_action`` drives the five engine and settings actions. The other
-    # two events have their own suites: ``watchlist_changed`` is the watch
-    # routes' (``tests/api/test_watch_routes.py``), and
+    # three events have their own suites: ``watchlist_changed`` is the watch
+    # routes' (``tests/api/test_watch_routes.py``), ``calendar_changed`` the
+    # calendar's manual routes' (``tests/api/test_calendar_routes.py``), and
     # ``sentiment_audit_requested`` the manual audit trigger's
     # (``tests/api/test_sentiment_routes.py``).
-    elsewhere = {OperatorEvent.WATCHLIST_CHANGED, OperatorEvent.SENTIMENT_AUDIT_REQUESTED}
+    elsewhere = {
+        OperatorEvent.WATCHLIST_CHANGED,
+        OperatorEvent.CALENDAR_CHANGED,
+        OperatorEvent.SENTIMENT_AUDIT_REQUESTED,
+    }
     assert sorted(r.__dict__["notification_event"] for r in skipped) == sorted(
         event.value for event in OperatorEvent if event not in elsewhere
     )
