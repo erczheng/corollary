@@ -46,6 +46,7 @@ from corollary.data.seeds.nport import DatabaseSeedLoader, invalidate_spdr_seed_
 from corollary.api.app import create_app
 from corollary.api.deps import (
     POSITION_UNDERLYINGS_TTL,
+    CashPositionsRefresher,
     PaperPositionsRefresher,
     PositionUnderlyings,
     ServiceRegistry,
@@ -75,6 +76,7 @@ from corollary.engine.runtime import EngineRuntime
 from corollary.engine.scheduler import (
     ContextServices,
     EveryInterval,
+    HeldCashUnderlyings,
     HeldPositionUnderlyings,
     ScheduledJob,
     Scheduler,
@@ -448,6 +450,12 @@ async def test_the_jobs_are_handed_the_app_state_the_routes_read(
         assert isinstance(services.position_underlyings, HeldPositionUnderlyings)
         assert services.position_underlyings.holder is app.state.position_underlyings
         assert isinstance(app.state.position_refresher, PaperPositionsRefresher)
+        # The Cash book reaches the jobs as a holder view over the app's own
+        # holder and session -- never the refresher, never a broker.
+        assert isinstance(services.cash_underlyings, HeldCashUnderlyings)
+        assert services.cash_underlyings.holder is app.state.cash_positions
+        assert services.cash_underlyings.session.holder is app.state.cash_session
+        assert isinstance(app.state.cash_position_refresher, CashPositionsRefresher)
 
         # The lifespan's refresher reads the paper book once at start.
         async def first_read() -> None:
@@ -841,6 +849,9 @@ _FORBIDDEN_TYPES: tuple[type, ...] = (
     AlpacaBroker,
     EngineRuntime,
     PaperPositionsRefresher,
+    # Cash-session unit 2: the Cash refresher holds the registry; the jobs
+    # get only the holder view and the session reader.
+    CashPositionsRefresher,
     FastAPI,
 )
 #: Modules whose objects a context job must never be able to reach: the
@@ -1113,6 +1124,9 @@ async def test_nothing_the_lifespan_hands_the_jobs_can_reach_a_broker_or_the_run
         reached = {id(obj) for _, obj in _walk(services)}
         assert id(app.state.position_underlyings) in reached
         assert id(app.state.asset_directory) in reached
+        # And behind the Cash view: its holder and the Cash session holder.
+        assert id(app.state.cash_positions) in reached
+        assert id(app.state.cash_session) in reached
         assert id(db_engine) in reached
         # The notice outbox (owner decision 2026-09-30) is walked too, and is
         # the one the lifespan drains -- a job's only way to notify.

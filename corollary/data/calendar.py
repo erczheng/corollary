@@ -567,8 +567,9 @@ def replace_window(
     shares dotted). A row for a ticker outside it, or with no
     ticker, is never read for withdrawal: its absence from a response that
     never asked about it says nothing. That is what keeps an underlying that
-    left the universe -- a position closed, or held only in the Cash book
-    the calendar does not read -- from losing its earnings and ex-dates.
+    left the universe -- a position closed, or a Cash holding whose read was
+    stale or absent this run (no confirmed Cash session) -- from losing its
+    earnings and ex-dates.
     An event whose ticker is outside a stated set is refused.
 
     The vendor equivalent of the seed import's withdrawal. It closes the

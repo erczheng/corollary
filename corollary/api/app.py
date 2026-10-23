@@ -85,6 +85,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from corollary.api.deps import (
     AccountMode,
     ApiError,
+    CashPositionsRefresher,
     PaperPositionsRefresher,
     PositionUnderlyings,
     ServiceRegistry,
@@ -125,7 +126,7 @@ from corollary.data.providers.interface import (
 from corollary.data.macro.risk_free import seed_rate_source
 from corollary.db.seed import seed
 from corollary.db.session import get_engine
-from corollary.engine.cash_session import CashSessionHolder
+from corollary.engine.cash_session import CashSessionHolder, CashSessionReader
 from corollary.engine.execution.interface import (
     BrokerAuthError,
     BrokerError,
@@ -142,10 +143,12 @@ from corollary.data.calendar_dividends import CashDividendSource
 from corollary.data.calendar_releases import ReleaseDatesSource
 from corollary.engine.scheduler import (
     AlpacaContextSource,
+    CashPositionUnderlyings,
     ContextNotices,
     ContextServices,
     ContextSessions,
     FinnhubCalendarSource,
+    HeldCashUnderlyings,
     HeldPositionUnderlyings,
     FinnhubNewsSource,
     Scheduler,
@@ -933,6 +936,14 @@ def _context_services(
         markets=UNIVERSE_SYMBOLS,
         funds=UNIVERSE_FUND_SYMBOLS,
         position_underlyings=positions,
+        # The confirmed Cash book's underlyings, for the earnings and
+        # dividends scope only -- a holder read gated on the Cash session on
+        # every read (rule 5). The Cash read that fills the holder is
+        # :func:`_cash_position_refresher`'s, which no job holds.
+        cash_underlyings=HeldCashUnderlyings(
+            holder=app.state.cash_positions,
+            session=CashSessionReader(app.state.cash_session),
+        ),
         seed_loader=app.state.spdr_seed_loader,
         # ``None`` when SEC_USER_AGENT is unset -- said once, inside -- and
         # the ``spdr_holdings`` job skips.
@@ -964,6 +975,21 @@ def _position_refresher(app: FastAPI) -> PaperPositionsRefresher:
     return PaperPositionsRefresher(
         broker=lambda: registry.broker(AccountMode.PAPER),
         holder=app.state.position_underlyings,
+    )
+
+
+def _cash_position_refresher(app: FastAPI) -> CashPositionsRefresher:
+    """The one reader of the Cash positions, into ``app.state.cash_positions``.
+
+    Holds the registry -- which is why this object is the lifespan's and is
+    never put in :class:`ContextServices`. It reads only while a confirmed
+    Cash session is active (``confirmed_cash_broker``, checked per read) and
+    clears the holder whenever one is not (rule 5).
+    """
+    return CashPositionsRefresher(
+        registry=app.state.registry,
+        session=CashSessionReader(app.state.cash_session),
+        holder=app.state.cash_positions,
     )
 
 
@@ -1180,6 +1206,10 @@ def create_app(
         app.state.context_notices = context_notices
         notice_task: asyncio.Task[None] | None = None
         refresher: PaperPositionsRefresher | None = None
+        # Its Cash twin, beside it and on the same terms: started only with
+        # the scheduler (the calendar jobs are its only readers), reading
+        # nothing until a Cash session is confirmed.
+        cash_refresher: CashPositionsRefresher | None = None
         try:
             if scheduler is not no_scheduler:
                 services = _context_services(app, context_sessions, context_notices)
@@ -1187,6 +1217,8 @@ def create_app(
             if context_scheduler is not None:
                 refresher = _position_refresher(app)
                 refresher.start()
+                cash_refresher = _cash_position_refresher(app)
+                cash_refresher.start()
                 notice_task = asyncio.create_task(
                     deliver_context_notices(context_notices, runtime)
                 )
@@ -1213,6 +1245,7 @@ def create_app(
             app.state.context_services = None
         app.state.scheduler = context_scheduler
         app.state.position_refresher = refresher
+        app.state.cash_position_refresher = cash_refresher
         try:
             yield
         finally:
@@ -1226,6 +1259,9 @@ def create_app(
             # alerts still queued in the Discord sink keep their grace period.
             if refresher is not None:
                 await refresher.aclose()
+            if cash_refresher is not None:
+                # Stops the loop and clears the holder: the session ended above.
+                await cash_refresher.aclose()
             if context_scheduler is not None:
                 # No new manual run from here on: the route refuses without
                 # context services, so none can start while the jobs stop.
@@ -1332,6 +1368,9 @@ def create_app(
     # Rule 5: a fresh app -- a cold start -- has no Cash session. The holder
     # is in memory only and nothing restores it; see corollary.engine.cash_session.
     app.state.cash_session = CashSessionHolder()
+    # The Cash book's underlyings for the calendar scope (unit 2): empty, and
+    # filled only by the lifespan's Cash refresher while a session is active.
+    app.state.cash_positions = CashPositionUnderlyings()
     app.state.spdr_seed_loader = DatabaseSeedLoader(
         None if db_engine is None else functools.partial(Session, db_engine)
     )

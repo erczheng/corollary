@@ -219,6 +219,7 @@ from corollary.data.news.pollers import (
     watch_interval,
 )
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
+from corollary.data.news.watchlist import watch_universe as watch_universe_of
 from corollary.data.providers.finnhub import CalendarAccessDenied
 from corollary.data.seeds import SpdrSeed
 from corollary.data.seeds.calendar_seeds import load_econ_release_times
@@ -234,6 +235,7 @@ from corollary.data.seeds.nport import (
     load_spdr_seed_from_db,
     stored_snapshot_amendments,
 )
+from corollary.engine.cash_session import CashSession, CashSessionReader
 from corollary.pricing.rates import DGS3MO_SERIES, RiskFreeRateSource
 from corollary.ratelimit import (
     ALPACA_DATA_HOST,
@@ -281,7 +283,10 @@ __all__ = [
     "FinnhubNewsSource",
     "JobSkipped",
     "JobStatus",
+    "CashPositionUnderlyings",
+    "CashUnderlyingsRead",
     "HELD_POSITIONS_STALE_AFTER",
+    "HeldCashUnderlyings",
     "HeldPositionUnderlyings",
     "PositionUnderlyings",
     "PositionUnderlyingsSource",
@@ -1276,6 +1281,112 @@ class HeldPositionUnderlyings:
         return self.holder.current()
 
 
+class CashPositionUnderlyings:
+    """The last-known **Cash** position underlyings, and the session they were read under.
+
+    The Cash twin of :class:`PositionUnderlyings`, with one addition that is
+    rule 5: every replace is tagged with the
+    :class:`~corollary.engine.cash_session.CashSession` it was read under, so a
+    read taken under one confirmation can never be served under a later one,
+    nor after the session ended. In memory only, like the session itself --
+    nothing restores it, and a cold start begins empty.
+
+    One writer, the lifespan's ``CashPositionsRefresher``
+    (``corollary.api.deps``), which reads the Cash book only while a session
+    is confirmed and calls :meth:`clear` whenever it is not. One reader,
+    :class:`HeldCashUnderlyings`. Holds no broker, no registry, no callable.
+    """
+
+    def __init__(self) -> None:
+        self._symbols: frozenset[str] = frozenset()
+        self._as_of: datetime | None = None
+        self._session: CashSession | None = None
+
+    def current(self) -> frozenset[str]:
+        return self._symbols
+
+    @property
+    def as_of(self) -> datetime | None:
+        """When :meth:`replace` last ran (UTC), or ``None`` if never, or since a clear."""
+        return self._as_of
+
+    @property
+    def session(self) -> CashSession | None:
+        """The session the current symbols were read under, or ``None``."""
+        return self._session
+
+    def replace(
+        self, symbols: Iterable[str], *, at: datetime, session: CashSession
+    ) -> None:
+        frozen = frozenset(symbols)
+        as_of = _require_utc(at)
+        # One assignment per field, all three together: single event loop, so
+        # a reader sees the old read or the new one, never half of each.
+        self._symbols, self._as_of, self._session = frozen, as_of, session
+
+    def clear(self) -> None:
+        """Forget the last read: no session, or the session it was read under ended."""
+        self._symbols, self._as_of, self._session = frozenset(), None, None
+
+
+@dataclass(frozen=True, slots=True)
+class CashUnderlyingsRead:
+    """What the calendar may scope to from the Cash book, this run.
+
+    ``symbols`` is empty whenever ``unavailable`` is set. ``unavailable`` is
+    ``None`` both when the read is usable and when there is simply no Cash
+    session -- "no confirmation" is the ordinary state, not a degradation,
+    and is not warned about.
+    """
+
+    symbols: frozenset[str]
+    unavailable: str | None = None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class HeldCashUnderlyings:
+    """What :attr:`ContextServices.cash_underlyings` is in production.
+
+    A read of a :class:`CashPositionUnderlyings` holder and the
+    :class:`~corollary.engine.cash_session.CashSessionReader`, and **nothing
+    more**: it never fetches, so it can never be the thing that reaches the
+    Cash account. The broker read that fills the holder is the lifespan's.
+
+    **The session is checked on every read**, so an ended session yields
+    nothing at once -- before the refresher's next tick clears the holder.
+    A read is served only if it was taken under *the* session now active
+    (identity, not equality) and is no older than
+    :data:`HELD_POSITIONS_STALE_AFTER`, the bound the paper read is held to.
+    """
+
+    holder: CashPositionUnderlyings
+    session: CashSessionReader
+
+    def read(self, now: datetime) -> CashUnderlyingsRead:
+        current = self.session.current()
+        if current is None:
+            return CashUnderlyingsRead(symbols=frozenset())
+        as_of = self.holder.as_of
+        if as_of is None or self.holder.session is not current:
+            return CashUnderlyingsRead(
+                symbols=frozenset(),
+                unavailable=(
+                    "the Cash positions have not been read since this Cash "
+                    "session was confirmed"
+                ),
+            )
+        age = _require_utc(now) - as_of
+        if age > HELD_POSITIONS_STALE_AFTER:
+            return CashUnderlyingsRead(
+                symbols=frozenset(),
+                unavailable=(
+                    f"the Cash positions were last read at {as_of.isoformat()}, "
+                    f"{age} ago, past the {HELD_POSITIONS_STALE_AFTER} bound"
+                ),
+            )
+        return CashUnderlyingsRead(symbols=self.holder.current())
+
+
 #: How long shutdown waits for a context job's in-flight database work. A job
 #: task cancelled while awaiting ``asyncio.to_thread`` stops waiting; the
 #: thread does not stop, and its commit would otherwise land after the
@@ -1537,6 +1648,14 @@ class ContextServices:
     #: refuses to default it too. ``()`` must be said, not implied.
     funds: tuple[str, ...] = field(kw_only=True)
     position_underlyings: PositionUnderlyingsSource = _no_position_underlyings
+    #: The Cash book's underlyings, **for the earnings and dividends calendar
+    #: scope only** (cash-session unit 2) -- or ``None``, and the calendar
+    #: scopes to the watch universe alone. In production a
+    #: :class:`HeldCashUnderlyings`: a holder read gated on the confirmed Cash
+    #: session (rule 5), never the Cash broker. Deliberately **not** a member
+    #: of the watch universe, so news polling, the name books and the
+    #: sentiment audit never see it; see the calendar section's comment.
+    cash_underlyings: HeldCashUnderlyings | None = None
     #: The SPDR seed, for the sector leaders. The lifespan passes
     #: ``app.state.spdr_seed_loader`` so the jobs and the watch routes agree.
     #: ``None`` means the accepted N-PORT snapshot in *this* services'
@@ -1735,7 +1854,8 @@ def _watch_universe_source(services: ContextServices) -> UniverseSource:
 
     A fresh build per call (positions, seed and manual watches as they are
     now), never a cached set; one partial per job set, so the earnings and
-    dividends jobs ask exactly the universe the watch tier polls.
+    dividends jobs ask the universe the watch tier polls -- plus, for those
+    two only, the confirmed Cash book's underlyings (:func:`_calendar_scope`).
     """
     seed_loader = services.seed_loader
     assert seed_loader is not None  # filled by ContextServices.__post_init__
@@ -2400,17 +2520,36 @@ def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> Schedule
 # because a response that never asked about a ticker says nothing about it.
 # IPOs and FRED releases are market-wide and pass ``None``.
 #
-# **The Cash book is not in the universe, and that is a known limit.** The
-# held-position members come from ``PaperPositionsRefresher`` alone. The app
-# has no server-side record that Cash was confirmed this session (rule 5's
-# confirmation lives in the browser; the server answers ``?account=cash``
-# per request whenever the live keys are set), so a background job reading
-# the Cash book would be a live-credential read nobody confirmed -- it is
-# deliberately not built. An underlying held only in Cash, and not otherwise
-# watched, therefore gets **no new** earnings or ex-dividend rows; the ticker
-# scope above only guarantees that rows it already had are not withdrawn.
-# Closing that needs an owner decision: a confirmed-Cash session state the
-# engine can read.
+# **The Cash book joins the earnings and dividends scope -- and nothing else.**
+# A stock held only in Cash needs its earnings and, above all, its ex-dividend
+# date: a short call before its ex-date is an early-assignment risk. So the
+# two ticker-scoped jobs fetch, and replace over, the watch universe **union**
+# the Cash underlyings (:func:`_calendar_scope`), read through
+# :class:`HeldCashUnderlyings`: the lifespan's ``CashPositionsRefresher``
+# reads the Cash book only while a confirmed Cash session is active (rule 5,
+# ``corollary.engine.cash_session``), and the view re-checks the session on
+# every read, so an ended session drops out of the very next run.
+#
+# The **watch universe** is unchanged: news polling, the name books and the
+# sentiment audit still read the paper positions alone. Those are standing
+# per-symbol polls and permanent label classifications; a Cash session is
+# transient and live, and a ticker that entered the news universe for one
+# session and left with it would churn the watch tier's budget and write
+# labels graded against a universe nobody can reconstruct afterwards. A
+# calendar row is a fact about a company, and harmless to keep.
+#
+# **A Cash read that is missing or stale while the session is active is not a
+# gap.** The run scopes to the watch universe alone and says so at WARNING
+# (``calendar_cash_positions_unavailable``); it is still free to replace the
+# watch universe's window. That is safe exactly because of the ticker scope:
+# a Cash-only ticker left out of the scope is never asked about, so its
+# stored rows are never withdrawn. It is the same bound the paper read is held
+# to (:data:`HELD_POSITIONS_STALE_AFTER`), with a different consequence,
+# because the paper positions are *inside* the scope and their absence would
+# withdraw rows. The cost is that a Cash-only ticker gets no **new** rows on a
+# run whose Cash read was not current -- and, since the jobs run once a day,
+# a session confirmed after the 07:00-07:10 slots joins the calendar at the
+# next morning's run, not at confirmation.
 #
 # The FRED "actual about ten minutes after each release" job is **not** here:
 # prior and actual are blocked on an owner question (unit 7.2b-R's
@@ -2548,6 +2687,71 @@ def _held_positions_gaps(source: PositionUnderlyingsSource, now: datetime) -> li
     return []
 
 
+def _calendar_scope(
+    services: ContextServices, built: BuiltUniverse, *, job: str, now: datetime
+) -> frozenset[str]:
+    """The tickers a ticker-scoped calendar fetch asks about: the watch universe ∪ Cash.
+
+    Cash adds its underlyings only while a confirmed session is active and its
+    read is current (:meth:`HeldCashUnderlyings.read`). Otherwise the scope is
+    the watch universe alone, and a session whose read is missing or stale is
+    said at WARNING -- never a gap and never a skip; see the section comment.
+    Cash symbols are normalised and filtered exactly as a paper position's are
+    (:func:`~corollary.data.news.watchlist.watch_universe`), so a warrant
+    deliverable is left out with its reason. Tickers and counts are logged;
+    nothing about the account is.
+    """
+    scope = frozenset(built.universe.symbols)
+    view = services.cash_underlyings
+    if view is None:
+        return scope
+    read = view.read(now)
+    if read.unavailable is not None:
+        logger.warning(
+            "the Cash positions are not current; the %s scope is the watch "
+            "universe alone this run",
+            job,
+            extra={
+                "event": "calendar_cash_positions_unavailable",
+                "job": job,
+                "reason": read.unavailable,
+                "rule": (
+                    "a Cash read that is missing or stale leaves Cash out of one "
+                    "calendar run; a ticker outside the scope is never withdrawn"
+                ),
+            },
+        )
+        return scope
+    if not read.symbols:
+        return scope
+    cash = watch_universe_of((), (), read.symbols, ())
+    for skipped in cash.skipped_positions:
+        logger.warning(
+            "Cash position underlying %r left out of the %s scope: %s",
+            skipped.raw,
+            job,
+            skipped.reason,
+            extra={
+                "event": "calendar_cash_position_skipped",
+                "job": job,
+                "symbol": skipped.raw,
+                "reason": skipped.reason,
+            },
+        )
+    added = frozenset(cash.polled_symbols) - scope
+    logger.info(
+        "the Cash positions joined the %s scope",
+        job,
+        extra={
+            "event": "calendar_cash_positions_in_scope",
+            "job": job,
+            "cash_underlyings": len(cash.polled_symbols),
+            "added": sorted(added),
+        },
+    )
+    return scope | added
+
+
 def _row_gaps(skipped: int) -> list[str]:
     """A fetched row left out of the events -- unreadable, so its key is unknown,
     or refused, so its row is not written. Either way replacing would withdraw
@@ -2616,8 +2820,9 @@ def _write_calendar_blocking(
     the window's whole truth. Any gap: :func:`upsert_events` only, and the
     gaps are logged -- the stored rows the fetch did not list stay live.
     ``tickers`` is what the fetch was asked about, passed straight to
-    :func:`replace_window`: the built watch universe for earnings and
-    dividends, so a ticker outside it is never withdrawn; ``None`` for the
+    :func:`replace_window`: the built watch universe ∪ the Cash underlyings
+    for earnings and dividends (:func:`_calendar_scope`), so a ticker outside
+    it is never withdrawn; ``None`` for the
     market-wide feeds. ``drop_guard`` adds one more gap, read in the same session as the write:
     the fetch is much smaller than what is stored (:func:`_sharp_drop_gaps`).
     """
@@ -2749,7 +2954,8 @@ async def _calendar_earnings(
         )
 
     read = await read_earnings_by_day(read_day, start=start, end=end)
-    batch = await asyncio.to_thread(earnings_events, read.rows, built.universe.symbols)
+    scope = _calendar_scope(services, built, job="calendar_earnings", now=now)
+    batch = await asyncio.to_thread(earnings_events, read.rows, scope)
     await asyncio.to_thread(
         _write_calendar_blocking,
         services.session_factory,
@@ -2759,7 +2965,7 @@ async def _calendar_earnings(
         kinds=frozenset({CalendarKind.EARNINGS}),
         window_start=start,
         window_end=end,
-        tickers=frozenset(built.universe.symbols),
+        tickers=scope,
         now=now,
         gaps=[
             *held_gaps,
@@ -2813,7 +3019,8 @@ async def _calendar_dividends(
     now = _require_utc(clock())
     held_gaps = _held_positions_gaps(services.position_underlyings, now)
     built = await universe()
-    fetched = await fetch_dividends(source, today=_et_date(now), watch=built.universe.symbols)
+    scope = _calendar_scope(services, built, job="calendar_dividends", now=now)
+    fetched = await fetch_dividends(source, today=_et_date(now), watch=scope)
     if fetched.outcome is DividendOutcome.FAILED:
         raise DividendsNotFetched(fetched.error)
     await asyncio.to_thread(
@@ -2825,7 +3032,7 @@ async def _calendar_dividends(
         kinds=frozenset({CalendarKind.DIVIDEND}),
         window_start=fetched.first_ex_date,
         window_end=fetched.last_ex_date,
-        tickers=frozenset(built.universe.symbols),
+        tickers=scope,
         now=now,
         gaps=[*held_gaps, *_universe_gaps(built), *_row_gaps(len(fetched.skipped))],
     )
