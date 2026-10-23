@@ -833,7 +833,8 @@ def correct_publisher_clock(published_at: datetime, publisher: str | None) -> da
     (Alpaca's feed is Benzinga's own), 1390 Finnhub rows with ``source``
     exactly ``"Benzinga"`` sat exactly 240 minutes early, the other 8 were
     templated repeats also -240 modulo whole days, and ``"Yahoo"`` rows
-    matched Alpaca and Massive at 0. An ET hour-of-day histogram put the skew
+    matched Alpaca and Massive at 0, except Motley Fool stories (see below).
+    An ET hour-of-day histogram put the skew
     on Finnhub's side. So Finnhub writes Benzinga's ``America/New_York`` wall
     time as if it were UTC, and the fix reads those wall-clock fields back as
     Eastern local time. Every other publisher, ``None`` included, is returned
@@ -858,6 +859,14 @@ def correct_publisher_clock(published_at: datetime, publisher: str | None) -> da
     There is no data migration: rows already stored keep the old stamp and
     age out under retention. A correction that lands in the future is caught
     one level up, in :meth:`FinnhubProvider.company_news`, which has a clock.
+
+    **Not corrected here: Motley Fool via Yahoo.** Those rows arrive 20
+    minutes after the time fool.com states (575 measured twins, exactly
+    +1200 s). Finnhub labels them ``"Yahoo"``, the same as its Zacks and
+    GlobeNewswire copies, which are stamped correctly. No field in the row
+    tells them apart, so a correction keyed on ``source`` would mis-stamp
+    the correct rows. The lag is absorbed in the ingest's headline match
+    instead: ``corollary.data.news.ingest.SYNDICATION_SKEWS``.
     """
     require_aware(published_at, "published_at")
     as_utc = published_at.astimezone(timezone.utc)
