@@ -477,6 +477,8 @@ def job_message(
         )
     if state == "failing":
         assert status.last_failure is not None
+        if status.last_failure_phase == "woken":
+            return _woken_failure_message(label, status, tail)
         return (
             f"{label}: {_stale_since(status)}; the last run failed at "
             f"{_eastern(status.last_failure)} ({status.last_error_type}) and runs "
@@ -504,6 +506,56 @@ def job_message(
         )
     assert status.last_success is not None
     return f"{lead}last fetched {_eastern(status.last_success)}.{tail}"
+
+
+def _woken_failure_message(label: str, status: JobStatus, tail: str) -> str:
+    """A failing job whose newest failure was an **early run for the Cash holdings**.
+
+    A woken run (cash-session unit 2b) asks about the Cash-only tickers
+    alone, so its failure says nothing about the sweep's rows. The job still
+    reads ``failing`` -- the failure is never hidden -- but the sentence
+    names the run that failed. When the last full run (scheduled or
+    catch-up) succeeded, its rows stand; when it failed too
+    (``last_full_failure`` not before ``last_success``; a tie reads
+    pessimistically, as :func:`_latest_outcome` does), the job is stale and
+    both failures are said.
+    """
+    assert status.last_failure is not None
+    early = (
+        "an early run for the Cash holdings failed at "
+        f"{_eastern(status.last_failure)} ({status.last_error_type})"
+    )
+    full_failure = status.last_full_failure
+    if status.last_success is not None and (
+        full_failure is None or full_failure < status.last_success
+    ):
+        return (
+            f"{label}: {early}; the {_eastern(status.last_success)} sweep's rows "
+            f"stand, and the job runs again at its next slot.{tail}"
+        )
+    if (
+        status.last_success is None
+        and full_failure is None
+        and status.last_skip_fresh_as_of is not None
+    ):
+        # The common mid-day path: a restart's catch-up found the stored rows
+        # fresh and skipped, then a re-confirmed Cash session's early run
+        # failed. Nothing full has failed, so the rows stored before this
+        # process started stand -- say so rather than reading as stale.
+        return (
+            f"{label}: {early}; the rows stored before this process started "
+            f"(up to date as of {_eastern(status.last_skip_fresh_as_of)}) stand, "
+            f"and the job runs again at its next slot.{tail}"
+        )
+    sweep = (
+        f"; the sweep last failed at {_eastern(full_failure)}"
+        if full_failure is not None
+        else ""
+    )
+    return (
+        f"{label}: {_stale_since(status)}; {early}{sweep}; the job runs again at "
+        f"its next slot.{tail}"
+    )
 
 
 def job_notices(

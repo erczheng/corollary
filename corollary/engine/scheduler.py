@@ -283,6 +283,9 @@ __all__ = [
     "FinnhubNewsSource",
     "JobSkipped",
     "JobStatus",
+    "JobWake",
+    "WOKEN_RUN_MIN_INTERVAL",
+    "CASH_SESSION_WAKE_JOBS",
     "CashPositionUnderlyings",
     "CashUnderlyingsRead",
     "HELD_POSITIONS_STALE_AFTER",
@@ -329,6 +332,20 @@ _MAX_SLEEP_SECONDS = 300.0
 #: walking the grid forward. Bounded so a schedule that somehow never
 #: advances cannot spin; past it the scheduler asks from "now" instead.
 _MAX_SLOTS_SKIPPED = 10_000
+
+#: The least time between two **woken** runs of one job (cash-session unit 2b;
+#: :meth:`Scheduler.waker`). A woken run is request load outside the job's
+#: slot -- the earnings sweep is about 22 requests on Finnhub's 60/min
+#: ``finnhub.io`` bucket -- so however often Cash is confirmed, ended and
+#: confirmed again, a job runs woken at most once an hour. A wake inside it is
+#: refused and logged (``context_job_wake_capped``); the next scheduled slot
+#: still covers whatever the refused wake would have. Measured from the last
+#: woken run that succeeded or failed, never from a skip
+#: (:attr:`JobStatus.last_woken`): that relies on every woken body returning
+#: its :class:`JobSkipped` **before** its first request, which both calendar
+#: bodies do. A woken body that could skip after asking must raise or succeed
+#: instead, or it escapes the cap.
+WOKEN_RUN_MIN_INTERVAL: Final = timedelta(hours=1)
 
 
 def _utc_now() -> datetime:
@@ -678,6 +695,13 @@ class ScheduledJob:
     #: which always makes one request: its cadence cannot be known until it
     #: has (see ``_news_watch_tier_catch_up``).
     catch_up: JobBody | None = None
+    #: What the job's **own task** runs when woken early through a
+    #: :class:`JobWake`, between slots. ``None`` -- every job but the two
+    #: ticker-scoped calendar jobs -- means the job cannot be woken. A woken
+    #: body must ask about no more than the wake is for (the calendar's asks
+    #: about the Cash-only tickers), because it runs outside the slot its full
+    #: body is budgeted for. See :meth:`Scheduler.waker`.
+    woken: JobBody | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,6 +740,34 @@ class JobStatus:
     #: process: it died (``context_job_task_died``) or its calendar ran out
     #: (``context_job_unscheduled``). ``next_run`` is then ``None``.
     stopped: bool = False
+    #: Woken runs started (:meth:`Scheduler.waker`), whatever their outcome --
+    #: skips included; a wake refused by the cap is not a run and is not
+    #: counted.
+    #: A woken run's **success or skip** sets none of the fields above: it
+    #: asked about a subset of what the scheduled run does, so it must not
+    #: date the job's coverage (``last_success_started``, which the calendar
+    #: panel's ``fetched_on`` reads) or replace its last outcome. Its
+    #: **failure** is a failure, recorded above and logged ``phase="woken"``.
+    woken_runs: int = 0
+    #: When the latest woken run **that did not skip** started, UTC -- the
+    #: clock :data:`WOKEN_RUN_MIN_INTERVAL` is measured from. A success or a
+    #: failure sets it; a :class:`JobSkipped` does not, because every woken
+    #: body skips before its first request, and charging the cap for no
+    #: request would refuse the next legitimate wake for an hour (unit 2b
+    #: audit). ``None`` while every woken run so far has skipped.
+    last_woken: datetime | None = None
+    #: The phase of the run behind :attr:`last_failure`: ``"scheduled"``,
+    #: ``"catch_up"`` or ``"woken"``; ``None`` before any failure. A woken
+    #: failure is a failure -- :attr:`failing` reads it like any other -- and
+    #: this is what lets a reader say *which* run failed rather than blame
+    #: the sweep for an early Cash run's fault (unit 2b audit).
+    last_failure_phase: str | None = None
+    #: The newest failure of a **full** run -- scheduled or catch-up, never
+    #: woken. A woken failure overwrites :attr:`last_failure` and leaves this
+    #: alone, so "the last sweep succeeded and only the early run failed"
+    #: (``last_success`` later than this) stays distinguishable from "both
+    #: failed".
+    last_full_failure: datetime | None = None
 
     @property
     def failing(self) -> bool:
@@ -746,6 +798,39 @@ class _JobRecord:
     last_skip_fresh_as_of: datetime | None = None
     last_success_started: datetime | None = None
     stopped: bool = False
+    woken_runs: int = 0
+    last_woken: datetime | None = None
+    last_failure_phase: str | None = None
+    last_full_failure: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class JobWake:
+    """A capability to wake a fixed set of jobs early -- and nothing else.
+
+    Built by :meth:`Scheduler.waker` and handed to the one caller that needs
+    it (the lifespan's Cash positions refresher), it holds each named job's
+    wake event and **not** the :class:`Scheduler`: whatever holds one can ask
+    those jobs to run their ``woken`` body once, on their own task, and can
+    neither start a second run, nor stop, reschedule or read a job, nor wake
+    a job it was not bound to.
+
+    Calling it only sets events: no await, no I/O, never raises. Coalescing
+    and the hourly cap are the job task's, so a caller that wakes too often
+    costs a log line, never a request.
+    """
+
+    _events: tuple[tuple[str, asyncio.Event], ...]
+
+    @property
+    def jobs(self) -> tuple[str, ...]:
+        return tuple(name for name, _ in self._events)
+
+    def __call__(self) -> tuple[str, ...]:
+        """Wake every bound job. Returns the names woken."""
+        for _, event in self._events:
+            event.set()
+        return self.jobs
 
 
 # --------------------------------------------------------------------------
@@ -787,6 +872,11 @@ class Scheduler:
         self._tasks: list[asyncio.Task[None]] = []
         self._warm_task: asyncio.Task[None] | None = None
         self._calendar_ready = asyncio.Event()
+        #: One wake event per wakeable job, set through a :class:`JobWake`
+        #: and waited on only by that job's own task.
+        self._wakes: dict[str, asyncio.Event] = {
+            job.name: asyncio.Event() for job in self._jobs if job.woken is not None
+        }
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -885,6 +975,27 @@ class Scheduler:
                 extra={"event": "context_job_task_died"},
             )
 
+    def waker(self, names: Iterable[str]) -> JobWake:
+        """A :class:`JobWake` bound to those of ``names`` that can be woken.
+
+        A name that is not a job here, or names a job with no ``woken`` body,
+        is left out and said at WARNING (``context_job_wake_unbound``): a
+        test's scheduler may run neither calendar job, and a lifespan that
+        refused to start for want of one would be worse than a wake that does
+        nothing. Callable before :meth:`start`; a wake set early is served
+        once the job's task reaches its first sleep.
+        """
+        wanted = list(dict.fromkeys(names))
+        bound = tuple((name, self._wakes[name]) for name in wanted if name in self._wakes)
+        unbound = [name for name in wanted if name not in self._wakes]
+        if unbound:
+            logger.warning(
+                "some jobs asked to be woken cannot be; a wake leaves them to "
+                "their next slot",
+                extra={"event": "context_job_wake_unbound", "jobs": unbound},
+            )
+        return JobWake(bound)
+
     # -- what a route reads ------------------------------------------------
 
     def status(self) -> dict[str, JobStatus]:
@@ -908,6 +1019,10 @@ class Scheduler:
                 last_skip_fresh_as_of=record.last_skip_fresh_as_of,
                 last_success_started=record.last_success_started,
                 stopped=record.stopped,
+                woken_runs=record.woken_runs,
+                last_woken=record.last_woken,
+                last_failure_phase=record.last_failure_phase,
+                last_full_failure=record.last_full_failure,
             )
             for job in self._jobs
             for record in (self._records[job.name],)
@@ -939,6 +1054,99 @@ class Scheduler:
             if remaining <= 0:
                 return
             await self._sleep(min(remaining, _MAX_SLEEP_SECONDS))
+
+    async def _sleep_until_due_or_woken(self, due: datetime, wake: asyncio.Event) -> bool:
+        """Sleep until ``due`` or a wake. ``True`` for a wake, ``False`` for due.
+
+        **Due wins a tie**: a slot that has arrived runs as scheduled even if
+        a wake is also pending, and that run clears the wake. Each step races
+        one injected sleep against the event and cancels the loser, so the
+        job stays on its one task and a wake can only shorten a sleep. A
+        sleeper that raises still ends the task, as :meth:`_sleep_until`'s
+        would.
+        """
+        while True:
+            remaining = (due - self._now()).total_seconds()
+            if remaining <= 0:
+                return False
+            if wake.is_set():
+                return True
+            sleeper = asyncio.ensure_future(self._sleep(min(remaining, _MAX_SLEEP_SECONDS)))
+            waiter = asyncio.ensure_future(wake.wait())
+            try:
+                await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for pending in (sleeper, waiter):
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(sleeper, waiter, return_exceptions=True)
+            if not sleeper.cancelled():
+                sleeper.result()  # re-raise a broken sleeper's exception
+
+    async def _run_woken(self, job: ScheduledJob, record: _JobRecord, wake: asyncio.Event) -> None:
+        """One woken run on the job's own task, or a logged refusal under the cap.
+
+        Same failure handling as a scheduled run (:meth:`_record_failure`,
+        ``phase="woken"``); a success or a skip is logged and counted in
+        :attr:`JobStatus.woken_runs` only -- see there for why. The cap's
+        clock, :attr:`JobStatus.last_woken`, is charged by a success or a
+        failure and **not** by a skip, which made no request.
+        """
+        wake.clear()
+        body = job.woken
+        if body is None:  # pragma: no cover - only wakeable jobs have an event
+            return
+        started = self._now()
+        last = record.last_woken
+        if last is not None and started - last < WOKEN_RUN_MIN_INTERVAL:
+            logger.info(
+                "a context job was woken again within the hour; nothing runs, "
+                "and its next slot covers it",
+                extra={
+                    "event": "context_job_wake_capped",
+                    "job": job.name,
+                    "last_woken": last.isoformat(),
+                    "min_interval_seconds": int(WOKEN_RUN_MIN_INTERVAL.total_seconds()),
+                    "at": started.isoformat(),
+                },
+            )
+            return
+        record.woken_runs += 1
+        try:
+            outcome = await body()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failure may have spent requests before it raised, so it
+            # charges the cap: a failing vendor is not asked again inside
+            # the hour.
+            record.last_woken = started
+            self._record_failure(job, record, exc, scheduled_for=None, phase="woken")
+            return
+        if isinstance(outcome, JobSkipped):
+            # Not charged (unit 2b audit): every woken body skips before its
+            # first request, so a skip -- nothing Cash-only, or a session
+            # that ended -- must not refuse the next, legitimate wake.
+            logger.info(
+                "a woken context job had nothing to fetch",
+                extra={
+                    "event": "context_job_woken_skipped",
+                    "job": job.name,
+                    "reason": str(outcome.reason),
+                    "at": started.isoformat(),
+                },
+            )
+            return
+        record.last_woken = started
+        logger.info(
+            "a woken context job ran; its next slot is unchanged",
+            extra={
+                "event": "context_job_woken_ran",
+                "job": job.name,
+                "started_at": started.isoformat(),
+                "next_run": None if record.next_run is None else record.next_run.isoformat(),
+            },
+        )
 
     async def _warm_calendar(self) -> None:
         """Build the market calendar on a worker thread, once, before any job runs.
@@ -1009,7 +1217,18 @@ class Scheduler:
                     },
                 )
                 return
-            await self._sleep_until(upcoming)
+            wake = self._wakes.get(job.name)
+            if wake is None:
+                await self._sleep_until(upcoming)
+            else:
+                # A woken run happens between slots and never moves the slot:
+                # after one, the job sleeps toward the same ``upcoming`` again
+                # -- and runs it at once if the woken run overran it.
+                while await self._sleep_until_due_or_woken(upcoming, wake):
+                    await self._run_woken(job, record, wake)
+                # The scheduled run reads the same Cash view a woken run
+                # would, so it serves any wake still pending.
+                wake.clear()
             due = upcoming
             started = self._now()
             record.last_started = started
@@ -1133,6 +1352,9 @@ class Scheduler:
         record.failures += 1
         record.last_failure = failed_at
         record.last_error_type = error_type
+        record.last_failure_phase = phase
+        if phase != "woken":
+            record.last_full_failure = failed_at
         try:
             logger.error(
                 "a context job failed; the engine is not halted and the job runs "
@@ -2547,9 +2769,23 @@ def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> Schedule
 # to (:data:`HELD_POSITIONS_STALE_AFTER`), with a different consequence,
 # because the paper positions are *inside* the scope and their absence would
 # withdraw rows. The cost is that a Cash-only ticker gets no **new** rows on a
-# run whose Cash read was not current -- and, since the jobs run once a day,
-# a session confirmed after the 07:00-07:10 slots joins the calendar at the
-# next morning's run, not at confirmation.
+# run whose Cash read was not current.
+#
+# **A session confirmed after the 07:00-07:10 slots is not left to the next
+# morning** (cash-session unit 2b). The lifespan's Cash positions refresher
+# notices the new session within seconds, reads the Cash book at once, and
+# after the first read under that session that found an underlying, wakes
+# these two jobs through a :class:`JobWake` bound to
+# :data:`CASH_SESSION_WAKE_JOBS` -- never the :class:`Scheduler`. Each job's
+# own task then runs its ``woken`` body once between slots, at most once per
+# :data:`WOKEN_RUN_MIN_INTERVAL`, and goes back to the slot it was sleeping
+# toward. The woken body asks about **the Cash-only tickers** -- the Cash
+# underlyings the watch universe does not already hold -- and replaces
+# nothing else's window, so a midday run never rewrites the watch universe's
+# rows outside the slot that is budgeted for them. With none (no session any
+# more, a stale read, or Cash holding only watched names) it requests nothing
+# and skips: a wake that lands after the session ended is harmless, because
+# the woken body reads the same session-checked view.
 #
 # The FRED "actual about ten minutes after each release" job is **not** here:
 # prior and actual are blocked on an owner question (unit 7.2b-R's
@@ -2577,6 +2813,10 @@ CALENDAR_RELEASES_AT: Final = FRED_DAILY_AT
 #: source and kind was written longer ago than this -- its period. See
 #: :func:`_calendar_catch_up` for why "written" and not "fetched".
 CALENDAR_CATCH_UP_AFTER: Final = timedelta(days=1)
+#: The jobs a newly confirmed Cash session may wake early: the two whose
+#: ticker scope Cash joins (:func:`_calendar_scope`). The lifespan binds its
+#: :class:`JobWake` to exactly these names.
+CASH_SESSION_WAKE_JOBS: Final = ("calendar_earnings", "calendar_dividends")
 #: How old the held-position read may be before a calendar fetch counts the
 #: watch universe as missing its positions: twice the paper refresher's
 #: interval (``corollary.api.deps.POSITION_UNDERLYINGS_TTL``, five minutes;
@@ -2750,6 +2990,38 @@ def _calendar_scope(
         },
     )
     return scope | added
+
+
+def _cash_only_scope(
+    services: ContextServices, built: BuiltUniverse, *, job: str, now: datetime
+) -> frozenset[str]:
+    """A woken run's scope: the Cash underlyings the watch universe does not hold.
+
+    :func:`_calendar_scope` minus the watch universe, so it carries the same
+    rule 5 check (an ended session, or a read under another one, adds
+    nothing) and the same normalisation. Logged as tickers and a count.
+    """
+    cash_only = _calendar_scope(services, built, job=job, now=now) - frozenset(
+        built.universe.symbols
+    )
+    logger.info(
+        "a woken %s run asks about the Cash-only tickers alone",
+        job,
+        extra={
+            "event": "calendar_cash_only_run",
+            "job": job,
+            "tickers": sorted(cash_only),
+            "count": len(cash_only),
+        },
+    )
+    return cash_only
+
+
+#: A woken run's skip reason when no ticker is Cash-only.
+_NO_CASH_ONLY_TICKERS: Final = (
+    "no Cash-only tickers to add (no confirmed Cash session, no current Cash "
+    "read, or every Cash underlying is already watched)"
+)
 
 
 def _row_gaps(skipped: int) -> list[str]:
@@ -2926,7 +3198,11 @@ async def _read_finnhub_calendar(
 
 
 async def _calendar_earnings(
-    services: ContextServices, universe: UniverseSource, clock: UtcClock
+    services: ContextServices,
+    universe: UniverseSource,
+    clock: UtcClock,
+    *,
+    cash_only: bool = False,
 ) -> JobSkipped | None:
     """Earnings for the watch universe, today -> ``EARNINGS_WINDOW``: one ``/calendar/earnings`` request **per day**.
 
@@ -2938,6 +3214,10 @@ async def _calendar_earnings(
     whole run and writes nothing. A day still answering near the cap, or a
     window that shrank sharply against the store (``drop_guard``), upserts
     and withdraws nothing.
+
+    ``cash_only`` is the woken run (see the section comment): the scope is
+    :func:`_cash_only_scope`, taken **before** the sweep, so a run with no
+    Cash-only ticker skips without a request.
     """
     source = services.finnhub_calendar
     if source is None:
@@ -2947,6 +3227,11 @@ async def _calendar_earnings(
     end = start + EARNINGS_WINDOW
     held_gaps = _held_positions_gaps(services.position_underlyings, now)
     built = await universe()
+    woken_scope: frozenset[str] | None = None
+    if cash_only:
+        woken_scope = _cash_only_scope(services, built, job="calendar_earnings", now=now)
+        if not woken_scope:
+            return JobSkipped(_NO_CASH_ONLY_TICKERS)
 
     async def read_day(day_start: date, day_end: date) -> Sequence[object]:
         return await _read_finnhub_calendar(
@@ -2954,7 +3239,11 @@ async def _calendar_earnings(
         )
 
     read = await read_earnings_by_day(read_day, start=start, end=end)
-    scope = _calendar_scope(services, built, job="calendar_earnings", now=now)
+    scope = (
+        woken_scope
+        if woken_scope is not None
+        else _calendar_scope(services, built, job="calendar_earnings", now=now)
+    )
     batch = await asyncio.to_thread(earnings_events, read.rows, scope)
     await asyncio.to_thread(
         _write_calendar_blocking,
@@ -3005,13 +3294,20 @@ async def _calendar_ipos(services: ContextServices, clock: UtcClock) -> JobSkipp
 
 
 async def _calendar_dividends(
-    services: ContextServices, universe: UniverseSource, clock: UtcClock
+    services: ContextServices,
+    universe: UniverseSource,
+    clock: UtcClock,
+    *,
+    cash_only: bool = False,
 ) -> JobSkipped | None:
     """Announced cash dividends for the watch universe, over the kept ex-date window.
 
     Only ``ANNOUNCED`` and ``NONE_ANNOUNCED`` write -- the second empties the
     window, which is what "none announced" means. ``FAILED`` raises
     :class:`DividendsNotFetched`: a failure, nothing withdrawn.
+
+    ``cash_only`` is the woken run: the fetch and the replace scope are
+    :func:`_cash_only_scope`, and with none it skips without a request.
     """
     source = services.dividends
     if source is None:
@@ -3019,7 +3315,12 @@ async def _calendar_dividends(
     now = _require_utc(clock())
     held_gaps = _held_positions_gaps(services.position_underlyings, now)
     built = await universe()
-    scope = _calendar_scope(services, built, job="calendar_dividends", now=now)
+    if cash_only:
+        scope = _cash_only_scope(services, built, job="calendar_dividends", now=now)
+        if not scope:
+            return JobSkipped(_NO_CASH_ONLY_TICKERS)
+    else:
+        scope = _calendar_scope(services, built, job="calendar_dividends", now=now)
     fetched = await fetch_dividends(source, today=_et_date(now), watch=scope)
     if fetched.outcome is DividendOutcome.FAILED:
         raise DividendsNotFetched(fetched.error)
@@ -3141,22 +3442,37 @@ def days_in_words(span: timedelta) -> str:
 
 
 def _newest_calendar_write_blocking(
-    session_factory: Callable[[], Session], source: CalendarSource, kind: CalendarKind
+    session_factory: Callable[[], Session],
+    source: CalendarSource,
+    kind: CalendarKind,
+    tickers: frozenset[str] | None = None,
 ) -> datetime | None:
     """The latest ``updated_at`` of any row, live or withdrawn, of ``source``/``kind``. **Blocks.**
 
-    Compared in Python: the instants are few (a few hundred rows), and SQL's
-    ``MAX`` over a text-stored column is the comparison ``corollary.db.types``
-    warns about.
+    ``tickers``, when given, restricts the evidence to rows whose ticker is
+    one of them (an untickered row then never counts); ``None`` reads every
+    row, which is the market-wide jobs' case. Compared in Python: the
+    instants are few (a few hundred rows), and SQL's ``MAX`` over a
+    text-stored column is the comparison ``corollary.db.types`` warns about.
     """
     with session_factory() as session:
-        stamps = session.scalars(
-            select(CalendarEvent.updated_at).where(
+        rows = session.execute(
+            select(CalendarEvent.ticker, CalendarEvent.updated_at).where(
                 CalendarEvent.source == source.value,
                 CalendarEvent.kind == kind.value,
             )
         ).all()
-    return max(stamps, default=None)
+    if tickers is None:
+        return max((stamp for _, stamp in rows), default=None)
+    wanted = frozenset(ticker.strip().upper() for ticker in tickers)
+    return max(
+        (
+            stamp
+            for ticker, stamp in rows
+            if ticker is not None and ticker.strip().upper() in wanted
+        ),
+        default=None,
+    )
 
 
 async def _calendar_catch_up(
@@ -3166,6 +3482,7 @@ async def _calendar_catch_up(
     *,
     source: CalendarSource,
     kind: CalendarKind,
+    universe: UniverseSource | None = None,
 ) -> JobSkipped | None:
     """At start: fetch only when the stored rows are older than the job's period.
 
@@ -3188,9 +3505,35 @@ async def _calendar_catch_up(
     rare. The proper fix is a persisted per-job fetch record, read here
     instead of the rows' stamps; it is **deferred** (a new table, unit
     7.2c-2 review), not forgotten.
+
+    **The per-ticker jobs read only the watch universe's rows** (``universe``
+    given: earnings and dividends; cash-session unit 2b audit). A woken run
+    (:func:`_cash_only_scope`) writes rows for the Cash-only tickers alone
+    and stamps that instant, so counted here it would vouch for a sweep that
+    never happened: a 07:00 sweep fails, a woken run succeeds at 14:00, and
+    an 18:00 restart would skip as "fresh" while the watch universe's rows
+    are a day old. The universe is built here, at start, and no Cash session
+    survives a restart (rule 5), so it holds no Cash-only ticker; a row
+    outside it is not evidence. A legitimate row wrongly left out (a ticker
+    dropped from the watch list since) only makes the catch-up fetch, the
+    safe direction above. The one way back the other way is a Cash-only
+    ticker written by a woken run and *since added* to the watch universe:
+    its row then vouches for the sweep. It can join three ways between the
+    woken run and the restart, inside one period -- a manual watch, a paper
+    position opened in that name (if the paper refresher's first read lands
+    before this universe is built), or an SPDR seed rebuild that makes it a
+    leader. Each costs at most one day's staleness until the daily slot (the
+    restart adds none; it only fails to recover a gap), though the panel then
+    reads ``fresh_at_start`` as of the woken stamp; the persisted fetch
+    record above closes it too. The market-wide jobs (IPO, FRED) are never
+    woken and keep reading every row of their source and kind.
     """
+    tickers: frozenset[str] | None = None
+    if universe is not None:
+        built = await universe()
+        tickers = frozenset(built.universe.symbols)
     newest = await asyncio.to_thread(
-        _newest_calendar_write_blocking, services.session_factory, source, kind
+        _newest_calendar_write_blocking, services.session_factory, source, kind, tickers
     )
     now = _require_utc(clock())
     if newest is not None and now - newest < CALENDAR_CATCH_UP_AFTER:
@@ -3208,14 +3551,35 @@ def _calendar_jobs(
 ) -> list[ScheduledJob]:
     """The five calendar jobs. ``universe`` is the news jobs' watch-universe build."""
 
-    def catch_up(run: JobBody, source: CalendarSource, kind: CalendarKind) -> JobBody:
+    def catch_up(
+        run: JobBody,
+        source: CalendarSource,
+        kind: CalendarKind,
+        *,
+        per_ticker: bool = False,
+    ) -> JobBody:
+        # ``per_ticker``: freshness is judged from the watch universe's rows
+        # only, so a woken Cash-only write is never a sweep's evidence.
         return functools.partial(
-            _calendar_catch_up, services, clock, run, source=source, kind=kind
+            _calendar_catch_up,
+            services,
+            clock,
+            run,
+            source=source,
+            kind=kind,
+            universe=universe if per_ticker else None,
         )
 
     earnings: JobBody = functools.partial(_calendar_earnings, services, universe, clock)
     ipos: JobBody = functools.partial(_calendar_ipos, services, clock)
     dividends: JobBody = functools.partial(_calendar_dividends, services, universe, clock)
+    # The woken bodies (cash-session unit 2b): the Cash-only tickers alone.
+    earnings_woken: JobBody = functools.partial(
+        _calendar_earnings, services, universe, clock, cash_only=True
+    )
+    dividends_woken: JobBody = functools.partial(
+        _calendar_dividends, services, universe, clock, cash_only=True
+    )
     releases: JobBody = functools.partial(_calendar_releases, services, clock)
     central_banks: JobBody = functools.partial(_calendar_central_banks, services, clock)
     return [
@@ -3223,7 +3587,10 @@ def _calendar_jobs(
             name="calendar_earnings",
             schedule=AtTime(CALENDAR_EARNINGS_AT, every_day),
             run=earnings,
-            catch_up=catch_up(earnings, CalendarSource.FINNHUB, CalendarKind.EARNINGS),
+            catch_up=catch_up(
+                earnings, CalendarSource.FINNHUB, CalendarKind.EARNINGS, per_ticker=True
+            ),
+            woken=earnings_woken,
             rule=(
                 "decision 7's earnings calendar for the watch universe, today to "
                 f"+{days_in_words(EARNINGS_WINDOW)}; when this fails the stored "
@@ -3248,7 +3615,10 @@ def _calendar_jobs(
             name="calendar_dividends",
             schedule=AtTime(CALENDAR_DIVIDENDS_AT, every_day),
             run=dividends,
-            catch_up=catch_up(dividends, CalendarSource.ALPACA, CalendarKind.DIVIDEND),
+            catch_up=catch_up(
+                dividends, CalendarSource.ALPACA, CalendarKind.DIVIDEND, per_ticker=True
+            ),
+            woken=dividends_woken,
             rule=(
                 "decision 7's announced cash dividends for the watch universe, "
                 f"ex-dates today to +{days_in_words(DIVIDEND_EX_DATE_HORIZON)}; a "

@@ -142,6 +142,7 @@ from corollary.engine.runtime import (
 from corollary.data.calendar_dividends import CashDividendSource
 from corollary.data.calendar_releases import ReleaseDatesSource
 from corollary.engine.scheduler import (
+    CASH_SESSION_WAKE_JOBS,
     AlpacaContextSource,
     CashPositionUnderlyings,
     ContextNotices,
@@ -978,18 +979,23 @@ def _position_refresher(app: FastAPI) -> PaperPositionsRefresher:
     )
 
 
-def _cash_position_refresher(app: FastAPI) -> CashPositionsRefresher:
+def _cash_position_refresher(app: FastAPI, scheduler: Scheduler) -> CashPositionsRefresher:
     """The one reader of the Cash positions, into ``app.state.cash_positions``.
 
     Holds the registry -- which is why this object is the lifespan's and is
     never put in :class:`ContextServices`. It reads only while a confirmed
     Cash session is active (``confirmed_cash_broker``, checked per read) and
     clears the holder whenever one is not (rule 5).
+
+    Handed a :class:`JobWake` bound to :data:`CASH_SESSION_WAKE_JOBS` -- the
+    earnings and dividends jobs -- and **not** ``scheduler``, which is read
+    here only to build that wake (cash-session unit 2b).
     """
     return CashPositionsRefresher(
         registry=app.state.registry,
         session=CashSessionReader(app.state.cash_session),
         holder=app.state.cash_positions,
+        wake=scheduler.waker(CASH_SESSION_WAKE_JOBS),
     )
 
 
@@ -1217,7 +1223,7 @@ def create_app(
             if context_scheduler is not None:
                 refresher = _position_refresher(app)
                 refresher.start()
-                cash_refresher = _cash_position_refresher(app)
+                cash_refresher = _cash_position_refresher(app, context_scheduler)
                 cash_refresher.start()
                 notice_task = asyncio.create_task(
                     deliver_context_notices(context_notices, runtime)

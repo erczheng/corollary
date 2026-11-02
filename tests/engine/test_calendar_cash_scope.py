@@ -336,3 +336,199 @@ async def test_cash_underlyings_are_in_neither_the_news_nor_the_audit_universe(
     universe = await deps.watch_universe()
     assert CASH_ONLY not in universe
     assert "NVDA" in universe
+
+
+# --------------------------------------------------------------------------
+# The woken run (cash-session unit 2b): the Cash-only tickers, and no more
+# --------------------------------------------------------------------------
+
+
+def _seed_watched_row_no_fetch_lists(db_engine: Engine) -> None:
+    """A stored NVDA report the fetch below omits: a full run would withdraw it."""
+    _seed_row(
+        db_engine,
+        kind=CalendarKind.EARNINGS,
+        source=CalendarSource.FINNHUB,
+        vendor_id="NVDA:2026Q1",
+        day=date(2026, 11, 17),
+        ticker="NVDA",
+    )
+
+
+def test_only_the_two_ticker_scoped_calendar_jobs_can_be_woken(db_engine: Engine) -> None:
+    view, _ = _cash(CASH_ONLY)
+    jobs = _jobs(_scoped_services(db_engine, view))
+    assert scheduler_module.CASH_SESSION_WAKE_JOBS == SCOPED_JOBS
+    assert {name for name, job in jobs.items() if job.woken is not None} == set(SCOPED_JOBS)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", SCOPED_JOBS)
+async def test_a_woken_run_scopes_to_the_cash_only_tickers_and_leaves_the_watch_window(
+    db_engine: Engine, replace_spy: _ReplaceSpy, name: str
+) -> None:
+    """NVDA is both watched and held in Cash; PLTR only in Cash. The woken run
+    asks about PLTR alone, so a watched ticker's stored row is never withdrawn
+    outside its slot."""
+    _seed_old_pltr_rows(db_engine)
+    _seed_watched_row_no_fetch_lists(db_engine)
+    view, _ = _cash(CASH_ONLY, "NVDA")
+    services = _scoped_services(db_engine, view)
+    job = _jobs(services)[name]
+    assert job.woken is not None
+    assert await job.woken() is None
+
+    (call,) = replace_spy.calls
+    assert call["tickers"] == frozenset({CASH_ONLY})
+    live = _live(db_engine)
+    assert _NEW_PLTR[name] in live
+    assert _OLD_PLTR[name] not in live
+    assert ("earnings", "NVDA:2026Q1") in live
+    if name == "calendar_dividends":
+        (asked,) = services.dividends.calls  # type: ignore[union-attr]
+        assert asked[0] == (CASH_ONLY,)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", SCOPED_JOBS)
+@pytest.mark.parametrize("case", ["no view", "never confirmed", "ended", "only watched", "stale"])
+async def test_a_woken_run_with_nothing_cash_only_requests_nothing_and_skips(
+    db_engine: Engine, replace_spy: _ReplaceSpy, name: str, case: str
+) -> None:
+    """Rule 5: a woken run that lands after the session ended covers nothing,
+    and costs no request -- the earnings sweep is 22 of them."""
+    view: HeldCashUnderlyings | None
+    if case == "no view":
+        view = None
+    elif case == "never confirmed":
+        view, _ = _cash(CASH_ONLY, confirmed=False)
+    elif case == "ended":
+        view, sessions = _cash(CASH_ONLY)
+        sessions.end()
+    elif case == "only watched":
+        view, _ = _cash("NVDA")
+    else:
+        view, _ = _cash(CASH_ONLY, as_of=NOW - HELD_POSITIONS_STALE_AFTER - timedelta(seconds=1))
+    services = _scoped_services(db_engine, view)
+    job = _jobs(services)[name]
+    assert job.woken is not None
+    outcome = await job.woken()
+    assert outcome is not None and "Cash-only" in outcome.reason
+    assert replace_spy.calls == []
+    assert services.finnhub_calendar.calls == []  # type: ignore[union-attr]
+    assert services.dividends.calls == []  # type: ignore[union-attr]
+    assert _NEW_PLTR[name] not in _live(db_engine)
+
+
+@pytest.mark.asyncio
+async def test_a_woken_run_logs_the_cash_only_tickers_and_their_count_only(
+    db_engine: Engine, replace_spy: _ReplaceSpy, caplog: pytest.LogCaptureFixture
+) -> None:
+    view, _ = _cash(CASH_ONLY, "NVDA")
+    services = _scoped_services(db_engine, view)
+    job = _jobs(services)["calendar_earnings"]
+    assert job.woken is not None
+    with caplog.at_level(logging.INFO, logger=scheduler_module.__name__):
+        await job.woken()
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == "calendar_cash_only_run"]
+    assert line.tickers == [CASH_ONLY]  # type: ignore[attr-defined]
+    assert line.count == 1  # type: ignore[attr-defined]
+    # Tickers and a count: nothing about the account rides on the line.
+    assert not {"account", "account_number_masked", "balance"} & set(line.__dict__)
+
+
+# --------------------------------------------------------------------------
+# A woken write is never the start-up catch-up's evidence (unit 2b audit)
+# --------------------------------------------------------------------------
+
+#: The woken run lands four hours before the restart: well inside a day, so
+#: counted as evidence it would make the restart's catch-up skip.
+_WOKEN_AT = NOW - timedelta(hours=4)
+
+_SCOPED_KINDS = {
+    "calendar_earnings": (CalendarKind.EARNINGS, CalendarSource.FINNHUB, "NVDA:2026Q1", "NVDA"),
+    "calendar_dividends": (CalendarKind.DIVIDEND, CalendarSource.ALPACA, "div-aapl-old", "AAPL"),
+}
+
+
+def _seed_stale_watched_row(db_engine: Engine, name: str) -> None:
+    """The watch universe's last successful sweep, three days old."""
+    kind, source, vendor_id, ticker = _SCOPED_KINDS[name]
+    _seed_row(
+        db_engine,
+        kind=kind,
+        source=source,
+        vendor_id=vendor_id,
+        day=date(2026, 11, 17),
+        ticker=ticker,
+        stamped=NOW - timedelta(days=3),
+    )
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", SCOPED_JOBS)
+@pytest.mark.parametrize("scenario", ["A: watched rows stale", "B: no watched rows at all"])
+async def test_a_woken_write_then_a_restart_still_fetches_at_catch_up(
+    db_engine: Engine, name: str, scenario: str
+) -> None:
+    """Scenario A: this morning's sweep failed, a woken run wrote PLTR at
+    14:00, and the process restarts at 18:00. Scenario B: no sweep ever
+    succeeded, only the woken run's rows exist. Either way the watch
+    universe's rows are not fresh, so the catch-up must fetch: the woken
+    stamp vouches for PLTR alone, and no Cash session survives a restart."""
+    if scenario.startswith("A"):
+        _seed_stale_watched_row(db_engine, name)
+    view, _ = _cash(CASH_ONLY, as_of=_WOKEN_AT)
+    woken_job = _jobs(_scoped_services(db_engine, view), now=_WOKEN_AT)[name]
+    assert woken_job.woken is not None
+    assert await woken_job.woken() is None
+    assert _NEW_PLTR[name] in _live(db_engine)  # the woken write did stamp
+
+    # The restart: a new job set, no Cash session, the clock four hours on.
+    restarted = _scoped_services(db_engine, None)
+    catch_up = _jobs(restarted)[name].catch_up
+    assert catch_up is not None
+    assert await catch_up() is None
+    if name == "calendar_earnings":
+        assert restarted.finnhub_calendar.calls != []  # type: ignore[union-attr]
+    else:
+        assert restarted.dividends.calls != []  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", SCOPED_JOBS)
+async def test_a_fresh_watched_row_still_lets_the_catch_up_skip_beside_a_woken_one(
+    db_engine: Engine, name: str
+) -> None:
+    """The restriction keeps the skip it exists for: a watched row written
+    within the period is still the evidence, whatever a Cash-only row says."""
+    kind, source, vendor_id, ticker = _SCOPED_KINDS[name]
+    fresh = NOW - timedelta(hours=2)
+    _seed_row(
+        db_engine,
+        kind=kind,
+        source=source,
+        vendor_id=vendor_id,
+        day=date(2026, 11, 17),
+        ticker=ticker,
+        stamped=fresh,
+    )
+    _seed_row(
+        db_engine,
+        kind=kind,
+        source=source,
+        vendor_id=f"{CASH_ONLY}:woken",
+        day=date(2026, 11, 18),
+        ticker=CASH_ONLY,
+        stamped=NOW - timedelta(minutes=5),
+    )
+    restarted = _scoped_services(db_engine, None)
+    catch_up = _jobs(restarted)[name].catch_up
+    assert catch_up is not None
+    outcome = await catch_up()
+    assert outcome is not None and outcome.fresh_as_of == fresh
+    assert restarted.finnhub_calendar.calls == []  # type: ignore[union-attr]
+    assert restarted.dividends.calls == []  # type: ignore[union-attr]

@@ -24,6 +24,7 @@ from sqlalchemy import Engine
 
 from corollary.api.app import create_app
 from corollary.api.deps import (
+    CASH_SESSION_POLL,
     POSITION_UNDERLYINGS_TTL,
     CashPositionsRefresher,
     ServiceRegistry,
@@ -252,10 +253,13 @@ async def test_the_loop_reads_once_per_interval_and_close_clears_the_holder() ->
     holder = CashPositionUnderlyings()
     slept: list[float] = []
     second_sleep = asyncio.Event()
+    # One interval is waited out in CASH_SESSION_POLL looks for a session
+    # change (unit 2b); with none, the second read comes a full interval later.
+    looks = int(POSITION_UNDERLYINGS_TTL / CASH_SESSION_POLL)
 
     async def sleep(seconds: float) -> None:
         slept.append(seconds)
-        if len(slept) == 2:
+        if len(slept) == looks + 1:
             second_sleep.set()
             await asyncio.Event().wait()  # parked until aclose cancels it
 
@@ -270,7 +274,8 @@ async def test_the_loop_reads_once_per_interval_and_close_clears_the_holder() ->
     try:
         await asyncio.wait_for(second_sleep.wait(), timeout=5)
         assert cash.calls == 2
-        assert slept == [300.0, 300.0]
+        assert slept == [CASH_SESSION_POLL.total_seconds()] * (looks + 1)
+        assert sum(slept[:looks]) == POSITION_UNDERLYINGS_TTL.total_seconds()
         assert holder.current() == frozenset({"KO"})
     finally:
         await refresher.aclose()

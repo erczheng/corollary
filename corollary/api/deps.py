@@ -64,7 +64,7 @@ from corollary.data.providers.interface import MarketDataProvider
 from corollary.data.providers.openfigi import OPENFIGI_API_KEY_ENV, OpenFigiProvider
 from corollary.data.providers.sec import SEC_USER_AGENT_ENV, SecProvider
 from corollary.data.seeds import SeedError, SpdrSeed
-from corollary.engine.cash_session import CashSessionHolder, CashSessionReader
+from corollary.engine.cash_session import CashSession, CashSessionHolder, CashSessionReader
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 # Re-exported: the holder lives beside the jobs that read it, so the object a
@@ -72,6 +72,7 @@ from corollary.engine.execution.interface import BrokerAccount
 from corollary.engine.scheduler import (
     CashPositionUnderlyings,
     JobStatus,
+    JobWake,
     PositionUnderlyings,
     Scheduler,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "ApiError",
     "AssetDirectoryDep",
     "BrokerDep",
+    "CASH_SESSION_POLL",
     "CashPositionsRefresher",
     "CashSessionDep",
     "FundamentalsDep",
@@ -633,6 +635,16 @@ SeedLoader = Callable[[], SpdrSeed | None]
 #: ``paper-api.`` cost at 12/hour against 200/min.
 POSITION_UNDERLYINGS_TTL: Final = timedelta(minutes=5)
 
+#: How often the Cash positions refresher looks, between reads, for a change of
+#: Cash session (cash-session unit 2b). A look is an in-memory identity check
+#: -- no request -- so a session confirmed mid-interval is read within this,
+#: not up to :data:`POSITION_UNDERLYINGS_TTL` later. Polled rather than
+#: signalled: the session holder outlives a lifespan (``create_app`` builds
+#: it), and an ``asyncio.Event`` on it would bind to the first loop that
+#: waited and refuse the next; it also keeps the holder free of anything but
+#: the session (``corollary.engine.cash_session``).
+CASH_SESSION_POLL: Final = timedelta(seconds=2)
+
 
 def position_underlying(symbol: str) -> str:
     """The symbol whose news a held position is about.
@@ -823,6 +835,18 @@ class CashPositionsRefresher:
     socket supervisor and catches every failure, so it can neither halt nor
     resume the engine (rule 9). Logs carry counts and error class names,
     never the account number, a balance, or an exception's message (rule 6).
+
+    **A new session is read at once, and wakes the calendar** (cash-session
+    unit 2b). Between reads the loop looks every :data:`CASH_SESSION_POLL` for
+    a change of session *identity* -- confirmed, ended, or replaced -- and
+    reads straight away when it sees one, rather than at the end of the
+    interval. After the first read under a session that found at least one
+    underlying, it calls ``wake`` once for that session: a
+    :class:`~corollary.engine.scheduler.JobWake` bound to the earnings and
+    dividends jobs, never the scheduler, so this object can ask those two jobs
+    for one early run and do nothing else to any job. The confirm route is
+    untouched and knows nothing of this; the cap on how often a job may run
+    woken is the scheduler's.
     """
 
     def __init__(
@@ -834,13 +858,21 @@ class CashPositionsRefresher:
         clock: Callable[[], datetime] = _utc_now,
         interval: timedelta = POSITION_UNDERLYINGS_TTL,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wake: JobWake | None = None,
+        poll: timedelta = CASH_SESSION_POLL,
     ) -> None:
+        if poll <= timedelta(0) or poll > interval:
+            raise ValueError(f"poll must be positive and at most the interval, got {poll}")
         self._registry = registry
         self._session = session
         self._holder = holder
         self._clock = clock
         self._interval = interval
         self._sleep = sleep
+        self._wake = wake
+        self._poll = poll
+        #: The session the calendar was last woken for; never woken twice for one.
+        self._woken_for: CashSession | None = None
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -925,10 +957,78 @@ class CashPositionsRefresher:
         self._holder.replace(
             (position_underlying(row.symbol) for row in held), at=now, session=session
         )
+        self._wake_calendar_once(session)
         return True
+
+    def _wake_calendar_once(self, session: CashSession) -> None:
+        """Wake the calendar jobs after the first read under ``session`` with holdings.
+
+        Called only with the holder just replaced under ``session``, which is
+        still the active one. An empty read wakes nothing and leaves the
+        session un-woken, so a later read under it that finds a position still
+        wakes. Never raises: a wake that failed costs the early run, never
+        the read.
+        """
+        if self._wake is None or session is self._woken_for:
+            return
+        underlyings = len(self._holder.current())
+        if underlyings == 0:
+            return
+        self._woken_for = session
+        try:
+            woken = self._wake()
+        except Exception as exc:
+            logger.error(
+                "the calendar could not be woken for the Cash session; its jobs "
+                "add the Cash underlyings at their next slot",
+                extra={
+                    "event": "cash_session_calendar_wake_failed",
+                    "account": AccountMode.CASH.value,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        logger.info(
+            "the Cash session was read; the calendar jobs are woken to add its "
+            "underlyings now rather than at their next slot",
+            extra={
+                "event": "cash_session_calendar_woken",
+                "account": AccountMode.CASH.value,
+                "jobs": list(woken),
+                "cash_underlyings": underlyings,
+            },
+        )
+
+    async def _wait_for_next_read(self, read_under: CashSession | None) -> None:
+        """Sleep out the interval, or less: until the session is not ``read_under``.
+
+        Counts the seconds it asked to sleep rather than reading the clock, so
+        a clock that misbehaves can neither spin this nor stall it. Each look
+        is an in-memory identity check and nothing else.
+        """
+        total = self._interval.total_seconds()
+        step = self._poll.total_seconds()
+        waited = 0.0
+        while waited < total:
+            if self._session.current() is not read_under:
+                logger.info(
+                    "the Cash session changed; its positions are read now",
+                    extra={
+                        "event": "cash_session_changed",
+                        "account": AccountMode.CASH.value,
+                        "active": self._session.current() is not None,
+                    },
+                )
+                return
+            chunk = min(step, total - waited)
+            await self._sleep(chunk)
+            waited += chunk
 
     async def _run(self) -> None:
         while True:
+            # The session this read is taken under: a change from it -- even
+            # one landing during the read -- ends the wait below at once.
+            read_under = self._session.current()
             try:
                 await self.refresh()
             except Exception as exc:
@@ -942,7 +1042,7 @@ class CashPositionsRefresher:
                         "retry_after_seconds": int(self._interval.total_seconds()),
                     },
                 )
-            await self._sleep(self._interval.total_seconds())
+            await self._wait_for_next_read(read_under)
 
     def start(self) -> None:
         """Start the read loop. Call once, from the running event loop."""
