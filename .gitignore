@@ -29,3 +29,6 @@ corollary.db.bak-*
 
 # Agent scratch notes — working memory, not project record.
 .claude/scratch/
+
+# Unattended-run logs (scripts/weekly_audit.py)
+logs/

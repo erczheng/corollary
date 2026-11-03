@@ -1473,3 +1473,30 @@ app = create_app(
 #: :func:`~corollary.ratelimit.default_limiter`, which is why no job may rely
 #: on its bucket alone to stay under a vendor's ceiling across restarts.
 dev_app = create_app(scheduler=build_context_scheduler)
+
+#: The same app with **no vendor sockets and Discord on**, for an unattended
+#: run: ``scripts/weekly_audit.py`` launches it from Windows Task Scheduler
+#: on Saturday morning so the weekly sentiment self-audit happens without the
+#: owner. **Never run it with ``--reload``**: Discord is on, so a reload loop
+#: would page the owner's channel once per save -- that is ``dev_app``'s job,
+#: with Discord off.
+#:
+#: No sockets, for two reasons. A second Corollary's trading stream earns
+#: Alpaca's **406** (``FATAL_STREAM_CODES``), and a laptop dropping back to
+#: sleep mid-run would look like a lost connection; either one halts the
+#: engine (rule 9) and leaves a self-inflicted entry in the halt log nobody
+#: reads on the morning it matters. Without the producers the watchdog has
+#: nothing to judge, so this app cannot halt itself that way.
+#:
+#: **Discord on** (``discord=True``), which is where it differs from
+#: ``dev_app``: a source demoted by an audit nobody was watching must still
+#: reach the owner, and Discord is the only route that leaves the machine.
+#:
+#: The context scheduler runs, as in both other apps -- the Saturday 10:00 ET
+#: ``sentiment_audit`` slot, or its start-up catch-up for a missed one, is the
+#: run the script waits on; the script never POSTs a manual run.
+#:
+#: ``--env-file .env`` is still the launcher's job (``uv run python -m
+#: uvicorn corollary.api:headless_app --env-file .env``): nothing under
+#: ``corollary/`` reads ``.env``.
+headless_app = create_app(scheduler=build_context_scheduler, discord=True)

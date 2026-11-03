@@ -78,7 +78,10 @@ before the first slot, under the same failure handling as a scheduled run --
 and it must be a no-op when the rows say nothing is missing, or it is the
 re-fire-on-every-save this rule exists to prevent. FRED's ``DGS3MO`` job
 fetches at start only while no observation has ever been stored, or the newest
-one is more than two sessions old (a long downtime). The slots themselves are
+one is more than two sessions old (a long downtime). The Saturday sentiment
+audit runs a missed slot once, when ``audit_run`` holds no run since it, and
+defers to the calendar's close if the start is in session
+(``_sentiment_audit_catch_up``). The slots themselves are
 **anchored to the session open** (``open + k * interval``), not to the instant
 the process started: anchored to the start, every save would push the first
 run a full interval out, and a developer saving more often than the interval
@@ -188,6 +191,7 @@ from corollary.data.macro.risk_free import (
 from corollary.data.news.assets import AssetDirectoryHolder, AssetSource
 from corollary.data.news.audit import TransitionNotice
 from corollary.data.news.audit_runner import (
+    ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
     AuditRunResult,
     AuditTrigger,
@@ -246,7 +250,7 @@ from corollary.ratelimit import (
     SEC_DATA_HOST,
     SEC_WWW_HOST,
 )
-from corollary.db.models import CalendarEvent
+from corollary.db.models import AuditRun, CalendarEvent
 from corollary.wire import vendor_detail
 
 __all__ = [
@@ -268,6 +272,8 @@ __all__ = [
     "SPDR_HOLDINGS_CATCH_UP_AFTER",
     "SPDR_HOLDINGS_DAYS",
     "SENTIMENT_AUDIT_AT",
+    "SENTIMENT_AUDIT_CATCH_UP_IMMINENT",
+    "SENTIMENT_AUDIT_CATCH_UP_POSITIONS_WAIT",
     "SENTIMENT_AUDIT_DAYS",
     "SENTIMENT_AUDIT_JOB",
     "SentimentAuditUnavailable",
@@ -303,6 +309,7 @@ __all__ = [
     "build_context_scheduler",
     "context_jobs",
     "every_day",
+    "latest_sentiment_audit_slot",
     "no_scheduler",
     "on_weekdays",
     "run_sentiment_audit_now",
@@ -2701,11 +2708,251 @@ async def _sentiment_audit(services: ContextServices, clock: UtcClock) -> JobSki
     return None
 
 
-def _sentiment_audit_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
+#: How long the start-up catch-up waits for the paper positions refresher's
+#: first read. The refresher starts just before the scheduler and reads at
+#: once, so one broker round trip is the normal wait; the bound is for a
+#: broker that does not answer, after which the run skips (the universe
+#: would be missing every held name) and the next start retries.
+SENTIMENT_AUDIT_CATCH_UP_POSITIONS_WAIT: Final = timedelta(minutes=2)
+_SENTIMENT_AUDIT_CATCH_UP_POSITIONS_POLL: Final = timedelta(seconds=5)
+
+#: When the **next** slot is this close (inclusive), the start-up catch-up
+#: runs nothing. Run last week's slot at 09:45 and, still running at 10:00, the
+#: loop's first ``next_run`` (asked after the catch-up returns) is next
+#: Saturday -- so today's slot would be left for a later catch-up. The slot's
+#: own run grades every matured label anyway, the missed week's included.
+SENTIMENT_AUDIT_CATCH_UP_IMMINENT: Final = timedelta(minutes=30)
+
+
+def latest_sentiment_audit_slot(now: datetime) -> datetime:
+    """The newest Saturday 10:00 ET slot **at or before** ``now``, in UTC.
+
+    At the slot exactly, the slot has passed: the scheduled loop asks
+    ``next_run`` for the first slot strictly after the start, so a start at
+    10:00:00 would otherwise miss it. Built from the same
+    :data:`SENTIMENT_AUDIT_AT` and :data:`SENTIMENT_AUDIT_DAYS` the job's
+    :class:`AtTime` runs on, per ET day, so DST moves the UTC instant and not
+    the ET one.
+    """
+    moment = _require_utc(now)
+    today = moment.astimezone(NYSE_TZ).date()
+    for back in range(8):
+        day = today - timedelta(days=back)
+        if not SENTIMENT_AUDIT_DAYS(day):
+            continue
+        slot = datetime.combine(day, SENTIMENT_AUDIT_AT, tzinfo=NYSE_TZ).astimezone(
+            timezone.utc
+        )
+        if slot <= moment:
+            return slot
+    raise AssertionError("a weekly rule always has a slot within eight days")  # pragma: no cover
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditRunsSince:
+    """What the catch-up read from ``audit_run``. Instants UTC."""
+
+    #: A run that counts as this slot's: succeeded or failed at or after the
+    #: slot, or ``running`` there and no older than ``ABANDONED_RUN_AFTER``.
+    ran: bool
+    #: The newest run's ``started_at``, in any state and from any week; for
+    #: the decision log only.
+    last_run_started: datetime | None
+
+
+def _audit_runs_since_blocking(
+    session_factory: Callable[[], Session], slot: datetime, now: datetime
+) -> _AuditRunsSince:
+    """Read ``audit_run`` newest first, stopping at the first row before ``slot``.
+
+    Compared in Python, as aware UTC, rather than in SQL. A ``running`` row
+    counts on the runner's own terms (``_open_run``): no more than
+    :data:`ABANDONED_RUN_AFTER` old is another process's live run; older, the
+    runner will close it as abandoned, so it is not this slot's run.
+    """
+    stmt = select(AuditRun.started_at, AuditRun.status).order_by(
+        AuditRun.started_at.desc(), AuditRun.id.desc()
+    )
+    last_run_started: datetime | None = None
+    with session_factory() as session:
+        for started_at, status in session.execute(stmt):
+            started = _require_utc(started_at)
+            if last_run_started is None:
+                last_run_started = started
+            if started < slot:
+                break
+            if status in ("succeeded", "failed"):
+                return _AuditRunsSince(ran=True, last_run_started=last_run_started)
+            if status == "running" and now - started <= ABANDONED_RUN_AFTER:
+                return _AuditRunsSince(ran=True, last_run_started=last_run_started)
+    return _AuditRunsSince(ran=False, last_run_started=last_run_started)
+
+
+def _log_audit_catch_up(
+    decision: str,
+    *,
+    slot: datetime,
+    runs: _AuditRunsSince,
+    at: datetime,
+    until: datetime | None = None,
+    skipped: JobSkipped | None = None,
+) -> None:
+    """One ``sentiment_audit_catch_up`` decision.
+
+    A ``skipped`` outcome -- the slot is left unrun -- is said at **WARNING**,
+    with the reason in the message text itself: under uvicorn nothing installs
+    a handler for ``corollary.*``, so the only thing that prints is
+    ``logging.lastResort``, which is WARNING-only and renders the message alone,
+    dropping ``extra``. Every other decision leaves nothing missing (the slot
+    ran, will run, or is about to) and stays at INFO.
+    """
+    started = runs.last_run_started
+    reason = None if skipped is None else skipped.reason
+    extra = {
+        "event": "sentiment_audit_catch_up",
+        "decision": decision,
+        "slot": slot.isoformat(),
+        "last_run_started": None if started is None else started.isoformat(),
+        "until": None if until is None else until.isoformat(),
+        "reason": reason,
+        "at": at.isoformat(),
+    }
+    if reason is None:
+        logger.info("sentiment audit catch-up: %s", decision, extra=extra)
+        return
+    logger.warning(
+        "sentiment audit catch-up: %s -- the %s slot was not run: %s",
+        decision,
+        slot.isoformat(),
+        reason,
+        extra=extra,
+    )
+
+
+async def _sleep_until_on(clock: UtcClock, sleep: Sleeper, due: datetime) -> None:
+    """Sleep until ``clock`` reads ``due``, in chunks, re-reading the clock each time.
+
+    The scheduler's own ``_sleep_until`` on the job's clock and sleeper: a
+    laptop that sleeps through the wait wakes to a clock already past it.
+    """
+    while True:
+        remaining = (due - _require_utc(clock())).total_seconds()
+        if remaining <= 0:
+            return
+        await sleep(min(remaining, _MAX_SLEEP_SECONDS))
+
+
+def _audit_not_needed(slot: datetime, runs: _AuditRunsSince) -> JobSkipped:
+    started = runs.last_run_started
+    return JobSkipped(
+        f"the sentiment audit already ran for the {slot.isoformat()} slot (the newest "
+        f"run started at {'never' if started is None else started.isoformat()}); "
+        "the start-up catch-up does not run it again"
+    )
+
+
+async def _sentiment_audit_catch_up(
+    services: ContextServices, clock: UtcClock, sleep: Sleeper
+) -> JobSkipped | None:
+    """At start: run the missed Saturday's audit once, decided from ``audit_run``.
+
+    The FRED/SPDR/calendar pattern -- decide from the rows, never from process
+    memory, so a restart (or a ``--reload`` save) cannot run it twice:
+
+    1. The slot is :func:`latest_sentiment_audit_slot`. A run at or after it
+       (see :func:`_audit_runs_since_blocking`) means nothing is missing.
+    1a. The **next** slot within :data:`SENTIMENT_AUDIT_CATCH_UP_IMMINENT`:
+       nothing (``not_needed_slot_imminent``). That slot's run is the one
+       that covers the missed week.
+    2. No provider: skip now (``skipped_no_provider``, at WARNING), rather
+       than wait out a session for nothing.
+    3. **In session, defer to the calendar's close** -- never a hardcoded
+       16:00, so a half-day defers to 13:00 ET. The audit fetches SIP minute
+       bars on the same Alpaca data bucket the live market polling spends.
+       The rows are read again after the wait: a manual run, or another
+       process's, may have landed meanwhile.
+    4. Wait, bounded by :data:`SENTIMENT_AUDIT_CATCH_UP_POSITIONS_WAIT`, for
+       the paper positions' first read. Every catch-up runs at start, before
+       the refresher has read anything, and the run refuses a universe built
+       without positions -- so without this wait the catch-up would always
+       skip in production.
+    5. Then the **scheduled** body, :func:`_sentiment_audit`: the run is
+       ``trigger = 'scheduled'`` and carries every precondition the slot's run
+       does (a degraded universe skips, and the next start or slot retries).
+       It is not the manual kind and sends no ``sentiment_audit_requested``,
+       which is the manual ``POST``'s alone.
+
+    Every decision is logged as ``sentiment_audit_catch_up``: ``run_now`` when
+    the run starts, after every wait, and then its outcome, ``ran`` or
+    ``skipped`` (WARNING, the reason in the message). Nothing here
+    holds the runtime: rule 9 is out of reach, as for every context job.
+    """
+    now = _require_utc(clock())
+    slot = latest_sentiment_audit_slot(now)
+    runs = await asyncio.to_thread(
+        _audit_runs_since_blocking, services.session_factory, slot, now
+    )
+    if runs.ran:
+        _log_audit_catch_up("not_needed", slot=slot, runs=runs, at=now)
+        return _audit_not_needed(slot, runs)
+    upcoming = AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS).next_run(now)
+    if upcoming is not None and upcoming - now <= SENTIMENT_AUDIT_CATCH_UP_IMMINENT:
+        _log_audit_catch_up(
+            "not_needed_slot_imminent", slot=slot, runs=runs, at=now, until=upcoming
+        )
+        return JobSkipped(
+            f"the next sentiment audit slot, {upcoming.isoformat()}, is imminent; its "
+            f"run grades every matured label, the missed {slot.isoformat()} slot's "
+            "included, so the start-up catch-up does not run"
+        )
+    if services.alpaca is None:
+        no_provider = JobSkipped(_SENTIMENT_AUDIT_NO_BARS)
+        _log_audit_catch_up(
+            "skipped_no_provider", slot=slot, runs=runs, at=now, skipped=no_provider
+        )
+        return no_provider
+    if _in_regular_session(now):
+        closes = nyse_session_close(now.astimezone(NYSE_TZ).date())
+        assert closes is not None  # _in_regular_session saw one
+        _log_audit_catch_up("deferred", slot=slot, runs=runs, at=now, until=closes)
+        await _sleep_until_on(clock, sleep, closes)
+        now = _require_utc(clock())
+        runs = await asyncio.to_thread(
+            _audit_runs_since_blocking, services.session_factory, slot, now
+        )
+        if runs.ran:
+            _log_audit_catch_up("not_needed", slot=slot, runs=runs, at=now)
+            return _audit_not_needed(slot, runs)
+    positions = services.position_underlyings
+    if isinstance(positions, HeldPositionUnderlyings):
+        waited = timedelta(0)
+        while (
+            positions.holder.as_of is None
+            and waited < SENTIMENT_AUDIT_CATCH_UP_POSITIONS_WAIT
+        ):
+            await sleep(_SENTIMENT_AUDIT_CATCH_UP_POSITIONS_POLL.total_seconds())
+            waited += _SENTIMENT_AUDIT_CATCH_UP_POSITIONS_POLL
+    # ``run_now`` is the run being started, after every wait; the run's own
+    # preconditions can still skip it, so the outcome is stated as well.
+    _log_audit_catch_up("run_now", slot=slot, runs=runs, at=_require_utc(clock()))
+    outcome = await _sentiment_audit(services, clock)
+    if outcome is None:
+        _log_audit_catch_up("ran", slot=slot, runs=runs, at=_require_utc(clock()))
+    else:
+        _log_audit_catch_up(
+            "skipped", slot=slot, runs=runs, at=_require_utc(clock()), skipped=outcome
+        )
+    return outcome
+
+
+def _sentiment_audit_job(
+    services: ContextServices, clock: UtcClock, sleep: Sleeper
+) -> ScheduledJob:
     return ScheduledJob(
         name=SENTIMENT_AUDIT_JOB,
         schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
         run=functools.partial(_sentiment_audit, services, clock),
+        catch_up=functools.partial(_sentiment_audit_catch_up, services, clock, sleep),
         rule=(
             "the sentiment self-audit (decisions 12-13): grades matured labels on "
             "SIP minute bars, stores each source's accuracy and applies the "
@@ -3712,7 +3959,7 @@ def context_jobs(
         ),
         *_news_jobs(services, clock),
         _spdr_job(services, clock, sleep),
-        _sentiment_audit_job(services, clock),
+        _sentiment_audit_job(services, clock, sleep),
         *_calendar_jobs(services, _watch_universe_source(services), clock),
     ]
 

@@ -12,8 +12,13 @@ sockets, which is what ``--reload`` should be pointed at. A reloader opens a
 second set of sockets on every save, and Alpaca answers the surplus trading
 connection with a 406 that halts the engine -- correctly, and fifteen times an
 afternoon. See :mod:`corollary.api.app`.
+
+``headless_app`` is the third: no vendor sockets either, but Discord on. It is
+what ``scripts/weekly_audit.py`` launches for the unattended Saturday audit,
+and it must never be run with ``--reload`` -- a reload loop with Discord on
+pages the owner once per save.
 """
 
-from corollary.api.app import app, dev_app
+from corollary.api.app import app, dev_app, headless_app
 
-__all__ = ["app", "dev_app"]
+__all__ = ["app", "dev_app", "headless_app"]

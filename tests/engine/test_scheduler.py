@@ -862,7 +862,15 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
     assert by_name["asset_directory"].catch_up is not None
     assert by_name["news_watch_tier"].catch_up is not None
     for name in _SHIPPED_NAMES[2:]:
-        if name not in ("asset_directory", "news_watch_tier", "spdr_holdings", *_CALENDAR_JOBS):
+        if name not in (
+            "asset_directory",
+            "news_watch_tier",
+            "spdr_holdings",
+            # A missed Saturday, decided from ``audit_run``
+            # (``test_scheduler_audit_catch_up.py``).
+            "sentiment_audit",
+            *_CALENDAR_JOBS,
+        ):
             assert by_name[name].catch_up is None, name
     # The SPDR sector seed (unit 4SEC-B2): weekly, Monday 09:00 ET, plus a
     # start-up catch-up when no attempt was ever recorded or the last is old.
@@ -1888,13 +1896,16 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     with Session(db_engine) as session:
         kinds = set(session.scalars(select(CalendarEvent.kind).distinct()))
     assert kinds == {"earnings", "ipo", "dividend", "economic", "central-bank"}
-    # The sentiment audit body really ran on Saturday: one scheduled run,
-    # closed -- never left ``running`` -- and never a skip for want of bars.
+    # The sentiment audit body really ran twice, both scheduled-kind and
+    # closed -- never left ``running`` -- and never a skip for want of bars:
+    # the start-up catch-up for Saturday 21 Nov's missed slot (the window
+    # opens on Thanksgiving evening, out of session, so it runs at once), and
+    # Saturday 28 Nov's own slot.
     from corollary.db.models import AuditRun
 
     with Session(db_engine) as session:
         runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
-    assert runs == [("scheduled", "succeeded")]
+    assert runs == [("scheduled", "succeeded")] * 2
     assert status["sentiment_audit"].skips == 0
 
     assert _state_snapshot(db_engine) == state_before

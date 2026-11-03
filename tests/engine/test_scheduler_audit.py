@@ -79,7 +79,7 @@ def test_the_audit_runs_saturday_at_1000_eastern(db_engine: Engine) -> None:
     job = _audit_job(_services(db_engine, None))
     assert job.schedule == AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS)
     assert SENTIMENT_AUDIT_AT == time(10, 0)
-    assert job.catch_up is None
+    assert job.catch_up is not None  # the missed-Saturday catch-up: test_scheduler_audit_catch_up.py
     assert job.inputs["host"] == ALPACA_DATA_HOST
     schedule = job.schedule
     # November (EST): 10:00 ET is 15:00 UTC.

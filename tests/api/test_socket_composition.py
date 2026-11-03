@@ -43,6 +43,7 @@ from corollary.api.app import (
     build_socket_supervisor,
     create_app,
     dev_app,
+    headless_app,
     no_socket_supervisor,
 )
 from corollary.api.deps import AccountMode, ServiceRegistry
@@ -1816,3 +1817,25 @@ def test_the_shipped_app_opts_in_and_the_reload_app_does_not() -> None:
     # Two apps, not one shared object: `dev_app` must not be able to hand a
     # route table or a fan-out to the one that holds the sockets.
     assert shipped_app is not dev_app
+
+
+@pytest.mark.risk
+def test_the_headless_app_opens_no_sockets_and_still_delivers_to_discord() -> None:
+    """``headless_app`` is the unattended Saturday run's (``scripts/weekly_audit.py``).
+
+    No sockets, for ``dev_app``'s reason and one of its own: a second
+    instance's trading stream earns Alpaca's 406, and a laptop dropping back
+    to sleep mid-run looks like a lost connection -- either halts the engine
+    (rule 9) with a self-inflicted entry. But a source demotion found with
+    nobody watching must still reach the owner, so Discord is **on**, which
+    ``dev_app`` (built for ``--reload``) is not. And it runs the context
+    scheduler, or there would be no audit for it to wait on.
+    """
+    from corollary.api import headless_app as reexported
+    from corollary.engine.scheduler import build_context_scheduler
+
+    assert headless_app.state.socket_factory is no_socket_supervisor
+    assert headless_app.state.discord_delivery is True
+    assert headless_app.state.scheduler_factory is build_context_scheduler
+    assert reexported is headless_app
+    assert headless_app is not shipped_app and headless_app is not dev_app
