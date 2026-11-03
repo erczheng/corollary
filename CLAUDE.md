@@ -55,7 +55,10 @@ script is blocked until shown otherwise, and reach for `python -m` first.
 extension modules, so the wheel cannot be imported at all. `[tool.uv]
 no-binary-package = ["mypy"]` in `pyproject.toml` makes uv build mypy from
 source instead, which is uncompiled. The checks are identical; a full run is
-slower, roughly 80s. `mypy --version` should report `compiled: no`. Do not
+slower, roughly 80s. `mypy --version` should report `compiled: no`. A venv
+that already holds the compiled wheel keeps it through a plain `uv sync`,
+because the version still satisfies the lock. Run `uv sync
+--reinstall-package mypy` once to swap it (2026-11-03). Do not
 remove that setting to speed things up. Smart App Control is Windows 11's
 consumer front end to the same Application Control policy described above, not
 a second policy. It is on, and Home offers no per-file allow-list for it. If
