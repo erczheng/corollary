@@ -42,7 +42,11 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from corollary.data.seeds import SeedError
-from corollary.data.seeds.nport import DatabaseSeedLoader, invalidate_spdr_seed_cache
+from corollary.data.seeds.nport import (
+    CusipSuccessorResolver,
+    DatabaseSeedLoader,
+    invalidate_spdr_seed_cache,
+)
 from corollary.api.app import create_app
 from corollary.api.deps import (
     POSITION_UNDERLYINGS_TTL,
@@ -1156,6 +1160,30 @@ async def test_nothing_the_lifespan_hands_the_jobs_can_reach_a_broker_or_the_run
         corollary_modules = {m for m in modules | code if m.startswith("corollary.")}
         assert "corollary.engine.scheduler" in corollary_modules
         assert _forbidden(_reachable_corollary_modules(corollary_modules)) == []
+    await registry.aclose()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_production_cusip_source_offers_the_name_change_fallback(
+    db_engine: Engine,
+) -> None:
+    """The SPDR job's CUSIP source, as ``create_app`` really wires it, follows name changes.
+
+    The fallback is optional by design (:class:`CusipSuccessorResolver` is
+    runtime-checkable, and ``nport._resolve`` asks only a resolver that is
+    one), so a wrapper or substitute replacing the provider would switch it
+    off with no error -- and XLE would go back to refusing at 73.87 the way
+    it did live on 2026-11-02. This pins it on the real provider objects,
+    built from placeholder values; nothing is called, no network is touched.
+    """
+    registry = ServiceRegistry.from_env(_PLACEHOLDER_ENV)
+    captured: list[ContextServices] = []
+    app = create_app(registry=registry, db_engine=db_engine, scheduler=_refusing_scheduler(captured))
+    async with app.router.lifespan_context(app):
+        (services,) = captured
+        assert services.cusips is not None
+        assert isinstance(services.cusips, CusipSuccessorResolver)
     await registry.aclose()
 
 

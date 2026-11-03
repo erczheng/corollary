@@ -102,8 +102,10 @@ from corollary.wire import (
     as_int,
     clean_params,
     decode_json,
+    epoch_second,
     mask_account_number,
     require_aware,
+    reset_text,
     rfc3339,
     translating,
     vendor_detail,
@@ -739,11 +741,16 @@ class AlpacaBroker(BrokerAccount):
                 "non-paper keys and answers 401 on every trading endpoint."
             )
         if response.status_code == 429:
+            # The reset is quoted as *parsed* -- an ISO instant or "absent" --
+            # never as the raw header (rule 6): a proxy or WAF that copies
+            # request headers back into its response would otherwise put the
+            # copy into this message and every log line that carries it.
+            reset_at = epoch_second(response.headers.get("X-RateLimit-Reset"))
             raise BrokerRateLimitedError(
                 f"GET {path} returned 429 despite the local budget. The "
                 "server window and the local bucket disagree — another "
-                "process may be sharing this key. Reset header: "
-                f"{response.headers.get('X-RateLimit-Reset', 'absent')}"
+                "process may be sharing this key. Server window reset: "
+                f"{reset_text(reset_at)}"
             )
         if response.status_code >= 400:
             raise BrokerError(

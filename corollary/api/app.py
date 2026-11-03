@@ -818,7 +818,8 @@ def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
     """The market-data provider's CUSIP lookup, for the ``spdr_holdings`` job -- or ``None``.
 
     The same provider object the other Alpaca jobs hold, so its budgets are
-    counted once. A reference-data read on ``paper-api.``; never the broker.
+    counted once. Reference-data reads only: assets on ``paper-api.``, and
+    ``name_change`` corporate actions on the data host; never the broker.
     """
     if provider is None or not _offers(provider, ("asset_by_cusip",)):
         return None

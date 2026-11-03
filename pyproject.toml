@@ -40,6 +40,13 @@ dev = [
     "python-dotenv>=1.0",
 ]
 
+[tool.uv]
+# Build mypy from its sdist, which is pure Python, rather than installing the
+# mypyc-compiled wheel. Smart App Control on the dev machine blocks the
+# compiled wheel's unsigned extension modules (`os error 4551`), so that wheel
+# cannot even be imported. The checks are identical; only the speed differs.
+no-binary-package = ["mypy"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -24,6 +24,8 @@ dist/
 corollary.db
 corollary.db-wal
 corollary.db-shm
+# Hand-made backups taken before a migration, with their sidecars
+corollary.db.bak-*
 
 # Agent scratch notes — working memory, not project record.
 .claude/scratch/

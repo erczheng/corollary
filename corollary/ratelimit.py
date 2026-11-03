@@ -33,12 +33,26 @@ ceiling lives, whatever its window. Read as per-minute, StockTwits' 200 would
 refill a token every 0.3 seconds instead of every 18, a sixty-fold over-spend.
 
 **What a token bucket does and does not promise.** It holds the *steady*
-rate to ``capacity / window``, but a full bucket spent at once and then
-refilled over the next window admits up to ``2 × capacity`` in any one
-rolling window. That is true of the per-minute buckets today and is
-unchanged; for StockTwits it means a caller's own cadence -- 180/hour by the
-spec's budget, leaving 20 for retries -- is what keeps a *fixed-window*
-server counter happy after an idle spell, and this bucket is the backstop.
+rate to ``refill / window``, but a full bucket spent at once and then
+refilled over the next window admits up to ``depth + refill`` in any one
+rolling window -- ``2 × capacity`` when the two are equal, as they are for
+every vendor in :data:`DEFAULT_PER_HOST_BUDGETS`. For StockTwits it means a
+caller's own cadence -- 180/hour by the spec's budget, leaving 20 for
+retries -- is what keeps a *fixed-window* server counter happy after an idle
+spell, and this bucket is the backstop.
+
+**The Alpaca hosts no longer have that hole** (2026-11-02). They used to be a
+bucket of depth 200 refilling at 200/min, so a cold start admitted 200 at
+once plus 200 more over the minute: 400 against a server ceiling of 200. That
+was not theoretical. The SPDR catch-up's sequential CUSIP lookups on
+``paper-api.`` were admitted at network speed, and on two starts in a row the
+server answered 429 at the same holding, lookup #233 of 474 (Fair Isaac,
+XLK), so the seed was never built. A host outside the table is now budgeted by
+:func:`ceiling_budget`: depth ``C // 20`` and refill ``C - 2 × depth``, so
+``depth + refill`` stays under the server's ``C`` with a margin for jitter.
+For Basic that is depth 10, steady 180/min, and a worst rolling minute of
+190. The steady 180 still covers the hottest planned load: the market poll
+at ~150/min on ``data.``, and the account trio at 12/min on ``paper-api.``.
 
 **Two hosts, one bucket** (Phase 3 step 4). SEC's fair-access policy caps a
 requester at 10 requests per second *across* EDGAR, and the N-PORT path spans
@@ -77,6 +91,7 @@ __all__ = [
     "SEC_REQUESTS_PER_SECOND",
     "SEC_WWW_HOST",
     "SHARED_BUCKETS",
+    "ceiling_budget",
     "ALPACA_LIVE_TRADING_HOST",
     "ALPACA_PAPER_TRADING_HOST",
     "DEFAULT_REQUESTS_PER_MINUTE",
@@ -159,15 +174,22 @@ SEC_REQUESTS_PER_SECOND = 4
 
 @dataclass(frozen=True, slots=True)
 class HostBudget:
-    """A ceiling of ``requests`` per ``window_seconds`` on one host.
+    """A steady ``requests`` per ``window_seconds`` on one host, at most ``burst`` at once.
 
     Every entry in the per-host table is one of these, so a ceiling and its
     window travel together: a number without its window is exactly how a
     per-hour vendor ends up metered per minute.
+
+    ``burst`` is the bucket's depth, the most it grants back to back from
+    idle. ``None`` means ``requests``, which was the only shape before
+    2026-11-02. The worst count in any one rolling window is
+    ``burst + requests``. :func:`ceiling_budget` derives both from a server's
+    stated ceiling so that sum stays under it.
     """
 
     requests: int
     window_seconds: float = 60.0
+    burst: int | None = None
 
     def __post_init__(self) -> None:
         if self.requests <= 0:
@@ -176,6 +198,39 @@ class HostBudget:
             raise ValueError(
                 f"window_seconds must be positive, got {self.window_seconds!r}"
             )
+        if self.burst is not None and self.burst <= 0:
+            raise ValueError(f"burst must be positive when given, got {self.burst!r}")
+
+    @property
+    def depth(self) -> int:
+        """Tokens the bucket holds when full: ``burst``, or ``requests`` when unset."""
+        return self.requests if self.burst is None else self.burst
+
+
+def ceiling_budget(ceiling: int, window_seconds: float = 60.0) -> HostBudget:
+    """A budget whose worst rolling window stays under a server ceiling of ``ceiling``.
+
+    Depth ``ceiling // 20`` (at least 1) and steady refill
+    ``ceiling - 2 × depth``. The worst count in any one window,
+    ``depth + refill``, is then ``ceiling - depth``. The ``depth`` held back
+    is the margin for network jitter compressing requests into the server's
+    window, which counts arrivals, not this process's admissions. For
+    Alpaca Basic's 200/min that is depth 10, 180/min steady, and 190 worst.
+    For Algo Trader Plus's 10,000 it is 500, 9,000 and 9,500.
+
+    Raises ``ValueError`` for a ceiling too small to keep a positive refill
+    under (below 3).
+    """
+    if ceiling <= 0:
+        raise ValueError(f"ceiling must be positive, got {ceiling!r}")
+    depth = max(1, ceiling // 20)
+    refill = ceiling - 2 * depth
+    if refill <= 0:
+        raise ValueError(
+            f"a ceiling of {ceiling} per window leaves no refill once a burst of "
+            f"{depth} and its margin are held back"
+        )
+    return HostBudget(refill, window_seconds, burst=depth)
 
 
 #: The hosts whose ceiling is not :data:`DEFAULT_REQUESTS_PER_MINUTE`.
@@ -215,9 +270,20 @@ SHARED_BUCKETS: Mapping[str, str] = MappingProxyType(
 Clock = Callable[[], float]
 Sleeper = Callable[[float], Awaitable[None]]
 
+#: A token count this close to the one wanted counts as there. Without it, a
+#: deficit of ~1e-16 tokens becomes a sleep that cannot move a float clock
+#: already at 1.8 s (``1.8 + 1e-16 == 1.8``), and ``acquire`` loops forever.
+#: Under ``time.monotonic`` real time always passes, so this only ever spun
+#: an injected test clock, but the loop must terminate whatever the clock.
+_TOKEN_EPSILON = 1e-9
+
 
 class TokenBucket:
-    """A budget of ``capacity`` requests per ``per_seconds``, refilled smoothly.
+    """A bucket of depth ``capacity``, refilled smoothly at ``refill`` per ``per_seconds``.
+
+    ``refill`` defaults to ``capacity``, the shape every bucket had before
+    2026-11-02. Over any window of ``per_seconds`` the bucket admits at most
+    :attr:`worst_case_per_window`, ``capacity + refill``.
 
     Not thread-safe and deliberately not trying to be: the design spec chose
     one process with an asyncio event loop, so the only concurrency here is
@@ -230,6 +296,7 @@ class TokenBucket:
         capacity: int,
         per_seconds: float = 60.0,
         *,
+        refill: int | None = None,
         clock: Clock = time.monotonic,
         sleep: Sleeper = asyncio.sleep,
     ) -> None:
@@ -237,12 +304,15 @@ class TokenBucket:
             raise ValueError(f"capacity must be positive, got {capacity!r}")
         if per_seconds <= 0:
             raise ValueError(f"per_seconds must be positive, got {per_seconds!r}")
+        if refill is not None and refill <= 0:
+            raise ValueError(f"refill must be positive when given, got {refill!r}")
         self._capacity = float(capacity)
         self._per_seconds = float(per_seconds)
+        self._refill_per_window = float(capacity if refill is None else refill)
         #: Tokens per second. The refill is continuous rather than a step at
         #: the top of each minute, because a step lets a burst of 200 land in
         #: one second and trip the server's own window.
-        self._rate = self._capacity / self._per_seconds
+        self._rate = self._refill_per_window / self._per_seconds
         self._clock = clock
         self._sleep = sleep
         self._tokens = self._capacity
@@ -255,8 +325,18 @@ class TokenBucket:
 
     @property
     def window_seconds(self) -> float:
-        """The window ``capacity`` is spent over: 60 for most hosts, 3600 for StockTwits."""
+        """The window the refill is counted over: 60 for most hosts, 3600 for StockTwits."""
         return self._per_seconds
+
+    @property
+    def refill_per_window(self) -> float:
+        """Tokens restored over one :attr:`window_seconds`: the steady rate."""
+        return self._refill_per_window
+
+    @property
+    def worst_case_per_window(self) -> float:
+        """The most requests this bucket admits in any one rolling window: ``C + r*T``."""
+        return self._capacity + self._refill_per_window
 
     @property
     def available(self) -> float:
@@ -294,8 +374,8 @@ class TokenBucket:
         async with self._lock:
             while True:
                 self._refill()
-                if self._tokens >= tokens:
-                    self._tokens -= tokens
+                if self._tokens + _TOKEN_EPSILON >= tokens:
+                    self._tokens = max(0.0, self._tokens - tokens)
                     return
                 deficit = tokens - self._tokens
                 await self._sleep(deficit / self._rate)
@@ -319,7 +399,16 @@ class HostRateLimiter:
         clock: Clock = time.monotonic,
         sleep: Sleeper = asyncio.sleep,
     ) -> None:
+        #: The **server's** ceiling for every host outside the table -- the
+        #: Alpaca hosts. It is not the bucket's size: :func:`ceiling_budget`
+        #: derives a depth and refill that keep the worst rolling minute
+        #: under it (module docstring, 2026-11-02).
         self._requests_per_minute = requests_per_minute
+        #: Derived, and so validated, here rather than at the first
+        #: ``bucket_for``: a ceiling too small to keep under (below 3) raised
+        #: ``ValueError`` from deep inside a provider's or broker's ``_get``,
+        #: where callers handling ``ProviderError``/``BrokerError`` missed it.
+        self._default_budget = ceiling_budget(requests_per_minute, 60.0)
         #: A bare ``int`` in ``per_host`` is requests **per minute**, which is
         #: what every caller before Phase 3 passed; a :class:`HostBudget`
         #: names its own window. Normalised to budgets here so ``bucket_for``
@@ -364,10 +453,11 @@ class HostRateLimiter:
         if bucket is None:
             budget = self._per_host.get(key)
             if budget is None:
-                budget = HostBudget(self._requests_per_minute, 60.0)
+                budget = self._default_budget
             bucket = TokenBucket(
-                budget.requests,
+                budget.depth,
                 budget.window_seconds,
+                refill=budget.requests,
                 clock=self._clock,
                 sleep=self._sleep,
             )

@@ -50,6 +50,18 @@ not to uv — and **not** specific to pytest, which is what the uvicorn block
 (hit 2026-09-11, same `os error 4551`) established. Assume any new console
 script is blocked until shown otherwise, and reach for `python -m` first.
 
+**mypy is installed from its sdist, so it is pure Python.** Since about
+2026-10-23, Smart App Control has blocked the mypyc-compiled wheel's unsigned
+extension modules, so the wheel cannot be imported at all. `[tool.uv]
+no-binary-package = ["mypy"]` in `pyproject.toml` makes uv build mypy from
+source instead, which is uncompiled. The checks are identical; a full run is
+slower, roughly 80s. `mypy --version` should report `compiled: no`. Do not
+remove that setting to speed things up. Smart App Control is Windows 11's
+consumer front end to the same Application Control policy described above, not
+a second policy. It is on, and Home offers no per-file allow-list for it. If
+it ever starts blocking mypy's compiled dependencies (`librt`,
+`ast-serialize`), add those to `no-binary-package` as well.
+
 **`--env-file .env` is not optional on the API.** Nothing under `corollary/`
 reads `.env` — the process environment is the engine's input, which is what
 keeps rule 2's scrubbed backtest environment actually scrubbed. Without the

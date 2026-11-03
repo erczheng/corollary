@@ -18,18 +18,21 @@ issuers' public identifiers, not credentials.
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
 import pytest
 
+from corollary.data.providers.alpaca import AlpacaProvider
 from corollary.data.providers.interface import (
     EquityAsset,
     FeedAccessError,
     ProviderError,
     RateLimitedError,
 )
-from corollary.ratelimit import ALPACA_PAPER_TRADING_HOST
-from tests.data.providers.conftest import TEST_CREDENTIALS, load_fixture
+from corollary.ratelimit import ALPACA_PAPER_TRADING_HOST, HostRateLimiter
+from tests.data.providers.conftest import BASIC_FEEDS, TEST_CREDENTIALS, load_fixture
 
 pytestmark = pytest.mark.asyncio
 
@@ -144,6 +147,92 @@ async def test_a_403_and_a_429_raise_their_own_types(make_provider):
     provider, _ = make_provider(lambda _r: literal({"message": "slow down"}, 429))
     with pytest.raises(RateLimitedError):
         await provider.asset_by_cusip(NVDA_CUSIP)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        # 1793652621 is the header the 2026-11-02 catch-up's 429 carried.
+        ("1793652621", datetime(2026, 11, 2, 20, 50, 21, tzinfo=timezone.utc)),
+        (None, None),
+        ("soon", None),  # SYNTHETIC: unreadable, so no reset is claimed
+        ("-5", None),
+        ("99999999999999999999", None),
+    ],
+)
+async def test_a_429_carries_the_reset_header_as_an_aware_utc_instant(
+    header: str | None, expected: datetime | None
+) -> None:
+    """``X-RateLimit-Reset`` is the epoch second the server window resets.
+
+    Carried on the error as aware UTC so a caller can wait for it rather
+    than parse prose; anything that does not read as an epoch second is
+    ``None``, never a guess.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {} if header is None else {"X-RateLimit-Reset": header}
+        return httpx.Response(429, json={"message": "too many"}, headers=headers, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = AlpacaProvider(
+        credentials=TEST_CREDENTIALS,
+        feeds=BASIC_FEEDS,
+        client=client,
+        limiter=HostRateLimiter(per_host={}),
+    )
+    try:
+        with pytest.raises(RateLimitedError) as caught:
+            await provider.asset_by_cusip(NVDA_CUSIP)
+    finally:
+        await client.aclose()
+    assert caught.value.reset_at == expected
+    if expected is not None:
+        assert caught.value.reset_at is not None
+        assert caught.value.reset_at.utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    ("header", "says"),
+    [
+        ("1793652621", "2026-11-02T20:50:21+00:00"),
+        (None, "absent"),
+        # SYNTHETIC: a proxy or WAF copying the request's secret header back
+        # into the response. Unreadable as an epoch second, so "absent".
+        (TEST_CREDENTIALS.secret_key, "absent"),
+        (f"1793652621 {TEST_CREDENTIALS.secret_key}", "absent"),
+    ],
+)
+async def test_a_429_message_carries_the_parsed_reset_never_the_raw_header(
+    header: str | None, says: str
+) -> None:
+    """Rule 6: the message reaches the build's ERROR abort line verbatim.
+
+    So it quotes the reset as parsed -- an ISO instant, or "absent" -- and
+    never the header text a vendor or a proxy in front of it chose to send.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {} if header is None else {"X-RateLimit-Reset": header}
+        return httpx.Response(429, json={"message": "too many"}, headers=headers, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = AlpacaProvider(
+        credentials=TEST_CREDENTIALS,
+        feeds=BASIC_FEEDS,
+        client=client,
+        limiter=HostRateLimiter(per_host={}),
+    )
+    try:
+        with pytest.raises(RateLimitedError) as caught:
+            await provider.asset_by_cusip(NVDA_CUSIP)
+    finally:
+        await client.aclose()
+    message = str(caught.value)
+    assert TEST_CREDENTIALS.secret_key not in message
+    assert f"Server window reset: {says}" in message
+    if header is not None:
+        assert header not in message
 
 
 async def test_an_error_body_echoing_the_secret_is_scrubbed(make_provider):
