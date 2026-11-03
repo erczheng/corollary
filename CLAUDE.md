@@ -36,6 +36,7 @@ uv run python -m corollary.engine    # start engine
 uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
 uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
 uv run python scripts/weekly_audit.py  # unattended weekly audit: starts corollary.api:headless_app (no sockets, Discord on), waits for the Saturday run, stops it
+uv run python scripts/weekday_session.py  # unattended trading day: runs corollary.api:headless_app until the calendar close + 30 min, keeping the machine awake only meanwhile; holds port 8000 -- see its docstring to stop it
 uv run mypy corollary            # type check, must be clean
 ```
 
