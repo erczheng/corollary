@@ -40,7 +40,7 @@ from corollary.ratelimit import (
     HostRateLimiter,
 )
 
-from .conftest import single
+from .conftest import TEST_CREDENTIALS, single
 
 
 @pytest.mark.asyncio
@@ -116,6 +116,45 @@ async def test_a_429_is_its_own_type(make_broker) -> None:
     with pytest.raises(BrokerRateLimitedError) as raised:
         await broker.account()
     assert "429" in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("header", "says"),
+    [
+        ("1793652621", "2026-11-02T20:50:21+00:00"),
+        (None, "absent"),
+        # SYNTHETIC: a proxy or WAF copying the request's secret header back.
+        ("not-a-real-secret", "absent"),
+        ("1793652621 not-a-real-secret", "absent"),
+    ],
+)
+async def test_a_429_message_carries_the_parsed_reset_never_the_raw_header(
+    limiter: HostRateLimiter, header: str | None, says: str
+) -> None:
+    """Rule 6: no header text a vendor or proxy chose reaches the message, or a log."""
+    secret = TEST_CREDENTIALS.secret_key
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {} if header is None else {"X-RateLimit-Reset": header}
+        return httpx.Response(429, json={"message": "too many"}, headers=headers, request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    broker = AlpacaBroker(
+        credentials=TEST_CREDENTIALS,
+        client=client,
+        limiter=limiter,
+    )
+    try:
+        with pytest.raises(BrokerRateLimitedError) as raised:
+            await broker.account()
+    finally:
+        await client.aclose()
+    message = str(raised.value)
+    assert secret not in message
+    assert f"Server window reset: {says}" in message
+    if header is not None:
+        assert header not in message
 
 
 @pytest.mark.asyncio

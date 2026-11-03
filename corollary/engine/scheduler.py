@@ -2295,7 +2295,9 @@ def _spdr_unavailable(services: ContextServices) -> JobSkipped | None:
     return None
 
 
-async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+async def _spdr_holdings(
+    services: ContextServices, clock: UtcClock, sleep: Sleeper
+) -> JobSkipped | None:
     """Build the SPDR sector snapshot from the latest N-PORT quarter.
 
     * ``accepted`` -- stored and now current: work done.
@@ -2305,6 +2307,10 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
       would say "nothing to do", which is not what happened.
     * ``unchanged`` -- :class:`JobSkipped`: no newer quarter than the loaded.
     * ``aborted`` -- :class:`SpdrSnapshotAborted`, a failure: nothing stored.
+      A CUSIP lookup answered 429 is first waited out on ``sleep``, the job's
+      own sleeper, up to ``nport.CUSIP_RATE_LIMIT_RETRIES`` times (2026-11-02);
+      a 429 past that bound, or past the build-wide
+      ``nport.SPDR_BUILD_RATE_LIMIT_RETRIES`` budget, aborts.
       :attr:`SnapshotRule.SEC_ACCESS_REFUSED` is also logged here at ERROR
       under its own event, because SEC refusing the declared User-Agent is an
       operator problem no retry fixes.
@@ -2351,6 +2357,7 @@ async def _spdr_holdings(services: ContextServices, clock: UtcClock) -> JobSkipp
         isin_resolver=isin_resolver,
         directory=directory,
         clock=clock,
+        sleep=sleep,
     )
     if outcome.status == "unchanged":
         loaded = outcome.report_date.isoformat() if outcome.report_date else "unknown"
@@ -2481,14 +2488,14 @@ async def _spdr_holdings_catch_up(
                 f"no asset directory arrived within {bound_seconds // 60} minutes of "
                 f"start; {_SPDR_NO_DIRECTORY}. The next start retries"
             )
-    return await _spdr_holdings(services, clock)
+    return await _spdr_holdings(services, clock, sleep)
 
 
 def _spdr_job(services: ContextServices, clock: UtcClock, sleep: Sleeper) -> ScheduledJob:
     return ScheduledJob(
         name="spdr_holdings",
         schedule=AtTime(SPDR_HOLDINGS_AT, SPDR_HOLDINGS_DAYS),
-        run=functools.partial(_spdr_holdings, services, clock),
+        run=functools.partial(_spdr_holdings, services, clock, sleep),
         catch_up=functools.partial(_spdr_holdings_catch_up, services, clock, sleep),
         rule=(
             "the SPDR sector seed (ticker -> sector, the sector leaders) from "

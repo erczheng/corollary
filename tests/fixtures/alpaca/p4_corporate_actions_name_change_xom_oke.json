@@ -1,0 +1,30 @@
+{
+  "recorded_at": "2026-11-03T00:44:46+00:00",
+  "recorder": "a one-off read-only probe (2026-11-02 SPDR inactive-CUSIP investigation), GET only",
+  "request": "/v1/corporate-actions?cusips=30231G102,682680103&types=name_change&start=2026-06-30&end=2026-11-02&limit=1000",
+  "note": "UNTRIMMED. XOM (30231G102 -> 30233Q108) and OKE (682680103 -> 30609A109) re-CUSIPed under the same ticker; the by-CUSIP asset records for the old CUSIPs answer status 'inactive'.",
+  "status_code": 200,
+  "body": {
+    "corporate_actions": {
+      "name_changes": [
+        {
+          "id": "f91ae982-5eaf-49bc-970a-d541f59b838d",
+          "new_cusip": "30609A109",
+          "new_symbol": "OKE",
+          "old_cusip": "682680103",
+          "old_symbol": "OKE",
+          "process_date": "2026-09-11"
+        },
+        {
+          "id": "71daae23-2985-4549-870e-a6d678474b6b",
+          "new_cusip": "30233Q108",
+          "new_symbol": "XOM",
+          "old_cusip": "30231G102",
+          "old_symbol": "XOM",
+          "process_date": "2026-07-02"
+        }
+      ]
+    },
+    "next_page_token": null
+  }
+}

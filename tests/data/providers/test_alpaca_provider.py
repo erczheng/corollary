@@ -917,8 +917,10 @@ async def test_the_chain_and_the_contracts_hit_different_buckets(
     # Each host was charged only for its own requests.
     data_calls = transport.hosts.count(ALPACA_DATA_HOST)
     trading_calls = transport.hosts.count(ALPACA_PAPER_TRADING_HOST)
-    assert data_bucket.available == pytest.approx(10_000 - data_calls)
-    assert trading_bucket.available == pytest.approx(10_000 - trading_calls)
+    # Full depth less each host's own calls (the depth is ceiling_budget's,
+    # not the 10,000 ceiling itself).
+    assert data_bucket.available == pytest.approx(data_bucket.capacity - data_calls)
+    assert trading_bucket.available == pytest.approx(trading_bucket.capacity - trading_calls)
 
 
 async def test_contracts_parse_every_structural_field(make_provider) -> None:
@@ -1631,4 +1633,4 @@ async def test_a_429_quotes_the_reset_header_and_not_the_body(
     message = str(raised.value)
     assert FAKE_SECRET_KEY not in message
     assert "blocked at the gateway" not in message
-    assert "Reset header" in message
+    assert "Server window reset: absent" in message

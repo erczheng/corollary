@@ -94,7 +94,19 @@ class RateLimitedError(ProviderError):
     and the server disagree — another process sharing the key, or a restart
     that reset the bucket while the server's window had not rolled. Worth
     surfacing rather than retrying blind.
+
+    ``reset_at`` is when the vendor says its window resets, as aware UTC, or
+    ``None`` when it said nothing readable. A caller that retries waits for
+    it rather than guessing (the SPDR build's CUSIP lookups, 2026-11-02). It
+    is parsed by the provider that saw the header, so no caller reads a
+    vendor's header name.
     """
+
+    def __init__(self, message: str, *, reset_at: datetime | None = None) -> None:
+        super().__init__(message)
+        if reset_at is not None and reset_at.utcoffset() is None:
+            raise ValueError("reset_at must be timezone-aware")
+        self.reset_at = reset_at
 
 
 class BarTimeframe(StrEnum):
@@ -438,6 +450,33 @@ class EquityAsset:
     tradable: bool
     has_options: bool
     exchange: str
+
+
+@dataclass(frozen=True, slots=True)
+class CusipChange:
+    """One vendor ``name_change`` corporate action: a security re-identified under a new CUSIP.
+
+    Reference data. A name change carries no exchange ratio: the holder of
+    ``old_cusip`` holds ``new_cusip`` one for one, which is what lets the SPDR
+    builder follow it (2026-11-02: XOM 30231G102 -> 30233Q108 and OKE
+    682680103 -> 30609A109, each under its own ticker, with the old CUSIP
+    still naming an *inactive* asset record). Mergers are different
+    corporate actions and are never read into this type.
+
+    CUSIPs are upper-cased and shape-checked by the provider; symbols are
+    normalised and equity-symbol-shaped, and may be empty when the vendor
+    sent none; ``action_id`` is UUID-shaped. Every field is a checked
+    identifier rather than free vendor text, which is what lets the SPDR
+    builder log them as they are (rule 6). A provider that cannot read a row
+    to this contract raises rather than answering it.
+    """
+
+    action_id: str
+    old_cusip: str
+    new_cusip: str
+    old_symbol: str
+    new_symbol: str
+    process_date: date
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ comes from ``data.``, the option *contracts* that carry ``multiplier`` and
 """
 
 import asyncio
+import bisect
 from collections.abc import Awaitable, Callable
 
 import pytest
@@ -31,6 +32,7 @@ from corollary.ratelimit import (
     HostRateLimiter,
     default_limiter,
     TokenBucket,
+    ceiling_budget,
 )
 
 
@@ -135,18 +137,18 @@ async def test_the_two_alpaca_hosts_are_independent(clock: FakeClock) -> None:
     limiter = HostRateLimiter(
         requests_per_minute=200, clock=clock, sleep=clock.sleep
     )
+    data = limiter.bucket_for(ALPACA_DATA_HOST)
+    trading = limiter.bucket_for(ALPACA_PAPER_TRADING_HOST)
 
-    for _ in range(200):
+    for _ in range(int(data.capacity)):
         await limiter.acquire(ALPACA_DATA_HOST)
 
-    assert limiter.bucket_for(ALPACA_DATA_HOST).available == pytest.approx(0.0)
-    assert limiter.bucket_for(ALPACA_PAPER_TRADING_HOST).available == pytest.approx(
-        200.0
-    )
+    assert data.available == pytest.approx(0.0)
+    assert trading.available == pytest.approx(trading.capacity)
     assert clock.slept == []
 
-    # And the trading host still grants its full budget without waiting.
-    for _ in range(200):
+    # And the trading host still grants its full burst without waiting.
+    for _ in range(int(trading.capacity)):
         await limiter.acquire(ALPACA_PAPER_TRADING_HOST)
     assert clock.slept == []
 
@@ -170,9 +172,87 @@ def test_host_matching_ignores_case(clock: FakeClock) -> None:
 
 
 def test_the_default_budget_is_alpacas_documented_ceiling(clock: FakeClock) -> None:
+    """200/min is the *server's* ceiling; the bucket is sized to stay under it.
+
+    A bucket of depth 200 refilling at 200/min admits 400 in a rolling minute
+    (C + r*T). Depth 10 refilling at 180/min admits at most 190.
+    """
     limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
     assert DEFAULT_REQUESTS_PER_MINUTE == 200
-    assert limiter.bucket_for(ALPACA_DATA_HOST).available == pytest.approx(200.0)
+    data = limiter.bucket_for(ALPACA_DATA_HOST)
+    assert data.capacity == 10.0
+    assert data.refill_per_window == 180.0
+    assert data.worst_case_per_window == 190.0
+    assert data.available == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("host", [ALPACA_DATA_HOST, ALPACA_PAPER_TRADING_HOST])
+@pytest.mark.asyncio
+async def test_no_rolling_minute_ever_sees_more_than_the_alpaca_ceiling(
+    clock: FakeClock, host: str
+) -> None:
+    """The 2026-11-02 SPDR catch-up 429 (Fair Isaac, CUSIP lookup #233).
+
+    The old bucket started full at 200 and refilled at 200/min, so a
+    sequential burst from a cold start was admitted ~233 requests in well
+    under a minute against Alpaca's 200/min -- the "2 x capacity" hole the
+    module docstring names. Measured here from a full bucket (the worst
+    start), every window closed at both ends.
+    """
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    stamps: list[float] = []
+    for _ in range(600):
+        await limiter.acquire(host)
+        stamps.append(clock.now)
+    worst = max(
+        bisect.bisect_right(stamps, start + 60.0 + 1e-9) - i
+        for i, start in enumerate(stamps)
+    )
+    assert worst <= 190
+    assert worst < DEFAULT_REQUESTS_PER_MINUTE
+    # Not starved either: after the burst of 10, the steady rate is 3/s.
+    assert clock.now == pytest.approx((600 - 10) / 3.0)
+
+
+@pytest.mark.parametrize("ceiling", [5, 200, 10_000])
+@pytest.mark.asyncio
+async def test_a_configured_ceiling_is_never_exceeded_in_any_rolling_minute(
+    ceiling: int,
+) -> None:
+    """``requests_per_minute`` is the server's number, Basic or Algo Trader Plus."""
+    clock = FakeClock()
+    limiter = HostRateLimiter(ceiling, per_host={}, clock=clock, sleep=clock.sleep)
+    bucket_ = limiter.bucket_for(ALPACA_PAPER_TRADING_HOST)
+    assert bucket_.worst_case_per_window < ceiling
+    stamps: list[float] = []
+    for _ in range(ceiling * 3):
+        await limiter.acquire(ALPACA_PAPER_TRADING_HOST)
+        stamps.append(clock.now)
+    worst = max(
+        bisect.bisect_right(stamps, start + 60.0 + 1e-9) - i
+        for i, start in enumerate(stamps)
+    )
+    assert worst < ceiling
+
+
+def test_a_ceiling_too_small_to_keep_under_is_refused() -> None:
+    with pytest.raises(ValueError, match="ceiling"):
+        ceiling_budget(2)
+
+
+def test_a_burst_separate_from_the_rate_bounds_the_worst_window(clock: FakeClock) -> None:
+    b = TokenBucket(5, 60.0, refill=55, clock=clock, sleep=clock.sleep)
+    assert b.capacity == 5.0
+    assert b.refill_per_window == 55.0
+    assert b.worst_case_per_window == 60.0
+    clock.advance(1.0)
+    assert b.available == pytest.approx(5.0)  # never above the depth
+
+
+@pytest.mark.parametrize("burst", [0, -1])
+def test_a_nonsense_burst_is_refused(burst: int) -> None:
+    with pytest.raises(ValueError, match="burst"):
+        HostBudget(10, 60.0, burst=burst)
 
 
 @pytest.mark.asyncio
@@ -205,9 +285,9 @@ def test_the_default_limiter_is_one_budget_for_the_whole_process() -> None:
 
 
 def test_the_default_limiter_carries_the_documented_ceiling() -> None:
-    assert default_limiter().bucket_for(
-        ALPACA_PAPER_TRADING_HOST
-    ).capacity == float(DEFAULT_REQUESTS_PER_MINUTE)
+    trading = default_limiter().bucket_for(ALPACA_PAPER_TRADING_HOST)
+    assert trading.worst_case_per_window < float(DEFAULT_REQUESTS_PER_MINUTE)
+    assert trading.refill_per_window == 180.0
 
 
 def test_a_second_vendors_host_carries_its_own_smaller_ceiling(
@@ -223,7 +303,7 @@ def test_a_second_vendors_host_carries_its_own_smaller_ceiling(
     limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
     assert FINNHUB_REQUESTS_PER_MINUTE == 60
     assert limiter.bucket_for(FINNHUB_HOST).capacity == 60.0
-    assert limiter.bucket_for(ALPACA_DATA_HOST).capacity == 200.0
+    assert limiter.bucket_for(ALPACA_DATA_HOST).worst_case_per_window == 190.0
 
 
 def test_the_default_limiter_meters_finnhub_at_sixty() -> None:
@@ -240,8 +320,11 @@ def test_an_explicit_per_host_budget_overrides_the_default(clock: FakeClock) -> 
         sleep=clock.sleep,
     )
     assert limiter.bucket_for("EXAMPLE.TEST").capacity == 3.0
-    assert limiter.bucket_for("other.test").capacity == 10_000.0
-    assert limiter.bucket_for(FINNHUB_HOST).capacity == 10_000.0
+    # Hosts outside the table take the ceiling-derived budget: depth 500,
+    # refill 9,000/min, worst rolling minute 9,500 against 10,000.
+    assert limiter.bucket_for("other.test").capacity == 500.0
+    assert limiter.bucket_for("other.test").refill_per_window == 9_000.0
+    assert limiter.bucket_for(FINNHUB_HOST).capacity == 500.0
 
 
 # --------------------------------------------------------------------------
@@ -279,12 +362,15 @@ def test_the_default_limiter_carries_the_phase_three_hosts() -> None:
 
 def test_the_existing_hosts_keep_their_per_minute_windows(clock: FakeClock) -> None:
     limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
-    for host, capacity in (
-        (ALPACA_DATA_HOST, 200.0),
-        (ALPACA_PAPER_TRADING_HOST, 200.0),
-        (FINNHUB_HOST, 60.0),
+    # Alpaca's are depth 10 refilling 180/min (ceiling_budget(200)); Finnhub's
+    # table entry keeps its old depth-equals-refill shape.
+    for host, capacity, refill in (
+        (ALPACA_DATA_HOST, 10.0, 180.0),
+        (ALPACA_PAPER_TRADING_HOST, 10.0, 180.0),
+        (FINNHUB_HOST, 60.0, 60.0),
     ):
         assert limiter.bucket_for(host).capacity == capacity
+        assert limiter.bucket_for(host).refill_per_window == refill
         assert limiter.bucket_for(host).window_seconds == 60.0
 
 
@@ -315,15 +401,16 @@ async def test_an_hourly_bucket_waits_past_its_ceiling_and_refills_over_the_hour
 
 
 @pytest.mark.asyncio
-async def test_a_per_minute_bucket_still_refills_at_its_old_rate(
+async def test_the_data_bucket_refills_a_token_every_third_of_a_second_past_its_burst(
     clock: FakeClock,
 ) -> None:
-    """The data bucket's arithmetic is unchanged: 200/min is 0.3s a token."""
+    """180/min steady is a third of a second a token, once the burst of 10 is spent."""
     limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
-    for _ in range(200):
+    for _ in range(10):
         await limiter.acquire(ALPACA_DATA_HOST)
+    assert clock.slept == []
     await limiter.acquire(ALPACA_DATA_HOST)
-    assert clock.slept == [pytest.approx(0.3)]
+    assert clock.slept == [pytest.approx(1 / 3)]
 
 
 def test_a_per_host_budget_may_name_its_window(clock: FakeClock) -> None:
@@ -429,3 +516,80 @@ def test_a_per_host_budget_for_one_shared_sec_host_is_refused(clock: FakeClock) 
         per_host={SEC_BUCKET: HostBudget(2, 1.0)}, clock=clock, sleep=clock.sleep
     )
     assert limiter.bucket_for(SEC_DATA_HOST).capacity == 2.0
+
+
+@pytest.mark.parametrize("ceiling", [-1, 0, 1, 2])
+def test_a_limiter_with_an_unkeepable_ceiling_is_refused_at_construction(ceiling: int) -> None:
+    """Refused where it is configured, not at the first request.
+
+    Raised lazily from ``bucket_for``, the ``ValueError`` surfaced deep inside
+    a provider's or broker's ``_get`` -- not a ``ProviderError`` or a
+    ``BrokerError``, so callers that handle a vendor failure did not handle it.
+    """
+    with pytest.raises(ValueError, match="ceiling"):
+        HostRateLimiter(ceiling, per_host={})
+
+
+def test_the_smallest_keepable_ceiling_is_accepted(clock: FakeClock) -> None:
+    limiter = HostRateLimiter(3, per_host={}, clock=clock, sleep=clock.sleep)
+    b = limiter.bucket_for(ALPACA_PAPER_TRADING_HOST)
+    assert (b.capacity, b.refill_per_window) == (1.0, 1.0)
+
+
+class YieldingClock(FakeClock):
+    """A fake clock whose sleep also yields to the event loop, as a real sleep does.
+
+    ``FakeClock.sleep`` never suspends, so under it a caller holding the
+    bucket's lock never lets another task run at all -- that would test the
+    fake, not the bucket.
+    """
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_late_account_read_is_admitted_within_a_few_tokens_of_a_bulk_run() -> None:
+    """The starvation argument for one shared trading bucket, pinned.
+
+    The SPDR build's CUSIP lookups and the engine's account reads share the
+    trading host's bucket. ``TokenBucket.acquire`` holds an ``asyncio.Lock``
+    across its refill sleep, and that lock queues FIFO, so a sequential bulk
+    caller and a late reader take turns: the reader waits for at most the
+    bulk caller's current token and its own, not for the bulk run to finish.
+    """
+    clock = YieldingClock()
+    limiter = HostRateLimiter(clock=clock, sleep=clock.sleep)
+    b = limiter.bucket_for(ALPACA_PAPER_TRADING_HOST)
+    interval = b.window_seconds / b.refill_per_window  # one token: 1/3 s at 180/min
+    bulk_total, arrive_after = 200, 50
+    bulk_admitted: list[float] = []
+    late: dict[str, float] = {}
+    late_task: asyncio.Task[None] | None = None
+
+    async def account_read() -> None:
+        late["arrived"] = clock()
+        late["bulk_done_at_arrival"] = len(bulk_admitted)
+        await limiter.acquire(ALPACA_PAPER_TRADING_HOST)
+        late["admitted"] = clock()
+        late["bulk_done_at_admission"] = len(bulk_admitted)
+
+    async def bulk() -> None:
+        nonlocal late_task
+        for i in range(bulk_total):
+            await limiter.acquire(ALPACA_PAPER_TRADING_HOST)
+            bulk_admitted.append(clock())
+            if i + 1 == arrive_after:
+                late_task = asyncio.create_task(account_read())
+
+    await bulk()
+    assert late_task is not None
+    await late_task
+
+    # Midway: the bucket's depth of 10 is long spent, every request waits.
+    assert late["bulk_done_at_arrival"] >= arrive_after
+    assert late["admitted"] - late["arrived"] <= 3 * interval + 1e-9
+    assert late["bulk_done_at_admission"] <= late["bulk_done_at_arrival"] + 2
+    assert late["bulk_done_at_admission"] < bulk_total
