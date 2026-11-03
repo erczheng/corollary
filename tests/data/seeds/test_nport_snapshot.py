@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -37,7 +37,12 @@ import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from corollary.data.providers.interface import AssetDirectory, EquityAsset, ProviderError
+from corollary.data.providers.interface import (
+    AssetDirectory,
+    EquityAsset,
+    ProviderError,
+    RateLimitedError,
+)
 from corollary.data.providers.sec import SecProvider, parse_nport_document
 from corollary.data.seeds import (
     NPORT_STALE_AFTER_DAYS,
@@ -160,7 +165,11 @@ def sec_provider(fake: FakeSec) -> SecProvider:
 
 
 class FakeResolver:
-    """``asset_by_cusip`` from the recorded survey. ``missing`` answers 404; ``broken`` raises."""
+    """``asset_by_cusip`` from the recorded survey. ``missing`` answers 404; ``broken`` raises.
+
+    ``rate_limited`` maps a CUSIP to how many times it answers 429
+    (:class:`RateLimitedError` carrying ``reset_at``) before it answers.
+    """
 
     def __init__(
         self,
@@ -168,14 +177,24 @@ class FakeResolver:
         *,
         missing: frozenset[str] = frozenset(),
         broken: frozenset[str] = frozenset(),
+        rate_limited: dict[str, int] | None = None,
+        reset_at: datetime | None = None,
     ) -> None:
         self.mapping = dict(SURVEY if mapping is None else mapping)
         self.missing = missing
         self.broken = broken
+        self.rate_limited = dict(rate_limited or {})
+        self.reset_at = reset_at
         self.calls: list[str] = []
 
     async def asset_by_cusip(self, cusip: str) -> EquityAsset | None:
         self.calls.append(cusip)
+        if self.rate_limited.get(cusip, 0) > 0:
+            self.rate_limited[cusip] -= 1
+            raise RateLimitedError(
+                f"GET /v2/assets/{cusip} returned 429 despite the local budget",
+                reset_at=self.reset_at,
+            )
         if cusip in self.broken:
             raise ProviderError(f"GET /v2/assets/{cusip}: HTTP 503")
         if cusip in self.missing or cusip not in self.mapping:
@@ -236,6 +255,7 @@ async def build(
     *,
     isin_resolver: IsinResolver | None = None,
     directory: AssetDirectory | None = None,
+    sleep: Callable[[float], Awaitable[None]] = _never_sleep,
 ) -> nport.SnapshotOutcome:
     """The builder as the running system calls it: ``isin_resolver=None`` is the default seam."""
     provider = sec_provider(fake)
@@ -243,16 +263,21 @@ async def build(
         return await build_spdr_snapshot(
             provider, resolver, sessions,
             isin_resolver=isin_resolver, directory=directory, clock=lambda: NOW,
+            sleep=sleep,
         )
     finally:
         await provider.aclose()
 
 
 async def build_accept(
-    sessions: Callable[[], Session], fake: FakeSec, resolver: FakeResolver
+    sessions: Callable[[], Session],
+    fake: FakeSec,
+    resolver: FakeResolver,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = _never_sleep,
 ) -> nport.SnapshotOutcome:
     """The accept path: XLB's five ISIN-only lines resolved through a fake seam."""
-    return await build(sessions, fake, resolver, isin_resolver=FakeIsinResolver())
+    return await build(sessions, fake, resolver, isin_resolver=FakeIsinResolver(), sleep=sleep)
 
 
 def snapshot_rows(sessions: Callable[[], Session]) -> list[SpdrHoldingsSnapshot]:
@@ -854,10 +879,200 @@ async def test_another_series_amendment_is_attributed_away_and_changes_nothing(
 async def test_an_alpaca_failure_aborts_without_storing(
     sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
 ) -> None:
-    outcome = await build_accept(sessions, FakeSec(), FakeResolver(broken=frozenset({"037833100"})))
+    resolver = FakeResolver(broken=frozenset({"037833100"}))
+    outcome = await build_accept(sessions, FakeSec(), resolver)  # _never_sleep: no wait
     assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.CUSIP_LOOKUP_FAILED)
     assert snapshot_rows(sessions) == []
     assert any(getattr(r, "event", "") == "spdr_snapshot_aborted" for r in caplog.records)
+    # An outage is not a rate limit: asked once, never retried.
+    assert resolver.calls.count("037833100") == 1
+
+
+# ------------------------------------------------------------------ 429 on a CUSIP lookup
+#
+# 2026-11-02: the catch-up aborted on two starts at the same holding, Fair
+# Isaac (XLK), lookup #233 of 474, on a 429 -- this process's own burst
+# against the trading host's 200/min. A 429 is the server saying "not yet",
+# not "no": the lookup waits for ``X-RateLimit-Reset`` and is asked again, a
+# bounded number of times, and only then does the build abort, storing nothing.
+
+FAIR_ISAAC = "303250104"
+
+
+class RecordingSleep:
+    def __init__(self) -> None:
+        self.slept: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_429_mid_build_waits_for_the_reset_and_the_build_completes(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    sleep = RecordingSleep()
+    resolver = FakeResolver(rate_limited={FAIR_ISAAC: 2}, reset_at=NOW + timedelta(seconds=30))
+    outcome = await build_accept(sessions, FakeSec(), resolver, sleep=sleep)
+
+    assert outcome.status == "accepted"
+    assert [r.status for r in snapshot_rows(sessions)] == ["accepted"]
+    assert any(h.symbol == "FICO" for h in outcome.holdings["XLK"])
+    # Asked three times: two 429s, then the answer. Each wait runs to the
+    # reset plus the one-second margin.
+    assert resolver.calls.count(FAIR_ISAAC) == 3
+    assert sleep.slept == [31.0, 31.0]
+    retries = [r for r in caplog.records if getattr(r, "event", "") == "spdr_cusip_rate_limited"]
+    assert [r.levelno for r in retries] == [logging.WARNING, logging.WARNING]
+    first = retries[0]
+    # A retry is not a failure: its own rule, so a query on the failure rule
+    # counts failures and nothing else.
+    assert first.rule == nport.CUSIP_RATE_LIMIT_RETRY_RULE  # type: ignore[attr-defined]
+    assert nport.CUSIP_RATE_LIMIT_RETRY_RULE not in {r.value for r in SnapshotRule}
+    assert first.build_retries_spent == 1  # type: ignore[attr-defined]
+    assert first.build_retry_budget == nport.SPDR_BUILD_RATE_LIMIT_RETRIES  # type: ignore[attr-defined]
+    assert (first.etf, first.cusip) == ("XLK", FAIR_ISAAC)  # type: ignore[attr-defined]
+    assert first.attempt == 1 and retries[1].attempt == 2  # type: ignore[attr-defined]
+    assert first.retry_bound == nport.CUSIP_RATE_LIMIT_RETRIES  # type: ignore[attr-defined]
+    assert first.reset_at == (NOW + timedelta(seconds=30)).isoformat()  # type: ignore[attr-defined]
+    assert first.wait_seconds == 31.0  # type: ignore[attr-defined]
+    assert first.at == NOW.isoformat()  # type: ignore[attr-defined]
+    assert not any(getattr(r, "event", "") == "spdr_snapshot_aborted" for r in caplog.records)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_429_past_the_retry_bound_aborts_stores_nothing_and_the_loaded_seed_stays(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    sleep = RecordingSleep()
+    resolver = FakeResolver(rate_limited={FAIR_ISAAC: 99}, reset_at=NOW + timedelta(seconds=30))
+    outcome = await build_accept(sessions, FakeSec(), resolver, sleep=sleep)
+
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.CUSIP_LOOKUP_FAILED)
+    assert outcome.reason is not None and "429" in outcome.reason
+    assert f"{nport.CUSIP_RATE_LIMIT_RETRIES} retries" in outcome.reason
+    bound = nport.CUSIP_RATE_LIMIT_RETRIES
+    assert resolver.calls.count(FAIR_ISAAC) == 1 + bound
+    assert resolver.calls[-1] == FAIR_ISAAC  # nothing asked after the give-up
+    assert sleep.slept == [31.0] * bound
+    # Nothing stored: the earlier accepted quarter is still the only row, and served.
+    assert [(r.status, r.report_date) for r in snapshot_rows(sessions)] == [
+        ("accepted", date(2026, 3, 31))
+    ]
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.as_of == date(2026, 3, 31)
+    [aborted] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_aborted"]
+    assert aborted.levelno == logging.ERROR
+
+
+@pytest.mark.parametrize(
+    ("reset_at", "expected"),
+    [
+        (NOW + timedelta(seconds=30), 31.0),  # to the reset, plus the margin
+        (NOW + timedelta(seconds=1), 2.0),
+        (NOW + timedelta(milliseconds=1), 1.001),
+        # A reset at or before our "now" is unknown, not "go at once": a local
+        # clock running ahead of the vendor's makes every reset look past, and
+        # a short wait would land each retry in the same exhausted window.
+        (NOW, 60.0),
+        (NOW - timedelta(seconds=5), 60.0),
+        (NOW + timedelta(hours=1), 61.0),  # a skewed header cannot stall the job for an hour
+        (None, 60.0),  # no header: one full window
+    ],
+)
+def test_the_wait_after_a_429_runs_to_the_reset_and_is_bounded(
+    reset_at: datetime | None, expected: float
+) -> None:
+    assert nport.rate_limit_wait(reset_at, NOW) == pytest.approx(expected)
+
+
+class FirstAsksRateLimited(FakeResolver):
+    """The first ask of each of the first ``count`` distinct CUSIPs answers 429 once.
+
+    Every one stays inside the per-CUSIP bound, so only the per-build budget
+    can stop the build.
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__(reset_at=NOW + timedelta(seconds=30))
+        self.count = count
+        self.limited: list[str] = []
+
+    async def asset_by_cusip(self, cusip: str) -> EquityAsset | None:
+        if cusip not in self.limited and len(self.limited) < self.count:
+            self.limited.append(cusip)
+            self.calls.append(cusip)
+            raise RateLimitedError(
+                f"GET /v2/assets/{cusip} returned 429 despite the local budget",
+                reset_at=self.reset_at,
+            )
+        return await super().asset_by_cusip(cusip)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_build_may_spend_exactly_its_retry_budget_and_complete(
+    sessions: Callable[[], Session],
+) -> None:
+    budget = nport.SPDR_BUILD_RATE_LIMIT_RETRIES
+    assert budget == 10
+    sleep = RecordingSleep()
+    resolver = FirstAsksRateLimited(budget)
+    outcome = await build_accept(sessions, FakeSec(), resolver, sleep=sleep)
+
+    assert outcome.status == "accepted"
+    assert len(resolver.limited) == budget
+    assert sleep.slept == [31.0] * budget
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_build_past_its_retry_budget_aborts_stores_nothing_and_logs_the_inputs(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """474 CUSIPs x 3 retries x 61 s has no useful ceiling; the build has one.
+
+    The eleventh 429 of one build aborts it under ``cusip_lookup_failed``
+    even though that CUSIP has used none of its own retries: a run that keeps
+    meeting the server's window is a key-sharing or plan problem, and one
+    that ran for hours would silently miss the job's weekly slot.
+    """
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    budget = nport.SPDR_BUILD_RATE_LIMIT_RETRIES
+    sleep = RecordingSleep()
+    resolver = FirstAsksRateLimited(budget + 1)
+    outcome = await build_accept(sessions, FakeSec(), resolver, sleep=sleep)
+
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.CUSIP_LOOKUP_FAILED)
+    assert sleep.slept == [31.0] * budget  # no wait spent on the one that broke the budget
+    last = resolver.limited[-1]
+    assert resolver.calls[-1] == last  # nothing asked after the give-up
+    assert outcome.reason is not None
+    assert f"retry budget of {budget}" in outcome.reason and last in outcome.reason
+    # Nothing stored: the earlier accepted quarter is still the only row, and served.
+    assert [(r.status, r.report_date) for r in snapshot_rows(sessions)] == [
+        ("accepted", date(2026, 3, 31))
+    ]
+    seed = load_spdr_seed_from_db(sessions)
+    assert seed is not None and seed.as_of == date(2026, 3, 31)
+    # Rule 8: the rule, the inputs, the timestamp.
+    [aborted] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_aborted"]
+    assert aborted.levelno == logging.ERROR
+    assert aborted.rule == SnapshotRule.CUSIP_LOOKUP_FAILED.value  # type: ignore[attr-defined]
+    assert aborted.at == NOW.isoformat()  # type: ignore[attr-defined]
+    assert aborted.inputs == {  # type: ignore[attr-defined]
+        "cusip": last,
+        "etf": aborted.inputs["etf"],  # type: ignore[attr-defined]
+        "build_retry_budget": budget,
+        "build_retries_spent": budget,
+        "cusip_attempts": 1,
+        "reset_at": (NOW + timedelta(seconds=30)).isoformat(),
+    }
+    assert aborted.inputs["etf"] in nport.SPDR_FUNDS  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

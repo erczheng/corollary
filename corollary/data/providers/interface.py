@@ -94,7 +94,19 @@ class RateLimitedError(ProviderError):
     and the server disagree — another process sharing the key, or a restart
     that reset the bucket while the server's window had not rolled. Worth
     surfacing rather than retrying blind.
+
+    ``reset_at`` is when the vendor says its window resets, as aware UTC, or
+    ``None`` when it said nothing readable. A caller that retries waits for
+    it rather than guessing (the SPDR build's CUSIP lookups, 2026-11-02). It
+    is parsed by the provider that saw the header, so no caller reads a
+    vendor's header name.
     """
+
+    def __init__(self, message: str, *, reset_at: datetime | None = None) -> None:
+        super().__init__(message)
+        if reset_at is not None and reset_at.utcoffset() is None:
+            raise ValueError("reset_at must be timezone-aware")
+        self.reset_at = reset_at
 
 
 class BarTimeframe(StrEnum):

@@ -2507,6 +2507,48 @@ async def test_a_cusip_lookup_outage_aborts_the_spdr_job_and_stores_nothing(
     assert _attempts(db_engine) == []
 
 
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("halted_before", [False, True])
+@pytest.mark.parametrize("throttled", [2, 99], ids=["recovers", "persists"])
+async def test_a_rate_limited_cusip_lookup_is_waited_out_and_never_moves_the_halt_state(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, halted_before: bool, throttled: int
+) -> None:
+    """2026-11-02: a 429 at Fair Isaac (XLK) aborted the catch-up on every start.
+
+    The job's own sleeper is the wait, so the scheduler's clock governs it.
+    Recovering, the build accepts; persisting past the bound, it aborts and
+    stores nothing. Either way rule 9's state is exactly as it was: a context
+    job neither halts nor resumes, and never feeds the watchdog.
+    """
+    _with_isin_seam(monkeypatch)
+    watched = _WatchedRuntime(db_engine, monkeypatch, halted=halted_before)
+    before = _state_snapshot(db_engine)
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    resolver = FakeResolver(
+        rate_limited={"303250104": throttled}, reset_at=SPDR_NOW + timedelta(seconds=30)
+    )
+    bound = nport.CUSIP_RATE_LIMIT_RETRIES
+    async with _recorded_sec() as sec:
+        _, job = await _spdr_jobs(db_engine, sec=sec, cusips=resolver, sleep=sleep)
+        if throttled <= bound:
+            assert await job.run() is None
+            assert [a.status for a in _attempts(db_engine)] == ["accepted"]
+            assert slept == [31.0] * throttled
+        else:
+            with pytest.raises(scheduler_module.SpdrSnapshotAborted) as raised:
+                await job.run()
+            assert raised.value.rule is nport.SnapshotRule.CUSIP_LOOKUP_FAILED
+            assert _attempts(db_engine) == []
+            assert slept == [31.0] * bound
+    assert _state_snapshot(db_engine) == before
+    watched.assert_untouched()
+
+
 # -- the start-up catch-up: a seven-day gate on facts, a bounded wait on the directory
 
 

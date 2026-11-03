@@ -159,7 +159,9 @@ from corollary.wire import (
     as_int,
     clean_params,
     decode_json,
+    epoch_second,
     require_aware,
+    reset_text,
     rfc3339,
     translating,
     vendor_detail,
@@ -858,15 +860,19 @@ class AlpacaProvider(MarketDataProvider):
                 "empty data. Check the plan before debugging the code."
             )
         if response.status_code == 429:
-            # The body is deliberately not quoted here: `X-RateLimit-Reset` is
-            # an epoch second, it is the only useful field in a 429, and it is
-            # not credential-shaped. Anything added to this branch later goes
-            # through `_detail` like the two above.
+            # Neither the body nor any raw header is quoted here (rule 6):
+            # the reset is quoted as *parsed*, an ISO instant or "absent",
+            # because this message reaches the SPDR build's ERROR abort line
+            # verbatim and a proxy may echo request headers into the
+            # response. Anything added to this branch later goes through
+            # `_detail` like the two above.
+            reset_at = _rate_limit_reset(response)
             raise RateLimitedError(
                 f"GET {path} returned 429 despite the local budget. The server "
-                "window and the local bucket disagree — another process may be "
-                f"sharing this key. Reset header: "
-                f"{response.headers.get('X-RateLimit-Reset', 'absent')}"
+                "window and the local bucket disagree — this process's own "
+                "burst, or another process sharing this key. Server window "
+                f"reset: {reset_text(reset_at)}",
+                reset_at=reset_at,
             )
         if response.status_code >= 400:
             raise ProviderError(
@@ -2193,6 +2199,15 @@ _NOT_FOUND: Final = object()
 #: envelope every Alpaca error uses plus the wording of its asset miss.
 _ALPACA_NOT_FOUND_CODES: Final = range(40400000, 40500000)
 _ASSET_NOT_FOUND_RE: Final = re.compile(r"\basset\b.*\bnot found\b", re.IGNORECASE)
+
+
+def _rate_limit_reset(response: httpx.Response) -> datetime | None:
+    """The 429's ``X-RateLimit-Reset`` as aware UTC, or ``None`` if absent or unreadable.
+
+    ``None`` is never a guess: a caller that waits falls back to a stated
+    default rather than to a number this function invented.
+    """
+    return epoch_second(response.headers.get("X-RateLimit-Reset"))
 
 
 def _is_asset_not_found(body: str) -> bool:

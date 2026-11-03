@@ -721,6 +721,37 @@ def as_date(value: Any) -> date | None:
 # --------------------------------------------------------------------------
 
 
+#: A rate-limit reset header: "Unix timestamp (in seconds) when the current
+#: window resets" (Alpaca's rate-limit page; the same convention elsewhere).
+#: Digits only, so a sign, a fraction or prose is not read as an instant.
+_EPOCH_SECOND_RE: Final = re.compile(r"[0-9]{1,12}")
+
+
+def epoch_second(raw: str | None) -> datetime | None:
+    """A header's Unix epoch second as aware UTC, or ``None`` if absent or unreadable.
+
+    ``None`` is never a guess: a caller that waits falls back to a stated
+    default rather than to a number this function invented.
+    """
+    if raw is None or not _EPOCH_SECOND_RE.fullmatch(raw.strip()):
+        return None
+    try:
+        return datetime.fromtimestamp(int(raw.strip()), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def reset_text(reset_at: datetime | None) -> str:
+    """What a 429 message says about the reset: the parsed instant, or ``absent``.
+
+    Rule 6. A 429 message is logged verbatim (the SPDR build's ERROR abort
+    line carries it), so it quotes the reset *as parsed* and never the raw
+    header: a proxy or WAF that copies request headers back into its
+    response would otherwise put whatever it copied into the log.
+    """
+    return "absent" if reset_at is None else reset_at.isoformat()
+
+
 def require_aware(moment: datetime | None, name: str) -> None:
     """Refuse a naive datetime, naming which argument it was.
 

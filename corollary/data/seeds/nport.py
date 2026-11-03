@@ -91,9 +91,10 @@ the CUSIP), and 474 lookups a quarter on the trading bucket is ~2.5 minutes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -135,6 +136,64 @@ logger = logging.getLogger(__name__)
 
 #: Owner rule: fewer resolved equities than this in any fund refuses the snapshot.
 MIN_EQUITIES_PER_FUND: Final = 5
+
+#: How many times one CUSIP lookup answered 429 is asked again before the
+#: build aborts (2026-11-02). A 429 is the server saying "not yet", not
+#: "no". Before this, one 429 at lookup #233 of 474 threw the whole build away
+#: on every start, so the seed was never built. Bounded, because a 429 that
+#: outlasts three full windows is a key-sharing or plan problem, not a burst.
+CUSIP_RATE_LIMIT_RETRIES: Final = 3
+
+#: How many rate-limited retries one whole build may spend, across every
+#: CUSIP (2026-11-02 audit). :data:`CUSIP_RATE_LIMIT_RETRIES` bounds one
+#: CUSIP; without this the build had no total ceiling -- 474 CUSIPs x 3
+#: retries x up to 61 s is hours, long enough to silently miss the job's
+#: weekly slot. Ten waits of at most 61 s caps the stall near ten minutes.
+#: Spent, the build aborts under ``cusip_lookup_failed`` and stores nothing.
+SPDR_BUILD_RATE_LIMIT_RETRIES: Final = 10
+
+#: The ``rule`` on a retry's WARNING. Deliberately not a :class:`SnapshotRule`
+#: and not ``cusip_lookup_failed``: a retry has not failed, and a log query on
+#: the failure rule must count failures only.
+CUSIP_RATE_LIMIT_RETRY_RULE: Final = "cusip_rate_limit_retry"
+
+#: After a 429, wait until the vendor's reset plus this margin: its clock and
+#: ours agree to the second at best.
+RATE_LIMIT_WAIT_MARGIN_SECONDS: Final = 1.0
+#: No usable reset -- absent, unreadable, or at or before our "now": wait one
+#: full window of the trading host's 200/min. A reset that looks past is
+#: treated as unknown, not as "go at once": a local clock running ahead of
+#: the vendor's makes *every* reset look past, and short waits would land
+#: each retry in the same exhausted window and abort the build in seconds.
+RATE_LIMIT_WAIT_DEFAULT_SECONDS: Final = 60.0
+#: The longest wait: one window plus the margin. A reset header further out
+#: than that is skew, not a window, and must not stall the job for an hour.
+RATE_LIMIT_WAIT_MAX_SECONDS: Final = 61.0
+
+
+def rate_limit_wait(reset_at: datetime | None, now: datetime) -> float:
+    """Seconds to wait after a 429 before asking again. Pure.
+
+    For a ``reset_at`` after ``now``: until it, plus
+    :data:`RATE_LIMIT_WAIT_MARGIN_SECONDS`, capped at
+    :data:`RATE_LIMIT_WAIT_MAX_SECONDS` -- so never under the margin. For no
+    reset, or one at or before ``now``: :data:`RATE_LIMIT_WAIT_DEFAULT_SECONDS`.
+    Alpaca's page asks clients not to retry before the reset, and this never
+    does unless the header is past the cap.
+    """
+    if reset_at is None or reset_at <= now:
+        return RATE_LIMIT_WAIT_DEFAULT_SECONDS
+    wanted = (reset_at - now).total_seconds() + RATE_LIMIT_WAIT_MARGIN_SECONDS
+    return min(RATE_LIMIT_WAIT_MAX_SECONDS, wanted)
+
+
+@dataclass
+class _RetryBudget:
+    """One build's allowance of rate-limited retries. Mutable, and local to one build."""
+
+    limit: int
+    spent: int = 0
+
 
 #: Owner rule: each fund's resolved EC weights (percent of net assets) must
 #: sum within this band, **inclusive** at both ends.
@@ -514,10 +573,15 @@ def choose_amendments(
 
 
 class _Abort(Exception):
-    def __init__(self, rule: SnapshotRule, reason: str) -> None:
+    """Abort the build. ``inputs`` are logged structured on the abort line (rule 8)."""
+
+    def __init__(
+        self, rule: SnapshotRule, reason: str, inputs: Mapping[str, object] | None = None
+    ) -> None:
         super().__init__(reason)
         self.rule = rule
         self.reason = reason
+        self.inputs: dict[str, object] = dict(inputs or {})
 
 
 async def build_spdr_snapshot(
@@ -528,12 +592,20 @@ async def build_spdr_snapshot(
     isin_resolver: IsinResolver | None = None,
     directory: AssetDirectory | None = None,
     clock: Callable[[], datetime] = _utcnow,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> SnapshotOutcome:
     """Build, validate and store one snapshot from the latest N-PORT quarter.
 
     ``isin_resolver`` answers the EC lines with no CUSIP; ``None`` means
     :class:`NoIsinResolver` (resolve nothing). ``directory``, when given,
     must list every ticker an ISIN resolved to.
+
+    ``sleep`` is the wait after a CUSIP lookup answers 429
+    (:func:`rate_limit_wait`): the lookup is asked again up to
+    :data:`CUSIP_RATE_LIMIT_RETRIES` times, each retry logged, before the
+    build aborts under :attr:`SnapshotRule.CUSIP_LOOKUP_FAILED`. The whole
+    build may spend at most :data:`SPDR_BUILD_RATE_LIMIT_RETRIES` such
+    retries across every CUSIP, then aborts the same way.
 
     Returns ``accepted`` (stored, now current), ``refused`` (recorded with
     its rule, the previous stays current), ``unchanged`` (the loaded
@@ -543,7 +615,8 @@ async def build_spdr_snapshot(
     """
     try:
         return await _build(
-            sec, resolver, isin_resolver or NoIsinResolver(), directory, session_factory, clock
+            sec, resolver, isin_resolver or NoIsinResolver(), directory, session_factory,
+            clock, sleep,
         )
     except _Abort as abort:
         logger.error(
@@ -554,6 +627,7 @@ async def build_spdr_snapshot(
                 "event": "spdr_snapshot_aborted",
                 "rule": abort.rule.value,
                 "reason": abort.reason,
+                "inputs": abort.inputs,
                 "at": clock().isoformat(),
             },
         )
@@ -567,6 +641,7 @@ async def _build(
     directory: AssetDirectory | None,
     session_factory: Callable[[], Session],
     clock: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
 ) -> SnapshotOutcome:
     try:
         series = await sec.sector_fund_series()
@@ -657,7 +732,9 @@ async def _build(
         funds[ticker] = SectorFund(ticker, series[ticker], filing, document)
     filed = max(fund.filing.filing_date for fund in funds.values())
 
-    holdings, skipped = await _resolve(funds, resolver, isin_resolver, directory)
+    holdings, skipped = await _resolve(
+        funds, resolver, isin_resolver, directory, clock=clock, sleep=sleep
+    )
     problems = validate_funds(holdings)
     if problems:
         reason = "; ".join(f"{p.rule.value}: {p.detail}" for p in problems)
@@ -719,13 +796,101 @@ async def _build(
     )
 
 
+async def _lookup_cusip(
+    resolver: CusipResolver,
+    cusip: str,
+    *,
+    etf: str,
+    name: str,
+    budget: _RetryBudget,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
+) -> EquityAsset | None:
+    """One CUSIP's answer, waiting out a 429 up to :data:`CUSIP_RATE_LIMIT_RETRIES` times.
+
+    Each retry also spends one of the build's ``budget``
+    (:data:`SPDR_BUILD_RATE_LIMIT_RETRIES`), so the build as a whole has a
+    ceiling and not only each CUSIP. Each retry is logged at WARNING under
+    :data:`CUSIP_RATE_LIMIT_RETRY_RULE` with the CUSIP, its fund, the attempt,
+    the budget, the vendor's reset and the wait. It carries no error text, so
+    nothing a vendor echoed can reach the log through this line. Past either
+    bound, or on any other :class:`ProviderError`, raises :class:`_Abort`.
+    The build then stores nothing and the loaded seed stays. Nothing here
+    can reach the engine's halt state: this is a context job.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await resolver.asset_by_cusip(cusip)
+        except RateLimitedError as exc:
+            reset = exc.reset_at.isoformat() if exc.reset_at else None
+            inputs: dict[str, object] = {
+                "cusip": cusip,
+                "etf": etf,
+                "build_retry_budget": budget.limit,
+                "build_retries_spent": budget.spent,
+                "cusip_attempts": attempt + 1,
+                "reset_at": reset,
+            }
+            if attempt >= CUSIP_RATE_LIMIT_RETRIES:
+                raise _Abort(
+                    SnapshotRule.CUSIP_LOOKUP_FAILED,
+                    f"{etf} {name[:80]} CUSIP {cusip}: still rate limited after "
+                    f"{CUSIP_RATE_LIMIT_RETRIES} retries: {exc}",
+                    inputs,
+                ) from None
+            if budget.spent >= budget.limit:
+                raise _Abort(
+                    SnapshotRule.CUSIP_LOOKUP_FAILED,
+                    f"{etf} {name[:80]} CUSIP {cusip}: rate limited with the build's "
+                    f"retry budget of {budget.limit} spent: {exc}",
+                    inputs,
+                ) from None
+            attempt += 1
+            budget.spent += 1
+            now = clock()
+            wait = rate_limit_wait(exc.reset_at, now)
+            logger.warning(
+                "spdr snapshot: CUSIP lookup %s (%s) rate limited; waiting %.1f s "
+                "for the server window, retry %d of %d (build: %d of %d)",
+                cusip, etf, wait, attempt, CUSIP_RATE_LIMIT_RETRIES,
+                budget.spent, budget.limit,
+                extra={
+                    "event": "spdr_cusip_rate_limited",
+                    "rule": CUSIP_RATE_LIMIT_RETRY_RULE,
+                    "etf": etf,
+                    "holding_name": name[:80],
+                    "cusip": cusip,
+                    "attempt": attempt,
+                    "retry_bound": CUSIP_RATE_LIMIT_RETRIES,
+                    "build_retries_spent": budget.spent,
+                    "build_retry_budget": budget.limit,
+                    "reset_at": reset,
+                    "wait_seconds": wait,
+                    "at": now.isoformat(),
+                },
+            )
+            await sleep(wait)
+        except ProviderError as exc:
+            raise _Abort(
+                SnapshotRule.CUSIP_LOOKUP_FAILED,
+                f"{etf} {name[:80]} CUSIP {cusip}: {exc}",
+            ) from None
+
+
 async def _resolve(
     funds: Mapping[str, SectorFund],
     resolver: CusipResolver,
     isin_resolver: IsinResolver,
     directory: AssetDirectory | None,
+    *,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
 ) -> tuple[dict[str, tuple[ResolvedHolding, ...]], tuple[SkippedLine, ...]]:
     """Resolve every EC line of the selected funds. Raises :class:`_Abort` on a lookup error.
+
+    A CUSIP lookup answered 429 is retried by :func:`_lookup_cusip`; every
+    other lookup error aborts at once.
 
     A line with a CUSIP is asked of the broker; a line with none but a
     well-formed ISIN is asked of ``isin_resolver``; anything else is
@@ -748,6 +913,8 @@ async def _resolve(
                     f"prefetching {len(wanted)} ISIN-only lines: {exc}",
                 ) from None
     cusip_answers: dict[str, EquityAsset | None] = {}
+    # One allowance for the whole build, across every CUSIP below.
+    budget = _RetryBudget(SPDR_BUILD_RATE_LIMIT_RETRIES)
     isin_answers: dict[str, str | None] = {}
     resolved: dict[str, tuple[ResolvedHolding, ...]] = {}
     skipped: list[SkippedLine] = []
@@ -765,13 +932,10 @@ async def _resolve(
                 rule = SnapshotRule.NON_POSITIVE_WEIGHT
             elif line.cusip is not None:
                 if line.cusip not in cusip_answers:
-                    try:
-                        cusip_answers[line.cusip] = await resolver.asset_by_cusip(line.cusip)
-                    except ProviderError as exc:
-                        raise _Abort(
-                            SnapshotRule.CUSIP_LOOKUP_FAILED,
-                            f"{etf} {line.name[:80]} CUSIP {line.cusip}: {exc}",
-                        ) from None
+                    cusip_answers[line.cusip] = await _lookup_cusip(
+                        resolver, line.cusip, etf=etf, name=line.name, budget=budget,
+                        clock=clock, sleep=sleep,
+                    )
                 asset = cusip_answers[line.cusip]
                 if asset is None:
                     rule = SnapshotRule.UNRESOLVED_CUSIP
