@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -39,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from corollary.data.providers.interface import (
     AssetDirectory,
+    CusipChange,
     EquityAsset,
     ProviderError,
     RateLimitedError,
@@ -1066,6 +1068,7 @@ async def test_a_build_past_its_retry_budget_aborts_stores_nothing_and_logs_the_
     assert aborted.at == NOW.isoformat()  # type: ignore[attr-defined]
     assert aborted.inputs == {  # type: ignore[attr-defined]
         "cusip": last,
+        "lookup": nport.LOOKUP_ASSET,  # which question was rate limited
         "etf": aborted.inputs["etf"],  # type: ignore[attr-defined]
         "build_retry_budget": budget,
         "build_retries_spent": budget,
@@ -1512,3 +1515,385 @@ async def test_through_openfigi_a_ticker_the_directory_does_not_list_still_refus
     assert [(r.status, r.rule) for r in rows] == [("accepted", None), ("refused", "weight_band")]
     seed = load_spdr_seed_from_db(sessions)
     assert seed is not None and seed.as_of == date(2026, 3, 31)  # the previous stays current
+
+
+# ------------------------------------------------------------------ re-CUSIPed holdings (2026-11-02)
+#
+# Live, 2026-11-02: the build resolved every CUSIP and was then refused,
+# XLE at 73.868850651100, because ``GET /v2/assets/{cusip}`` answered
+# ``status: inactive`` for Exxon (30231G102) and ONEOK (682680103). Probed:
+# both re-CUSIPed under their own tickers (XOM 30231G102 -> 30233Q108 on
+# 2026-07-02, OKE 682680103 -> 30609A109 on 2026-09-11, recorded in
+# ``tests/fixtures/alpaca/p4_corporate_actions_name_change_xom_oke.json``),
+# and the old CUSIP still names the old, inactive asset record. Asset objects
+# carry no ``cusip`` field, so the by-symbol record cannot be proved to be
+# the same security; the vendor's ``name_change`` record (old CUSIP -> new
+# CUSIP) can. An unresolved CUSIP is followed through exactly one such record,
+# and the successor is resolved **by CUSIP**, never by ticker.
+
+XOM_OLD, XOM_NEW = "30231G102", "30233Q108"
+OKE_OLD, OKE_NEW = "682680103", "30609A109"
+# The live refusal, to the digit: XLE without Exxon and ONEOK.
+XLE_WITHOUT_XOM_OKE = "73.868850651100"
+
+
+def synthetic_action_id(old: str, new: str) -> str:
+    """A UUID-shaped vendor id, the shape the provider insists on; derived, so stable."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"synthetic-name-change:{old}:{new}"))
+
+
+def name_change(
+    old: str, new: str, old_symbol: str, new_symbol: str,
+    *, process_date: date = date(2026, 7, 2),
+) -> CusipChange:
+    return CusipChange(
+        action_id=synthetic_action_id(old, new), old_cusip=old, new_cusip=new,
+        old_symbol=old_symbol, new_symbol=new_symbol, process_date=process_date,
+    )
+
+
+class FakeSuccessorResolver(FakeResolver):
+    """``FakeResolver`` plus the vendor's ``name_change`` records, by CUSIP asked.
+
+    ``changes`` maps a CUSIP to the rows the vendor answers for it (its
+    ``cusips=`` filter matches a row on *any* of its CUSIPs, so a row may name
+    the asked CUSIP as ``new_cusip``). Only rows whose ``process_date`` falls
+    in ``[start, end]`` are answered, as the endpoint filters. ``changes_broken`` raises;
+    ``changes_rate_limited`` answers 429 that many times first.
+    """
+
+    def __init__(
+        self,
+        mapping: dict[str, str] | None = None,
+        *,
+        changes: dict[str, list[CusipChange]] | None = None,
+        changes_broken: frozenset[str] = frozenset(),
+        changes_rate_limited: dict[str, int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(mapping, **kwargs)
+        self.changes = dict(changes or {})
+        self.changes_broken = changes_broken
+        self.changes_rate_limited = dict(changes_rate_limited or {})
+        self.change_calls: list[tuple[str, date, date]] = []
+
+    async def cusip_name_changes(
+        self, cusip: str, *, start: date, end: date
+    ) -> tuple[CusipChange, ...]:
+        self.change_calls.append((cusip, start, end))
+        if self.changes_rate_limited.get(cusip, 0) > 0:
+            self.changes_rate_limited[cusip] -= 1
+            raise RateLimitedError(
+                "GET /v1/corporate-actions returned 429 despite the local budget",
+                reset_at=self.reset_at,
+            )
+        if cusip in self.changes_broken:
+            raise ProviderError("GET /v1/corporate-actions: HTTP 503 body-echo-SYNTHETIC")
+        return tuple(
+            c for c in self.changes.get(cusip, ()) if start <= c.process_date <= end
+        )
+
+
+def recusiped(**kwargs: Any) -> FakeSuccessorResolver:
+    """The live 2026-11-02 state: the old CUSIPs answer no active asset; the new ones do."""
+    mapping = {**SURVEY, XOM_NEW: "XOM", OKE_NEW: "OKE"}
+    kwargs.setdefault("changes", {
+        XOM_OLD: [name_change(XOM_OLD, XOM_NEW, "XOM", "XOM")],
+        OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE")],
+    })
+    return FakeSuccessorResolver(mapping, missing=frozenset({XOM_OLD, OKE_OLD}), **kwargs)
+
+
+def successor_logs(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event", "") == "spdr_cusip_successor"]
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_live_refusal_reproduces_when_no_successor_source_is_offered(
+    sessions: Callable[[], Session],
+) -> None:
+    # A plain CUSIP resolver has no name-change source: nothing is followed,
+    # and the build refuses exactly as it did live.
+    resolver = FakeResolver(missing=frozenset({XOM_OLD, OKE_OLD}))
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    assert outcome.reason is not None and XLE_WITHOUT_XOM_OKE in outcome.reason
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_recusiped_holding_resolves_through_its_name_change_by_cusip(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    resolver = recusiped()
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert outcome.status == "accepted", outcome.reason
+    xle = {h.symbol: h for h in outcome.holdings["XLE"]}
+    assert xle["XOM"].weight == Decimal("22.67157977475")
+    assert xle["OKE"].weight == Decimal("3.287142766985")
+    # The holding keeps the CUSIP the fund filed; the successor is only how it was resolved.
+    assert (xle["XOM"].cusip, xle["OKE"].cusip) == (XOM_OLD, OKE_OLD)
+    assert sum((h.weight for h in outcome.holdings["XLE"]), Decimal(0)) == Decimal("99.827573192835")
+    # Each successor resolved by its own CUSIP, never by ticker.
+    assert XOM_NEW in resolver.calls and OKE_NEW in resolver.calls
+    assert "XOM" not in resolver.calls and "OKE" not in resolver.calls
+    # The window opens NAME_CHANGE_LOOKBACK before the report date and
+    # closes at the build's day.
+    asked = {c: (s, e) for c, s, e in resolver.change_calls}
+    assert asked[XOM_OLD] == (REPORT - nport.NAME_CHANGE_LOOKBACK, NOW.date())
+    assert not [s for s in outcome.skipped if s.cusip in {XOM_OLD, OKE_OLD}]
+
+    accepted = {getattr(r, "cusip"): r for r in successor_logs(caplog)
+                if getattr(r, "rule") == nport.CUSIP_SUCCESSOR_ACCEPTED}
+    record = accepted[XOM_OLD]
+    assert record.levelno == logging.WARNING
+    assert getattr(record, "etf") == "XLE"
+    assert getattr(record, "successor_cusip") == XOM_NEW
+    assert getattr(record, "old_symbol") == "XOM" and getattr(record, "new_symbol") == "XOM"
+    assert getattr(record, "successor_symbol") == "XOM"
+    assert getattr(record, "action_id") == synthetic_action_id(XOM_OLD, XOM_NEW)
+    assert getattr(record, "at") == NOW.isoformat()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_successor_whose_ticker_disagrees_with_the_name_change_is_refused(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    # The name change says XOM; the successor CUSIP's asset says another
+    # company. The vendor contradicts itself, so nothing is accepted.
+    resolver = recusiped()
+    resolver.mapping[XOM_NEW] = "ZZZQ"
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    assert outcome.reason is not None and "XLE" in outcome.reason
+    assert not any(h.symbol == "ZZZQ" for hs in outcome.holdings.values() for h in hs)
+    assert [s.rule for s in outcome.skipped if s.cusip == XOM_OLD] == [SnapshotRule.UNRESOLVED_CUSIP]
+    [refusal] = [r for r in successor_logs(caplog) if getattr(r, "cusip") == XOM_OLD]
+    assert getattr(refusal, "rule") == nport.CUSIP_SUCCESSOR_SYMBOL_MISMATCH
+    assert getattr(refusal, "successor_symbol") == "ZZZQ"
+    assert getattr(refusal, "new_symbol") == "XOM"
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_holding_inactive_with_no_name_change_stays_unresolved(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    # EA, WBD, KVUE and AVB live: one inactive record by CUSIP and by symbol
+    # alike, and a merger -- not a name change -- behind each. Modelled on
+    # XOM/OKE so the band decides, and decides as it did live.
+    resolver = recusiped(changes={})
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    assert outcome.reason is not None and XLE_WITHOUT_XOM_OKE in outcome.reason
+    rules = {getattr(r, "cusip"): getattr(r, "rule") for r in successor_logs(caplog)}
+    assert rules[XOM_OLD] == nport.CUSIP_SUCCESSOR_ABSENT
+    assert XOM_NEW not in resolver.calls
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_name_change_naming_the_cusip_only_as_its_successor_is_not_followed(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    # The vendor's cusips= filter matches any CUSIP on a row (live: WBD's
+    # CUSIP came back on AT&T's 2022 spin-off as its new_cusip). Only a row
+    # whose old_cusip is the filed CUSIP says where that security went.
+    backwards = name_change("999999999", XOM_OLD, "OLDX", "XOM")
+    resolver = recusiped(changes={XOM_OLD: [backwards],
+                                  OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE")]})
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    rules = {getattr(r, "cusip"): getattr(r, "rule") for r in successor_logs(caplog)}
+    assert rules[XOM_OLD] == nport.CUSIP_SUCCESSOR_ABSENT
+    assert "999999999" not in resolver.calls
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_two_different_successors_for_one_cusip_are_refused(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    resolver = recusiped(changes={
+        XOM_OLD: [name_change(XOM_OLD, XOM_NEW, "XOM", "XOM"),
+                  name_change(XOM_OLD, "88888X888", "XOM", "XOM")],
+        OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE")],
+    })
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    [refusal] = [r for r in successor_logs(caplog) if getattr(r, "cusip") == XOM_OLD]
+    assert getattr(refusal, "rule") == nport.CUSIP_SUCCESSOR_AMBIGUOUS
+    assert XOM_NEW not in resolver.calls and "88888X888" not in resolver.calls
+    # Rule 8: each conflicting vendor row, by the fields needed to dispute it,
+    # in the same order as ``successor_cusips``.
+    assert getattr(refusal, "successor_cusips") == [XOM_NEW, "88888X888"]
+    assert getattr(refusal, "conflicting") == [
+        {"action_id": synthetic_action_id(XOM_OLD, XOM_NEW), "old_cusip": XOM_OLD,
+         "new_cusip": XOM_NEW, "old_symbol": "XOM", "new_symbol": "XOM",
+         "process_date": "2026-07-02"},
+        {"action_id": synthetic_action_id(XOM_OLD, "88888X888"), "old_cusip": XOM_OLD,
+         "new_cusip": "88888X888", "old_symbol": "XOM", "new_symbol": "XOM",
+         "process_date": "2026-07-02"},
+    ]
+    assert synthetic_action_id(XOM_OLD, "88888X888") in refusal.getMessage()
+    assert synthetic_action_id(XOM_OLD, XOM_NEW) in refusal.getMessage()
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_same_successor_reported_twice_is_one_successor(
+    sessions: Callable[[], Session],
+) -> None:
+    resolver = recusiped(changes={
+        XOM_OLD: [name_change(XOM_OLD, XOM_NEW, "XOM", "XOM")] * 2,
+        OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE")],
+    })
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+    assert outcome.status == "accepted", outcome.reason
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_successor_cusip_with_no_active_asset_stays_unresolved(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    resolver = recusiped()
+    resolver.missing = frozenset({XOM_OLD, OKE_OLD, XOM_NEW})
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    [refusal] = [r for r in successor_logs(caplog) if getattr(r, "cusip") == XOM_OLD]
+    assert getattr(refusal, "rule") == nport.CUSIP_SUCCESSOR_UNRESOLVED
+    assert getattr(refusal, "successor_cusip") == XOM_NEW
+    # One hop only: the unresolved successor is not itself followed.
+    assert XOM_NEW not in [c for c, _, _ in resolver.change_calls]
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_name_change_lookup_429_waits_on_the_builds_budget_and_completes(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    sleep = RecordingSleep()
+    resolver = recusiped(changes_rate_limited={XOM_OLD: 1}, reset_at=NOW + timedelta(seconds=30))
+    outcome = await build_accept(sessions, FakeSec(), resolver, sleep=sleep)
+
+    assert outcome.status == "accepted", outcome.reason
+    assert [c for c, _, _ in resolver.change_calls].count(XOM_OLD) == 2
+    assert sleep.slept == [31.0]
+    [retry] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_cusip_rate_limited"]
+    assert getattr(retry, "cusip") == XOM_OLD
+    assert getattr(retry, "lookup") == "name_change"
+    assert getattr(retry, "build_retries_spent") == 1
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_name_change_lookup_failure_aborts_and_stores_nothing(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    insert_accepted(sessions, date(2026, 3, 31), date(2026, 5, 29))
+    resolver = recusiped(changes_broken=frozenset({XOM_OLD}))
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    # An outage is never recorded as "no successor".
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.CUSIP_LOOKUP_FAILED)
+    assert [(r.status, r.report_date) for r in snapshot_rows(sessions)] == [
+        ("accepted", date(2026, 3, 31))
+    ]
+    # The successor log lines carry no vendor text.
+    assert not any("body-echo-SYNTHETIC" in r.getMessage() for r in successor_logs(caplog))
+    # Rule 8: the abort states the window it asked, and logs its inputs.
+    start, end = REPORT - nport.NAME_CHANGE_LOOKBACK, NOW.date()
+    assert outcome.reason is not None
+    assert XOM_OLD in outcome.reason
+    assert f"{start.isoformat()} to {end.isoformat()}" in outcome.reason
+    [aborted] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_aborted"]
+    assert aborted.at == NOW.isoformat()  # type: ignore[attr-defined]
+    assert aborted.inputs == {  # type: ignore[attr-defined]
+        "cusip": XOM_OLD,
+        "lookup": nport.LOOKUP_NAME_CHANGE,
+        "etf": "XLE",
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+    }
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_an_asset_lookup_failure_logs_its_inputs(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    resolver = FakeResolver(broken=frozenset({"037833100"}))
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+    assert (outcome.status, outcome.rule) == ("aborted", SnapshotRule.CUSIP_LOOKUP_FAILED)
+    [aborted] = [r for r in caplog.records if getattr(r, "event", "") == "spdr_snapshot_aborted"]
+    assert aborted.inputs == {  # type: ignore[attr-defined]
+        "cusip": "037833100",
+        "lookup": nport.LOOKUP_ASSET,
+        "etf": aborted.inputs["etf"],  # type: ignore[attr-defined]
+    }
+    assert aborted.inputs["etf"] in nport.SPDR_FUNDS  # type: ignore[attr-defined]
+
+
+def test_the_name_change_lookback_is_180_days() -> None:
+    assert nport.NAME_CHANGE_LOOKBACK == timedelta(days=180)
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days_before", [1, 19, 180])
+async def test_a_name_change_processed_before_the_report_date_is_followed(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture, days_before: int
+) -> None:
+    """A fund administrator lags: the filing can list a CUSIP already re-CUSIPed.
+
+    Next quarter's filing (report date 2026-09-30) could still carry OKE's
+    682680103, changed 2026-09-11. Identity is still the vendor's CUSIP ->
+    CUSIP record, so looking back adds no identity risk; up to and including
+    ``NAME_CHANGE_LOOKBACK`` before the report date is followed.
+    """
+    caplog.set_level(logging.INFO)
+    processed = REPORT - timedelta(days=days_before)
+    resolver = recusiped(changes={
+        XOM_OLD: [name_change(XOM_OLD, XOM_NEW, "XOM", "XOM", process_date=processed)],
+        OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE", process_date=processed)],
+    })
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert outcome.status == "accepted", outcome.reason
+    rules = {getattr(r, "cusip"): getattr(r, "rule") for r in successor_logs(caplog)}
+    assert rules[XOM_OLD] == rules[OKE_OLD] == nport.CUSIP_SUCCESSOR_ACCEPTED
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_name_change_processed_past_the_lookback_is_not_followed(
+    sessions: Callable[[], Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    processed = REPORT - nport.NAME_CHANGE_LOOKBACK - timedelta(days=1)
+    resolver = recusiped(changes={
+        XOM_OLD: [name_change(XOM_OLD, XOM_NEW, "XOM", "XOM", process_date=processed)],
+        OKE_OLD: [name_change(OKE_OLD, OKE_NEW, "OKE", "OKE", process_date=processed)],
+    })
+    outcome = await build_accept(sessions, FakeSec(), resolver)
+
+    assert (outcome.status, outcome.rule) == ("refused", SnapshotRule.WEIGHT_BAND)
+    rules = {getattr(r, "cusip"): getattr(r, "rule") for r in successor_logs(caplog)}
+    assert rules[XOM_OLD] == nport.CUSIP_SUCCESSOR_ABSENT

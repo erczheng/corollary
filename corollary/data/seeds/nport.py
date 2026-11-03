@@ -87,6 +87,14 @@ imports the engine runtime or a broker. The asset lookup is taken as a
 CUSIPs are resolved once per build (a CUSIP two funds hold is asked once) and
 **not** cached across quarters: a CUSIP's ticker can change (a rename keeps
 the CUSIP), and 474 lookups a quarter on the trading bucket is ~2.5 minutes.
+
+A CUSIP that answers no active asset is followed through the vendor's
+``name_change`` record to its successor CUSIP, when the resolver offers one
+(:class:`CusipSuccessorResolver`, :func:`_follow_name_change`; 2026-11-02:
+Exxon and ONEOK were re-CUSIPed and their filed CUSIPs named inactive
+records, which put XLE at 73.87 and refused every build). Identity is by
+CUSIP, never by ticker; mergers are not followed, and a cash-merged holding
+(EA, WBD that quarter) stays unresolved for the weight band to judge.
 """
 
 from __future__ import annotations
@@ -96,16 +104,17 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import Final, Literal, Protocol, TypeVar, runtime_checkable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from corollary.data.providers.interface import (
     AssetDirectory,
+    CusipChange,
     EquityAsset,
     ProviderError,
     RateLimitedError,
@@ -245,6 +254,73 @@ class CusipResolver(Protocol):
     """The broker's CUSIP lookup: an asset, ``None`` for "unknown", or raises."""
 
     async def asset_by_cusip(self, cusip: str) -> EquityAsset | None: ...
+
+
+@runtime_checkable
+class CusipSuccessorResolver(CusipResolver, Protocol):
+    """A :class:`CusipResolver` that can also say where a re-CUSIPed security went.
+
+    ``cusip_name_changes`` answers every vendor ``name_change`` record naming
+    ``cusip`` (as either side) processed in ``[start, end]``, or raises
+    :class:`~corollary.data.providers.interface.ProviderError` /
+    :class:`~corollary.data.providers.interface.RateLimitedError`. Optional,
+    the way :class:`BatchIsinResolver` is: a resolver without it is never
+    asked, and an unresolved CUSIP then stays unresolved.
+    """
+
+    async def cusip_name_changes(
+        self, cusip: str, *, start: date, end: date
+    ) -> tuple[CusipChange, ...]: ...
+
+
+# The ``rule`` on each ``spdr_cusip_successor`` log line (2026-11-02). Not
+# :class:`SnapshotRule` values: the holding line itself is still accepted or
+# skipped under the existing rules (``unresolved_cusip`` when not accepted),
+# and these say what the name-change fallback found on the way.
+#: The successor was accepted: one name change, its new CUSIP an active
+#: asset whose ticker is the name change's ``new_symbol``.
+CUSIP_SUCCESSOR_ACCEPTED: Final = "cusip_successor_accepted"
+#: No name change has the filed CUSIP as its ``old_cusip``.
+CUSIP_SUCCESSOR_ABSENT: Final = "cusip_successor_absent"
+#: Name changes from the filed CUSIP to more than one new CUSIP: refused.
+CUSIP_SUCCESSOR_AMBIGUOUS: Final = "cusip_successor_ambiguous"
+#: The successor CUSIP answers no active US equity. Not followed further.
+CUSIP_SUCCESSOR_UNRESOLVED: Final = "cusip_successor_unresolved"
+#: The successor CUSIP's asset carries a ticker other than the name change's:
+#: the vendor's two records disagree, so neither is believed.
+CUSIP_SUCCESSOR_SYMBOL_MISMATCH: Final = "cusip_successor_symbol_mismatch"
+
+#: How far before the filing's report date the name-change window opens
+#: (audit, 2026-11-02). A fund administrator can lag the vendor: a filing for
+#: 2026-09-30 could still list ONEOK's 682680103, re-CUSIPed 2026-09-11, and
+#: a window opening at the report date would miss that change. Looking back
+#: adds no identity risk -- what is followed is still the vendor's own
+#: CUSIP -> CUSIP record from the filed CUSIP, never a ticker -- so the bound
+#: only limits how much history is read. Two quarters: a CUSIP stale for
+#: longer than that is a filing problem, not a lag, and stays unresolved for
+#: the weight band to judge.
+NAME_CHANGE_LOOKBACK: Final = timedelta(days=180)
+
+
+def name_change_successors(cusip: str, changes: Iterable[CusipChange]) -> list[CusipChange]:
+    """The name changes that move ``cusip`` somewhere else, one per new CUSIP. Pure.
+
+    Kept: rows whose ``old_cusip`` is ``cusip`` and whose ``new_cusip`` is
+    not. A row naming ``cusip`` only as its ``new_cusip`` says where the
+    security *came from*, not where it went -- the vendor's ``cusips=``
+    filter returns those too (WBD's CUSIP came back on AT&T's 2022 spin-off).
+    Two rows to the same new CUSIP are one successor (the first kept); the
+    result is sorted by new CUSIP, so the same rows give the same answer.
+    More than one entry means the vendor names two successors, and the
+    caller refuses rather than choosing.
+    """
+    key = cusip.strip().upper()
+    by_new: dict[str, CusipChange] = {}
+    for change in changes:
+        old, new = change.old_cusip.strip().upper(), change.new_cusip.strip().upper()
+        if old == key and new != key and new not in by_new:
+            by_new[new] = change
+    return [by_new[new] for new in sorted(by_new)]
 
 
 #: ISO 6166: two-letter country, nine alphanumerics, one check digit. A line
@@ -733,7 +809,8 @@ async def _build(
     filed = max(fund.filing.filing_date for fund in funds.values())
 
     holdings, skipped = await _resolve(
-        funds, resolver, isin_resolver, directory, clock=clock, sleep=sleep
+        funds, resolver, isin_resolver, directory, report_date=filings.report_date,
+        clock=clock, sleep=sleep,
     )
     problems = validate_funds(holdings)
     if problems:
@@ -796,6 +873,13 @@ async def _build(
     )
 
 
+_T = TypeVar("_T")
+
+#: The ``lookup`` field on a rate-limit retry line: which question was asked.
+LOOKUP_ASSET: Final = "asset"  # GET /v2/assets/{cusip}, trading host
+LOOKUP_NAME_CHANGE: Final = "name_change"  # GET /v1/corporate-actions, data host
+
+
 async def _lookup_cusip(
     resolver: CusipResolver,
     cusip: str,
@@ -806,11 +890,36 @@ async def _lookup_cusip(
     clock: Callable[[], datetime],
     sleep: Callable[[float], Awaitable[None]],
 ) -> EquityAsset | None:
-    """One CUSIP's answer, waiting out a 429 up to :data:`CUSIP_RATE_LIMIT_RETRIES` times.
+    """One CUSIP's asset, through :func:`_rate_limited`."""
+    return await _rate_limited(
+        lambda: resolver.asset_by_cusip(cusip), cusip, lookup=LOOKUP_ASSET,
+        etf=etf, name=name, budget=budget, clock=clock, sleep=sleep,
+    )
 
-    Each retry also spends one of the build's ``budget``
+
+async def _rate_limited(
+    fetch: Callable[[], Awaitable[_T]],
+    cusip: str,
+    *,
+    lookup: str,
+    etf: str,
+    name: str,
+    budget: _RetryBudget,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
+    window: tuple[date, date] | None = None,
+) -> _T:
+    """One lookup about ``cusip``, waiting out a 429 up to :data:`CUSIP_RATE_LIMIT_RETRIES` times.
+
+    ``lookup`` names the question (:data:`LOOKUP_ASSET`,
+    :data:`LOOKUP_NAME_CHANGE`) and is carried on the retry line and in
+    every abort's ``inputs`` (rule 8), with ``window`` -- the ``[start, end]``
+    a dated question asked about -- as ``window_start``/``window_end`` and
+    stated in the abort's reason. Each
+    retry also spends one of the build's ``budget``
     (:data:`SPDR_BUILD_RATE_LIMIT_RETRIES`), so the build as a whole has a
-    ceiling and not only each CUSIP. Each retry is logged at WARNING under
+    ceiling and not only each CUSIP -- the name-change fallback draws on the
+    same allowance as the asset lookups. Each retry is logged at WARNING under
     :data:`CUSIP_RATE_LIMIT_RETRY_RULE` with the CUSIP, its fund, the attempt,
     the budget, the vendor's reset and the wait. It carries no error text, so
     nothing a vendor echoed can reach the log through this line. Past either
@@ -818,15 +927,22 @@ async def _lookup_cusip(
     The build then stores nothing and the loaded seed stays. Nothing here
     can reach the engine's halt state: this is a context job.
     """
+    asked = "" if lookup == LOOKUP_ASSET else f" ({lookup} lookup"
+    if window is not None:
+        asked += f", processed {window[0].isoformat()} to {window[1].isoformat()}"
+    asked += ")" if asked else ""
+    asked_inputs: dict[str, object] = {"cusip": cusip, "lookup": lookup, "etf": etf}
+    if window is not None:
+        asked_inputs["window_start"] = window[0].isoformat()
+        asked_inputs["window_end"] = window[1].isoformat()
     attempt = 0
     while True:
         try:
-            return await resolver.asset_by_cusip(cusip)
+            return await fetch()
         except RateLimitedError as exc:
             reset = exc.reset_at.isoformat() if exc.reset_at else None
             inputs: dict[str, object] = {
-                "cusip": cusip,
-                "etf": etf,
+                **asked_inputs,
                 "build_retry_budget": budget.limit,
                 "build_retries_spent": budget.spent,
                 "cusip_attempts": attempt + 1,
@@ -835,14 +951,14 @@ async def _lookup_cusip(
             if attempt >= CUSIP_RATE_LIMIT_RETRIES:
                 raise _Abort(
                     SnapshotRule.CUSIP_LOOKUP_FAILED,
-                    f"{etf} {name[:80]} CUSIP {cusip}: still rate limited after "
+                    f"{etf} {name[:80]} CUSIP {cusip}{asked}: still rate limited after "
                     f"{CUSIP_RATE_LIMIT_RETRIES} retries: {exc}",
                     inputs,
                 ) from None
             if budget.spent >= budget.limit:
                 raise _Abort(
                     SnapshotRule.CUSIP_LOOKUP_FAILED,
-                    f"{etf} {name[:80]} CUSIP {cusip}: rate limited with the build's "
+                    f"{etf} {name[:80]} CUSIP {cusip}{asked}: rate limited with the build's "
                     f"retry budget of {budget.limit} spent: {exc}",
                     inputs,
                 ) from None
@@ -851,9 +967,9 @@ async def _lookup_cusip(
             now = clock()
             wait = rate_limit_wait(exc.reset_at, now)
             logger.warning(
-                "spdr snapshot: CUSIP lookup %s (%s) rate limited; waiting %.1f s "
+                "spdr snapshot: CUSIP lookup %s%s (%s) rate limited; waiting %.1f s "
                 "for the server window, retry %d of %d (build: %d of %d)",
-                cusip, etf, wait, attempt, CUSIP_RATE_LIMIT_RETRIES,
+                cusip, asked, etf, wait, attempt, CUSIP_RATE_LIMIT_RETRIES,
                 budget.spent, budget.limit,
                 extra={
                     "event": "spdr_cusip_rate_limited",
@@ -861,6 +977,7 @@ async def _lookup_cusip(
                     "etf": etf,
                     "holding_name": name[:80],
                     "cusip": cusip,
+                    "lookup": lookup,
                     "attempt": attempt,
                     "retry_bound": CUSIP_RATE_LIMIT_RETRIES,
                     "build_retries_spent": budget.spent,
@@ -872,10 +989,149 @@ async def _lookup_cusip(
             )
             await sleep(wait)
         except ProviderError as exc:
+            # The provider's message is already through its redaction (rule 6).
             raise _Abort(
                 SnapshotRule.CUSIP_LOOKUP_FAILED,
-                f"{etf} {name[:80]} CUSIP {cusip}: {exc}",
+                f"{etf} {name[:80]} CUSIP {cusip}{asked}: {exc}",
+                asked_inputs,
             ) from None
+
+
+async def _follow_name_change(
+    resolver: CusipSuccessorResolver,
+    cusip: str,
+    *,
+    etf: str,
+    name: str,
+    start: date,
+    end: date,
+    budget: _RetryBudget,
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], Awaitable[None]],
+) -> EquityAsset | None:
+    """The active asset a re-CUSIPed holding became, or ``None``. Raises :class:`_Abort` on a lookup error.
+
+    Asked only for a CUSIP the asset lookup left unresolved (2026-11-02:
+    Exxon's and ONEOK's filed CUSIPs named inactive asset records after
+    each was re-CUSIPed under its own ticker, and XLE fell to 73.87).
+    **Identity is proved by CUSIP, never by ticker.** Asset objects carry
+    no ``cusip`` (probed: absent on every record, including AAPL's), so a
+    by-symbol lookup cannot tell the holding from an unrelated company that
+    reused the ticker. The vendor's ``name_change`` record links the filed
+    CUSIP to its successor CUSIP directly, and the successor is resolved
+    with the same ``asset_by_cusip`` as every other line. Accepted only when:
+
+    - exactly one new CUSIP is named from the filed one
+      (:func:`name_change_successors`), else :data:`CUSIP_SUCCESSOR_ABSENT`
+      or :data:`CUSIP_SUCCESSOR_AMBIGUOUS`;
+    - that CUSIP answers an active US equity, else
+      :data:`CUSIP_SUCCESSOR_UNRESOLVED` -- one hop only, never followed further;
+    - its ticker is the name change's ``new_symbol``, else
+      :data:`CUSIP_SUCCESSOR_SYMBOL_MISMATCH`: two vendor records that
+      disagree are not evidence for either.
+
+    Mergers are never followed: they are different corporate actions, not
+    1:1 into the same security, and a cash-merged holding stays unresolved
+    for the weight band to judge. Both requests go through
+    :func:`_rate_limited` on the build's one retry budget. Every outcome is
+    logged at WARNING as ``spdr_cusip_successor`` with its rule, the fund,
+    both CUSIPs, both symbols and the time; no vendor error text, since an
+    error never reaches this log line -- it aborts instead.
+    """
+    changes = await _rate_limited(
+        lambda: resolver.cusip_name_changes(cusip, start=start, end=end), cusip,
+        lookup=LOOKUP_NAME_CHANGE, etf=etf, name=name, budget=budget, clock=clock, sleep=sleep,
+        window=(start, end),
+    )
+    successors = name_change_successors(cusip, changes)
+    if not successors:
+        _log_successor(CUSIP_SUCCESSOR_ABSENT, etf=etf, name=name, cusip=cusip,
+                       change=None, successors=(), asset=None, start=start, end=end, clock=clock)
+        return None
+    if len(successors) > 1:
+        _log_successor(CUSIP_SUCCESSOR_AMBIGUOUS, etf=etf, name=name, cusip=cusip,
+                       change=None, successors=successors, asset=None,
+                       start=start, end=end, clock=clock)
+        return None
+    [change] = successors
+    asset = await _lookup_cusip(
+        resolver, change.new_cusip, etf=etf, name=name, budget=budget, clock=clock, sleep=sleep,
+    )
+    if asset is None:
+        rule = CUSIP_SUCCESSOR_UNRESOLVED
+    elif normalize_symbol(asset.symbol) != normalize_symbol(change.new_symbol):
+        rule = CUSIP_SUCCESSOR_SYMBOL_MISMATCH
+    else:
+        rule = CUSIP_SUCCESSOR_ACCEPTED
+    _log_successor(rule, etf=etf, name=name, cusip=cusip, change=change,
+                   successors=successors, asset=asset, start=start, end=end, clock=clock)
+    return asset if rule == CUSIP_SUCCESSOR_ACCEPTED else None
+
+
+def _log_successor(
+    rule: str,
+    *,
+    etf: str,
+    name: str,
+    cusip: str,
+    change: CusipChange | None,
+    successors: Sequence[CusipChange],
+    asset: EquityAsset | None,
+    start: date,
+    end: date,
+    clock: Callable[[], datetime],
+) -> None:
+    """One ``spdr_cusip_successor`` line. Identifiers only: no vendor text beyond parsed fields.
+
+    Every vendor field here was shape-checked when the provider decoded it
+    (CUSIPs, equity symbols, a UUID-shaped action id), so none is free text
+    (rule 6). ``conflicting`` carries every row in ``successors`` -- for an
+    ambiguous refusal, the rows the vendor contradicts itself with, by the
+    fields needed to dispute them (rule 8) -- in ``successor_cusips`` order.
+    """
+    successor_symbol = normalize_symbol(asset.symbol) if asset is not None else None
+    conflicting = [
+        {
+            "action_id": s.action_id,
+            "old_cusip": s.old_cusip,
+            "new_cusip": s.new_cusip,
+            "old_symbol": s.old_symbol,
+            "new_symbol": s.new_symbol,
+            "process_date": s.process_date.isoformat(),
+        }
+        for s in successors
+    ]
+    rows = "; ".join(
+        f"{s.action_id} {s.old_cusip} {s.old_symbol or '-'} -> {s.new_cusip} "
+        f"{s.new_symbol or '-'} on {s.process_date.isoformat()}"
+        for s in successors
+    )
+    logger.warning(
+        "spdr snapshot: %s %r CUSIP %s name-change fallback: %s (successor %s, %s -> %s, "
+        "asset %s; name changes processed %s to %s: %s)",
+        etf, name[:80], cusip, rule,
+        change.new_cusip if change else None,
+        change.old_symbol if change else None,
+        change.new_symbol if change else None,
+        successor_symbol, start.isoformat(), end.isoformat(), rows or "none",
+        extra={
+            "event": "spdr_cusip_successor",
+            "rule": rule,
+            "etf": etf,
+            "holding_name": name[:80],
+            "cusip": cusip,
+            "successor_cusip": change.new_cusip if change else None,
+            "successor_cusips": [s.new_cusip for s in successors],
+            "conflicting": conflicting,
+            "old_symbol": change.old_symbol if change else None,
+            "new_symbol": change.new_symbol if change else None,
+            "action_id": change.action_id if change else None,
+            "successor_symbol": successor_symbol,
+            "window_start": start.isoformat(),
+            "window_end": end.isoformat(),
+            "at": clock().isoformat(),
+        },
+    )
 
 
 async def _resolve(
@@ -884,6 +1140,7 @@ async def _resolve(
     isin_resolver: IsinResolver,
     directory: AssetDirectory | None,
     *,
+    report_date: date,
     clock: Callable[[], datetime],
     sleep: Callable[[float], Awaitable[None]],
 ) -> tuple[dict[str, tuple[ResolvedHolding, ...]], tuple[SkippedLine, ...]]:
@@ -891,6 +1148,13 @@ async def _resolve(
 
     A CUSIP lookup answered 429 is retried by :func:`_lookup_cusip`; every
     other lookup error aborts at once.
+
+    A CUSIP the asset lookup leaves unresolved is followed through its
+    vendor name change when ``resolver`` is a :class:`CusipSuccessorResolver`
+    (:func:`_follow_name_change`), over name changes processed from
+    :data:`NAME_CHANGE_LOOKBACK` before ``report_date`` -- the date the fund
+    said it held that CUSIP, which can lag the change -- to the build's UTC
+    day, which is never earlier than the ET day the vendor dates by.
 
     A line with a CUSIP is asked of the broker; a line with none but a
     well-formed ISIN is asked of ``isin_resolver``; anything else is
@@ -915,6 +1179,9 @@ async def _resolve(
     cusip_answers: dict[str, EquityAsset | None] = {}
     # One allowance for the whole build, across every CUSIP below.
     budget = _RetryBudget(SPDR_BUILD_RATE_LIMIT_RETRIES)
+    successors = resolver if isinstance(resolver, CusipSuccessorResolver) else None
+    window_start = report_date - NAME_CHANGE_LOOKBACK
+    window_end = max(report_date, clock().astimezone(timezone.utc).date())
     isin_answers: dict[str, str | None] = {}
     resolved: dict[str, tuple[ResolvedHolding, ...]] = {}
     skipped: list[SkippedLine] = []
@@ -932,10 +1199,17 @@ async def _resolve(
                 rule = SnapshotRule.NON_POSITIVE_WEIGHT
             elif line.cusip is not None:
                 if line.cusip not in cusip_answers:
-                    cusip_answers[line.cusip] = await _lookup_cusip(
+                    found = await _lookup_cusip(
                         resolver, line.cusip, etf=etf, name=line.name, budget=budget,
                         clock=clock, sleep=sleep,
                     )
+                    if found is None and successors is not None:
+                        found = await _follow_name_change(
+                            successors, line.cusip, etf=etf, name=line.name,
+                            start=window_start, end=window_end, budget=budget,
+                            clock=clock, sleep=sleep,
+                        )
+                    cusip_answers[line.cusip] = found
                 asset = cusip_answers[line.cusip]
                 if asset is None:
                     rule = SnapshotRule.UNRESOLVED_CUSIP

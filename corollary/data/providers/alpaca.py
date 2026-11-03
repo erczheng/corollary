@@ -100,6 +100,7 @@ from corollary.data.providers.interface import (
     Bar,
     BarTimeframe,
     ContractStatus,
+    CusipChange,
     EquityAsset,
     FeedAccessError,
     MarketDataProvider,
@@ -1964,6 +1965,80 @@ class AlpacaProvider(MarketDataProvider):
             )
         return rows
 
+    async def cusip_name_changes(
+        self, cusip: str, *, start: date, end: date
+    ) -> tuple[CusipChange, ...]:
+        """Every ``name_change`` corporate action naming ``cusip``, processed in ``[start, end]``.
+
+        ``GET /v1/corporate-actions?cusips={cusip}&types=name_change`` on the
+        **data** host, every page. The SPDR builder's fallback for a CUSIP
+        whose asset record is inactive because the security was re-CUSIPed
+        (2026-11-02, recorded in
+        ``p4_corporate_actions_name_change_xom_oke.json``: XOM 30231G102 ->
+        30233Q108, OKE 682680103 -> 30609A109). The filter matches a row on
+        **any** of its CUSIPs, so a row may carry ``cusip`` as its
+        ``new_cusip``; every row is returned in vendor order, and which one
+        counts is the builder's rule
+        (:func:`corollary.data.seeds.nport.name_change_successors`).
+
+        ``start``/``end`` filter on ``process_date`` (the endpoint's
+        documented behaviour). The CUSIP is trimmed and upper-cased and must
+        have :data:`_CUSIP_RE`'s shape, not all zeros, else ``ValueError``
+        before any request, as :meth:`asset_by_cusip` does.
+
+        **A row that cannot be read raises :class:`ProviderError`**: a name
+        change is an identity claim, and one half-read is a vendor shape
+        change, never "no successor". "Read" includes shape (audit,
+        2026-11-02, rule 6): the id must be UUID-shaped and each symbol an
+        equity symbol, since all of them reach the builder's log line, and
+        the refusal quotes the bad field only through :meth:`_scrub`. A blank
+        or absent symbol is read as ``""``; the builder refuses a successor
+        whose ticker disagrees, so it need not abort here. A page without a ``name_changes`` key is no rows.
+        A 429 raises :class:`RateLimitedError`, any other failure
+        :class:`ProviderError`.
+        """
+        key = cusip.strip().upper()
+        if not _CUSIP_RE.fullmatch(key) or set(key) == {"0"}:
+            raise ValueError(
+                f"{cusip!r} is not a CUSIP (eight letters or digits, then a check digit)"
+            )
+        if end < start:
+            raise ValueError(f"end {end.isoformat()} is before start {start.isoformat()}")
+        pages = await self._paginate(
+            DATA_BASE_URL,
+            _CORPORATE_ACTIONS_PATH,
+            {
+                "cusips": key,
+                "types": _NAME_CHANGE_TYPE,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "limit": _CORPORATE_ACTIONS_PAGE_LIMIT,
+            },
+        )
+        changes: list[CusipChange] = []
+        for page in pages:
+            actions = page.get("corporate_actions") if isinstance(page, Mapping) else None
+            if not isinstance(actions, Mapping):
+                raise ProviderError(
+                    f"GET {_CORPORATE_ACTIONS_PATH} answered without a corporate_actions "
+                    f"object: {self._scrub(repr(page))}"
+                )
+            rows = actions.get("name_changes", [])
+            if not isinstance(rows, list):
+                raise ProviderError(
+                    f"GET {_CORPORATE_ACTIONS_PATH} answered name_changes as a "
+                    f"{type(rows).__name__}, not a list: {self._scrub(repr(rows))}"
+                )
+            for row in rows:
+                try:
+                    changes.append(_name_change(row))
+                except ValueError as exc:
+                    raise ProviderError(
+                        f"GET {_CORPORATE_ACTIONS_PATH} answered a name_change row "
+                        f"that cannot be read: {self._scrub(str(exc))}"
+                    ) from None
+        return tuple(changes)
+
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -2294,6 +2369,67 @@ _CORPORATE_ACTIONS_PAGE_LIMIT: Final = 1000
 #: Alpaca documents ``interest`` and ``return_of_capital``; anything shaped
 #: like an identifier is carried, anything else is an unreadable row.
 _SUB_TYPE_RE: Final = re.compile(r"[a-z][a-z_]{0,39}")
+
+
+_NAME_CHANGE_TYPE: Final = "name_change"
+
+#: A corporate action's ``id``: a UUID, hyphenated, either case (every
+#: recorded id is lower-case v4). Shape-checked because the id is quoted on
+#: the SPDR builder's ``spdr_cusip_successor`` log line, which takes no
+#: free vendor text (rule 6). Surrounding whitespace is stripped before the
+#: match, and the stripped id is what is stored and logged.
+_ACTION_ID_RE: Final = re.compile(
+    r"\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\Z"
+)
+
+
+def _name_change(row: Any) -> CusipChange:
+    """One ``name_changes`` row, or ``ValueError`` naming the field. The caller scrubs.
+
+    Every field the row is read into is shape-checked, because every one of
+    them reaches a log line (audit, 2026-11-02, rule 6): the id must be
+    UUID-shaped (:data:`_ACTION_ID_RE`), both CUSIPs CUSIP-shaped, and each
+    symbol, when present, an equity symbol once normalised
+    (:data:`~corollary.data.seeds.EQUITY_SYMBOL_RE`). A blank or absent
+    symbol is read as ``""`` -- an absence, not text -- and the builder
+    refuses a successor whose ticker disagrees.
+    """
+    if not isinstance(row, Mapping):
+        raise ValueError(f"row is a {type(row).__name__}, not an object")
+    raw_id = row.get("id")
+    action_id = raw_id.strip() if isinstance(raw_id, str) else None
+    if action_id is None or not _ACTION_ID_RE.fullmatch(action_id):
+        raise ValueError(f"id is {raw_id!r}, not a UUID-shaped action id")
+    cusips: dict[str, str] = {}
+    for name in ("old_cusip", "new_cusip"):
+        value = row.get(name)
+        text = value.strip().upper() if isinstance(value, str) else None
+        if text is None or not _CUSIP_RE.fullmatch(text) or set(text) == {"0"}:
+            raise ValueError(f"{name} is {value!r}, not a CUSIP")
+        cusips[name] = text
+    symbols: dict[str, str] = {}
+    for name in ("old_symbol", "new_symbol"):
+        value = row.get(name)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"{name} is a {type(value).__name__}, not a string")
+        symbol = normalize_symbol(value) if value and value.strip() else ""
+        if symbol and not EQUITY_SYMBOL_RE.fullmatch(symbol):
+            raise ValueError(f"{name} is {value!r}, not an equity symbol")
+        symbols[name] = symbol
+    try:
+        process_date = as_date(row.get("process_date"))
+    except WireFormatError as exc:
+        raise ValueError(f"process_date: {exc}") from exc
+    if process_date is None:
+        raise ValueError("process_date is missing")
+    return CusipChange(
+        action_id=action_id,
+        old_cusip=cusips["old_cusip"],
+        new_cusip=cusips["new_cusip"],
+        old_symbol=symbols["old_symbol"],
+        new_symbol=symbols["new_symbol"],
+        process_date=process_date,
+    )
 
 
 def _cash_dividend(row: Any, scrub: _Scrub) -> CashDividend | SkippedDividend:
