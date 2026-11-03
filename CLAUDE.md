@@ -35,6 +35,7 @@ uv run alembic upgrade head       # migrations — wired, 0004 is head
 uv run python -m corollary.engine    # start engine
 uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
 uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
+uv run python scripts/weekly_audit.py  # unattended weekly audit: starts corollary.api:headless_app (no sockets, Discord on), waits for the Saturday run, stops it
 uv run mypy corollary            # type check, must be clean
 ```
 
