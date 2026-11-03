@@ -540,3 +540,15 @@ def test_the_scripts_own_log_appends_to_its_own_file(
     last = json.loads(lines[-1])
     assert last["event"] == "today" and last["at"] == MON_0900.isoformat()
     assert set(last) == {"logged_at", "level", "message", "event", "at"}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="kernel32 exists on Windows only")
+def test_the_real_execution_state_call_is_typed_dword_to_dword(ws: ModuleType) -> None:
+    """Without ``argtypes``, ctypes passes a C int and ES_CONTINUOUS (the top
+    bit) overflows it with ArgumentError. Inspected only, never called."""
+    import ctypes
+
+    function = ws.execution_state_call()
+    assert function is not None
+    assert function.argtypes == [ctypes.c_uint32]
+    assert function.restype is ctypes.c_uint32

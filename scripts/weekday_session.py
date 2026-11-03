@@ -19,8 +19,10 @@ auto-resumes, and an auto-start must not become one. What it does, in order:
    calendar's published range has ended is logged at ERROR
    (``calendar_exhausted``) rather than read as a holiday, since from then on
    nothing would be collected and every line would say why not wrongly.
-2. ``GET /api/health`` on 127.0.0.1:8000. If anything answers, the owner's
-   own app or another runner is up (``already_running``, exit 0).
+2. ``GET /api/health`` on 127.0.0.1:8000. If it answers 200, the owner's
+   own app or another runner is up (``already_running``, exit 0). A non-200
+   listener on 8000 is not counted: the launch then fails to bind and the run
+   exits 3, which is safe.
 3. ``.env`` must exist -- ``exists()``, a stat; **this script never reads
    it**. Missing, nothing could authenticate: logged, exit 3.
 4. Hold the machine awake (below), then launch
@@ -70,9 +72,24 @@ the owner's app up exits ``already_running``.
 **Task Scheduler settings this assumes:** "If the task is already running:
 Do not start a new instance" (the 09:00 and at-logon triggers can coincide);
 "Start the task only if the computer is on AC power" *cleared*, or a laptop
-on battery collects nothing; and a time limit above the longest run -- a
+on battery collects nothing; "Stop if the computer switches to battery
+power" *cleared* too (``New-ScheduledTaskSettingsSet`` defaults it on, and a
+stop there can orphan the server on 8000); and a time limit above the longest run -- a
 logon just after midnight runs until the close plus 30 minutes, so the
 default of three days is fine and anything under a day is not.
+
+**Two things the owner should know while it runs.** From 09:00 to the close
+plus 30 minutes on a trading day, a browser on the Vite dev server reaches
+*this* app, which has no live vendor stream and nothing feeding rule 9's
+connection checks, and nothing on screen says so yet. No order path exists
+today, so nothing is at risk; before ``BrokerExecution`` lands (Phase 6) the
+terminal must show the socket mode and refuse orders without a live stream.
+And uvicorn runs the whole lifespan *before* it binds the port, so an
+``uvicorn corollary.api:app`` started while this holds 8000 briefly
+bootstraps against the same database, starts its scheduler's catch-ups, and
+then shuts down on the failed bind. It opens no vendor socket, because the
+supervisor sleeps before its first tick, so there is no 406 and no halt; the
+worst case is a duplicated catch-up call. Stop this runner first, as above.
 
 Logs go to ``logs/weekday-session.log``, appended (one JSON object per line,
 UTC), carrying only this script's own decisions, instants, codes and
