@@ -36,6 +36,7 @@ uv run python -m corollary.engine    # start engine
 uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
 uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
 uv run python scripts/weekly_audit.py  # unattended weekly audit: starts corollary.api:headless_app (no sockets, Discord on), waits for the Saturday run, stops it
+uv run python scripts/weekday_session.py  # unattended trading day: runs corollary.api:headless_app until the calendar close + 30 min, keeping the machine awake only meanwhile; holds port 8000 -- see its docstring to stop it
 uv run mypy corollary            # type check, must be clean
 ```
 
@@ -51,11 +52,16 @@ script is blocked until shown otherwise, and reach for `python -m` first.
 
 **mypy is installed from its sdist, so it is pure Python.** Since about
 2026-10-23, Smart App Control has blocked the mypyc-compiled wheel's unsigned
-extension modules, so the wheel cannot be imported at all. `[tool.uv]
+extension modules, so the wheel has repeatedly failed to import. `[tool.uv]
 no-binary-package = ["mypy"]` in `pyproject.toml` makes uv build mypy from
 source instead, which is uncompiled. The checks are identical; a full run is
 slower, roughly 80s. `mypy --version` should report `compiled: no`. Do not
-remove that setting to speed things up. Smart App Control is Windows 11's
+remove that setting to speed things up. A venv that already holds the
+compiled wheel keeps it through a plain `uv sync`, because the version still
+satisfies the lock; run `uv sync --reinstall-package mypy` once to swap it
+(2026-11-02). The block has not been consistent: a compiled mypy imported and
+ran cleanly in one worktree that day. That is a reason to keep the setting,
+not to drop it. Smart App Control is Windows 11's
 consumer front end to the same Application Control policy described above, not
 a second policy. It is on, and Home offers no per-file allow-list for it. If
 it ever starts blocking mypy's compiled dependencies (`librt`,
