@@ -133,6 +133,14 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     # and 20, migration 0015): ``info``, a record for Discord, not the bell.
     ("calendar_changed", "bell", False),
     ("calendar_changed", "discord", True),
+    # A Cash session confirmed or ended (rule 5, migration 0016): ``info``,
+    # but **bell on as well as Discord** -- an orchestrator decision. Which
+    # book the engine may read is not a settings record; a confirmation that
+    # real money is now in scope is worth the bell, and so is its end.
+    ("cash_session_confirmed", "bell", True),
+    ("cash_session_confirmed", "discord", True),
+    ("cash_session_ended", "bell", True),
+    ("cash_session_ended", "discord", True),
 )
 
 #: Decision 13: every sentiment source starts ``unaudited``. Seeded here as

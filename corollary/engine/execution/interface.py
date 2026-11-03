@@ -184,11 +184,15 @@ class MarginClass(StrEnum):
 class Account:
     """One account's balances, margin class and options entitlement.
 
-    **No identifier is carried.** Not the account number, not the account
-    UUID. Rule 6 keeps keys out of logs, and the account number is the one
-    genuinely sensitive field on any of these responses; the API serves
-    exactly one account, so nothing downstream needs it. Not modelling it is
-    what stops it reaching a log line.
+    **No identifier is carried, only a mask of one.** Not the account number,
+    not the account UUID. Rule 6 keeps keys out of logs, and the account
+    number is the one genuinely sensitive field on any of these responses.
+    Not modelling it is what stops it reaching a log line.
+    :attr:`account_number_masked` (``••••1234``) is the exception, and it is
+    a mask built inside the vendor decode by ``wire.mask_account_number``:
+    rule 5's Cash confirmation has to *name* the account, and the server has
+    to check the name the dialog echoes against the account it just read. The
+    full number never reaches this type.
 
     **``pending_transfer_in`` and ``pending_transfer_out`` are deliberately
     absent.** They are not in the response on this plan. Nothing reads them,
@@ -254,6 +258,11 @@ class Account:
     transfers_blocked: bool
     trade_suspended_by_user: bool
     shorting_enabled: bool
+
+    #: ``••••1234``, or ``None`` when the account object carried no number
+    #: long enough to mask. Defaulted, and last, so a test double that never
+    #: names an account need not invent one.
+    account_number_masked: str | None = None
 
     @property
     def margin_class(self) -> MarginClass:

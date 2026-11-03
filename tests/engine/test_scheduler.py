@@ -43,6 +43,7 @@ from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine import scheduler as scheduler_module
 from corollary.engine.runtime import EngineRuntime, Notification
 from corollary.engine.scheduler import (
+    CASH_SESSION_WAKE_JOBS,
     ALPACA_NEWS_IN_SESSION,
     ALPACA_NEWS_OTHERWISE,
     ASSET_DIRECTORY_AT,
@@ -186,7 +187,9 @@ class FakeClock:
             for task in asyncio.all_tasks()
             if task.get_name().startswith("context-job:") and not task.done()
         ]
-        return len(self._waiting) >= len(live)
+        # A cancelled sleep (a woken job's racing sleeper) leaves a done
+        # future behind; it is nobody asleep.
+        return sum(1 for _, _, wake in self._waiting if not wake.done()) >= len(live)
 
     async def drive(self) -> None:
         while True:
@@ -204,6 +207,12 @@ class FakeClock:
                 self.now = max(self.now, self.stop_at)
                 self.parked.set()
                 return
+            # Drop sleeps that were cancelled -- a job woken early cancels the
+            # sleep it raced against -- without moving time to their instant.
+            while self._waiting and self._waiting[0][2].done():
+                heapq.heappop(self._waiting)
+            if not self._waiting or self._waiting[0][0] > self.stop_at:
+                continue
             target, _, wake = heapq.heappop(self._waiting)
             self.now = max(self.now, target)
             wake.set_result(None)
@@ -1809,17 +1818,31 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             # path (``phase="catch_up"``); it must raise here as well, or that
             # path would never be exercised with a shipped job's rule and inputs.
             original_catch_up = job.catch_up
-            if original_catch_up is None:
-                return dataclasses.replace(job, run=run)
+            original_woken = job.woken
+            raised = dataclasses.replace(job, run=run)
+            if original_catch_up is not None:
 
-            async def catch_up() -> None:
-                await original_catch_up()
-                raise _alpaca_news_failure()
+                async def catch_up() -> None:
+                    await original_catch_up()
+                    raise _alpaca_news_failure()
 
-            return dataclasses.replace(job, run=run, catch_up=catch_up)
+                raised = dataclasses.replace(raised, catch_up=catch_up)
+            # A woken body likewise (cash-session unit 2b): its failure runs
+            # through ``phase="woken"``, which must be as harmless.
+            if original_woken is not None:
+
+                async def woken() -> None:
+                    await original_woken()
+                    raise _alpaca_news_failure()
+
+                raised = dataclasses.replace(raised, woken=woken)
+            return raised
 
         jobs = [raising(job) for job in shipped] if mode == "each_raises" else shipped
         scheduler = Scheduler(jobs, secrets=no_secrets, clock=clock, sleep=clock.sleep)
+        # Wake every wakeable shipped job before start, as a Cash confirmation
+        # would: each woken body runs once on its job's own task, here too.
+        assert scheduler.waker(CASH_SESSION_WAKE_JOBS)() == CASH_SESSION_WAKE_JOBS
         try:
             await run_until_parked(scheduler, clock, timeout=60)
         finally:
@@ -1831,6 +1854,8 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             status[job.name].runs + status[job.name].failures + status[job.name].skips
         )
         assert attempts >= 1, f"{job.name} never ran; widen the window"
+        if job.woken is not None:
+            assert status[job.name].woken_runs == 1, (job.name, status[job.name])
         if mode == "each_raises":
             assert status[job.name].last_error_type == "ConnectError"
         elif mode == "as_shipped" or job.name != "news_alpaca":

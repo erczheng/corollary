@@ -25,6 +25,7 @@ the rule here is structural: no ``description`` reaches the wire, and nothing
 logs one without :func:`corollary.wire.vendor_detail` first.
 """
 
+import json
 import logging
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
@@ -59,7 +60,7 @@ from corollary.engine.execution.interface import (
     PortfolioHistory,
 )
 
-from .conftest import TEST_CREDENTIALS, RecordedBroker
+from .conftest import FIXTURE_DIR, TEST_CREDENTIALS, RecordedBroker
 
 ACCOUNT_MODULE = (
     Path(__file__).resolve().parents[2] / "corollary" / "api" / "routes" / "account.py"
@@ -539,7 +540,17 @@ def test_no_credential_and_no_account_identifier_reach_the_wire(
     assert TEST_CREDENTIALS.key_id not in text
     assert TEST_CREDENTIALS.secret_key not in text
     assert "account_number" not in text
-    assert "accountNumber" not in text
+    # The one identifier served is the mask rule 5's Cash confirm shows; the
+    # full number (scrubbed in the fixture, but still the full string) is not.
+    full = json.loads((FIXTURE_DIR / "account.json").read_text(encoding="utf-8"))[
+        "body"
+    ]["account_number"]
+    assert full not in text
+    body = json.loads(text)
+    assert [key for key in body if key.startswith("accountNumber")] == [
+        "accountNumberMasked"
+    ]
+    assert body["accountNumberMasked"] == "••••" + full[-4:]
     # The recorded object's own `id`, which `Account` deliberately never models.
     assert "d66d53bc" not in text
 

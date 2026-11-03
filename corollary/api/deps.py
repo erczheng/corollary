@@ -64,11 +64,18 @@ from corollary.data.providers.interface import MarketDataProvider
 from corollary.data.providers.openfigi import OPENFIGI_API_KEY_ENV, OpenFigiProvider
 from corollary.data.providers.sec import SEC_USER_AGENT_ENV, SecProvider
 from corollary.data.seeds import SeedError, SpdrSeed
+from corollary.engine.cash_session import CashSession, CashSessionHolder, CashSessionReader
 from corollary.engine.execution.alpaca import AlpacaBroker
 from corollary.engine.execution.interface import BrokerAccount
 # Re-exported: the holder lives beside the jobs that read it, so the object a
 # job holds a view of is one the jobs' import scan may walk.
-from corollary.engine.scheduler import JobStatus, PositionUnderlyings, Scheduler
+from corollary.engine.scheduler import (
+    CashPositionUnderlyings,
+    JobStatus,
+    JobWake,
+    PositionUnderlyings,
+    Scheduler,
+)
 from corollary.instruments import parse_occ_symbol
 from corollary.pricing.rates import RiskFreeRateSource
 from corollary.wire import require_aware
@@ -79,6 +86,9 @@ __all__ = [
     "ApiError",
     "AssetDirectoryDep",
     "BrokerDep",
+    "CASH_SESSION_POLL",
+    "CashPositionsRefresher",
+    "CashSessionDep",
     "FundamentalsDep",
     "LIVE_CREDENTIAL_ENV_VARS",
     "POSITION_UNDERLYINGS_TTL",
@@ -94,6 +104,8 @@ __all__ = [
     "account_mode",
     "asset_directory",
     "broker_for_account",
+    "cash_session_holder",
+    "confirmed_cash_broker",
     "db_session",
     "fundamentals_data",
     "market_data",
@@ -328,6 +340,16 @@ class ServiceRegistry:
             sec=lambda: SecProvider.from_env(source),
             openfigi=lambda: OpenFigiProvider.from_env(source),
         )
+
+    def configured(self, mode: AccountMode) -> bool:
+        """Whether this registry can build a broker for ``mode`` at all.
+
+        Cash is configured exactly when both live variables were set; paper
+        always is (its keys are checked on first use). Asking never builds a
+        broker and never logs, which is what lets the Cash-session route
+        answer "no live credentials" with its own status.
+        """
+        return mode in self._factories
 
     def broker(self, mode: AccountMode) -> BrokerAccount:
         """The broker for one book, built on first use and cached after.
@@ -613,6 +635,16 @@ SeedLoader = Callable[[], SpdrSeed | None]
 #: ``paper-api.`` cost at 12/hour against 200/min.
 POSITION_UNDERLYINGS_TTL: Final = timedelta(minutes=5)
 
+#: How often the Cash positions refresher looks, between reads, for a change of
+#: Cash session (cash-session unit 2b). A look is an in-memory identity check
+#: -- no request -- so a session confirmed mid-interval is read within this,
+#: not up to :data:`POSITION_UNDERLYINGS_TTL` later. Polled rather than
+#: signalled: the session holder outlives a lifespan (``create_app`` builds
+#: it), and an ``asyncio.Event`` on it would bind to the first loop that
+#: waited and refuse the next; it also keeps the holder free of anything but
+#: the session (``corollary.engine.cash_session``).
+CASH_SESSION_POLL: Final = timedelta(seconds=2)
+
 
 def position_underlying(symbol: str) -> str:
     """The symbol whose news a held position is about.
@@ -776,6 +808,259 @@ class PaperPositionsRefresher:
         await asyncio.gather(task, return_exceptions=True)
 
 
+class CashPositionsRefresher:
+    """Reads the **Cash** account's positions -- only while Cash is confirmed.
+
+    The Cash twin of :class:`PaperPositionsRefresher`: the same interval
+    (:data:`POSITION_UNDERLYINGS_TTL`), the same never-raises guards, the same
+    loop. It fills :class:`~corollary.engine.scheduler.CashPositionUnderlyings`,
+    which the earnings and dividends jobs read through
+    :class:`~corollary.engine.scheduler.HeldCashUnderlyings` -- for the
+    calendar's ticker scope and nothing else (cash-session unit 2).
+
+    **Rule 5, per read.** Every read asks :func:`confirmed_cash_broker` for the
+    broker, and that answers ``None`` unless a confirmed Cash session is active
+    and the live keys are set. On ``None`` nothing is read and the holder is
+    **cleared**, so Cash underlyings never outlive the session. A session that
+    ends -- or is replaced by a new confirmation -- while the positions read is
+    in flight is caught on return: the read is discarded and the holder
+    cleared, never written under a session that no longer stands. The read is
+    tagged with the very session it was taken under, so the jobs' view can
+    refuse it under any other.
+
+    Owned by the lifespan and outside everything a context job is built from:
+    it holds the registry. It calls exactly ``positions()`` -- the read half,
+    ``BrokerAccount``; there is no ``BrokerExecution`` (rule 1) -- and the
+    holder's ``replace``/``clear``. It is handed no runtime, watchdog or
+    socket supervisor and catches every failure, so it can neither halt nor
+    resume the engine (rule 9). Logs carry counts and error class names,
+    never the account number, a balance, or an exception's message (rule 6).
+
+    **A new session is read at once, and wakes the calendar** (cash-session
+    unit 2b). Between reads the loop looks every :data:`CASH_SESSION_POLL` for
+    a change of session *identity* -- confirmed, ended, or replaced -- and
+    reads straight away when it sees one, rather than at the end of the
+    interval. After the first read under a session that found at least one
+    underlying, it calls ``wake`` once for that session: a
+    :class:`~corollary.engine.scheduler.JobWake` bound to the earnings and
+    dividends jobs, never the scheduler, so this object can ask those two jobs
+    for one early run and do nothing else to any job. The confirm route is
+    untouched and knows nothing of this; the cap on how often a job may run
+    woken is the scheduler's.
+    """
+
+    def __init__(
+        self,
+        *,
+        registry: ServiceRegistry,
+        session: CashSessionReader,
+        holder: CashPositionUnderlyings,
+        clock: Callable[[], datetime] = _utc_now,
+        interval: timedelta = POSITION_UNDERLYINGS_TTL,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wake: JobWake | None = None,
+        poll: timedelta = CASH_SESSION_POLL,
+    ) -> None:
+        if poll <= timedelta(0) or poll > interval:
+            raise ValueError(f"poll must be positive and at most the interval, got {poll}")
+        self._registry = registry
+        self._session = session
+        self._holder = holder
+        self._clock = clock
+        self._interval = interval
+        self._sleep = sleep
+        self._wake = wake
+        self._poll = poll
+        #: The session the calendar was last woken for; never woken twice for one.
+        self._woken_for: CashSession | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def holder(self) -> CashPositionUnderlyings:
+        return self._holder
+
+    async def refresh(self) -> bool:
+        """One read. ``True`` if the holder was replaced. Never raises an ``Exception``."""
+        try:
+            return await self._refresh_once()
+        except Exception as exc:
+            # Fail off: whatever went wrong, the jobs' view also re-checks the
+            # session, but a holder in an unknown state is cleared here too.
+            self._holder.clear()
+            logger.error(
+                "the Cash positions refresh failed outside the broker read; "
+                "the calendar scope has no Cash underlyings until the next read",
+                extra={
+                    "event": "cash_position_underlyings_refresh_failed",
+                    "account": AccountMode.CASH.value,
+                    "error_type": type(exc).__name__,
+                    "retry_after_seconds": int(self._interval.total_seconds()),
+                    "rule": (
+                        "a failed Cash position refresh clears the holder and "
+                        "is never a rule 9 input"
+                    ),
+                },
+            )
+            return False
+
+    def _clear(self, reason: str) -> None:
+        had = self._holder.as_of is not None
+        self._holder.clear()
+        if had:
+            logger.info(
+                "the Cash position underlyings were cleared: %s",
+                reason,
+                extra={
+                    "event": "cash_position_underlyings_cleared",
+                    "account": AccountMode.CASH.value,
+                    "reason": reason,
+                },
+            )
+
+    async def _refresh_once(self) -> bool:
+        now = self._clock()
+        require_aware(now, "now")
+        session = self._session.current()
+        if session is None:
+            self._clear("no confirmed Cash session")
+            return False
+        broker = confirmed_cash_broker(self._registry, self._session)
+        if broker is None:
+            self._clear("the live keys are not configured")
+            return False
+        try:
+            held = await broker.positions()
+        except Exception as exc:
+            as_of = self._holder.as_of
+            logger.warning(
+                "the Cash positions could not be read; the calendar keeps the "
+                "last Cash read until it is past its bound",
+                extra={
+                    "event": "cash_position_underlyings_unavailable",
+                    "account": AccountMode.CASH.value,
+                    "error_type": type(exc).__name__,
+                    "kept": len(self._holder.current()),
+                    "kept_as_of": None if as_of is None else as_of.isoformat(),
+                    "retry_after_seconds": int(self._interval.total_seconds()),
+                    "rule": (
+                        "a failed Cash position read keeps the last value and "
+                        "is never a rule 9 input"
+                    ),
+                },
+            )
+            return False
+        if self._session.current() is not session:
+            # Ended, or replaced by a new confirmation, while the read was in
+            # flight: what was read belongs to a session that no longer stands.
+            self._clear("the Cash session ended while its positions were read")
+            return False
+        self._holder.replace(
+            (position_underlying(row.symbol) for row in held), at=now, session=session
+        )
+        self._wake_calendar_once(session)
+        return True
+
+    def _wake_calendar_once(self, session: CashSession) -> None:
+        """Wake the calendar jobs after the first read under ``session`` with holdings.
+
+        Called only with the holder just replaced under ``session``, which is
+        still the active one. An empty read wakes nothing and leaves the
+        session un-woken, so a later read under it that finds a position still
+        wakes. Never raises: a wake that failed costs the early run, never
+        the read.
+        """
+        if self._wake is None or session is self._woken_for:
+            return
+        underlyings = len(self._holder.current())
+        if underlyings == 0:
+            return
+        self._woken_for = session
+        try:
+            woken = self._wake()
+        except Exception as exc:
+            logger.error(
+                "the calendar could not be woken for the Cash session; its jobs "
+                "add the Cash underlyings at their next slot",
+                extra={
+                    "event": "cash_session_calendar_wake_failed",
+                    "account": AccountMode.CASH.value,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        logger.info(
+            "the Cash session was read; the calendar jobs are woken to add its "
+            "underlyings now rather than at their next slot",
+            extra={
+                "event": "cash_session_calendar_woken",
+                "account": AccountMode.CASH.value,
+                "jobs": list(woken),
+                "cash_underlyings": underlyings,
+            },
+        )
+
+    async def _wait_for_next_read(self, read_under: CashSession | None) -> None:
+        """Sleep out the interval, or less: until the session is not ``read_under``.
+
+        Counts the seconds it asked to sleep rather than reading the clock, so
+        a clock that misbehaves can neither spin this nor stall it. Each look
+        is an in-memory identity check and nothing else.
+        """
+        total = self._interval.total_seconds()
+        step = self._poll.total_seconds()
+        waited = 0.0
+        while waited < total:
+            if self._session.current() is not read_under:
+                logger.info(
+                    "the Cash session changed; its positions are read now",
+                    extra={
+                        "event": "cash_session_changed",
+                        "account": AccountMode.CASH.value,
+                        "active": self._session.current() is not None,
+                    },
+                )
+                return
+            chunk = min(step, total - waited)
+            await self._sleep(chunk)
+            waited += chunk
+
+    async def _run(self) -> None:
+        while True:
+            # The session this read is taken under: a change from it -- even
+            # one landing during the read -- ends the wait below at once.
+            read_under = self._session.current()
+            try:
+                await self.refresh()
+            except Exception as exc:
+                logger.error(
+                    "the Cash positions refresh raised; the read loop "
+                    "continues on its interval",
+                    extra={
+                        "event": "cash_position_underlyings_loop_error",
+                        "account": AccountMode.CASH.value,
+                        "error_type": type(exc).__name__,
+                        "retry_after_seconds": int(self._interval.total_seconds()),
+                    },
+                )
+            await self._wait_for_next_read(read_under)
+
+    def start(self) -> None:
+        """Start the read loop. Call once, from the running event loop."""
+        if self._task is not None:
+            raise RuntimeError("the Cash positions refresher is already running")
+        self._task = asyncio.get_running_loop().create_task(
+            self._run(), name="cash-position-underlyings-refresh"
+        )
+
+    async def aclose(self) -> None:
+        """Stop the loop and wait for it, then clear the holder. Safe twice. Never raises."""
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._holder.clear()
+
+
 # --------------------------------------------------------------------------
 # Dependencies
 # --------------------------------------------------------------------------
@@ -872,6 +1157,38 @@ def asset_directory(request: Request) -> AssetDirectoryHolder:
     holder = request.app.state.asset_directory
     assert isinstance(holder, AssetDirectoryHolder)
     return holder
+
+
+def cash_session_holder(request: Request) -> CashSessionHolder:
+    """The process's Cash session holder (rule 5). Built empty by ``create_app``."""
+    holder = request.app.state.cash_session
+    assert isinstance(holder, CashSessionHolder)
+    return holder
+
+
+CashSessionDep = Annotated[CashSessionHolder, Depends(cash_session_holder)]
+
+
+def confirmed_cash_broker(
+    registry: ServiceRegistry, session: CashSessionReader
+) -> BrokerAccount | None:
+    """The Cash ``BrokerAccount``, **only** while a confirmed session is active.
+
+    For the lifespan-owned :class:`CashPositionsRefresher`, which calls this
+    on every read rather than holding the broker: rule 5 says nothing reads Cash
+    without a confirmation, so the gate is checked per read, and ending the
+    session stops the very next read. ``None`` -- never paper, never a
+    substitute -- when no session is active or the live keys are absent.
+
+    The broker is the read half only (``BrokerAccount``); there is no
+    ``BrokerExecution`` (rule 1). A context job must never be handed this
+    function or its result: hand it a :class:`CashSessionReader` if it needs
+    to know whether Cash is confirmed, and read positions through a holder
+    the way :class:`PaperPositionsRefresher` does.
+    """
+    if not session.active() or not registry.configured(AccountMode.CASH):
+        return None
+    return registry.broker(AccountMode.CASH)
 
 
 def position_underlyings(request: Request) -> PositionUnderlyings:

@@ -60,25 +60,39 @@ is not in a type these routes can name.
 
 import logging
 import re
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Final
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from corollary.api.deps import (
     LIVE_CREDENTIAL_ENV_VARS,
+    AccountMode,
     AccountModeDep,
     ApiError,
     BrokerDep,
+    CashSessionDep,
     ServiceRegistry,
     SessionDep,
     service_registry,
 )
+from corollary.api.operator import (
+    AuditChange,
+    cash_session_confirmed_notice,
+    cash_session_ended_notice,
+    NoticeSink,
+    deliver_notice,
+)
 from corollary.api.schemas import (
     AccountResponse,
     ActivityItem,
+    CashSessionConfirm,
+    CashSessionState,
     ActivityStatus,
     EquityCurvePoint,
     MarginClassName,
@@ -87,13 +101,27 @@ from corollary.api.schemas import (
     PortfolioHistoryResponse,
     Trend,
 )
-from corollary.db.models import ENGINE_STATE_ID, EngineState
+from corollary.db.models import (
+    CASH_SESSION_ACTIVE_PREFIX,
+    CASH_SESSION_AUDIT_FIELD,
+    CASH_SESSION_INACTIVE,
+    ENGINE_STATE_ID,
+    AuditLog,
+    EngineState,
+)
+from corollary.engine.cash_session import (
+    MASKED_ACCOUNT_NUMBER,
+    CashSession,
+    CashSessionEndedWhileConfirming,
+)
 from corollary.engine.execution.interface import (
     Account,
+    BrokerError,
     MarginClass,
     NonTradeActivity,
 )
-from corollary.wire import vendor_detail
+from corollary.engine.runtime import OperatorNotice
+from corollary.wire import mask_account_number, vendor_detail
 
 __all__ = ["CASH_ACTIVITY_TYPES", "router"]
 
@@ -361,6 +389,7 @@ async def read_account(
         cash_account_available=not missing,
         cash_account_unavailable_reason=_cash_unavailable_reason(missing),
         missing_live_credential_env_vars=list(missing),
+        account_number_masked=account.account_number_masked,
     )
 
 
@@ -666,3 +695,482 @@ async def read_transfers(
         page_size=page_size,
         has_more=start + len(window) < len(items),
     )
+
+
+# --------------------------------------------------------------------------
+# /api/account/cash-session -- rule 5's confirmed Cash session
+# --------------------------------------------------------------------------
+
+#: Every refusal below logs this, the inputs (masked only) and the instant.
+_CASH_SESSION_RULE: Final = (
+    "rule 5: Cash requires an explicit confirmation naming the live account, "
+    "and the server checks the name the client echoed against the account it "
+    "reads itself (rule 4)"
+)
+
+#: The 503's fixed words. Fixed, so nothing from the environment can reach
+#: a response (rule 6); the variable names are on ``GET /api/account``.
+CASH_SESSION_UNAVAILABLE: Final = (
+    "Cash cannot be confirmed: the live Alpaca credentials are not configured "
+    "on the server, so there is no live account to read or to confirm."
+)
+
+
+def cash_session_now() -> datetime:
+    """The confirmation's clock, aware UTC. A dependency so a test can fix it."""
+    return datetime.now(timezone.utc)
+
+
+CashNowDep = Annotated[datetime, Depends(cash_session_now)]
+
+
+def _echo_for_log(echo: str) -> str:
+    """The number the client sent, in a form safe to log.
+
+    A mask goes as-is. Anything else may be a full account number pasted in,
+    so it is masked here, or replaced outright when even that is unsafe --
+    a client's mistake must not put the number in the log (rule 6).
+    """
+    text = echo.strip()
+    if MASKED_ACCOUNT_NUMBER.match(text):
+        return text
+    return mask_account_number(text) or "<not a masked account number>"
+
+
+def _cash_session_refused(
+    *,
+    status: int,
+    code: str,
+    message: str,
+    reason: str,
+    correlation_id: str,
+    **inputs: str,
+) -> ApiError:
+    """Rule 8: log the refusal -- rule, masked inputs, instant -- then build it."""
+    _refuse(
+        "cash_session_refused",
+        message,
+        _CASH_SESSION_RULE,
+        reason=reason,
+        status=status,
+        correlation_id=correlation_id,
+        **inputs,
+    )
+    return ApiError(status_code=status, code=code, message=message)
+
+
+def _audit_value(session: CashSession | None) -> str:
+    """``inactive``, or ``active ••••1234`` -- ``ck_audit_log_account_row``'s shapes."""
+    if session is None:
+        return CASH_SESSION_INACTIVE
+    return CASH_SESSION_ACTIVE_PREFIX + session.account_number_masked
+
+
+def _write_audit(session: Session, change: AuditChange, at: datetime) -> None:
+    session.add(
+        AuditLog(
+            at=at,
+            category=change.category,
+            field=change.field,
+            previous_value=change.previous,
+            new_value=change.new,
+        )
+    )
+    session.commit()
+
+
+def _state(session: CashSession | None) -> CashSessionState:
+    if session is None:
+        return CashSessionState(
+            active=False, account_number_masked=None, confirmed_at=None, balance=None
+        )
+    return CashSessionState(
+        active=True,
+        account_number_masked=session.account_number_masked,
+        confirmed_at=session.confirmed_at,
+        balance=session.balance,
+    )
+
+
+@router.get("/cash-session", summary="Whether a Cash session is confirmed")
+def read_cash_session(holder: CashSessionDep) -> CashSessionState:
+    """In memory only: reads the holder, never the broker."""
+    return _state(holder.current())
+
+
+async def _notify_in_order(request: Request, notice: OperatorNotice) -> None:
+    """Deliver ``notice`` now, under the writers' lock, off the event loop.
+
+    Not ``notify_after_response``, for two reasons that are both rule 5's.
+    A background task runs after the handler has released the lock, so a
+    confirm's notice and the end queued behind it could reach the runtime in
+    either order -- "ended" then "confirmed" reads as Cash on. And a
+    background task is dropped when the handler raises, which is exactly when
+    a fail-off end most needs saying. ``deliver_notice`` never raises, and the
+    action it describes has already happened by the time this runs.
+    """
+    runtime: NoticeSink | None = getattr(request.app.state, "engine_runtime", None)
+    await run_in_threadpool(deliver_notice, runtime, notice)
+
+
+async def _record_end(
+    *,
+    ended: CashSession,
+    session: Session,
+    now: datetime,
+    correlation_id: str,
+    request: Request,
+    cause: str,
+) -> None:
+    """Audit, log and notify a session that has *already* ended. Never raises.
+
+    The end itself is the caller's, done first: ending is the safe direction
+    and never waits on the database. If the audit row cannot be written the
+    end still stands, the failure is an ERROR naming the rule and the
+    correlation id, and the owner is still told the session ended -- a notice
+    withheld because the bookkeeping failed would leave them believing Cash is
+    on.
+    """
+    change = AuditChange(
+        category="account",
+        field=CASH_SESSION_AUDIT_FIELD,
+        previous=_audit_value(ended),
+        new=CASH_SESSION_INACTIVE,
+    )
+    try:
+        await run_in_threadpool(_write_audit, session, change, now)
+    except Exception as exc:
+        logger.error(
+            "the Cash session ended but its audit row could not be written; "
+            "the end stands and is notified, the audit log is missing it",
+            extra={
+                "event": "cash_session_end_unrecorded",
+                "rule": _CASH_SESSION_RULE,
+                "cause": cause,
+                "account": ended.account_number_masked,
+                "error_type": type(exc).__name__,
+                "at": now.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+    logger.info(
+        "cash session ended for %s",
+        ended.account_number_masked,
+        extra={
+            "event": "cash_session_ended",
+            "cause": cause,
+            "account": ended.account_number_masked,
+            "confirmed_at": ended.confirmed_at.isoformat(),
+            "at": now.isoformat(),
+            "correlation_id": correlation_id,
+        },
+    )
+    await _notify_in_order(
+        request,
+        cash_session_ended_notice(
+            account_number_masked=ended.account_number_masked,
+            confirmed_at=ended.confirmed_at,
+            at=now,
+            correlation_id=correlation_id,
+        ),
+    )
+
+
+@router.post(
+    "/cash-session",
+    summary="Confirm the live Cash account. Audit-logged.",
+    responses={
+        409: {
+            "description": (
+                "The echoed account number is not the live account's (any "
+                "existing session is ended), or the session was ended while "
+                "this confirmation was in flight"
+            )
+        },
+        502: {"description": "The live account could not be read, or reported no number"},
+        503: {"description": "No live credentials are configured"},
+    },
+)
+async def confirm_cash_session(
+    body: CashSessionConfirm,
+    registry: RegistryDep,
+    holder: CashSessionDep,
+    session: SessionDep,
+    now: CashNowDep,
+    request: Request,
+) -> CashSessionState:
+    """Rule 5's confirmation, checked by the server.
+
+    Reads the live account through the read-only Cash ``BrokerAccount`` and
+    refuses unless the masked number the dialog showed -- echoed as
+    ``accountNumber`` -- is the live account's. A success writes one
+    ``account`` audit row, *then* starts (or restarts) the in-memory session,
+    and notifies; a failed audit write therefore never has a visible session
+    behind it, and ends any prior one (fail-off).
+
+    Refusals record nothing, with one exception: a mismatch also ends any
+    existing session, audited and notified, because a mismatch means the UI
+    is wrong about which account is live (orchestrator decision P3).
+
+    Holds the holder's writer lock for the whole body, so an end can never
+    interleave with a confirm (audit M1); the generation check refuses a
+    confirm overtaken by an end from any other path.
+
+    Touches nothing else: no order path (rule 1), no halt state (rule 9).
+    """
+    correlation_id = str(uuid.uuid4())
+    echoed = _echo_for_log(body.account_number)
+    # Read at arrival, before waiting on the lock: an end that lands while
+    # this request waits (or while its dependencies resolved) refuses it,
+    # rather than this confirm reading the post-end generation and
+    # switching Cash back on after the owner's later DELETE.
+    generation = holder.generation
+    async with holder.writer_lock:
+        if not registry.configured(AccountMode.CASH):
+            raise _cash_session_refused(
+                status=503,
+                code="cash_unavailable",
+                message=CASH_SESSION_UNAVAILABLE,
+                reason="no_live_credentials",
+                correlation_id=correlation_id,
+                echoed=echoed,
+            )
+
+        try:
+            account = await registry.broker(AccountMode.CASH).account()
+        except BrokerError as exc:
+            # BrokerAuthError is a subclass. Logged as a Cash refusal (rule 8),
+            # then re-raised into the app's vendor-error mapping, which
+            # chooses the status and the words. Class name only: the vendor's
+            # text is not ours to vouch for (rule 6).
+            _refuse(
+                "cash_session_refused",
+                "Cash cannot be confirmed: the live account could not be read",
+                _CASH_SESSION_RULE,
+                reason="live_account_unreadable",
+                error_type=type(exc).__name__,
+                correlation_id=correlation_id,
+                echoed=echoed,
+            )
+            raise
+        live = account.account_number_masked
+        if live is None:
+            raise _cash_session_refused(
+                status=502,
+                code="cash_account_unnamed",
+                message=(
+                    "The live account reported no account number to confirm "
+                    "against, so Cash cannot be confirmed. Nothing was recorded."
+                ),
+                reason="live_account_unnamed",
+                correlation_id=correlation_id,
+                echoed=echoed,
+            )
+        if body.account_number.strip() != live:
+            ended = holder.end()
+            refusal = _cash_session_refused(
+                status=409,
+                code="cash_account_mismatch",
+                message=(
+                    f"The account confirmed ({echoed}) is not the live account "
+                    f"({live}). Cash is not confirmed"
+                    + (
+                        ", and the Cash session confirmed earlier has been ended"
+                        if ended is not None
+                        else ""
+                    )
+                    + "; reopen the confirmation and check which account the "
+                    "live credentials belong to."
+                ),
+                reason="account_mismatch",
+                correlation_id=correlation_id,
+                echoed=echoed,
+                live=live,
+                ended_session=str(ended is not None),
+            )
+            if ended is not None:
+                await _record_end(
+                    ended=ended,
+                    session=session,
+                    now=now,
+                    correlation_id=correlation_id,
+                    request=request,
+                    cause="account_mismatch",
+                )
+            raise refusal
+        if holder.generation != generation:
+            raise _ended_while_confirming(correlation_id, echoed)
+
+        previous = holder.current()
+        change = AuditChange(
+            category="account",
+            field=CASH_SESSION_AUDIT_FIELD,
+            previous=_audit_value(previous),
+            new=CASH_SESSION_ACTIVE_PREFIX + live,
+        )
+        try:
+            await run_in_threadpool(_write_audit, session, change, now)
+        except BaseException:
+            # A session with no audit row is not allowed to stand. Ending the
+            # prior one is the safe direction -- Cash off -- and it is said.
+            ended = holder.end()
+            logger.error(
+                "the Cash session's audit row could not be written; no session "
+                "was started, and any prior session was ended",
+                extra={
+                    "event": "cash_session_unrecorded",
+                    "rule": _CASH_SESSION_RULE,
+                    "account": live,
+                    "ended_prior": ended is not None,
+                    "at": now.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )
+            if ended is not None:
+                await _notify_in_order(
+                    request,
+                    cash_session_ended_notice(
+                        account_number_masked=ended.account_number_masked,
+                        confirmed_at=ended.confirmed_at,
+                        at=now,
+                        correlation_id=correlation_id,
+                    ),
+                )
+            raise
+
+        try:
+            holder.confirm(
+                account_number_masked=live,
+                balance=account.equity,
+                at=now,
+                correlation_id=correlation_id,
+                generation=generation,
+            )
+        except CashSessionEndedWhileConfirming:
+            # An end from outside the lock landed during the audit write. It
+            # stands; the row just written claims a session that never
+            # started, so the correcting row goes beside it, best effort.
+            await _correct_unstarted(
+                session=session,
+                started=change.new,
+                now=now,
+                correlation_id=correlation_id,
+            )
+            raise _ended_while_confirming(correlation_id, echoed) from None
+
+        logger.info(
+            "cash session confirmed for %s",
+            live,
+            extra={
+                "event": "cash_session_confirmed",
+                "account": live,
+                "balance": str(account.equity),
+                "replaced": previous is not None,
+                "at": now.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+        await _notify_in_order(
+            request,
+            cash_session_confirmed_notice(
+                account_number_masked=live,
+                balance=account.equity,
+                replaced=previous is not None,
+                at=now,
+                correlation_id=correlation_id,
+            ),
+        )
+        return _state(holder.current())
+
+
+def _ended_while_confirming(correlation_id: str, echoed: str) -> ApiError:
+    return _cash_session_refused(
+        status=409,
+        code="cash_session_ended_while_confirming",
+        message=(
+            "The Cash session was ended while this confirmation was in "
+            "flight; the end stands and Cash is not confirmed. Confirm again "
+            "if Cash is still wanted."
+        ),
+        reason="ended_while_confirming",
+        correlation_id=correlation_id,
+        echoed=echoed,
+    )
+
+
+async def _correct_unstarted(
+    *, session: Session, started: str, now: datetime, correlation_id: str
+) -> None:
+    """Follow an ``active`` audit row whose session never started. Never raises."""
+    change = AuditChange(
+        category="account",
+        field=CASH_SESSION_AUDIT_FIELD,
+        previous=started,
+        new=CASH_SESSION_INACTIVE,
+    )
+    try:
+        await run_in_threadpool(_write_audit, session, change, now)
+    except Exception as exc:
+        logger.error(
+            "a Cash confirmation was overtaken by an end after its audit row "
+            "was written, and the correcting row could not be written",
+            extra={
+                "event": "cash_session_correction_unrecorded",
+                "rule": _CASH_SESSION_RULE,
+                "error_type": type(exc).__name__,
+                "at": now.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+
+
+@router.delete(
+    "/cash-session",
+    status_code=204,
+    summary="End the Cash session. 204 whether or not one existed.",
+)
+async def end_cash_session(
+    holder: CashSessionDep,
+    session: SessionDep,
+    now: CashNowDep,
+    request: Request,
+) -> Response:
+    """End the session first, then record it.
+
+    Ending is the safe direction, so it never waits on the database: if the
+    audit write fails the session is still over, the response is still a
+    204, the owner is still notified, and the missing row is an ERROR naming
+    the rule and the correlation id. Ending nothing changes nothing, writes
+    no row and notifies nobody.
+
+    **Ends at once, before waiting on anything** (re-audit LOW-1): switching
+    to Paper must never wait behind a confirm's slow live-account read, so
+    ``end()`` runs before the writer lock. Its generation bump refuses an
+    in-flight confirm, at the re-check after the read or at ``confirm()``.
+    The lock is then taken only to record the end, so the ended notice still
+    follows any notice the in-flight confirm already sent.
+    """
+    correlation_id = str(uuid.uuid4())
+    ended = holder.end()
+    if ended is None:
+        # Nothing was active, so nothing to record or notify: answer at once.
+        # The generation bump above still refuses any confirm in flight.
+        logger.info(
+            "no Cash session to end",
+            extra={
+                "event": "cash_session_end_noop",
+                "at": now.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+        return Response(status_code=204)
+    async with holder.writer_lock:
+        await _record_end(
+            ended=ended,
+            session=session,
+            now=now,
+            correlation_id=correlation_id,
+            request=request,
+            cause="operator",
+        )
+        return Response(status_code=204)
