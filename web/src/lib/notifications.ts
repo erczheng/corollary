@@ -55,7 +55,9 @@ export type { NotificationSeverity }
  * degradation report, the same reasoning that makes `stop_loss_hit` one.
  * `sentiment_repromoted` is `info`: nothing is wrong. Both `account: null`.
  * `sentiment_audit_requested` — an audit run started by hand — is `info`, on
- * the config events' terms (decision 20). */
+ * the config events' terms (decision 20). `cash_session_confirmed` and
+ * `cash_session_ended` — rule 5's server-checked Cash session, confirmed or
+ * ended by the owner — are `info` too: deliberate acts, not faults. */
 const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   order_rejected: 'critical',
   daily_loss_halt: 'critical',
@@ -76,6 +78,8 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   sentiment_repromoted: 'info',
   sentiment_audit_requested: 'info',
   calendar_changed: 'info',
+  cash_session_confirmed: 'info',
+  cash_session_ended: 'info',
 }
 
 export function severityFor(event: NotificationEvent): NotificationSeverity {

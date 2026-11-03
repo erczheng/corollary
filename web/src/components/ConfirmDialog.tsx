@@ -13,6 +13,14 @@ interface ConfirmDialogProps {
    * uses the ordinary primary button since it isn't destructive, just
    * consequential. */
   destructive?: boolean
+  /** Holds the confirm shut — while the facts it names are still loading or
+   * could not be read, or while the action is already in flight. */
+  confirmDisabled?: boolean
+  /** Holds Cancel (and the backdrop) shut while an action is in flight, so the
+   * dialog cannot close over a request whose answer still changes state. */
+  cancelDisabled?: boolean
+  /** Status below the consequence: a refusal, a loading line. */
+  children?: ReactNode
 }
 
 export function ConfirmDialog({
@@ -23,6 +31,9 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
   destructive = false,
+  confirmDisabled = false,
+  cancelDisabled = false,
+  children,
 }: ConfirmDialogProps) {
   if (!open) return null
 
@@ -30,7 +41,7 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-inverse-surface/40 p-6"
       role="presentation"
-      onClick={onCancel}
+      onClick={cancelDisabled ? undefined : onCancel}
     >
       <div
         role="alertdialog"
@@ -45,21 +56,25 @@ export function ConfirmDialog({
         <p className="mt-3 text-body-md text-on-surface-variant">
           {consequence}
         </p>
+        {children}
         <div className="mt-6 flex justify-end gap-3">
           <button
             type="button"
             onClick={onCancel}
-            className="rounded border border-outline px-4 py-2 text-label-md text-on-surface"
+            disabled={cancelDisabled}
+            className="rounded border border-outline px-4 py-2 text-label-md text-on-surface disabled:cursor-not-allowed disabled:opacity-50"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={onConfirm}
+            disabled={confirmDisabled}
             className={
-              destructive
+              (destructive
                 ? 'rounded border border-error px-4 py-2 text-label-md text-error'
-                : 'rounded bg-primary px-4 py-2 text-label-md text-on-primary'
+                : 'rounded bg-primary px-4 py-2 text-label-md text-on-primary') +
+              ' disabled:cursor-not-allowed disabled:opacity-50'
             }
           >
             {confirmLabel}

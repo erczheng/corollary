@@ -94,6 +94,25 @@ interface UIState {
    * come up on a cold start (CLAUDE.md rule 5) — this store is never
    * persisted to storage, so a reload always resets here. */
   accountMode: AccountMode
+  /** A `POST /api/account/cash-session` is in flight. While it is, the
+   * toggle and the confirm are disabled, so a confirm cannot be sent twice
+   * and a `DELETE` cannot race it. Never persisted — see `cashSession.ts`. */
+  cashSessionPending: boolean
+  /** The engine did not confirm a Cash session ended — the UI is already in
+   * Paper (the safe direction does not wait), but the server may still hold
+   * one. `null` when there is nothing to report. */
+  cashSessionEndError: string | null
+  /** A cash-session check's `GET`/`DELETE` is in flight. While it is, the
+   * Cash pill and the confirm are disabled, so the user's `POST` cannot be
+   * overtaken by a `DELETE` sent on a stale read. Cleared by the check's own
+   * 10s timeout, so a hung engine cannot lock the pill. */
+  cashSessionReconciling: boolean
+  /** `confirmedAt` of the session **this tab** confirmed. A check that finds
+   * a different (or no) session drops the tab to Paper: the one it
+   * confirmed is over, whoever started the new one. */
+  cashSessionConfirmedAt: string | null
+  /** Why a check moved this tab out of Cash, in words. `null` otherwise. */
+  cashSessionDropped: string | null
   /** Whether the engine may place orders unattended. */
   executionMode: ExecutionMode
   paletteOpen: boolean
@@ -283,6 +302,11 @@ interface UIState {
   submitOpenOrder: (contract: OptionContract, draft: OpenDraft) => void
   toggleTheme: () => void
   setAccountMode: (mode: AccountMode) => void
+  setCashSessionPending: (pending: boolean) => void
+  setCashSessionEndError: (message: string | null) => void
+  setCashSessionReconciling: (reconciling: boolean) => void
+  setCashSessionConfirmedAt: (confirmedAt: string | null) => void
+  setCashSessionDropped: (message: string | null) => void
   setExecutionMode: (mode: ExecutionMode) => void
   setActiveStrategyId: (id: string) => void
   openPalette: () => void
@@ -820,6 +844,11 @@ export const useUIStore = create<UIState>((set) => ({
   // that survives a reload. See `theme.ts` for why it is the only one.
   theme: loadTheme(),
   accountMode: 'paper',
+  cashSessionPending: false,
+  cashSessionEndError: null,
+  cashSessionReconciling: false,
+  cashSessionConfirmedAt: null,
+  cashSessionDropped: null,
   executionMode: 'manual',
   paletteOpen: false,
   activeStrategyId: 'strat-1',
@@ -903,6 +932,11 @@ export const useUIStore = create<UIState>((set) => ({
       return { theme }
     }),
   setAccountMode: (accountMode) => set({ accountMode }),
+  setCashSessionPending: (cashSessionPending) => set({ cashSessionPending }),
+  setCashSessionEndError: (cashSessionEndError) => set({ cashSessionEndError }),
+  setCashSessionReconciling: (cashSessionReconciling) => set({ cashSessionReconciling }),
+  setCashSessionConfirmedAt: (cashSessionConfirmedAt) => set({ cashSessionConfirmedAt }),
+  setCashSessionDropped: (cashSessionDropped) => set({ cashSessionDropped }),
   setExecutionMode: (executionMode) => set({ executionMode }),
   setActiveStrategyId: (activeStrategyId) => set({ activeStrategyId }),
   openPalette: () => set({ paletteOpen: true }),

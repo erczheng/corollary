@@ -171,3 +171,17 @@ async def test_the_blocked_flags_are_bools(make_broker) -> None:
     assert account.transfers_blocked is False
     assert account.shorting_enabled is True
     assert account.status == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_the_account_number_arrives_masked_and_only_masked(make_broker) -> None:
+    """The cash-session confirm names the account, so a tail is carried --
+    and only a tail. The full number is dropped inside the vendor decode, so
+    no ``Account`` (and no log line built from one) can hold it.
+    """
+    broker, _ = make_broker(single("account"))
+    account = await broker.account()
+    raw = load_fixture("account")["body"]["account_number"]
+
+    assert account.account_number_masked == "••••" + raw[-4:]
+    assert raw not in repr(account)

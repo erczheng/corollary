@@ -585,6 +585,24 @@ export function storeHandlers(): LiveSocketHandlers {
 
 let current: LiveSocket | null = null
 
+const openListeners = new Set<() => void>()
+
+function notifyOpen(): void {
+  for (const listener of [...openListeners]) listener()
+}
+
+/** Be told each time the app's socket reaches `open` — first connect and
+ * every reconnect. A reconnect is the engine coming back, possibly from a
+ * restart that cleared state this tab still believes in; rule 5's Cash
+ * session check (`cashSession.ts`) re-reads on it. **Listeners re-read;
+ * they never resume anything** — rule 9. Returns the unsubscribe. */
+export function onLiveSocketOpen(listener: () => void): () => void {
+  openListeners.add(listener)
+  return () => {
+    openListeners.delete(listener)
+  }
+}
+
 /** The app's live socket, or null before anything started one.
  *
  * Module-level because the invariant is app-wide, the same way
@@ -612,7 +630,17 @@ export function liveSocket(): LiveSocket | null {
  * two — which is why `useLiveSocket` registers no cleanup. That reasoning
  * is written out there, not here. */
 export function startLiveSocket(options: LiveSocketOptions = {}): LiveSocket {
-  if (current === null) current = new LiveSocket({ ...storeHandlers(), ...options })
+  if (current === null) {
+    const handlers = { ...storeHandlers(), ...options }
+    const onStatus = handlers.onStatus
+    current = new LiveSocket({
+      ...handlers,
+      onStatus: (status) => {
+        onStatus?.(status)
+        if (status === 'open') notifyOpen()
+      },
+    })
+  }
   current.start()
   return current
 }

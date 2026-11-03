@@ -255,6 +255,20 @@ function stubFetch(answers: Answers = {}) {
     const params = new URLSearchParams(url.slice(url.indexOf('?') + 1))
     const cash = params.get('account') === 'cash'
 
+    // Rule 5's standing check. A test that sets the store to Cash directly
+    // is asserting about a confirmed session, so the engine holds one; a
+    // check that found none would rightly drop the tab to Paper.
+    if (url.includes('/account/cash-session')) {
+      if ((init?.method ?? 'GET') === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }))
+      return Promise.resolve(
+        jsonResponse(200, {
+          active: true,
+          accountNumberMasked: '••••1234',
+          confirmedAt: '2026-09-12T14:00:00Z',
+          balance: '21337.12',
+        }),
+      )
+    }
     if (url.includes('/account/history')) {
       answers.onHistory?.(params)
       if (cash) return Promise.resolve(answers.account ?? UNAVAILABLE)
@@ -837,14 +851,26 @@ describe('Performance is the broker’s curve, with t₀ marked', () => {
 })
 
 describe('Cash without credentials', () => {
-  it('renders the server’s reason and the missing variable names, not an idle account', async () => {
+  /** The confirm reads the live account first, so with no live keys there is
+   * no account to name and nothing to confirm: it says why and stays shut.
+   * (It used to switch regardless, which is what the next test now reaches
+   * by setting the store directly.) */
+  it('cannot be confirmed — the dialog states the reason and stays in Paper', async () => {
     stubFetch()
     await renderDashboard()
 
     fireEvent.click(screen.getByRole('button', { name: 'Cash' }))
-    fireEvent.click(
-      within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Switch to Cash' }),
-    )
+    const dialog = screen.getByRole('alertdialog')
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/ALPACA_LIVE_API_KEY/)
+    expect(within(dialog).getByRole('button', { name: 'Switch to Cash' })).toBeDisabled()
+    expect(useUIStore.getState().accountMode).toBe('paper')
+  })
+
+  it('renders the server’s reason and the missing variable names, not an idle account', async () => {
+    stubFetch()
+    useUIStore.setState({ accountMode: 'cash', cashSessionConfirmedAt: '2026-09-12T14:00:00Z' })
+    render(<App />)
 
     expect(await screen.findByRole('heading', { name: 'Cash is not configured' })).toBeInTheDocument()
     expect(screen.getByText(/ALPACA_LIVE_API_KEY, ALPACA_LIVE_SECRET_KEY/)).toBeInTheDocument()

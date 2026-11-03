@@ -47,6 +47,7 @@ import type {
   AuditLogEntry,
   CalendarEvent,
   CalendarRange,
+  CashSessionState,
   ChartRange,
   DataFeed,
   DataSourceStatus,
@@ -915,6 +916,31 @@ export function fetchAccount(
   options: RequestOptions = {},
 ): Promise<AccountResponse> {
   return request<AccountResponse>('/account', { params: { account }, ...options })
+}
+
+/* Rule 5's Cash session — see `cashSession.ts`, which is the only caller.
+ *
+ * `confirmCashSession` posts back **the masked number the dialog displayed**,
+ * never a number the browser derived or remembered: the server checks it
+ * against the live account it reads itself, so the confirm is a statement
+ * about what the operator saw. `endCashSession` always answers 204. */
+export function fetchCashSession(options: RequestOptions = {}): Promise<CashSessionState> {
+  return request<CashSessionState>('/account/cash-session', options)
+}
+
+export function confirmCashSession(
+  accountNumber: string,
+  options: RequestOptions = {},
+): Promise<CashSessionState> {
+  return request<CashSessionState>('/account/cash-session', {
+    method: 'POST',
+    body: { accountNumber },
+    ...options,
+  })
+}
+
+export function endCashSession(options: RequestOptions = {}): Promise<void> {
+  return request<void>('/account/cash-session', { method: 'DELETE', ...options })
 }
 
 export function fetchAccountHistory(

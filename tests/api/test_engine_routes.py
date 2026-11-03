@@ -361,6 +361,8 @@ def test_there_is_no_flatten_endpoint(app: FastAPI) -> None:
 #: agree with the bug.
 SERVED_API_PATHS: Final[tuple[str, ...]] = (
     "/api/account",
+    # Rule 5: the server-checked Cash session (GET, POST, DELETE).
+    "/api/account/cash-session",
     "/api/account/history",
     "/api/account/transfers",
     "/api/activity",

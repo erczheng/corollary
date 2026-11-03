@@ -193,6 +193,10 @@ export function auditFieldLabel(entry: AuditLogEntry, catalog: AuditCatalog = {}
     return `Sentiment source — ${source}`
   }
 
+  // Rule 5's confirm and end rows. One field (`cash_session`) today; the
+  // category is the whole of what the label needs to say.
+  if (entry.category === 'account') return 'Cash session'
+
   const [event, channel] = entry.field.split('.')
   const eventLabel = NOTIFICATION_EVENT_LABEL[event as NotificationEvent]
   const channelLabel = CHANNEL_LABEL[channel as NotificationChannel]

@@ -858,6 +858,132 @@ def test_a_failing_job_still_states_what_its_last_success_did_not_cover(
     assert "dates after 2026-11-03 have not been fetched" in notice["message"]
 
 
+#: 14:00 EDT the same day: an early run for a Cash session confirmed mid-day.
+WOKEN_EDT = SEVEN_EDT + timedelta(hours=7)
+
+
+def test_a_woken_failure_beside_a_good_sweep_says_the_early_run_failed_and_the_rows_stand(
+    app: FastAPI, calendar: TestClient
+) -> None:
+    """Unit 2b audit, finding 3. The 07:00 sweep succeeded; the 14:00 early
+    run for the Cash holdings failed. The notice still reads failing -- the
+    failure is not hidden -- but it names the early run, and says the
+    sweep's rows stand rather than calling the whole job stale."""
+    app.state.scheduler = FakeScheduler(
+        {
+            "calendar_earnings": job(
+                "calendar_earnings",
+                last_success=SEVEN_EDT,
+                last_success_started=SEVEN_EDT,
+                last_failure=WOKEN_EDT,
+                last_error_type="TimeoutError",
+                last_failure_phase="woken",
+                failures=1,
+                runs=1,
+            )
+        }
+    )
+
+    notice = _notice(calendar, "calendar_earnings", "2026-10-14", "2026-10-20")
+
+    assert notice["state"] == "failing"
+    assert notice["lastErrorType"] == "TimeoutError"
+    message = notice["message"]
+    assert (
+        "an early run for the Cash holdings failed at 2026-10-14 14:00 EDT (TimeoutError)"
+        in message
+    )
+    assert "the 2026-10-14 07:00 EDT sweep's rows stand" in message
+    assert "stale since" not in message
+    assert "the last run failed" not in message
+
+
+def test_a_woken_failure_after_a_failed_sweep_says_both(
+    app: FastAPI, calendar: TestClient
+) -> None:
+    """The sweep failed at 07:00 and the early run at 14:00: the job is stale
+    since yesterday's success, and the notice names both failures."""
+    app.state.scheduler = FakeScheduler(
+        {
+            "calendar_earnings": job(
+                "calendar_earnings",
+                last_success=SEVEN_EDT - timedelta(days=1),
+                last_success_started=SEVEN_EDT - timedelta(days=1),
+                last_failure=WOKEN_EDT,
+                last_error_type="TimeoutError",
+                last_failure_phase="woken",
+                last_full_failure=SEVEN_EDT,
+                failures=2,
+                runs=1,
+            )
+        }
+    )
+
+    notice = _notice(calendar, "calendar_earnings", "2026-10-14", "2026-10-20")
+
+    assert notice["state"] == "failing"
+    message = notice["message"]
+    assert "stale since 2026-10-13 07:00 EDT" in message
+    assert "an early run for the Cash holdings failed at 2026-10-14 14:00 EDT" in message
+    assert "the sweep last failed at 2026-10-14 07:00 EDT" in message
+    assert "rows stand" not in message
+
+
+def test_a_woken_failure_after_a_restart_that_skipped_fresh_says_the_stored_rows_stand(
+    app: FastAPI, calendar: TestClient
+) -> None:
+    """Re-audit LOW: Cash never survives a restart, so the usual mid-day path
+    is a restart whose catch-up skipped as fresh, then a re-confirm whose early
+    run failed. No full run has failed, so the stored rows stand."""
+    app.state.scheduler = FakeScheduler(
+        {
+            "calendar_earnings": job(
+                "calendar_earnings",
+                last_failure=WOKEN_EDT,
+                last_error_type="TimeoutError",
+                last_failure_phase="woken",
+                last_skip_fresh_as_of=SEVEN_EDT,
+                failures=1,
+                runs=0,
+            )
+        }
+    )
+
+    notice = _notice(calendar, "calendar_earnings", "2026-10-14", "2026-10-20")
+
+    assert notice["state"] == "failing"
+    message = notice["message"]
+    assert "an early run for the Cash holdings failed at 2026-10-14 14:00 EDT" in message
+    assert (
+        "the rows stored before this process started (up to date as of "
+        "2026-10-14 07:00 EDT) stand"
+    ) in message
+    assert "never fetched successfully" not in message
+
+def test_a_scheduled_failure_keeps_the_sweep_wording(
+    app: FastAPI, calendar: TestClient
+) -> None:
+    app.state.scheduler = FakeScheduler(
+        {
+            "calendar_earnings": job(
+                "calendar_earnings",
+                last_success=SEVEN_EDT - timedelta(days=1),
+                last_success_started=SEVEN_EDT - timedelta(days=1),
+                last_failure=SEVEN_EDT,
+                last_error_type="TimeoutError",
+                last_failure_phase="scheduled",
+                last_full_failure=SEVEN_EDT,
+                failures=1,
+            )
+        }
+    )
+
+    message = _notice(calendar, "calendar_earnings", "2026-10-14", "2026-10-20")["message"]
+
+    assert "the last run failed at 2026-10-14 07:00 EDT (TimeoutError)" in message
+    assert "early run" not in message
+
+
 # --------------------------------------------------------------------------
 # A start-up catch-up that found the rows fresh is calm, and Eastern
 # --------------------------------------------------------------------------

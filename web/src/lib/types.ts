@@ -1263,8 +1263,9 @@ export interface RiskLimit {
  * `field` the source, the two values its old and new status. Only the weekly
  * audit run writes it; there is no human route to change a status. Mirrors
  * `AuditCategory` in `corollary/api/schemas.py` and `AUDIT_CATEGORIES` in
- * `db/models.py`. */
-export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist' | 'sentiment'
+ * `db/models.py`. `account` (rule 5) is a Cash session confirmed or ended —
+ * `field` `cash_session`, values `inactive` or `active ••••1234`. */
+export type AuditCategory = 'risk' | 'feed' | 'notification' | 'watchlist' | 'sentiment' | 'account'
 
 export interface AuditLogEntry {
   id: string
@@ -1321,6 +1322,8 @@ export type NotificationEvent =
   | 'sentiment_repromoted'
   | 'sentiment_audit_requested'
   | 'calendar_changed'
+  | 'cash_session_confirmed'
+  | 'cash_session_ended'
 
 export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   order_filled: 'Order filled',
@@ -1342,6 +1345,8 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   sentiment_repromoted: 'Sentiment source re-promoted',
   sentiment_audit_requested: 'Sentiment audit started by operator',
   calendar_changed: 'Calendar entry changed',
+  cash_session_confirmed: 'Cash session confirmed',
+  cash_session_ended: 'Cash session ended',
 }
 
 /** Routing per channel.
@@ -1573,6 +1578,24 @@ export interface AccountResponse {
   cashAccountAvailable: boolean
   cashAccountUnavailableReason: string | null
   missingLiveCredentialEnvVars: string[]
+  /** `••••1234` — the last four characters of this account's number, the only
+   * form the server ever sends (rule 6). `null` when the broker reported no
+   * number long enough to mask. The Cash confirm shows it and posts it back
+   * to `/api/account/cash-session` as `accountNumber`. */
+  accountNumberMasked: string | null
+}
+
+/** `GET` / `POST /api/account/cash-session` — rule 5's server-checked Cash
+ * session, held in engine memory only, so a restart has none. `POST` takes
+ * `{ accountNumber }`: the masked number (`••••1234`) the confirm dialog
+ * showed, which the server checks against the live account it reads itself.
+ * Inactive means every other field is null. `balance` is the live equity as
+ * the server read it at confirmation — a **decimal string**, not a number. */
+export interface CashSessionState {
+  active: boolean
+  accountNumberMasked: string | null
+  confirmedAt: string | null
+  balance: string | null
 }
 
 /** One point on the broker's own equity curve. Every figure is nullable:
