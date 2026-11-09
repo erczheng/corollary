@@ -164,7 +164,7 @@ SCRIPT_GLOB = "*.py"
 SCRIPT_FILES = tuple(sorted(SCRIPTS.glob(SCRIPT_GLOB)))
 
 #: The scripts that exist today. The glob must find at least these.
-KNOWN_SCRIPTS = frozenset({"probe_phase3.py", "weekly_audit.py"})
+KNOWN_SCRIPTS = frozenset({"probe_phase3.py", "weekday_session.py", "weekly_audit.py"})
 
 #: The package's own two vendor directories -- the files that reach Alpaca
 #: through a ``self._client`` attribute.
