@@ -1143,6 +1143,18 @@ parallel. Neither is an owner decision.
   audit that has never run, which is the claim Settings' *insufficient sample*
   state exists to avoid.
 
+**Q23 — What is left of steps 5–7 (2026-11-09).** Carried in full by
+`2026-11-09-phase-3-steps-5-7-remainder.md`. It **amends decision 13**: every
+eligibility check also needs ≥5 distinct sessions in each window (Q23b). It
+**amends Q6**: a voided run's status changes are restored by a script, which
+may restore only a status an earlier run decided, never set a new one (Q23a).
+The first real audit, run 2 (2026-11-09), graded under the reference rule the
+owner replaced on 2026-10-22, before that change merged. It is voided and
+re-graded. Economic-release actuals take FRED's release-day vintage through a
+fixed series map (Q23c). Central-bank seed verification is deferred (Q23d).
+The engine was resumed on the owner's instruction (Q23e). Step 5's
+mean-versus-median question is closed on evidence (planner resolution P1).
+
 ---
 
 ## Decisions
