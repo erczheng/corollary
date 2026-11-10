@@ -27,13 +27,21 @@ What :func:`void_audit_run` does, in **one transaction**:
 
 Notifying is the caller's, **after** the commit (``scripts/void_audit_run.py``
 emits ``sentiment_audit_voided``): this module never emits, so a refusal
-cannot.
+cannot. So is the success log line (:func:`log_voided`): :func:`void_audit_run`
+returns **straight after its COMMIT** (finding F1), so that nothing of its own
+runs between the commit and the caller holding the result. A caller whose
+void raised anyway (a Ctrl-C landing in the session's close, say) reads it
+back with :func:`read_back_void` rather than assuming either outcome.
 
 **Refusals write nothing and are logged** (rule 8's spirit) with the rule,
 the inputs and the instant -- :class:`VoidRule` names every one. They are
 decided by pure functions (:func:`check_reason`, :func:`check_run`,
 :func:`plan_restorations`) over rows read inside the void's own transaction,
-before its first write.
+before its first write, and **logged only once that transaction has rolled
+back** (finding F2): a log handler that blocks (a stderr under a conhost
+QuickEdit selection, an unread pipe) must not hold SQLite's write lock while
+it does, because every other writer in the app waits on that lock and the
+watchdog's write is on the event loop.
 
 **A failed run is voided like any other** (U4a-fix, ruling M3). A run's
 transitions commit only in the transaction that closes it ``succeeded``
@@ -52,7 +60,8 @@ be written correctly: a restore row inside a run's span, or a status
 ``audit_log`` cannot prove.
 
 **Concurrency.** The void's first statement is ``BEGIN IMMEDIATE``
-(:func:`take_write_lock`), before it reads its clock and before any check,
+(:func:`corollary.db.session.take_write_lock`), before it reads its clock and
+before any check,
 and ``audit_runner._open_run`` does the same. The driver would otherwise run
 every read before the first write outside any transaction, and a run's
 ``running`` row could commit between the void's checks and its writes, so
@@ -67,7 +76,7 @@ line.
 """
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -86,6 +95,7 @@ from corollary.db.models import (
     LabelOutcomeVoided,
     SentimentSourceStatus,
 )
+from corollary.db.session import take_write_lock
 from corollary.db.types import UtcDateTime
 
 __all__ = [
@@ -102,10 +112,11 @@ __all__ = [
     "check_reason",
     "check_run",
     "latest_standing_run",
+    "log_voided",
     "plan_restorations",
+    "read_back_void",
     "restored_reason",
     "run_of",
-    "take_write_lock",
     "void_audit_run",
     "void_notice_text",
 ]
@@ -336,6 +347,31 @@ def _unprovable(message: str, **facts: object) -> Refusal:
     return Refusal(VoidRule.RESTORE_UNPROVABLE, message, facts)
 
 
+def _previous_transition(
+    move: SentimentLogRow,
+    logs: Sequence[SentimentLogRow],
+    voided_run_id: int,
+    standing: Collection[int],
+) -> SentimentLogRow | None:
+    """The source's newest ``audit_log`` row before ``move`` in a ``standing``
+    run other than the one voided: where a restore to ``active`` /
+    ``demoted`` takes its ``changed_at`` and run from. ``None`` if there is
+    none. Shared by :func:`plan_restorations` and :func:`read_back_void`, so
+    the two cannot disagree about it."""
+    earlier = [
+        row
+        for row in logs
+        if row.source == move.source
+        and row.run_id is not None
+        and row.run_id != voided_run_id
+        and row.run_id in standing
+        and row.at < move.at
+    ]
+    if not earlier:
+        return None
+    return max(earlier, key=lambda row: (row.at, row.id))
+
+
 def plan_restorations(
     run: RunFacts,
     reason: str,
@@ -405,22 +441,13 @@ def plan_restorations(
                 )
             )
             continue
-        earlier = [
-            row
-            for row in logs
-            if row.source == source
-            and row.run_id is not None
-            and row.run_id != run.id
-            and row.run_id in standing
-            and row.at < move.at
-        ]
-        if not earlier:
+        previous = _previous_transition(move, logs, run.id, standing)
+        if previous is None:
             return _unprovable(
                 f"run {run.id} moved {source} from {move.previous_value}, but no earlier "
                 f"non-voided run's audit_log row put it there",
                 source=source,
             )
-        previous = max(earlier, key=lambda row: (row.at, row.id))
         if previous.new_value != move.previous_value:
             return _unprovable(
                 f"run {run.id} moved {source} from {move.previous_value}, but its previous "
@@ -590,51 +617,75 @@ def _refuse(refusal: Refusal, inputs: Mapping[str, object]) -> VoidRefused:
     return VoidRefused(refusal)
 
 
-def take_write_lock(session: Session) -> None:
-    """Begin ``session``'s transaction with ``BEGIN IMMEDIATE``: SQLite's write
-    lock, taken **before** any read.
+def _decide(
+    session: Session, run_id: int, reason: str, at: datetime
+) -> Refusal | tuple[RunFacts, tuple[Restoration, ...]]:
+    """Every check, on rows read inside the void's transaction: the refusal,
+    or the run and what each source goes back to. Writes nothing."""
+    runs = _load_runs(session)
+    refusal = check_run(run_id, runs, at)
+    if refusal is not None:
+        return refusal
+    run = next(r for r in runs if r.id == run_id)
+    planned = plan_restorations(
+        run, reason, _load_logs(session, runs), _load_sources(session), runs
+    )
+    if isinstance(planned, Refusal):
+        return planned
+    return run, planned
 
-    Needed because of how the driver opens transactions. ``sqlite3``'s legacy
-    transaction control (``autocommit == LEGACY_TRANSACTION_CONTROL``, the
-    default, and what ``db.session``'s engine gets) issues an implicit
-    *deferred* ``BEGIN`` only before an INSERT, UPDATE or DELETE. Every SELECT
-    before a session's first write therefore runs outside any transaction,
-    each in its own autocommit snapshot, and another connection may commit
-    between those reads and the first write without anything noticing.
 
-    ``BEGIN IMMEDIATE`` takes the RESERVED lock at once. Any other writer
-    then waits for this transaction's commit or rollback (up to
-    ``SQLITE_BUSY_TIMEOUT_MS``, then ``database is locked``); readers carry
-    on under WAL. Every later statement runs inside this one transaction, and
-    the driver, seeing a transaction already open, issues no ``BEGIN`` of its
-    own. ``session.commit()`` commits it, and closing the session without a
-    commit rolls it back.
-
-    The two writers that must not interleave, the void
-    (:func:`void_audit_run`) and a run's open (``audit_runner._open_run``),
-    each call this first and read their clock after it. Whichever takes the
-    lock first therefore has the earlier instant, and the other sees its
-    committed result before deciding anything.
-
-    No other ``BEGIN IMMEDIATE`` exists under ``corollary/``. This is the
-    first, and it is explicit on the session's own connection rather than an
-    engine-wide ``begin`` hook, which would change every transaction in the
-    app. It must be the session's first statement. A transaction already open
-    on the connection would make ``BEGIN`` fail, so that raises here,
-    naming the cause.
-    """
-    connection = session.connection()
-    if connection.dialect.name != "sqlite":
-        raise NotImplementedError(
-            f"take_write_lock is written for SQLite, not {connection.dialect.name}"
+def _write_void(
+    session: Session,
+    run_id: int,
+    planned: Sequence[Restoration],
+    at: datetime,
+    reason: str,
+) -> int:
+    """Every write of the void, uncommitted: the mark, the archive, each
+    restoration and its ``audit_log`` row. Returns the outcomes archived."""
+    # Every read before this ran inside the write lock, so nothing has
+    # committed since. The conditional writes and row-count checks below
+    # are a second line, not the serialization.
+    marked = session.execute(
+        update(AuditRun)
+        .where(AuditRun.id == run_id)
+        .where(AuditRun.voided_at.is_(None))
+        .where(AuditRun.status.in_(_TERMINAL))
+        .values(voided_at=at, void_reason=reason)
+        .execution_options(synchronize_session=False)
+    )
+    if _rowcount(marked) != 1:
+        raise RuntimeError(f"audit run {run_id} changed under the void; nothing committed")
+    archived = _archive_outcomes(session, run_id, at)
+    for restoration in planned:
+        restored = session.execute(
+            update(SentimentSourceStatus)
+            .where(SentimentSourceStatus.source == restoration.source)
+            .where(SentimentSourceStatus.status == restoration.from_status)
+            .where(SentimentSourceStatus.audit_run_id == run_id)
+            .values(
+                status=restoration.to_status,
+                changed_at=restoration.changed_at,
+                reason=restoration.reason,
+                audit_run_id=restoration.audit_run_id,
+            )
+            .execution_options(synchronize_session=False)
         )
-    driver = connection.connection.driver_connection
-    if getattr(driver, "in_transaction", False):
-        raise RuntimeError(
-            "a transaction is already open on this connection; the write lock must be "
-            "the session's first statement"
+        if _rowcount(restored) != 1:
+            raise RuntimeError(
+                f"{restoration.source}'s status changed under the void; nothing committed"
+            )
+        session.add(
+            AuditLog(
+                at=at,
+                category=_SENTIMENT,
+                field=restoration.source,
+                previous_value=restoration.from_status,
+                new_value=restoration.to_status,
+            )
         )
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    return archived
 
 
 def void_audit_run(
@@ -647,11 +698,16 @@ def void_audit_run(
 ) -> VoidResult:
     """Void run ``run_id`` in one transaction (see the module docstring).
 
-    ``clock`` is read once, **after** :func:`take_write_lock`. That makes the
-    void's instant later than everything committed before it and earlier
-    than any run that opens after it. Raises :class:`VoidRefused` (logged,
-    nothing written) on every refusal. Any other exception rolls the whole
-    void back.
+    ``clock`` is read once, **after** :func:`~corollary.db.session.take_write_lock`.
+    That makes the void's instant later than everything committed before it
+    and earlier than any run that opens after it. Raises :class:`VoidRefused`
+    on every refusal, having written nothing, and logs the refusal once the
+    lock is released (F2). If releasing it raises, the refusal is still
+    logged and the release's error is what propagates (E3). Any other
+    exception rolls the whole void back.
+
+    Returns straight after the COMMIT (F1). The success line
+    (:func:`log_voided`) and the notification are the caller's.
     """
     clean = reason.strip()
     inputs: dict[str, object] = {
@@ -664,83 +720,66 @@ def void_audit_run(
         # Nothing is read or written, so no lock: the instant is the refusal's own.
         inputs["at"] = _aware_utc(clock()).isoformat()
         raise _refuse(refusal, inputs)
-    with session_factory() as session:
-        take_write_lock(session)
-        at = _aware_utc(clock())
-        inputs["at"] = at.isoformat()
-        runs = _load_runs(session)
-        refusal = check_run(run_id, runs, at)
-        if refusal is not None:
-            raise _refuse(refusal, inputs)
-        run = next(r for r in runs if r.id == run_id)
-        planned = plan_restorations(
-            run, clean, _load_logs(session, runs), _load_sources(session), runs
-        )
-        if isinstance(planned, Refusal):
-            raise _refuse(planned, inputs)
+    # Set only on the refusal path: what the ``finally`` below logs.
+    declined: Refusal | None = None
+    refused: VoidRefused | None = None
+    try:
+        with session_factory() as session:
+            take_write_lock(session)
+            at = _aware_utc(clock())
+            inputs["at"] = at.isoformat()
+            decided = _decide(session, run_id, clean, at)
+            if not isinstance(decided, Refusal):
+                run, planned = decided
+                archived = _write_void(session, run_id, planned, at, clean)
+                # Built before the commit, so that only the session's close
+                # stands between the COMMIT and the caller holding it (F1).
+                result = VoidResult(
+                    run_id=run_id,
+                    run_trigger=run.trigger,
+                    run_status=run.status,
+                    run_started_at=run.started_at,
+                    reason=clean,
+                    voided_at=at,
+                    archived=archived,
+                    restorations=planned,
+                    correlation_id=correlation_id,
+                )
+                session.commit()
+                return result
+            # Refused, with nothing written. Release the write lock
+            # **before** the refusal is logged (F2): this rollback, then the
+            # ``with``'s close. The rule, the inputs and the instant were all
+            # decided above, under the lock; logging them later changes none
+            # of them.
+            declined = decided
+            session.rollback()
+    finally:
+        # In a ``finally`` so that a rollback or close that raises cannot
+        # cost rule 8's record (E3). When the release succeeds this still
+        # runs after it, so F2 holds. When it raises, the refusal is logged
+        # and the release's error propagates: a database fault, not a
+        # refusal, and the caller reads the run back as for any other.
+        if declined is not None:
+            refused = _refuse(declined, inputs)
+    if refused is None:  # pragma: no cover - the ``with`` returns, raises or refuses
+        raise RuntimeError(f"the void of audit run {run_id} neither returned nor refused")
+    raise refused
 
-        # Every read above ran inside the write lock, so nothing has
-        # committed since. The conditional writes and row-count checks
-        # below are a second line, not the serialization.
-        marked = session.execute(
-            update(AuditRun)
-            .where(AuditRun.id == run_id)
-            .where(AuditRun.voided_at.is_(None))
-            .where(AuditRun.status.in_(_TERMINAL))
-            .values(voided_at=at, void_reason=clean)
-            .execution_options(synchronize_session=False)
-        )
-        if _rowcount(marked) != 1:
-            raise RuntimeError(f"audit run {run_id} changed under the void; nothing committed")
-        archived = _archive_outcomes(session, run_id, at)
-        for restoration in planned:
-            restored = session.execute(
-                update(SentimentSourceStatus)
-                .where(SentimentSourceStatus.source == restoration.source)
-                .where(SentimentSourceStatus.status == restoration.from_status)
-                .where(SentimentSourceStatus.audit_run_id == run_id)
-                .values(
-                    status=restoration.to_status,
-                    changed_at=restoration.changed_at,
-                    reason=restoration.reason,
-                    audit_run_id=restoration.audit_run_id,
-                )
-                .execution_options(synchronize_session=False)
-            )
-            if _rowcount(restored) != 1:
-                raise RuntimeError(
-                    f"{restoration.source}'s status changed under the void; nothing committed"
-                )
-            session.add(
-                AuditLog(
-                    at=at,
-                    category=_SENTIMENT,
-                    field=restoration.source,
-                    previous_value=restoration.from_status,
-                    new_value=restoration.to_status,
-                )
-            )
-        session.commit()
 
-    result = VoidResult(
-        run_id=run_id,
-        run_trigger=run.trigger,
-        run_status=run.status,
-        run_started_at=run.started_at,
-        reason=clean,
-        voided_at=at,
-        archived=archived,
-        restorations=planned,
-        correlation_id=correlation_id,
-    )
+def log_voided(result: VoidResult) -> None:
+    """The void's success line: the run, the reason, what was archived and
+    what was restored. The caller's to write, once :func:`void_audit_run` has
+    returned (F1), so a log handler that raises or blocks can never stand
+    between the commit and the caller holding the result."""
     logger.info(
         "sentiment audit run %d voided",
-        run_id,
+        result.run_id,
         extra={
             "event": "sentiment_audit_run_voided",
-            "audit_run_id": run_id,
-            "reason": clean,
-            "archived_outcomes": archived,
+            "audit_run_id": result.run_id,
+            "reason": result.reason,
+            "archived_outcomes": result.archived,
             "restorations": [
                 {
                     "source": r.source,
@@ -748,10 +787,121 @@ def void_audit_run(
                     "to": r.to_status,
                     "audit_run_id": r.audit_run_id,
                 }
-                for r in planned
+                for r in result.restorations
             ],
-            "at": at.isoformat(),
-            "correlation_id": correlation_id,
+            "at": result.voided_at.isoformat(),
+            "correlation_id": result.correlation_id,
         },
     )
-    return result
+
+
+def read_back_void(
+    session_factory: Callable[[], Session],
+    *,
+    run_id: int,
+    reason: str,
+    voided_at: datetime,
+    correlation_id: str,
+) -> VoidResult | None:
+    """One void, read back from what it committed: the :class:`VoidResult`
+    :func:`void_audit_run` returned, or ``None`` if that void did not land.
+
+    For a caller whose :func:`void_audit_run` raised something other than
+    :class:`VoidRefused`, which may have come after the COMMIT (F1).
+    ``voided_at`` is the one reading of that call's clock. The void landed
+    exactly when run ``run_id`` carries that ``voided_at`` and this
+    ``reason``. That match is strict because voids serialize on the write
+    lock and a run is voided at most once, not because of the clock check.
+    Another void of the run that committed before this call took the lock
+    would have had this call refused -- ``already_voided``, or
+    ``another_run_running`` first if a run was open, since :func:`check_run`
+    tests that before it looks at ``voided_at`` -- so this call would not be
+    reading back. One that committed after this call released the lock read
+    its clock only after taking it, so no earlier than this call's reading on
+    a clock that does not run backwards. ``clock_behind`` is not the
+    reason: :func:`check_run` refuses a void of an already-voided run before
+    it compares the clock at all.
+
+    Reads only, and takes no lock. ``archived`` counts run ``run_id``'s rows
+    in ``label_outcome_voided``; a run is voided at most once. The
+    restorations are the void's own ``audit_log`` rows (``at`` =
+    ``voided_at``). Each one not to ``unaudited`` takes its ``changed_at``
+    and run from :func:`_previous_transition`, as the planner did, over the
+    runs that stood at ``voided_at``. ``audit_log`` is only ever appended to,
+    so that answer cannot have changed since. A history that no longer
+    yields it raises rather than reporting a guess.
+    """
+    clean = reason.strip()
+    at = _aware_utc(voided_at)
+    with session_factory() as session:
+        row = session.get(AuditRun, run_id)
+        if (
+            row is None
+            or row.voided_at is None
+            or _aware_utc(row.voided_at) != at
+            or row.void_reason != clean
+        ):
+            return None
+        runs = _load_runs(session)
+        logs = _load_logs(session, runs)
+        archived = int(
+            session.scalar(
+                select(func.count())
+                .select_from(LabelOutcomeVoided)
+                .where(LabelOutcomeVoided.audit_run_id == run_id)
+            )
+            or 0
+        )
+    run = next(r for r in runs if r.id == run_id)
+    # The runs that stood when the void planned: not voided by then.
+    standing = {
+        r.id for r in runs if r.id != run_id and (r.voided_at is None or r.voided_at > at)
+    }
+    restorations: list[Restoration] = []
+    own_rows = sorted(
+        (log for log in logs if log.at == at and log.run_id is None),
+        key=lambda log: log.source,
+    )
+    for restore in own_rows:
+        if restore.new_value == _UNAUDITED:
+            restorations.append(
+                Restoration(
+                    source=restore.source,
+                    from_status=restore.previous_value,
+                    to_status=_UNAUDITED,
+                    changed_at=None,
+                    reason=None,
+                    audit_run_id=None,
+                )
+            )
+            continue
+        moves = [log for log in logs if log.source == restore.source and log.run_id == run_id]
+        previous = (
+            _previous_transition(moves[0], logs, run_id, standing) if len(moves) == 1 else None
+        )
+        if previous is None or previous.new_value != restore.new_value:
+            raise RuntimeError(
+                f"run {run_id} is voided, but its restoration of {restore.source} to "
+                f"{restore.new_value} cannot be read back from audit_log"
+            )
+        restorations.append(
+            Restoration(
+                source=restore.source,
+                from_status=restore.previous_value,
+                to_status=restore.new_value,
+                changed_at=previous.at,
+                reason=restored_reason(run_id, clean),
+                audit_run_id=previous.run_id,
+            )
+        )
+    return VoidResult(
+        run_id=run_id,
+        run_trigger=run.trigger,
+        run_status=run.status,
+        run_started_at=run.started_at,
+        reason=clean,
+        voided_at=at,
+        archived=archived,
+        restorations=tuple(restorations),
+        correlation_id=correlation_id,
+    )

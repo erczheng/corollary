@@ -174,7 +174,6 @@ from corollary.data.news.audit import (
     plan_audit,
     reference_instant,
 )
-from corollary.data.news.audit_void import take_write_lock
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels, verdict_histories
 from corollary.data.news.watchlist import MARKET_TICKER
@@ -188,6 +187,7 @@ from corollary.db.models import (
     SentimentLabelRow,
     SentimentSourceStatus,
 )
+from corollary.db.session import take_write_lock
 from corollary.wire import WireFormatError
 
 __all__ = [
@@ -429,7 +429,7 @@ def _open_run(
 
     Returns the new row's id and its ``started_at``. That is ``clock``'s one
     reading, taken **after** the write lock
-    (:func:`~corollary.data.news.audit_void.take_write_lock`) and before
+    (:func:`~corollary.db.session.take_write_lock`) and before
     every check, so a void that committed first is in the past of this run.
     A void that comes later waits for this commit and then sees the
     ``running`` row and is refused (R4, finding M1). Reading the clock before

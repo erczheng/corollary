@@ -30,7 +30,9 @@ from corollary.data.news.audit_void import (
     VoidRefused,
     VoidResult,
     VoidRule,
+    log_voided,
     plan_restorations,
+    read_back_void,
     restored_reason,
     void_audit_run,
     void_notice_text,
@@ -58,6 +60,7 @@ from tests.data.news.test_audit_runner import (
     _five_session_week,
     _label,
 )
+from tests.db.test_session import _lock_is_free
 
 UTC = timezone.utc
 REASON = "run 2 graded syndicated twins twice"
@@ -807,6 +810,171 @@ def test_a_void_arriving_mid_open_waits_and_then_sees_the_run(db_engine: Engine)
         opened = session.get(AuditRun, run3)
         assert voided is not None and voided.voided_at is None
         assert opened is not None and (opened.status, opened.started_at) == ("running", started_at)
+
+
+# ------------------------------------------------- the commit and the lock
+
+
+def test_the_void_returns_straight_after_its_commit(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1, the auditor's reproduction: a Ctrl-C landing on the success log
+    line used to escape the void after its COMMIT, so the caller never had the
+    result to notify with. Nothing of the void's own runs after the commit
+    now; the line is the caller's (:func:`log_voided`)."""
+    _run1, run2 = _history(db_engine, (("massive", "active", "demoted"),))
+
+    def interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(audit_void.logger, "info", interrupt)
+    try:
+        result = _void(db_engine, run2)
+    except KeyboardInterrupt:  # pragma: no cover - only while F1 is open
+        pytest.fail("a KeyboardInterrupt after the void's commit escaped void_audit_run")
+    assert (result.run_id, result.voided_at) == (run2, NOW)
+    with Session(db_engine) as session:
+        run = session.get(AuditRun, run2)
+        assert run is not None and run.voided_at == NOW
+
+
+def test_the_success_line_is_logged_by_the_caller_not_the_void(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    _run1, run2 = _history(db_engine, (("massive", "active", "demoted"),))
+    with caplog.at_level(logging.DEBUG, logger="corollary.data.news.audit_void"):
+        result = _void(db_engine, run2)
+        assert [r for r in caplog.records if r.name == audit_void.logger.name] == []
+        log_voided(result)
+    [record] = [
+        r for r in caplog.records if getattr(r, "event", None) == "sentiment_audit_run_voided"
+    ]
+    assert record.levelno == logging.INFO
+    assert getattr(record, "audit_run_id") == run2
+    assert getattr(record, "reason") == REASON
+    assert getattr(record, "archived_outcomes") == 2
+    assert getattr(record, "restorations") == [
+        {"source": "massive", "from": "demoted", "to": "active", "audit_run_id": _run1}
+    ]
+    assert getattr(record, "at") == NOW.isoformat()
+    assert getattr(record, "correlation_id") == "c0ffee"
+
+
+def test_read_back_rebuilds_exactly_the_result_the_void_returned(db_engine: Engine) -> None:
+    """F1: a caller whose void raised reads it back. Each kind of restoration
+    -- to a run's earlier status, and to ``unaudited`` -- comes back as the
+    void planned it."""
+    run1, run2 = _history(
+        db_engine, (("massive", "active", "demoted"), ("rules", "unaudited", "active"))
+    )
+    result = _void(db_engine, run2)
+    assert {r.audit_run_id for r in result.restorations} == {run1, None}
+    assert read_back_void(
+        _sessions(db_engine), run_id=run2, reason=f"  {REASON} ", voided_at=NOW,
+        correlation_id="c0ffee",
+    ) == result
+
+
+def test_read_back_finds_no_void_that_is_not_this_one(db_engine: Engine) -> None:
+    run1, run2 = _history(db_engine, (("massive", "active", "demoted"),))
+    sessions = _sessions(db_engine)
+
+    def read(run_id: int, reason: str = REASON, at: datetime = NOW) -> VoidResult | None:
+        return read_back_void(
+            sessions, run_id=run_id, reason=reason, voided_at=at, correlation_id="c0ffee"
+        )
+
+    assert read(run2) is None  # nothing voided yet
+    _void(db_engine, run2)
+    assert read(run2) is not None
+    assert read(run2, reason="another reason") is None
+    assert read(run2, at=NOW + timedelta(microseconds=1)) is None
+    assert read(run1) is None
+    assert read(99) is None
+
+
+@pytest.mark.parametrize("rule", [VoidRule.RUN_NOT_FOUND, VoidRule.RESTORE_UNPROVABLE])
+def test_a_refusal_is_logged_after_the_write_lock_is_released(
+    db_engine: Engine, rule: VoidRule
+) -> None:
+    """F2: the refusal's log line used to be written inside ``BEGIN
+    IMMEDIATE``, so a stderr that blocks (a conhost QuickEdit selection, an
+    unread pipe) held every other writer -- the watchdog's on the event loop
+    among them -- past ``SQLITE_BUSY_TIMEOUT_MS``. A second connection must
+    take the lock **during** the log call."""
+    if rule is VoidRule.RUN_NOT_FOUND:
+        _history(db_engine, (("massive", "active", "demoted"),))
+        run_id = 99
+    else:
+        with Session(db_engine) as session:
+            run_id = _run(session, T1)
+            _move(session, run_id, T1, "massive", "active", "demoted")
+            session.commit()
+    database = db_engine.url.database
+    assert database is not None
+    free_during_the_log: list[bool] = []
+
+    class LockProbe(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if getattr(record, "event", None) == "sentiment_audit_void_refused":
+                free_during_the_log.append(_lock_is_free(Path(database)))
+
+    target = logging.getLogger(audit_void.logger.name)
+    probe = LockProbe(level=logging.WARNING)
+    level = target.level
+    target.addHandler(probe)
+    target.setLevel(logging.WARNING)
+    try:
+        with pytest.raises(VoidRefused) as refused:
+            _void(db_engine, run_id)
+    finally:
+        target.removeHandler(probe)
+        target.setLevel(level)
+    assert refused.value.refusal.rule is rule
+    assert free_during_the_log == [True]
+
+
+@pytest.mark.parametrize("step", ["rollback", "close"])
+def test_a_refusal_is_logged_even_when_releasing_the_lock_raises(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture, step: str
+) -> None:
+    """E3: F2 moved the refusal's log line after the release, so a rollback
+    or close that raised skipped it, and rule 8's record of the refusal was
+    lost. It is logged in a ``finally`` now. The release's own error still
+    propagates: it is a database fault, and dressing it as a clean refusal
+    would hide it. Nothing is written either way."""
+    _history(db_engine, (("massive", "active", "demoted"),))
+    before = _snapshot(db_engine)
+
+    class ReleaseRaises(Session):
+        def rollback(self) -> None:
+            if step != "rollback":
+                return super().rollback()
+            # Fails without rolling back: the ``with``'s close still does.
+            raise RuntimeError("SYNTHETIC: the rollback failed")
+
+        def close(self) -> None:
+            super().close()
+            if step == "close":
+                raise RuntimeError("SYNTHETIC: the close failed")
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="corollary.data.news.audit_void"):
+        with pytest.raises(RuntimeError, match=f"SYNTHETIC: the {step} failed"):
+            void_audit_run(
+                lambda: ReleaseRaises(db_engine),
+                run_id=99,
+                reason=REASON,
+                clock=lambda: NOW,
+                correlation_id="c0ffee",
+            )
+    [record] = [
+        r for r in caplog.records if getattr(r, "event", None) == "sentiment_audit_void_refused"
+    ]
+    assert getattr(record, "rule") == VoidRule.RUN_NOT_FOUND.value
+    assert getattr(record, "inputs")["run_id"] == 99
+    assert getattr(record, "at") == NOW.isoformat()
+    assert _snapshot(db_engine) == before
 
 
 # ------------------------------------------------------------ the catch-up

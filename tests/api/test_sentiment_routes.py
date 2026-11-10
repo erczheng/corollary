@@ -13,11 +13,13 @@ scheduler's ``sentiment_audit_deps`` is replaced, because building real
 ``ContextServices`` would construct vendor clients.
 """
 
+import ast
 import inspect
 import logging
 import re
 import time
 from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1263,6 +1265,714 @@ def test_no_api_module_writes_the_source_status() -> None:
         if _writes_the_source_status(path.read_text(encoding="utf-8"))
     ]
     assert offenders == [], offenders
+
+
+#: The tables R4 leaves to the audit run and the void script: a run, its
+#: graded outcomes, and the archive a void moves them to. The manual
+#: ``POST /api/settings/sentiment/audit`` starts ``audit_runner``, which
+#: writes its own rows, so no module under ``corollary/api`` writes any of
+#: the three -- in any column, by any path. The rule is the table, not the
+#: column: enumerating the ways to write ``voided_at`` did not converge.
+_GUARDED_MODELS = frozenset({"AuditRun", "LabelOutcome", "LabelOutcomeVoided"})
+_GUARDED_TABLES = frozenset({"audit_run", "label_outcome", "label_outcome_voided"})
+#: The statement builders, called on the model or table they write.
+_STATEMENT_CALLS = frozenset({"update", "insert", "delete"})
+#: Methods that write when called on a chain over a guarded model, table or
+#: row: ``query(AuditRun)...update(...)``, ``AuditRun.__table__.delete()``,
+#: ``insert(AuditRun).on_conflict_do_update(...)``, ``run.__dict__.update``.
+_CHAIN_WRITES = frozenset(
+    {
+        "update",
+        "delete",
+        "insert",
+        "values",
+        "ordered_values",
+        "from_select",
+        "on_conflict_do_update",
+        "on_conflict_do_nothing",
+    }
+)
+#: The session's unit of work, and its bulk forms.
+_SESSION_WRITES = frozenset(
+    {
+        "add",
+        "add_all",
+        "merge",
+        "delete",
+        "bulk_save_objects",
+        "bulk_insert_mappings",
+        "bulk_update_mappings",
+    }
+)
+#: Calls whose first argument names the table they hand back.
+_TABLE_BUILDERS = frozenset({"aliased", "table", "Table"})
+#: ``audit_run``'s void columns. Not the rule -- the rule is the table --
+#: but a second net for a write whose table the scan cannot see: a bare
+#: ``run.voided_at = now``, ``update(t)`` with ``t`` built elsewhere.
+_VOID_COLUMNS = frozenset({"voided_at", "void_reason"})
+#: A dotted name holding either part names the void's module or its script.
+_VOID_MODULE_PARTS = frozenset({"audit_void", "void_audit_run"})
+#: Names the API has no reason to say at all, as a name or an attribute:
+#: the void's module, its entry point, and the archive's model.
+_VOID_NAMES = _VOID_MODULE_PARTS | {"LabelOutcomeVoided"}
+#: The void's module or script named in a string -- ``scripts/void_audit_run.py``,
+#: ``scripts.void_audit_run``, ``corollary.data.news.audit_void`` -- which is
+#: how ``subprocess``, ``runpy`` and ``importlib`` reach it. ``\b`` counts
+#: ``_`` as part of a word, so the notice's event name
+#: ``sentiment_audit_voided`` is not one.
+_VOID_MODULE_TEXT = re.compile(r"\b(?:audit_void|void_audit_run)\b")
+_VOID_ARCHIVE = re.compile(r"label_outcome_voided|LabelOutcomeVoided")
+#: A logging call. The keys of its ``extra={...}`` name log fields, not
+#: columns: ``routes/sentiment.py`` logs a damaged row's ``"voided_at"``.
+_LOG_CALLS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
+#: Stands in, in a folded string, for a part the scan cannot evaluate: an
+#: f-string field, or a name concatenated in.
+_OPAQUE = "\x00"
+#: An optional schema qualifier and an opening quote: ``main.``, ``"main".``, ``[``.
+_SQL_QUALIFIER = r"(?:[\"'`\[]?\w+[\"'`\]]?\s*\.\s*)?[\"'`\[]?"
+#: What follows ``UPDATE <table>``: a closing quote, an alias, then ``SET``.
+#: ``SET`` is required so prose (``f"cannot update {name}"``) is not SQL.
+_SQL_AFTER_UPDATE = r"[\"'`\]]?(?:\s+(?:as\s+)?\w+)?\s+set\b"
+
+
+def _sql_write(table: str) -> re.Pattern[str]:
+    """SQL that writes ``table``: ``UPDATE ... SET``, ``INSERT [OR x] INTO``,
+    ``REPLACE INTO``, ``DELETE FROM``. Row-value ``SET (a, b) = (...)`` is
+    the same ``UPDATE``, so no column is read at all."""
+    return re.compile(
+        r"\bupdate(?:\s+or\s+\w+)?\s+" + _SQL_QUALIFIER + table + _SQL_AFTER_UPDATE
+        + r"|\b(?:insert(?:\s+or\s+\w+)?|replace)\s+into\s+" + _SQL_QUALIFIER + table
+        + r"|\bdelete\s+from\s+" + _SQL_QUALIFIER + table,
+        re.IGNORECASE,
+    )
+
+
+#: A raw SQL write of a guarded table, in any column.
+_SQL_GUARDED_WRITE = _sql_write(r"(?:label_outcome_voided|label_outcome|audit_run)\b")
+#: A raw SQL write whose table the scan cannot read -- an opaque fold, a
+#: ``%s`` field, a ``str.format`` field. ``corollary/api`` holds no raw SQL
+#: at all, so it could be a guarded table and is refused as one.
+_SQL_OPAQUE_WRITE = _sql_write(r"(?:\x00|%\(?\w*\)?s|\{[^{}]*\})")
+
+
+@dataclass
+class _Guarded:
+    """What one module calls the guarded tables. Names are bound module-wide,
+    not per scope -- a ``run`` that holds a row in one function is taken to
+    hold one in every function -- which over-reports rather than under."""
+
+    #: A guarded model class: its own name, or an alias of it.
+    models: set[str] = field(default_factory=lambda: set(_GUARDED_MODELS))
+    #: A guarded model, table or column: ``t = AuditRun.__table__``,
+    #: ``col = AuditRun.voided_at``, ``Run = aliased(AuditRun)``.
+    handles: set[str] = field(default_factory=lambda: set(_GUARDED_MODELS))
+    #: May hold a guarded row, or a statement or query over one.
+    rows: set[str] = field(default_factory=set)
+    #: Local functions annotated to return a guarded row (``_latest_run``).
+    returns_row: set[str] = field(default_factory=set)
+    #: ``update`` / ``insert`` / ``delete``, and any name imported as one.
+    statements: set[str] = field(default_factory=lambda: set(_STATEMENT_CALLS))
+
+    def size(self) -> tuple[int, int, int, int]:
+        return (len(self.models), len(self.handles), len(self.rows), len(self.returns_row))
+
+
+def _names_the_void(dotted: str) -> bool:
+    return bool(_VOID_MODULE_PARTS & set(dotted.split(".")))
+
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    """The docstring constants, which may mention anything."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            first = node.body[0] if node.body else None
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                found.add(id(first.value))
+    return found
+
+
+def _log_field_ids(tree: ast.AST) -> set[int]:
+    """The keys of every logging call's literal ``extra={...}``. Only a dict
+    written in the call counts: one held in a variable is scanned like any
+    other."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _call_name(node) in _LOG_CALLS:
+            for keyword in node.keywords:
+                if keyword.arg == "extra" and isinstance(keyword.value, ast.Dict):
+                    found.update(id(key) for key in keyword.value.keys if key is not None)
+    return found
+
+
+def _call_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _void_attribute(node: ast.AST) -> str | None:
+    """The void column ``node`` names by attribute, anywhere inside it:
+    ``AuditRun.voided_at``, ``t.c.void_reason``, ``AuditRun.voided_at.key``."""
+    for part in ast.walk(node):
+        if isinstance(part, ast.Attribute) and part.attr in _VOID_COLUMNS:
+            return part.attr
+    return None
+
+
+def _is_model(node: ast.AST, g: _Guarded) -> bool:
+    """A guarded model class: by name, by alias, or as ``models.AuditRun``."""
+    return (isinstance(node, ast.Name) and node.id in g.models) or (
+        isinstance(node, ast.Attribute) and node.attr in _GUARDED_MODELS
+    )
+
+
+def _is_guarded_table_name(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value in _GUARDED_TABLES
+    )
+
+
+def _is_handle(node: ast.AST, g: _Guarded) -> bool:
+    """A guarded model, table or column, as an expression: ``AuditRun``,
+    ``AuditRun.__table__``, ``t.c.voided_at``, ``aliased(AuditRun)``,
+    ``table('audit_run', ...)``, ``metadata.tables['audit_run']``."""
+    if _is_model(node, g) or _is_guarded_table_name(node):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in g.handles
+    if isinstance(node, ast.Attribute):
+        return _is_handle(node.value, g)
+    if isinstance(node, ast.Subscript):
+        return _is_handle(node.slice, g) or _is_handle(node.value, g)
+    if isinstance(node, ast.Call):
+        return (
+            _call_name(node) in _TABLE_BUILDERS
+            and bool(node.args)
+            and _is_handle(node.args[0], g)
+        )
+    return False
+
+
+def _refs(node: ast.AST, g: _Guarded, *, row_attributes: bool) -> bool:
+    """Whether ``node`` reaches a guarded model, table or row anywhere inside
+    it. Without ``row_attributes``, an attribute read off a row (``run.id``,
+    ``run.started_at.isoformat()``) is a value, not the row: ``seen.add(run.id)``
+    adds an integer to a set."""
+    if (
+        not row_attributes
+        and isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in g.rows
+        and node.value.id not in g.handles
+    ):
+        return False
+    if isinstance(node, ast.Name) and (node.id in g.handles or node.id in g.rows):
+        return True
+    if _is_model(node, g) or _is_guarded_table_name(node):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in g.returns_row:
+            return True
+    return any(
+        _refs(child, g, row_attributes=row_attributes) for child in ast.iter_child_nodes(node)
+    )
+
+
+def _annotation_refs(node: ast.AST | None, g: _Guarded) -> bool:
+    """Whether an annotation names a guarded model, including as a string
+    (``-> "AuditRun | None"``)."""
+    if node is None:
+        return False
+    if _refs(node, g, row_attributes=True):
+        return True
+    for part in ast.walk(node):
+        if isinstance(part, ast.Constant) and isinstance(part.value, str):
+            try:
+                parsed = ast.parse(part.value, mode="eval")
+            except SyntaxError:
+                continue
+            if _refs(parsed, g, row_attributes=True):
+                return True
+    return False
+
+
+def _stored_names(target: ast.AST) -> list[str]:
+    return [
+        part.id
+        for part in ast.walk(target)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)
+    ]
+
+
+def _bind_value(targets: Sequence[ast.AST], value: ast.AST, g: _Guarded) -> None:
+    names = [name for target in targets for name in _stored_names(target)]
+    if _is_model(value, g):
+        g.models.update(names)
+        g.handles.update(names)
+    elif _is_handle(value, g):
+        g.handles.update(names)
+    elif _refs(value, g, row_attributes=False):
+        g.rows.update(names)
+
+
+def _bind(node: ast.AST, g: _Guarded) -> None:
+    """Record what ``node`` binds: an alias, a handle, a row, a row-returning
+    function."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if _annotation_refs(node.returns, g):
+            g.returns_row.add(node.name)
+        a = node.args
+        for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]:
+            if arg is not None and _annotation_refs(arg.annotation, g):
+                g.rows.add(arg.arg)
+    elif isinstance(node, ast.Assign):
+        _bind_value(node.targets, node.value, g)
+    elif isinstance(node, ast.AnnAssign):
+        if _annotation_refs(node.annotation, g):
+            g.rows.update(_stored_names(node.target))
+        if node.value is not None:
+            _bind_value([node.target], node.value, g)
+    elif isinstance(node, ast.NamedExpr):
+        _bind_value([node.target], node.value, g)
+    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        if _refs(node.iter, g, row_attributes=False):
+            g.rows.update(_stored_names(node.target))
+
+
+def _guarded_names(tree: ast.AST) -> _Guarded:
+    """Every name in the module that stands for a guarded model, table or
+    row, to a fixpoint: a function defined below its caller still counts."""
+    g = _Guarded()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if alias.name in _GUARDED_MODELS:
+                    g.models.add(bound)
+                    g.handles.add(bound)
+                if alias.name in _STATEMENT_CALLS:
+                    g.statements.add(bound)
+    while True:
+        before = g.size()
+        for node in ast.walk(tree):
+            _bind(node, g)
+        if g.size() == before:
+            return g
+
+
+def _root(node: ast.AST) -> str | None:
+    """The name an attribute, subscript or call chain hangs from."""
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call)):
+        node = node.func if isinstance(node, ast.Call) else node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _folded(node: ast.AST) -> str | None:
+    """The text of a string expression, each part the scan cannot evaluate
+    replaced by :data:`_OPAQUE`: a literal, a ``+`` chain, the template of a
+    ``%`` format, an f-string. ``None`` for anything that is not one."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            inner = _folded(value.value if isinstance(value, ast.FormattedValue) else value)
+            parts.append(_OPAQUE if inner is None else inner)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _folded(node.left), _folded(node.right)
+        if left is None and right is None:
+            return None
+        return (_OPAQUE if left is None else left) + (_OPAQUE if right is None else right)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _folded(node.left)
+    return None
+
+
+def _setattr_parts(node: ast.Call) -> tuple[ast.AST | None, ast.AST | None]:
+    """The object and the name a ``setattr`` sets: ``setattr(obj, name, v)``,
+    ``object.__setattr__(obj, name, v)``, ``obj.__setattr__(name, v)``."""
+    args = node.args
+    if isinstance(node.func, ast.Name) or len(args) >= 3:
+        return (args[0] if args else None), (args[1] if len(args) > 1 else None)
+    receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    return receiver, (args[0] if args else None)
+
+
+def _call_violations(node: ast.Call, g: _Guarded) -> list[str]:
+    """The writes a call makes to a guarded table, in any column."""
+    name = _call_name(node)
+    found: list[str] = []
+    if name in g.statements and node.args and _is_handle(node.args[0], g):
+        found.append(f"builds {name}() on {ast.unparse(node.args[0])}")
+    if _is_model(node.func, g):
+        found.append(f"constructs {ast.unparse(node.func)}")
+    if isinstance(node.func, ast.Attribute):
+        receiver = node.func.value
+        # ``.values()`` with nothing to set is a dict's, never a write.
+        if (
+            name in _CHAIN_WRITES
+            and (name != "values" or node.args or node.keywords)
+            and _refs(receiver, g, row_attributes=True)
+        ):
+            found.append(f"calls .{name}() on a chain over a guarded table")
+        if name in _SESSION_WRITES and any(
+            _refs(arg, g, row_attributes=False) for arg in node.args
+        ):
+            found.append(f"passes a guarded row or table to .{name}()")
+    if name in {"setattr", "__setattr__"}:
+        target, attribute = _setattr_parts(node)
+        if not (isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)):
+            # The FastAPI patch loop, ``setattr(run, k, v)``: any column at all.
+            found.append(f"calls {name}() with a name the scan cannot read")
+        elif target is not None and _refs(target, g, row_attributes=False):
+            found.append(f"sets {attribute.value} on a guarded row by {name}()")
+    return found
+
+
+def _key_violations(node: ast.Dict, g: _Guarded, log_fields: set[int]) -> list[str]:
+    """A mapping keyed by a guarded column (``{AuditRun.status: x}``), which
+    is what Core's ``values`` and ``set_`` take."""
+    found: list[str] = []
+    for key in node.keys:
+        if key is None or id(key) in log_fields:
+            continue
+        if _is_handle(key, g):
+            found.append(f"keys a mapping by {ast.unparse(key)}")
+        elif (column := _void_attribute(key)) is not None:
+            found.append(f"writes .{column} as a dict key")
+    return found
+
+
+def _assignment_violations(
+    node: ast.Assign | ast.AugAssign | ast.AnnAssign, g: _Guarded
+) -> list[str]:
+    """An attribute set on a guarded row or model, in any column; or, where
+    the row cannot be seen, a void column set on anything."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    found: list[str] = []
+    for target in targets:
+        for part in ast.walk(target):
+            if isinstance(part, ast.Attribute) and isinstance(part.ctx, ast.Store):
+                root = _root(part.value)
+                if root is not None and (root in g.rows or root in g.handles):
+                    found.append(f"assigns {ast.unparse(part)}")
+                elif part.attr in _VOID_COLUMNS:
+                    found.append(f"assigns .{part.attr}")
+    return found
+
+
+def _string_violations(node: ast.AST, *, log_field: bool) -> list[str]:
+    """What a string expression says, once folded."""
+    text = _folded(node)
+    if text is None:
+        return []
+    found: list[str] = []
+    if text in _VOID_COLUMNS and not log_field:
+        found.append(f"names {text} in a string")
+    if _VOID_MODULE_TEXT.search(text):
+        found.append("names the void's module or script in a string")
+    if _VOID_ARCHIVE.search(text):
+        found.append("names the archive table in a string")
+    if _SQL_GUARDED_WRITE.search(text):
+        found.append("writes a guarded table in SQL")
+    if _SQL_OPAQUE_WRITE.search(text):
+        found.append("writes in SQL to a table the scan cannot read")
+    return found
+
+
+def _void_violations(source: str) -> list[str]:
+    """What ``source`` does that only the audit run and the void script may
+    (R4, "never a route"): write ``audit_run``, ``label_outcome`` or
+    ``label_outcome_voided`` **in any form, whatever the column**; import or
+    otherwise reach the void's module or script; name the archive.
+
+    **A tripwire, not a proof.** It is built to catch the forms a
+    well-meaning change would reach for -- the ORM, Core, a dialect upsert,
+    raw SQL, a patch loop, a subprocess -- and a determined one can still get
+    past it: a name assembled where nothing folds it, a write delegated to a
+    helper outside ``corollary/api``. The guarantee is R4 plus review. What
+    this adds is that the honest mistake fails a test instead of shipping.
+
+    A write is found by its target, never by its column: a statement built
+    on a guarded model or table (``update(AuditRun)``, ``delete(t)``), a
+    write method on a chain over one (``query(...).update``,
+    ``.on_conflict_do_update``), a guarded row handed to the session or
+    constructed, an attribute set on a guarded row, a mapping keyed by a
+    guarded column, raw SQL naming a guarded table. Model aliases, tables,
+    columns and rows are tracked through imports, simple assignments,
+    annotations, ``for`` targets and functions annotated to return a row.
+
+    Also refused, because nothing in ``corollary/api`` needs them: a
+    ``setattr`` whose name is not a literal, raw SQL writing a table the scan
+    cannot read, and any non-docstring string naming the void's module or
+    script. Kept as a second net where the table is out of sight: a void
+    column set by attribute, used as a dict key, or named in a string.
+
+    Reads pass: ``select(...)``, ``session.get``, the ``voided_at IS NULL``
+    filter, building ``VoidedAuditRun(voided_at=...)``. Docstrings may name
+    anything, and a logging call's literal ``extra`` keys name log fields."""
+    tree = ast.parse(source)
+    g = _guarded_names(tree)
+    docstrings = _docstring_ids(tree)
+    log_fields = _log_field_ids(tree)
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found += [f"imports {a.name}" for a in node.names if _names_the_void(a.name)]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            for alias in node.names:
+                if _names_the_void(f"{base}.{alias.name}") or alias.name == "LabelOutcomeVoided":
+                    found.append(f"imports {base}.{alias.name}")
+        elif isinstance(node, ast.Call):
+            found += _call_violations(node, g)
+        elif isinstance(node, ast.Dict):
+            found += _key_violations(node, g, log_fields)
+        elif isinstance(node, (ast.Assign, ast.AugAssign)) or (
+            isinstance(node, ast.AnnAssign) and node.value is not None
+        ):
+            found += _assignment_violations(node, g)
+        elif isinstance(node, ast.Name) and node.id in _VOID_NAMES:
+            found.append(f"names {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr in _VOID_NAMES:
+            found.append(f"names {node.attr}")
+        is_string = isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp))
+        if is_string and id(node) not in docstrings:
+            found += _string_violations(node, log_field=id(node) in log_fields)
+    # A string folded whole and piece by piece can say one thing twice.
+    return list(dict.fromkeys(found))
+
+
+#: The forms the scan must refuse. Each one fails the test if it passes.
+_MUST_CATCH = [
+    "from corollary.data.news.audit_void import void_audit_run",
+    "from corollary.data.news import audit_void",
+    "from corollary.data.news import (\n    audit_runner,\n    audit_void,\n)",
+    "import corollary.data.news.audit_void as voiding",
+    "from . import audit_void",
+    "importlib.import_module('corollary.data.news.audit_void')",
+    "from scripts.void_audit_run import main",
+    "from corollary.db.models import LabelOutcomeVoided",
+    "rows = session.scalars(select(models.LabelOutcomeVoided))",
+    "conn.execute(text('INSERT INTO label_outcome_voided SELECT * FROM label_outcome'))",
+    "run.voided_at = now",
+    "run.voided_at, run.void_reason = now, body.reason",
+    "session.execute(update(AuditRun).values(voided_at=now, void_reason=reason))",
+    "session.execute(update(AuditRun).values({'void_reason': reason}))",
+    "session.query(AuditRun).filter_by(id=n).update({'voided_at': now})",
+    "session.add(AuditRun(started_at=now, voided_at=now))",
+    "setattr(run, 'void_reason', reason)",
+    "conn.execute(text('UPDATE audit_run SET voided_at = :at WHERE id = :id'))",
+    "conn.exec_driver_sql('update audit_run set \"void_reason\" = ?')",
+    "conn.exec_driver_sql('INSERT INTO audit_run (started_at, voided_at) VALUES (?, ?)')",
+    # The case the route test cannot see: a void folded into the body of
+    # the existing ``POST /api/settings/sentiment/audit``.
+    "def audit_now(body):\n"
+    "    if body.void_run_id is not None:\n"
+    "        return void_audit_run(sessions, run_id=body.void_run_id, reason=body.reason)\n",
+    # E1: every form below passed the scan before it was widened.
+    # Core's column-keyed dict, by the model and by the table.
+    "session.execute(update(AuditRun).values("
+    "{AuditRun.voided_at: now, AuditRun.void_reason: body.reason}))",
+    "session.execute(update(t).values({t.c.voided_at: now}))",
+    "session.execute(update(AuditRun).values({AuditRun.voided_at.key: now}))",
+    # ``**``, whose keyword has no name of its own.
+    "session.execute(update(AuditRun).values(**{'voided_at': now}))",
+    "session.add(AuditRun(**{'voided_at': now, 'void_reason': reason}))",
+    "session.add(AuditRun(**dict(void_reason=reason)))",
+    # A list of parameter dicts: executemany, and the bulk mappings.
+    "session.execute(update(AuditRun), [{'id': n, 'voided_at': now}])",
+    "session.bulk_update_mappings(AuditRun, [{'id': n, 'void_reason': reason}])",
+    # The other ways to spell a mapping, and one held in a variable.
+    "session.execute(update(AuditRun).values(dict(voided_at=now)))",
+    "session.execute(update(AuditRun).ordered_values((AuditRun.voided_at, now)))",
+    "session.execute(insert(AuditRun).from_select([AuditRun.void_reason], rows))",
+    "session.execute(insert(AuditRun).values(id=n).on_conflict_do_update("
+    "index_elements=['id'], set_={'voided_at': now}))",
+    "session.execute(insert(AuditRun).values(id=n).on_conflict_do_update("
+    "index_elements=['id'], set_={AuditRun.void_reason: reason}))",
+    "changes = {'void_reason': reason}\nsession.execute(update(AuditRun).values(changes))",
+    # A mapping whose keys were built somewhere the scan cannot see.
+    "session.execute(update(AuditRun).values(**body.model_dump()))",
+    "session.execute(update(AuditRun).where(AuditRun.id == n).values(body.model_dump()))",
+    "session.add(AuditRun(**body.model_dump()))",
+    "row['voided_at'] = now",
+    "column = 'voided' + '_at'\nsetattr(run, column, now)",
+    # Raw SQL assembled rather than written out.
+    "conn.execute(text('UPDATE audit_run SET ' + 'voided_at = :at'))",
+    "column = 'voided_at'\nconn.execute(text(f'UPDATE audit_run SET {column} = :at'))",
+    "conn.execute(text(f'UPDATE audit_run SET {body.column} = :at WHERE id = :id'))",
+    "conn.execute(text('UPDATE audit_run SET ' + body.column + ' = :at'))",
+    "conn.execute(text('UPDATE audit_run SET %s = :at' % body.column))",
+    "conn.execute(text('UPDATE audit_run SET {} = :at'.format(body.column)))",
+    "conn.exec_driver_sql('REPLACE INTO audit_run (id, started_at, voided_at) VALUES (?, ?, ?)')",
+    "conn.exec_driver_sql(f'INSERT INTO audit_run (id, {body.column}) VALUES (?, ?)')",
+    # The dunder spellings of setattr.
+    "run.__setattr__('voided_at', now)",
+    "object.__setattr__(run, 'void_reason', reason)",
+    # The void's module reached by attribute rather than imported by name.
+    "import corollary.data.news\n"
+    "corollary.data.news.audit_void._write_void(session, n, (), now, reason)",
+    "news = importlib.import_module('corollary.data.news')\nnews.audit_void.void_audit_run",
+    # U4d: forms the column enumeration still let through. The rule is now
+    # the table, so none of these depends on which column it sets.
+    "session.query(AuditRun).filter_by(id=n).update(body.model_dump())",
+    "session.execute(update(AuditRun).where(AuditRun.id == n), body.model_dump())",
+    "session.execute(update(AuditRun), [body.model_dump()])",
+    "session.bulk_update_mappings(AuditRun, [body.model_dump()])",
+    "session.execute(insert(AuditRun).values(id=n).on_conflict_do_update("
+    "index_elements=['id'], set_=body.model_dump()))",
+    "from sqlalchemy.dialects.sqlite import insert as upsert\n"
+    "stmt = upsert(AuditRun).on_conflict_do_update(index_elements=['id'], set_=body.model_dump())",
+    "stmt = update(AuditRun).where(AuditRun.id == n)\n"
+    "session.execute(stmt.values(**body.model_dump()))",
+    "for k, v in body.model_dump().items():\n    setattr(run, k, v)",
+    "col = AuditRun.voided_at\nsession.execute(update(AuditRun).values({col: now}))",
+    "col = AuditRun.voided_at\nsession.execute(update(t).values({col: now}))",
+    "subprocess.run([sys.executable, 'scripts/void_audit_run.py', '--run', str(n)])",
+    "runpy.run_module('scripts.void_audit_run')",
+    "runpy.run_path(str(ROOT / 'scripts' / 'void_audit_run.py'))",
+    "importlib.import_module('corollary.data.news.' + 'audit_void')",
+    "from corollary.db.models import AuditRun as Run\n"
+    "session.execute(update(Run).values(status='failed'))",
+    "from corollary.db.models import AuditRun as Run\nsession.add(Run(started_at=now))",
+    "Run = models.AuditRun\nsession.add(Run(started_at=now))",
+    "conn.execute(text("
+    "'UPDATE audit_run SET (voided_at, void_reason) = (:at, :why) WHERE id = :id'))",
+    "object.__setattr__(run, name, value)",
+    # Column-agnostic: every write below sets a column the void does not
+    # own, or none -- the table alone is what fails it.
+    "session.execute(update(AuditRun).values(status='failed'))",
+    "session.execute(delete(AuditRun).where(AuditRun.id == n))",
+    "session.execute(sa.insert(AuditRun.__table__).values(id=n))",
+    "conn.execute(AuditRun.__table__.update().values(status='failed'))",
+    "t = AuditRun.__table__\nconn.execute(update(t).values(status='failed'))",
+    "conn.execute(metadata.tables['audit_run'].delete())",
+    "conn.execute(insert(table('label_outcome', column('id'))))",
+    "session.query(LabelOutcome).filter_by(audit_run_id=n).delete()",
+    "session.add(LabelOutcome(audit_run_id=n, label_id=m))",
+    "session.merge(AuditRun(id=n, status='failed'))",
+    "session.add_all([AuditRun(started_at=now)])",
+    "run = session.get(AuditRun, n)\nsession.delete(run)",
+    "session.delete(session.get(AuditRun, n))",
+    "run: AuditRun\nrun.status = 'failed'",
+    "def close(run: AuditRun | None) -> None:\n    run.finished_at = now",
+    "def _latest() -> 'AuditRun | None': ...\nrun = _latest()\nrun.status = 'failed'",
+    "for run in session.scalars(select(AuditRun)):\n    run.status = 'failed'",
+    "run = session.get(AuditRun, n)\nsetattr(run, 'status', 'failed')",
+    "run = session.get(AuditRun, n)\nrun.__dict__.update(body.model_dump())",
+    "session.execute(update(LabelOutcome).values({LabelOutcome.audit_run_id: n}))",
+    "conn.execute(text('DELETE FROM label_outcome WHERE audit_run_id = :n'))",
+    "conn.execute(text('UPDATE audit_run SET status = :s'))",
+    "conn.exec_driver_sql('INSERT OR REPLACE INTO \"main\".\"label_outcome\" VALUES (?)')",
+    "conn.execute(text(f'UPDATE {table} SET status = :s'))",
+    "conn.execute(text('DELETE FROM %s' % table))",
+]
+
+
+#: Reads, and the near misses that must stay reads.
+_MUST_PASS = [
+    "stmt = select(AuditRun).where(AuditRun.voided_at.is_(None))",
+    "stmt = select(AuditRun).order_by(AuditRun.voided_at.desc(), AuditRun.id.desc())",
+    "voided_at, reason = run.voided_at, run.void_reason",
+    "out.append(VoidedAuditRun(id=run.id, voided_at=voided_at, reason=reason))",
+    "class VoidedAuditRun(BaseModel):\n    voided_at: datetime\n    reason: str",
+    'def f():\n    """A void moves outcomes to label_outcome_voided; see void_audit_run."""',
+    "EVENTS = ('sentiment_audit_voided',)",
+    "text('SELECT voided_at, void_reason FROM audit_run WHERE voided_at IS NOT NULL')",
+    # A log line's field, exactly as ``routes/sentiment.py`` writes one:
+    # ``extra``'s keys name log fields, not columns.
+    "logger.error('no reason', extra={'event': 'x', 'voided_at': voided_at.isoformat()})",
+    "text(f'SELECT voided_at FROM audit_run WHERE id = {n}')",
+    # U4d: reads of every guarded table, and values read off a row.
+    "run = session.get(AuditRun, n)",
+    "rows = session.scalars(select(LabelOutcome).where(LabelOutcome.audit_run_id == n)).all()",
+    "text('SELECT * FROM label_outcome WHERE audit_run_id = :n')",
+    "run = session.get(AuditRun, n)\nlogger.info('x', extra={'audit_run_id': run.id})",
+    "seen = set()\nfor run in session.scalars(select(AuditRun)):\n    seen.add(run.id)",
+    "def _summary(run: AuditRun) -> AuditRunSummary:\n"
+    "    return AuditRunSummary(id=run.id, status=run.status)",
+    "run = session.get(AuditRun, n)\npayload = {'id': run.id}\npayload.update(extra)",
+    "rows = session.scalars(select(AuditRun)).all()\n"
+    "by_id = {run.id: run for run in rows}\nfor run in by_id.values():\n    pass",
+    "setattr(request.app.state, 'sentiment_audit_task', task)",
+    "message = f'cannot update {name} now'",
+]
+
+
+@pytest.mark.parametrize("snippet", _MUST_CATCH)
+def test_the_void_scan_catches_each_form(snippet: str) -> None:
+    """The scan below is only as good as what it can see: prove each form fails it."""
+    assert _void_violations(snippet), snippet
+
+
+@pytest.mark.parametrize("snippet", _MUST_PASS)
+def test_the_void_scan_passes_reads(snippet: str) -> None:
+    assert _void_violations(snippet) == []
+
+
+def test_the_void_scan_fails_a_planted_violation_in_the_real_route_module() -> None:
+    """The real module passes as it stands, and the same text with a void
+    planted in it, in memory, does not."""
+    source = Path(sentiment_routes.__file__).read_text(encoding="utf-8")
+    assert _void_violations(source) == []
+    planted = source + (
+        "\n\nfrom corollary.data.news.audit_void import void_audit_run as _void\n"
+        "\n\ndef _planted(run: AuditRun, now: datetime) -> None:\n"
+        "    run.voided_at = now\n"
+    )
+    assert _void_violations(planted) == [
+        "imports corollary.data.news.audit_void.void_audit_run",
+        "assigns run.voided_at",
+    ]
+
+
+def test_the_void_scan_fails_a_write_in_any_column_through_the_modules_own_reads() -> None:
+    """Column-agnostic, on the real module: a row from its own ``_latest_run``
+    (annotated ``-> AuditRun | None``) has a non-void column set and is
+    deleted, and both are found."""
+    source = Path(sentiment_routes.__file__).read_text(encoding="utf-8")
+    planted = source + (
+        "\n\ndef _planted(session: Session) -> None:\n"
+        "    last = _latest_run(session, succeeded_only=False)\n"
+        "    if last is not None:\n"
+        "        last.status = 'failed'\n"
+        "        session.delete(last)\n"
+    )
+    assert _void_violations(planted) == [
+        "assigns last.status",
+        "passes a guarded row or table to .delete()",
+    ]
+
+
+def test_no_api_module_voids_a_run() -> None:
+    """R4: a void is ``scripts/void_audit_run.py`` and never a route, and a
+    run's rows are the runner's. No module under ``corollary/api`` writes
+    ``audit_run``, ``label_outcome`` or ``label_outcome_voided`` in any
+    column, reaches the void's module or script, or names the archive table.
+
+    **This scan is a tripwire, not a proof.** It catches the forms a
+    well-meaning change would use; a determined one can get past it. The
+    guarantee is R4 plus review. It complements the route test, which
+    checks paths and names and so cannot see a write folded into an
+    existing route's body."""
+    package = Path(sentiment_routes.__file__).resolve().parents[1]
+    offenders = {
+        str(path.relative_to(package)): found
+        for path in sorted(package.rglob("*.py"))
+        if (found := _void_violations(path.read_text(encoding="utf-8")))
+    }
+    assert offenders == {}, offenders
 
 
 def test_the_module_imports_no_event_loop_blocking_sleep() -> None:
