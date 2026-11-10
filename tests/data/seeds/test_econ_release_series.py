@@ -228,6 +228,30 @@ def test_bad_decimals_refuses_the_pair(decimals: str) -> None:
         _parse(series=_series_with(2, f'188,IR,pct_change,1,"% m/m, NSA",{decimals}'))
 
 
+def test_decimals_of_four_permits() -> None:
+    # The ceiling: R7 stores the figure quantized to 4 places, so 4 is the
+    # most precision display can honestly show.
+    seeds = parse_econ_release_seeds(
+        _BASE_TIMES, _series_with(2, '188,IR,pct_change,1,"% m/m, NSA",4')
+    )
+    ir = seeds.series.by_id(188)
+    assert ir is not None and ir.decimals == 4
+
+
+@pytest.mark.parametrize("decimals", ["5", "12"])
+def test_decimals_above_four_refuses_the_pair(decimals: str) -> None:
+    # Display cannot show precision that was never stored.
+    with pytest.raises(SeedError, match=r"series\.csv, line 4: decimals .* at most 4"):
+        _parse(series=_series_with(2, f'188,IR,pct_change,1,"% m/m, NSA",{decimals}'))
+
+
+@pytest.mark.parametrize("label", [" % m/m", "% m/m ", "\t% m/m"])
+def test_unit_label_with_surrounding_whitespace_refuses_the_pair(label: str) -> None:
+    # Consistent with " 1" being refused for scale: the file's text is the value.
+    with pytest.raises(SeedError, match=r"series\.csv, line 2: unit_label .*whitespace"):
+        _parse(series=_series_with(0, f'10,CPIAUCSL,pct_change,1,"{label}",1'))
+
+
 @pytest.mark.parametrize(
     ("row", "match"),
     [
@@ -300,7 +324,7 @@ def test_a_bad_series_seed_refuses_the_times_loader_too(tmp_path: Path, series: 
     times_path, series_path = _write_pair(tmp_path, _BASE_TIMES, series)
     with pytest.raises(SeedError, match=r"econ_release_series\.csv|econ_release_times\.csv"):
         load_econ_release_seeds(times_path, series_path)
-    with pytest.raises(SeedError):
+    with pytest.raises(SeedError, match=r"econ_release_series\.csv|econ_release_times\.csv"):
         load_econ_release_times(times_path, series_path)
 
 

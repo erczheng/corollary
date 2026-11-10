@@ -67,8 +67,10 @@ its headline figure and how to turn that series into the figure shown::
 ``transform`` is exactly one of :data:`ECON_TRANSFORMS`. ``scale`` is a plain
 positive decimal (``0.001``, never ``1e-3``), parsed from its text straight to
 :class:`~decimal.Decimal` -- no float exists on the path. ``decimals`` is a
-non-negative integer, the display precision. A unit label holding a comma is
-CSV-quoted.
+non-negative integer, the display precision, at most
+:data:`MAX_DISPLAY_DECIMALS` (4) because the figure is stored to 4 places. A
+unit label holding a comma is CSV-quoted, and one with leading or trailing
+whitespace is refused.
 
 The two econ tables are **one seed for validation purposes**: they are parsed
 and refused together, by :func:`parse_econ_release_seeds`. Every release in
@@ -208,6 +210,11 @@ _SERIES_ID_RE: Final = re.compile(r"\A[A-Z0-9_]+\Z")
 #: ``Infinity``, exponents, underscores and surrounding whitespace.
 _SCALE_RE: Final = re.compile(r"\A[0-9]+(\.[0-9]+)?\Z")
 _DECIMALS_RE: Final = re.compile(r"\A(0|[1-9][0-9]*)\Z")
+
+#: The most display precision a series row may ask for. R7 stores each figure
+#: quantized to 4 decimal places, so display cannot honestly show more: a fifth
+#: place would be a zero that was never measured.
+MAX_DISPLAY_DECIMALS: Final = 4
 
 
 @dataclass(frozen=True)
@@ -777,8 +784,16 @@ def _parse_econ_release_series_lines(
             scale = _parse_scale(scale_text)
             if not unit_label.strip():
                 raise ValueError("unit_label is empty")
+            if unit_label != unit_label.strip():
+                # As ' 1' is refused for scale: the file's text is the value.
+                raise ValueError(f"unit_label {unit_label!r} has leading or trailing whitespace")
             if not _DECIMALS_RE.fullmatch(decimals_text):
                 raise ValueError(f"decimals {decimals_text!r} is not a non-negative integer")
+            if int(decimals_text) > MAX_DISPLAY_DECIMALS:
+                raise ValueError(
+                    f"decimals {decimals_text!r} must be at most {MAX_DISPLAY_DECIMALS}: "
+                    f"the figure is stored to {MAX_DISPLAY_DECIMALS} places"
+                )
             row = EconReleaseSeries(
                 release_id=int(id_text),
                 series_id=series_id,

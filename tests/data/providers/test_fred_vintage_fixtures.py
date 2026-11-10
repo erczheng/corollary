@@ -15,23 +15,34 @@ about every one of them --
 
 It also pins the one vendor fact U6a exists to settle, as data rather than as
 prose, so U6c builds on a test rather than on a note: what each observation's
-``realtime_start`` says in an ``output_type=1`` vintage. See
-``.claude/scratch/u6a-fred-vintage-findings.md`` in the worktree that recorded
-these for the reading.
+``realtime_start`` says in an ``output_type=1`` vintage. The reading, recorded
+2026-11-09:
+
+* FRED **clips** ``realtime_start`` and ``realtime_end`` to the requested
+  window. A single-day vintage (``realtime_start = realtime_end = D``) stamps
+  every row ``D``, so it cannot say which value is new.
+* A two-day window ``D-1 .. D`` can. A value valid on both days is one row
+  spanning both; a value new or revised on ``D`` starts on ``D``; a revised one
+  also leaves its old value in a row ending on ``D-1``.
+* ``EXHOSLUSM495S`` (NAR, release 291) is not in ALFRED. Every dated query is
+  a 400 with FRED's own message, and only its current values are served.
 """
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from corollary.data.providers.fred import MISSING_VALUE, parse_observations
+from tests.fixtures.record_fred_vintages import KNOWN_RELEASE_DAYS
 
 FIXTURE_DIR: Final = Path(__file__).resolve().parents[2] / "fixtures" / "fred"
 PREFIX: Final = "p3_vintage_"
+ET: Final = ZoneInfo("America/New_York")
 
 #: The four series U6's pre-flight names, by release.
 SERIES: Final = {
@@ -110,6 +121,45 @@ def test_every_series_has_its_full_set_of_fixtures() -> None:
     assert not unexpected, f"fixtures nothing here checks by name: {unexpected}"
 
 
+@pytest.mark.parametrize("sid", SERIES)
+def test_every_series_set_is_from_one_release_cycle(sid: str) -> None:
+    """A set mixed across two recordings fails here, not in U6c.
+
+    The recorder writes file by file, so an ``--overwrite`` run that aborts
+    part-way leaves new date sources beside old vintages. Each series' ``D``
+    must therefore be the latest past date its own ``release_dates`` lists --
+    or, for a release FRED lists no dates for (291), the recorder's
+    ``KNOWN_RELEASE_DAYS`` entry -- and a date its ``vintagedates`` lists
+    whenever FRED answered that one. The four vintages must be the windows the
+    recorder derives from that one ``D``.
+    """
+    dated = envelope(f"{PREFIX}{sid}_release_dates")
+    recorded_on = datetime.fromisoformat(dated["recorded_at"]).astimezone(ET).date()
+    listed = sorted(
+        d
+        for d in (date.fromisoformat(r["date"]) for r in dated["body"]["release_dates"])
+        if d < recorded_on
+    )
+    release_day = listed[-1] if listed else KNOWN_RELEASE_DAYS[SERIES[sid]]
+
+    windows = {
+        label: tuple(
+            date.fromisoformat(envelope(f"{PREFIX}{sid}_{label}")["params"][key])
+            for key in ("realtime_start", "realtime_end")
+        )
+        for label in VINTAGE_LABELS
+    }
+    day_before = release_day - timedelta(days=1)
+    assert windows["release_day"] == (release_day, release_day)
+    assert windows["day_before"] == (day_before, day_before)
+    assert windows["window"] == (day_before, release_day)
+    assert windows["since_prior"][1] == release_day
+
+    vintages = envelope(f"{PREFIX}{sid}_vintagedates")
+    if vintages["status_code"] == 200:
+        assert release_day.isoformat() in vintages["body"]["vintage_dates"]
+
+
 @pytest.mark.parametrize("path", fixture_paths(), ids=lambda p: p.stem)
 def test_no_fixture_carries_a_key(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
@@ -185,6 +235,13 @@ def test_the_two_day_window_splits_exactly_the_new_and_revised_values(sid: str) 
     a value new or revised on release day is a row starting on release day, and
     a revised one also leaves a row ending on ``day_before``. The release-day
     rows are therefore exactly what comparing the two single-day vintages finds.
+
+    Both halves of the split are pinned, because U6c reads both. The rows
+    *ending* on release day are the release-day vintage, which is where the
+    prior is taken from: without that filter ``PAYEMS`` has two 2026-09-01
+    rows, and the superseded 159044 gives a payroll change of +249K where the
+    vintage's 159128 gives +165K. The rows ending on ``day_before`` are exactly
+    the superseded values, which is how a revision is told from a new value.
     """
     params = envelope(f"{PREFIX}{sid}_window")["params"]
     start, end = params["realtime_start"], params["realtime_end"]
@@ -198,6 +255,16 @@ def test_the_two_day_window_splits_exactly_the_new_and_revised_values(sid: str) 
     on_day = {r["date"]: r["value"] for r in observations_of(sid, "release_day")}
     changed = {(d, v) for d, v in on_day.items() if before.get(d) != v}
     assert starting_on_day == changed
+
+    # The release-day vintage is exactly the rows still valid on release day...
+    assert {(r["date"], r["value"]) for r in rows if r["realtime_end"] == end} == set(
+        on_day.items()
+    )
+    # ...and the rows that stopped on the day before are exactly the values
+    # release day superseded: a revision leaves one, a new value does not.
+    assert {(r["date"], r["value"]) for r in rows if r["realtime_end"] == start} == {
+        (d, v) for d, v in before.items() if on_day.get(d) != v
+    }
 
 
 @pytest.mark.parametrize("label", (*VINTAGE_LABELS, "vintagedates", "vintagedates_recent"))

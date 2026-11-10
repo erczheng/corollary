@@ -54,6 +54,7 @@ from corollary.data.calendar_releases import ReleaseEvents, SkippedRelease
 from corollary.data.providers.finnhub import CalendarAccessDenied, CalendarProviderError
 from corollary.data.providers.fred import FredError, FredReleaseDate
 from corollary.data.providers.interface import ProviderError
+from corollary.data.seeds import calendar_seeds
 from corollary.db.models import Base, CalendarEvent
 from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine import scheduler as scheduler_module
@@ -581,6 +582,41 @@ async def test_a_failed_dividend_read_is_a_failure_never_an_empty_window(
     status = scheduler.status()[job.name]
     assert status.failures == 1 and status.runs == 0 and status.skips == 0
     assert status.last_error_type == "DividendsNotFetched"
+    assert replace_spy.calls == []
+    assert _live(db_engine) == before
+
+
+@pytest.mark.asyncio
+async def test_a_refused_series_seed_fails_the_release_job_before_fred_is_asked(
+    db_engine: Engine,
+    replace_spy: _ReplaceSpy,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """U6b's behaviour change: the series table is validated with the times.
+
+    ``load_econ_release_times`` is the joint loader, so a series file that
+    refuses -- here the shipped one with ``PAYEMS``'s row dropped -- stops the
+    times table loading too. The job fails with the ``SeedError``, FRED is
+    never asked, and nothing stored is withdrawn.
+    """
+    before = _seed_one_of_each(db_engine)
+    shipped = calendar_seeds.ECON_RELEASE_SERIES_PATH.read_text(encoding="utf-8")
+    kept = [line for line in shipped.splitlines() if not line.startswith("50,PAYEMS,")]
+    assert len(kept) == len(shipped.splitlines()) - 1
+    bad = tmp_path / "econ_release_series.csv"
+    bad.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    monkeypatch.setattr(calendar_seeds, "ECON_RELEASE_SERIES_PATH", bad)
+    releases = FakeReleases([_cpi(date(2026, 11, 13))])
+    job = _jobs(_services(db_engine, releases=releases))["calendar_releases"]
+    scheduler = _scheduler(job)
+
+    await scheduler._run_catch_up(job, job.run, scheduler._records[job.name])
+
+    status = scheduler.status()[job.name]
+    assert status.failures == 1 and status.runs == 0 and status.skips == 0
+    assert status.last_error_type == "SeedError"
+    assert releases.calls == []
     assert replace_spy.calls == []
     assert _live(db_engine) == before
 

@@ -74,15 +74,31 @@ Safety, enforced rather than intended -- the same as ``record_fred.py``:
   error is reported by class name only, because ``httpx`` quotes the URL.
 * **GET only.** ``tests/test_hard_rules.py`` globs ``record_*.py`` into its
   write-verb guard, so this file is in scope by construction.
+* **httpx's own request log line is scrubbed.** httpx logs every request URL,
+  key included, at INFO on its ``httpx`` logger. No handler is configured here,
+  but the provider's ``_RedactQueryKey`` filter is installed on that logger
+  anyway, so adding ``logging.basicConfig(level=logging.INFO)`` to debug a run
+  cannot print the key.
 * **Nothing here loads ``.env``.** The launcher's ``--env-file`` puts the key
   in the process environment; this reads that and nothing else.
-* **Nothing is half-overwritten.** Every target name is known before the first
-  request, and an existing one refuses the whole run unless ``--overwrite``.
+* **A first recording is never half-written over another.** Every target name
+  is known before the first request, and an existing one refuses the whole
+  run unless ``--overwrite``. **With ``--overwrite`` that guarantee is gone:**
+  files are written one at a time as their requests answer, so a run that
+  aborts part-way leaves the new ``release_dates`` and ``vintagedates`` beside
+  the previous run's vintages; and a ``FALLBACK_LABELS`` file from an earlier
+  run is never removed when a later run does not need the fallback. The
+  fixture test checks that each series' ``D`` is the latest past date its
+  ``release_dates`` lists (or its :data:`KNOWN_RELEASE_DAYS` entry) and, where
+  FRED answered, a date its ``vintagedates`` lists, so a set mixed across two
+  release cycles fails there. After an aborted ``--overwrite``, re-run it to
+  completion.
 
 ``tests/data/providers/test_fred_vintage_fixtures.py`` checks what it writes.
 """
 
 import json
+import logging
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -98,6 +114,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from corollary.data.providers.fred import (  # noqa: E402
     FRED_BASE_URL,
     FredCredentials,
+    _RedactQueryKey,
     _redact_query_key,
     release_dates_params,
 )
@@ -341,6 +358,8 @@ def main() -> None:
         raise SystemExit(f"{existing} exist; pass --overwrite to replace them")
 
     secret = FredCredentials.from_env().api_key
+    # Before the first request: httpx logs each request URL, key included.
+    logging.getLogger("httpx").addFilter(_RedactQueryKey((secret,)))
     today = datetime.now(ET).date()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with httpx.Client(timeout=30.0) as client:
