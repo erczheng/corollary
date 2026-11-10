@@ -60,15 +60,20 @@ Economic release series (spec R7)
 ``econ_release_series.csv`` names, per FRED release, the series that carries
 its headline figure and how to turn that series into the figure shown::
 
-    release_id,series_id,transform,scale,unit_label,decimals
-    10,CPIAUCSL,pct_change,1,% m/m,1
-    188,IR,pct_change,1,"% m/m, NSA",1
+    release_id,series_id,transform,scale,unit_label,decimals,frequency
+    10,CPIAUCSL,pct_change,1,% m/m,1,monthly
+    188,IR,pct_change,1,"% m/m, NSA",1,monthly
 
-``transform`` is exactly one of :data:`ECON_TRANSFORMS`. ``scale`` is a plain
+``transform`` is exactly one of :data:`ECON_TRANSFORMS`, and ``frequency``
+exactly one of :data:`ECON_FREQUENCIES`: the fetch's lookback and the
+figure's one-period-earlier check both read it, so it is the series' stated
+frequency, never inferred from the dates FRED returns. (The column extends
+spec R7's list, deliberately; U6c-fix F8.) ``scale`` is a plain
 positive decimal (``0.001``, never ``1e-3``), parsed from its text straight to
 :class:`~decimal.Decimal` -- no float exists on the path. ``decimals`` is a
 non-negative integer, the display precision, at most
-:data:`MAX_DISPLAY_DECIMALS` (4) because the figure is stored to 4 places. A
+:data:`MAX_DISPLAY_DECIMALS` (4) because the figure is stored to 4 places --
+``econ_values.STORED_EXPONENT`` is derived from it. A
 unit label holding a comma is CSV-quoted, and one with leading or trailing
 whitespace is refused.
 
@@ -76,7 +81,8 @@ The two econ tables are **one seed for validation purposes**: they are parsed
 and refused together, by :func:`parse_econ_release_seeds`. Every release in
 the times table has exactly one series row and every series row has a
 release in the times table; a missing row, an extra row, a duplicate, an
-unknown transform, an unparseable scale or bad decimals refuses **both**. The
+unknown transform or frequency, an unparseable scale or bad decimals refuses
+**both**. The
 loaders enforce that structurally: :func:`load_econ_release_times` -- what
 the calendar job already calls -- is :func:`load_econ_release_seeds` keeping
 only the times, so a broken series file stops the times table loading too,
@@ -187,6 +193,7 @@ ECON_RELEASE_SERIES_COLUMNS: Final[tuple[str, ...]] = (
     "scale",
     "unit_label",
     "decimals",
+    "frequency",
 )
 
 ECON_RELEASE_TIMES_PATH: Final[Path] = SEEDS_DIR / "econ_release_times.csv"
@@ -197,6 +204,12 @@ ECON_RELEASE_SERIES_PATH: Final[Path] = SEEDS_DIR / "econ_release_series.csv"
 #: ``pct_change`` that difference as a percentage of the prior.
 EconTransform = Literal["level", "change", "pct_change"]
 ECON_TRANSFORMS: Final[tuple[EconTransform, ...]] = ("level", "change", "pct_change")
+
+#: How often a release's series is observed (U6c-fix F8). The **one**
+#: definition: ``fred.VintageFrequency`` is this Literal, so the seed cannot
+#: name a frequency the fetch has no lookback for.
+EconFrequency = Literal["monthly", "quarterly"]
+ECON_FREQUENCIES: Final[tuple[EconFrequency, ...]] = ("monthly", "quarterly")
 
 #: ``HH:MM``, 24-hour, two digits each. ``time.fromisoformat`` alone also
 #: accepts seconds and offsets, which a hand-kept table should not carry.
@@ -213,7 +226,10 @@ _DECIMALS_RE: Final = re.compile(r"\A(0|[1-9][0-9]*)\Z")
 
 #: The most display precision a series row may ask for. R7 stores each figure
 #: quantized to 4 decimal places, so display cannot honestly show more: a fifth
-#: place would be a zero that was never measured.
+#: place would be a zero that was never measured. **This is the stored
+#: precision too:** ``econ_values.STORED_EXPONENT`` is derived from it (that
+#: module imports this one, so the number lives at the lower layer), and a
+#: test pins the two together. Raising it raises both.
 MAX_DISPLAY_DECIMALS: Final = 4
 
 
@@ -361,6 +377,9 @@ class EconReleaseSeries:
     unit_label: str
     #: Display precision, a non-negative integer.
     decimals: int
+    #: How often the series is observed: sets the fetch's lookback and the
+    #: period x(t-1) and x(t-2) must each be exactly one of.
+    frequency: EconFrequency
 
 
 @dataclass(frozen=True)
@@ -733,6 +752,15 @@ def _parse_transform(value: str) -> EconTransform:
     raise ValueError(f"transform {value!r} is not one of {list(ECON_TRANSFORMS)}")
 
 
+def _parse_frequency(value: str) -> EconFrequency:
+    # Spelled out rather than cast, so mypy checks each value against the Literal.
+    if value == "monthly":
+        return "monthly"
+    if value == "quarterly":
+        return "quarterly"
+    raise ValueError(f"frequency {value!r} is not one of {list(ECON_FREQUENCIES)}")
+
+
 def _parse_scale(value: str) -> Decimal:
     """``value`` as an exact :class:`Decimal`, finite and greater than zero."""
     if not _SCALE_RE.fullmatch(value):
@@ -771,7 +799,15 @@ def _parse_econ_release_series_lines(
                 f"{source}, line {line}: expected {len(ECON_RELEASE_SERIES_COLUMNS)} fields, "
                 f"got {len(record)}: {record!r} (a unit label holding a comma must be quoted)"
             )
-        id_text, series_id, transform_text, scale_text, unit_label, decimals_text = record
+        (
+            id_text,
+            series_id,
+            transform_text,
+            scale_text,
+            unit_label,
+            decimals_text,
+            frequency_text,
+        ) = record
         try:
             if not _RELEASE_ID_RE.fullmatch(id_text):
                 raise ValueError(f"release_id {id_text!r} is not a positive integer")
@@ -794,6 +830,7 @@ def _parse_econ_release_series_lines(
                     f"decimals {decimals_text!r} must be at most {MAX_DISPLAY_DECIMALS}: "
                     f"the figure is stored to {MAX_DISPLAY_DECIMALS} places"
                 )
+            frequency = _parse_frequency(frequency_text)
             row = EconReleaseSeries(
                 release_id=int(id_text),
                 series_id=series_id,
@@ -801,6 +838,7 @@ def _parse_econ_release_series_lines(
                 scale=scale,
                 unit_label=unit_label,
                 decimals=int(decimals_text),
+                frequency=frequency,
             )
         except ValueError as exc:
             raise SeedError(f"{source}, line {line}: {exc}") from None

@@ -11,12 +11,14 @@ posting, a ``"."``), it is derived from a recorded one, and says so.
 """
 
 import copy
+import dataclasses
 import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
+import httpx
 import pytest
 
 from corollary.data.econ_values import (
@@ -30,18 +32,29 @@ from corollary.data.econ_values import (
     first_print,
 )
 from corollary.data.providers.fred import (
+    FredCredentials,
+    FredProvider,
     FredRefusal,
     FredVintageWindow,
     VintageFrequency,
     parse_vintage_window,
 )
-from corollary.data.seeds.calendar_seeds import EconReleaseSeries, EconTransform
+from corollary.data.seeds.calendar_seeds import (
+    MAX_DISPLAY_DECIMALS,
+    EconReleaseSeries,
+    EconTransform,
+)
+from corollary.ratelimit import HostRateLimiter
 
 FIXTURE_DIR: Final = Path(__file__).resolve().parents[1] / "fixtures" / "fred"
 
-CPI: Final = EconReleaseSeries(10, "CPIAUCSL", "pct_change", Decimal("1"), "% m/m", 1)
-PAYEMS: Final = EconReleaseSeries(50, "PAYEMS", "change", Decimal("1"), "K", 0)
-BOPGSTB: Final = EconReleaseSeries(51, "BOPGSTB", "level", Decimal("0.001"), "$B", 1)
+CPI: Final = EconReleaseSeries(
+    10, "CPIAUCSL", "pct_change", Decimal("1"), "% m/m", 1, "monthly"
+)
+PAYEMS: Final = EconReleaseSeries(50, "PAYEMS", "change", Decimal("1"), "K", 0, "monthly")
+BOPGSTB: Final = EconReleaseSeries(
+    51, "BOPGSTB", "level", Decimal("0.001"), "$B", 1, "monthly"
+)
 
 CPI_DAY: Final = date(2026, 10, 14)
 PAYEMS_DAY: Final = date(2026, 11, 6)
@@ -75,8 +88,14 @@ def recorded(sid: str, series_id: str, release_day: date) -> FredVintageWindow:
     return window(series_id, body(f"{sid}_window"), release_day)
 
 
-def _series(transform: EconTransform, scale: str = "1") -> EconReleaseSeries:
-    return EconReleaseSeries(999, "TEST", transform, Decimal(scale), "u", 1)
+def _series(
+    transform: EconTransform, scale: str = "1", frequency: VintageFrequency = "monthly"
+) -> EconReleaseSeries:
+    return EconReleaseSeries(999, "TEST", transform, Decimal(scale), "u", 1, frequency)
+
+
+#: FRED's echo of what every vintage query sends, as the recorded bodies carry it.
+ECHO: Final = {"units": "lin", "output_type": 1}
 
 
 def _synthetic(
@@ -87,6 +106,7 @@ def _synthetic(
     payload = {
         "realtime_start": day_before,
         "realtime_end": release_day.isoformat(),
+        **ECHO,
         "count": len(rows),
         "observations": [
             {"date": d, "value": v, "realtime_start": s, "realtime_end": e}
@@ -244,7 +264,7 @@ def test_a_missing_value_in_a_needed_observation_is_no_value(
 
 
 def test_a_missing_value_nobody_needs_changes_nothing() -> None:
-    # 2026-05-01 is four periods back; neither the actual nor the prior reads it.
+    # 2026-05-01 is five periods back; neither the actual nor the prior reads it.
     figure = first_print(_payems_with("2026-05-01", B, "."), PAYEMS)
     assert isinstance(figure, Figure)
     assert (figure.actual, figure.prior) == (Decimal("165.0000"), Decimal("60.0000"))
@@ -284,6 +304,29 @@ def test_a_text_only_revision_is_not_new() -> None:
     assert isinstance(figure, Figure) and figure.period == date(2026, 9, 1)
     assert figure.actual == Decimal("60.0000")  # 159128 - 159068
     assert figure.prior == Decimal("186.0000")  # 159068 - 158882
+
+
+def test_an_observation_removed_on_d_is_not_in_the_vintage() -> None:
+    """The D vintage is the rows **ending on D**, not every row in the window.
+
+    2026-08-01 was valid on D-1 only: FRED removed it on D. In the D vintage
+    the observation before 2026-09-01 is 2026-07-01, two months back, so
+    there is no m/m figure. Reading every row as the vintage would compute
+    120 - 110 = +10 and 110 - 100 = +10 from a value no longer in it.
+    """
+    outcome = first_print(
+        _synthetic(
+            [
+                ("2026-07-01", "100", B, D),
+                ("2026-08-01", "110", B, B),
+                ("2026-09-01", "120", D, D),
+            ]
+        ),
+        _series("change"),
+    )
+    assert isinstance(outcome, NoValue)
+    assert outcome.reason.startswith("x(t-1) should be 2026-08-01")
+    assert outcome.reason.endswith("in the 2026-11-06 vintage is 2026-07-01")
 
 
 def test_the_latest_new_or_revised_observation_is_the_release() -> None:
@@ -346,11 +389,25 @@ def test_a_gap_in_the_vintage_is_no_value_not_a_two_period_change() -> None:
     assert "2026-07-01" in outcome.reason
 
 
-def test_a_monthly_series_read_as_quarterly_is_no_value() -> None:
+def test_a_monthly_series_seeded_as_quarterly_is_no_value() -> None:
+    # A seed row marking PAYEMS quarterly, fetched as the row says: October
+    # starts a quarter, but the observation before it is September, not July,
+    # so no figure -- never a one-month change beside a "q/q" label.
+    seeded_quarterly = dataclasses.replace(PAYEMS, frequency="quarterly")
     payload = body("payems_window")
-    outcome = first_print(window("PAYEMS", payload, PAYEMS_DAY, "quarterly"), PAYEMS)
+    outcome = first_print(
+        window("PAYEMS", payload, PAYEMS_DAY, seeded_quarterly.frequency), seeded_quarterly
+    )
     assert isinstance(outcome, NoValue)
     assert "quarterly" in outcome.reason
+
+
+def test_a_window_fetched_at_another_frequency_than_the_seed_row_is_a_caller_bug() -> None:
+    # The frequency is the seed row's: a window fetched with another lookback
+    # was fetched for a different question.
+    payload = body("payems_window")
+    with pytest.raises(ValueError, match="quarterly.*monthly"):
+        first_print(window("PAYEMS", payload, PAYEMS_DAY, "quarterly"), PAYEMS)
 
 
 def test_a_quarterly_series_reads_quarters() -> None:
@@ -363,13 +420,15 @@ def test_a_quarterly_series_reads_quarters() -> None:
     payload = {
         "realtime_start": qb,
         "realtime_end": qd,
+        **ECHO,
         "count": len(rows),
         "observations": [
             {"date": d, "value": v, "realtime_start": s, "realtime_end": e} for d, v, s, e in rows
         ],
     }
     figure = first_print(
-        window("TEST", payload, date(2026, 10, 29), "quarterly"), _series("pct_change")
+        window("TEST", payload, date(2026, 10, 29), "quarterly"),
+        _series("pct_change", frequency="quarterly"),
     )
     # actual = (203.01 / 202 - 1) x 100 = 1.01 / 202 x 100 = 101 / 202 = 0.5
     # prior  = (202 / 200 - 1) x 100 = 2 / 200 x 100 = 1
@@ -405,33 +464,37 @@ def test_a_change_over_zero_is_a_number() -> None:
     assert (str(figure.actual), str(figure.prior)) == ("3.0000", "0.0000")
 
 
-@pytest.mark.asyncio
-async def test_exhoslusm495s_recorded_400_through_the_provider_is_refused() -> None:
-    import httpx
+async def _no_sleep(seconds: float) -> None:  # pragma: no cover
+    raise AssertionError("slept")
 
-    from corollary.data.providers.fred import FredCredentials, FredProvider
-    from corollary.ratelimit import HostRateLimiter
 
-    text = (FIXTURE_DIR / "p3_vintage_exhoslusm495s_window.json").read_text(encoding="utf-8")
-    replay = json.dumps(json.loads(text)["body"])
-    assert json.loads(text)["status_code"] == 400
-
-    async def no_sleep(seconds: float) -> None:  # pragma: no cover
-        raise AssertionError("slept")
-
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(400, content=replay.encode()))
-    )
+async def _fetch(
+    series: EconReleaseSeries, release_day: date, respond: Any
+) -> FredVintageWindow | FredRefusal:
+    """One ``vintage_window`` through a fake FRED, at the **seed row's** frequency."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     async with FredProvider(
         credentials=FredCredentials(api_key="notarealfredkeynotarealfredkey00"),
         client=client,
-        limiter=HostRateLimiter(clock=lambda: 0.0, sleep=no_sleep),
+        limiter=HostRateLimiter(clock=lambda: 0.0, sleep=_no_sleep),
     ) as provider:
-        answer = await provider.vintage_window(
-            "EXHOSLUSM495S", date(2026, 10, 13), frequency="monthly"
+        return await provider.vintage_window(
+            series.series_id, release_day, frequency=series.frequency
         )
-    series = EconReleaseSeries(291, "EXHOSLUSM495S", "level", Decimal("0.000001"), "M SAAR", 2)
 
+
+@pytest.mark.asyncio
+async def test_exhoslusm495s_recorded_400_through_the_provider_is_refused() -> None:
+    text = (FIXTURE_DIR / "p3_vintage_exhoslusm495s_window.json").read_text(encoding="utf-8")
+    replay = json.dumps(json.loads(text)["body"])
+    assert json.loads(text)["status_code"] == 400
+    series = EconReleaseSeries(
+        291, "EXHOSLUSM495S", "level", Decimal("0.000001"), "M SAAR", 2, "monthly"
+    )
+
+    answer = await _fetch(
+        series, date(2026, 10, 13), lambda request: httpx.Response(400, content=replay.encode())
+    )
     outcome = first_print(answer, series)
 
     assert isinstance(outcome, Refused)
@@ -442,9 +505,89 @@ async def test_exhoslusm495s_recorded_400_through_the_provider_is_refused() -> N
     )
 
 
+def _fred_honouring_observation_start(history: list[tuple[str, str, str, str]]) -> Any:
+    """A fake FRED holding ``history`` that, like FRED, serves only the rows
+    dated on or after the request's ``observation_start``."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        kept = [
+            {"date": d, "value": v, "realtime_start": s, "realtime_end": e}
+            for d, v, s, e in history
+            if d >= params["observation_start"]
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "realtime_start": params["realtime_start"],
+                "realtime_end": params["realtime_end"],
+                "observation_start": params["observation_start"],
+                **ECHO,
+                "count": len(kept),
+                "observations": kept,
+            },
+        )
+
+    return respond
+
+
+@pytest.mark.asyncio
+async def test_a_series_lagging_three_months_is_in_the_window() -> None:
+    """x(t) three months before the release's month (2026-08 for a November
+    release) puts x(t-2) at 2026-06-01: inside the six-month lookback, outside
+    the four the spec states as its floor.
+
+    actual = 121 - 110 = 11 -> 11.0000; prior = 110 - 104 = 6 -> 6.0000.
+    March to May are in the window too, and change nothing.
+    """
+    history = [
+        ("2026-03-01", "90", B, D),
+        ("2026-04-01", "95", B, D),
+        ("2026-05-01", "100", B, D),
+        ("2026-06-01", "104", B, D),
+        ("2026-07-01", "110", B, D),
+        ("2026-08-01", "121", D, D),
+    ]
+    series = _series("change")
+    answer = await _fetch(series, PAYEMS_DAY, _fred_honouring_observation_start(history))
+
+    # Under the four-month floor this is NoValue naming x(t-2), 2026-06-01.
+    assert first_print(answer, series) == Figure(
+        "TEST", date(2026, 8, 1), Decimal("11.0000"), Decimal("6.0000"), PAYEMS_DAY
+    )
+    assert isinstance(answer, FredVintageWindow)
+    assert min(row.date for row in answer.rows) == date(2026, 5, 1)
+
+
+@pytest.mark.asyncio
+async def test_the_wider_window_keeps_one_period_strictness() -> None:
+    # July is missing. The window now reaches back far enough to hold June,
+    # May and more, and the observation before August is still not July: no
+    # figure, rather than a two-month change against June.
+    history = [
+        ("2026-05-01", "100", B, D),
+        ("2026-06-01", "104", B, D),
+        ("2026-08-01", "121", D, D),
+    ]
+    series = _series("change")
+    answer = await _fetch(series, PAYEMS_DAY, _fred_honouring_observation_start(history))
+
+    outcome = first_print(answer, series)
+
+    assert isinstance(outcome, NoValue)
+    assert outcome.reason.startswith("x(t-1) should be 2026-07-01")
+
+
 # --------------------------------------------------------------------------
 # Arithmetic: exact, quantized half-even, never float
 # --------------------------------------------------------------------------
+
+
+def test_the_stored_precision_is_the_display_ceiling() -> None:
+    # One fact, two names: the seed may ask for at most as many display
+    # places as the figure is stored to, and no fewer are stored.
+    assert STORED_EXPONENT.as_tuple().exponent == -MAX_DISPLAY_DECIMALS
+    assert str(STORED_EXPONENT) == "0.0001"
 
 
 @pytest.mark.parametrize(

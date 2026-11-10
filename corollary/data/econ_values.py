@@ -21,7 +21,9 @@ real-time period to that window (U6a's probe), so:
   one. If there is none, FRED has not posted the release: :class:`NotPosted`.
 * **x(t-1) and x(t-2)** are the observations immediately before it **in the D
   vintage**, so a revision published that day is in the prior. Each must be
-  exactly one period earlier at the stated frequency. The spec says
+  exactly one period earlier at the seed row's ``frequency`` -- the same
+  value the fetch's lookback was set from, and an answer fetched at another
+  frequency is refused as a caller's bug. The spec says
   "immediately before"; requiring the period too means a gap in the vintage,
   or a monthly series read as quarterly, is :class:`NoValue` rather than a
   two-period change printed beside an "m/m" label.
@@ -37,10 +39,10 @@ In ``Decimal``, every input parsed from FRED's text, in an explicit
 * ``change``: x(t) - x(t-1). Prior x(t-1) - x(t-2).
 * ``pct_change``: (x(t) / x(t-1) - 1) x 100. Prior one period earlier.
 
-Then ``scale``, then quantized to :data:`STORED_EXPONENT` (four places,
-``ROUND_HALF_EVEN``). A quantized negative zero is stored as ``0.0000``. The
-division runs at 50 significant digits, so its one rounding cannot move the
-four-place result: FRED's values carry a handful of digits, and a quotient of
+Then ``scale``, then quantized to :data:`STORED_EXPONENT` (four places, the
+seed's display ceiling, from which it is derived; ``ROUND_HALF_EVEN``). A
+quantized negative zero is stored as ``0.0000``. The division runs at 50
+significant digits, so its one rounding cannot move the four-place result: FRED's values carry a handful of digits, and a quotient of
 two of them that does not terminate within 50 digits cannot lie within
 10^-50 of a half-way point.
 
@@ -67,9 +69,12 @@ from corollary.data.providers.fred import (
     FredRefusal,
     FredVintageRow,
     FredVintageWindow,
-    VintageFrequency,
 )
-from corollary.data.seeds.calendar_seeds import EconReleaseSeries
+from corollary.data.seeds.calendar_seeds import (
+    MAX_DISPLAY_DECIMALS,
+    EconFrequency,
+    EconReleaseSeries,
+)
 
 __all__ = [
     "COMPUTED_FROM_FRED",
@@ -87,8 +92,11 @@ __all__ = [
 #: so a 0.1 difference from the agency's printed number has an explanation.
 COMPUTED_FROM_FRED: Final = "computed from FRED's levels"
 
-#: Four decimal places: the stored figure's exponent.
-STORED_EXPONENT: Final = Decimal("0.0001")
+#: The stored figure's exponent: ``Decimal("0.0001")``, four places. Derived
+#: from the seed's display ceiling rather than written twice, so a row can
+#: never ask to display a place that was not stored. Built from its tuple, so
+#: no context or string parse is involved.
+STORED_EXPONENT: Final = Decimal((0, (1,), -MAX_DISPLAY_DECIMALS))
 
 #: The transforms' context. Fifty digits: see the module docstring.
 _ARITHMETIC: Final = Context(
@@ -105,7 +113,7 @@ _HUNDRED: Final = Decimal(100)
 _ONE: Final = Decimal(1)
 
 #: Months per period, and the months a period may start in.
-_PERIOD_MONTHS: Final[dict[VintageFrequency, int]] = {"monthly": 1, "quarterly": 3}
+_PERIOD_MONTHS: Final[dict[EconFrequency, int]] = {"monthly": 1, "quarterly": 3}
 
 #: How x(t), x(t-1) and x(t-2) are named in a reason.
 _NAMES: Final = ("x(t)", "x(t-1)", "x(t-2)")
@@ -175,7 +183,7 @@ def _months_back(day: date, months: int) -> date:
     return date(index // 12, index % 12 + 1, day.day)
 
 
-def _starts_a_period(day: date, frequency: VintageFrequency) -> bool:
+def _starts_a_period(day: date, frequency: EconFrequency) -> bool:
     if day.day != 1:
         return False
     return frequency == "monthly" or (day.month - 1) % 3 == 0
@@ -209,8 +217,10 @@ def first_print(
 ) -> FirstPrint:
     """The release's figure, from FRED's ``D-1 .. D`` answer and its seed row.
 
-    Raises ``ValueError`` only for a caller's bug: an answer for a different
-    series than the seed row names.
+    The frequency is the seed row's. Raises ``ValueError`` only for a
+    caller's bug: an answer for a different series than the seed row names,
+    or a window fetched at a different frequency than the row states (its
+    lookback was set for another series).
     """
     if answer.series_id != series.series_id:
         raise ValueError(
@@ -219,6 +229,12 @@ def first_print(
     release_day = answer.release_day
     if isinstance(answer, FredRefusal):
         return Refused(series.series_id, release_day, answer.vendor_message)
+    frequency = series.frequency
+    if answer.frequency != frequency:
+        raise ValueError(
+            f"the answer for {series.series_id} was fetched as {answer.frequency}, the seed "
+            f"row says {frequency}"
+        )
 
     def no_value(reason: str) -> NoValue:
         return NoValue(series.series_id, release_day, reason)
@@ -240,7 +256,6 @@ def first_print(
     if not changed:
         return NotPosted(series.series_id, release_day)
 
-    frequency = answer.frequency
     period = changed[-1]
     if not _starts_a_period(period, frequency):
         return no_value(

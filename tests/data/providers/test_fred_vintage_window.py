@@ -9,12 +9,14 @@ The recorded U6a fixtures are replayed through an ``httpx.MockTransport``, so
 the request the provider builds is the one exercised, and every value's digits
 are FRED's text. Pinned here:
 
-* the request's exact parameters, the ``observation_start`` lookback per
-  frequency, and that it is metered against the FRED bucket;
-* the window parser refuses a body that is not the window asked for;
+* the request's exact parameters, ``output_type=1`` and ``units=lin`` sent
+  explicitly, the ``observation_start`` lookback per frequency, and that it is
+  metered against the FRED bucket;
+* the window parser refuses a body that is not the window asked for, the
+  ``output_type``/``units`` echo included;
 * ``EXHOSLUSM495S``'s recorded 400 is a typed :class:`FredRefusal` carrying
-  FRED's message, while a bad key, a 429, a 5xx and a transport error stay
-  ordinary errors the scheduler retries;
+  FRED's message, while a bad key, a plain "series does not exist", a 429, a
+  5xx and a transport error stay ordinary errors the scheduler retries;
 * the key reaches no exception message and no refusal message.
 """
 
@@ -127,13 +129,15 @@ def _serve_fixture(name: str) -> Any:
 @pytest.mark.parametrize(
     ("release_day", "frequency", "start"),
     [
-        # Four months before D's month, from its first day.
-        (date(2026, 11, 6), "monthly", date(2026, 7, 1)),
-        (date(2026, 10, 14), "monthly", date(2026, 6, 1)),
-        (date(2026, 2, 11), "monthly", date(2025, 10, 1)),  # across a year end
-        # A year before D's month.
-        (date(2026, 10, 29), "quarterly", date(2025, 10, 1)),
-        (date(2026, 1, 30), "quarterly", date(2025, 1, 1)),
+        # Six months before D's month, from its first day.
+        (date(2026, 11, 6), "monthly", date(2026, 5, 1)),
+        (date(2026, 10, 14), "monthly", date(2026, 4, 1)),
+        (date(2026, 2, 11), "monthly", date(2025, 8, 1)),  # across a year end
+        (date(2026, 6, 30), "monthly", date(2025, 12, 1)),
+        # Fifteen months before D's month.
+        (date(2026, 10, 29), "quarterly", date(2025, 7, 1)),
+        (date(2026, 1, 30), "quarterly", date(2024, 10, 1)),
+        (date(2026, 3, 31), "quarterly", date(2024, 12, 1)),
     ],
 )
 def test_the_lookback_holds_three_observations(
@@ -163,7 +167,11 @@ async def test_the_request_is_exactly_the_two_day_window() -> None:
         "file_type": "json",
         "realtime_start": "2026-11-05",
         "realtime_end": "2026-11-06",
-        "observation_start": "2026-07-01",
+        "observation_start": "2026-05-01",
+        # Sent, not left to FRED's defaults: the new-versus-revised split
+        # depends on observations by real-time period (1), in levels (lin).
+        "output_type": "1",
+        "units": "lin",
         "api_key": FAKE_KEY,
     }
     assert request.url.host == FRED_HOST
@@ -172,7 +180,7 @@ async def test_the_request_is_exactly_the_two_day_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_quarterly_request_reaches_back_a_year() -> None:
+async def test_a_quarterly_request_reaches_back_fifteen_months() -> None:
     provider, recorder = _provider(_serve_fixture("p3_vintage_payems_window"))
     async with provider:
         # The body is PAYEMS's; only the outgoing request is under test, and a
@@ -182,7 +190,7 @@ async def test_a_quarterly_request_reaches_back_a_year() -> None:
     (request,) = recorder.requests
     params = dict(request.url.params)
     assert (params["realtime_start"], params["realtime_end"]) == ("2026-10-28", "2026-10-29")
-    assert params["observation_start"] == "2025-10-01"
+    assert params["observation_start"] == "2025-07-01"
 
 
 def test_the_public_params_carry_no_key() -> None:
@@ -191,7 +199,9 @@ def test_the_public_params_carry_no_key() -> None:
         "file_type": "json",
         "realtime_start": "2026-11-05",
         "realtime_end": "2026-11-06",
-        "observation_start": "2026-07-01",
+        "observation_start": "2026-05-01",
+        "output_type": "1",
+        "units": "lin",
     }
 
 
@@ -261,6 +271,17 @@ def _duplicate_row(body: dict[str, Any]) -> None:
         (_set_row(0, date="20260501"), "YYYY-MM-DD"),
         (_set_row(0, realtime_start=None), "realtime_start"),
         (lambda b: b.update(realtime_end="2026-11-07"), "realtime_end"),
+        # The echo of what was sent: output_type 4 (initial release only) and
+        # any non-level units would each be a different question answered.
+        (lambda b: b.update(output_type=4), "output_type"),
+        (lambda b: b.update(output_type=2), "output_type"),
+        (lambda b: b.update(output_type="1"), "output_type"),
+        (lambda b: b.update(output_type=True), "output_type"),
+        (lambda b: b.pop("output_type"), "output_type"),
+        (lambda b: b.update(units="chg"), "units"),
+        (lambda b: b.update(units="pch"), "units"),
+        (lambda b: b.update(units="LIN"), "units"),
+        (lambda b: b.pop("units"), "units"),
         (lambda b: b.pop("count"), "count"),
         (lambda b: b.pop("observations"), "observations"),
     ],
@@ -297,15 +318,92 @@ async def test_a_refusal_that_echoes_the_key_carries_no_key() -> None:
     body = json.dumps(
         {
             "error_code": 400,
-            "error_message": f"Bad Request.  The series does not exist. api_key={FAKE_KEY}",
+            "error_message": (
+                "Bad Request.  The series does not exist in ALFRED but may exist in "
+                f"FRED. api_key={FAKE_KEY}"
+            ),
         }
     )
     provider, _ = _provider(_serve_text(body, 400))
     async with provider:
-        answer = await provider.vintage_window("NOSUCH", PAYEMS_DAY, frequency="monthly")
+        answer = await provider.vintage_window("EXHOSLUSM495S", PAYEMS_DAY, frequency="monthly")
     assert isinstance(answer, FredRefusal)
     assert FAKE_KEY not in answer.vendor_message
-    assert "series does not exist" in answer.vendor_message
+    assert "series does not exist in ALFRED" in answer.vendor_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Bad Request. The series does not exist in ALFRED but may exist in FRED.",
+        # Matched whitespace-collapsed and case-folded.
+        "Bad Request.  The series\n does  NOT exist\tin Alfred.",
+    ],
+)
+async def test_the_alfred_refusal_is_matched_whatever_its_spacing_and_case(
+    message: str,
+) -> None:
+    body = json.dumps({"error_code": 400, "error_message": message})
+    provider, _ = _provider(_serve_text(body, 400))
+    async with provider:
+        answer = await provider.vintage_window("EXHOSLUSM495S", PAYEMS_DAY, frequency="monthly")
+    assert isinstance(answer, FredRefusal)
+    assert answer.vendor_message == " ".join(message.split())
+
+
+@pytest.mark.asyncio
+async def test_a_series_that_does_not_exist_at_all_is_an_error_not_a_refusal() -> None:
+    """FRED's plain "The series does not exist." is what a seed typo gets.
+
+    ``CPIAUSCL`` for ``CPIAUCSL`` is our fault, not FRED's data policy, so it
+    must not be stored as "not available from FRED": it stays a loud
+    :class:`FredError`. Only the ALFRED case -- the series exists, its
+    vintages do not -- is a refusal.
+    """
+    body = json.dumps(
+        {"error_code": 400, "error_message": "Bad Request.  The series does not exist."}
+    )
+    provider, _ = _provider(_serve_text(body, 400))
+    async with provider:
+        with pytest.raises(FredError, match="series does not exist") as raised:
+            await provider.vintage_window("CPIAUSCL", PAYEMS_DAY, frequency="monthly")
+    assert FAKE_KEY not in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 404])
+async def test_the_refusal_body_under_another_status_is_an_error(status: int) -> None:
+    # The recorded refusal, word for word, but not a 400: a proxy or an
+    # outage replaying an error page is transient and retried, never stored
+    # as FRED's permanent answer.
+    body = fixture_body_text("p3_vintage_exhoslusm495s_window")
+    assert "does not exist in ALFRED" in body
+    provider, _ = _provider(_serve_text(body, status))
+    async with provider:
+        with pytest.raises(FredError, match=str(status)):
+            await provider.vintage_window("EXHOSLUSM495S", PAYEMS_DAY, frequency="monthly")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"error_message": NOT_IN_ALFRED},
+        {"error_code": 500, "error_message": NOT_IN_ALFRED},
+        {"error_code": "400", "error_message": NOT_IN_ALFRED},
+    ],
+    ids=["no-error-code", "error-code-500", "error-code-as-text"],
+)
+async def test_a_400_with_the_refusal_text_but_not_freds_error_code_is_an_error(
+    body: dict[str, Any],
+) -> None:
+    # Only FRED's own error object is FRED's answer; the message alone, in a
+    # body that is not that object, is not.
+    provider, _ = _provider(_serve_text(json.dumps(body), 400))
+    async with provider:
+        with pytest.raises(FredError, match="400"):
+            await provider.vintage_window("EXHOSLUSM495S", PAYEMS_DAY, frequency="monthly")
 
 
 @pytest.mark.asyncio

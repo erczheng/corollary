@@ -55,11 +55,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final, Literal, TypeAlias
+from typing import Any, Final, TypeAlias
 
 import httpx
 
 from corollary.data.providers.interface import ProviderError, RateLimitedError
+from corollary.data.seeds.calendar_seeds import EconFrequency
 from corollary.ratelimit import FRED_HOST, FRED_REQUESTS_PER_MINUTE, HostRateLimiter, default_limiter
 from corollary.wire import (
     STORED_DETAIL_MAX,
@@ -87,6 +88,8 @@ __all__ = [
     "RELEASE_DATES_MAX_PAGES",
     "RELEASE_DATES_PAGE_LIMIT",
     "VINTAGE_LOOKBACK_MONTHS",
+    "VINTAGE_OUTPUT_TYPE",
+    "VINTAGE_UNITS",
     "VintageFrequency",
     "parse_observations",
     "parse_release_dates",
@@ -352,9 +355,10 @@ def parse_release_dates(payload: Any) -> FredReleaseDatesPage:
 
 #: How often a release series is observed. It sets the lookback, and
 #: ``econ_values`` checks the dates FRED returns against it. A parameter, not
-#: derived: the lookback must be known before the request, and the release
-#: series seed carries no frequency column.
-VintageFrequency: TypeAlias = Literal["monthly", "quarterly"]
+#: derived from FRED's dates: the lookback must be known before the request.
+#: The series seed's ``frequency`` column carries it, and this is that
+#: column's Literal rather than a second copy of it.
+VintageFrequency: TypeAlias = EconFrequency
 
 #: ``datetime.date`` under a second name, for :class:`FredVintageRow`: its
 #: field is called ``date``, after FRED's own key, and inside the class body
@@ -362,25 +366,39 @@ VintageFrequency: TypeAlias = Literal["monthly", "quarterly"]
 _Day: TypeAlias = date
 
 #: Months before the release day's month that ``observation_start`` reaches
-#: (spec R7). The figure needs three observations, x(t), x(t-1) and x(t-2), and
-#: x(t) lags the release by up to two months for a monthly series (trade,
-#: construction, JOLTS) -- so x(t-2) sits at most four months back. A year
-#: holds three quarters with the same lag to spare. A release delayed past
-#: that is reported as no value naming the missing observation, never guessed.
+#: (spec R7, whose four months and one year are a floor). The figure needs
+#: three observations, x(t), x(t-1) and x(t-2), and x(t) lags the release by up
+#: to two months for a monthly series (trade, construction, JOLTS) -- so x(t-2)
+#: sits at most four months back. Six months holds a series lagging three or
+#: four; fifteen holds three quarters with two quarters' lag. It is one request
+#: either way, and a wider window changes only how many rows come back, never
+#: which are x(t-1) and x(t-2): ``econ_values`` still requires each to be
+#: exactly one period earlier. A release delayed past this is reported as no
+#: value naming the missing observation, never guessed.
 VINTAGE_LOOKBACK_MONTHS: Final[Mapping[VintageFrequency, int]] = {
-    "monthly": 4,
-    "quarterly": 12,
+    "monthly": 6,
+    "quarterly": 15,
 }
 
-#: What a vintage query's 400 says when FRED declines the *series* -- matched
-#: in the whitespace-collapsed, lower-cased message. ``EXHOSLUSM495S`` (NAR's
-#: existing home sales) answers every dated query with "The series does not
-#: exist in ALFRED but may exist in FRED", and an unknown ID with "The series
-#: does not exist". Every other 400 stays a :class:`FredError`: FRED answers a
-#: bad key with a 400 too, and so would a malformed request of ours, and
-#: recording either as "not available from FRED" would hide a fault behind
-#: what reads as the vendor's data policy.
-_SERIES_REFUSED: Final = "series does not exist"
+#: Sent with every vintage query, and required back in the body's echo.
+#: ``output_type`` 1 is observations by real-time period, the layout the
+#: new-versus-revised split reads (4, initial release only, would hide every
+#: revision); ``units`` ``lin`` is the series' own levels, which every
+#: transform is computed from. FRED's defaults today, sent anyway so a change
+#: of default cannot change the question.
+VINTAGE_OUTPUT_TYPE: Final = 1
+VINTAGE_UNITS: Final = "lin"
+
+#: What a vintage query's 400 says when FRED declines the series' *vintages*
+#: -- matched in the whitespace-collapsed, case-folded message.
+#: ``EXHOSLUSM495S`` (NAR's existing home sales, held back from ALFRED for
+#: copyright) answers every dated query with "The series does not exist in
+#: ALFRED but may exist in FRED". Every other 400 stays a :class:`FredError`,
+#: **including FRED's plain "The series does not exist."**: that is what a seed
+#: typo such as ``CPIAUSCL`` gets, and a bad key and a malformed request of
+#: ours are 400s too. Recording any of those as "not available from FRED"
+#: would hide our own fault behind what reads as the vendor's data policy.
+_SERIES_REFUSED: Final = "does not exist in alfred"
 
 
 def vintage_observation_start(release_day: date, frequency: VintageFrequency) -> date:
@@ -406,8 +424,10 @@ def vintage_window_params(
     them, and a value new or revised on ``D`` starts on ``D`` (a revised one
     leaving its old value in a row ending ``D-1``).
 
-    ``output_type`` is not sent: FRED's default, 1 (observations by real-time
-    period), is what U6a recorded and what that split depends on.
+    ``output_type`` and ``units`` are sent explicitly
+    (:data:`VINTAGE_OUTPUT_TYPE`, :data:`VINTAGE_UNITS`), and
+    :func:`parse_vintage_window` refuses a body whose echo differs: that split
+    depends on observations by real-time period, in levels.
     """
     return {
         "series_id": series_id,
@@ -415,6 +435,8 @@ def vintage_window_params(
         "realtime_start": (release_day - timedelta(days=1)).isoformat(),
         "realtime_end": release_day.isoformat(),
         "observation_start": vintage_observation_start(release_day, frequency).isoformat(),
+        "output_type": str(VINTAGE_OUTPUT_TYPE),
+        "units": VINTAGE_UNITS,
     }
 
 
@@ -486,8 +508,10 @@ def parse_vintage_window(
 
     Refused whole (:class:`FredError`) unless it is the window asked for:
     FRED's echo of ``realtime_start``/``realtime_end`` must be ``D-1``/``D``,
-    every row's period must lie inside them and not end before it starts,
-    no date may have two values valid on the same day, and ``count`` must be
+    its echo of ``output_type`` exactly the integer 1 and of ``units`` exactly
+    ``lin`` (what :func:`vintage_window_params` sent), every row's period must
+    lie inside ``D-1 .. D`` and not end before it starts, no date may have two
+    values valid on the same day, and ``count`` must be
     the rows returned -- a truncated vintage would be a partial answer read as
     a whole one. The body's ``observation_start`` echo is not checked: a
     deeper start changes how many rows come back, never what they say.
@@ -502,6 +526,23 @@ def parse_vintage_window(
                 f"{series_id}: the response's {key} {str(echoed)[:40]!r} is not the "
                 f"requested {wanted.isoformat()}"
             )
+    output_type = payload.get("output_type")
+    if (
+        isinstance(output_type, bool)
+        or not isinstance(output_type, int)
+        or output_type != VINTAGE_OUTPUT_TYPE
+    ):
+        raise FredError(
+            f"{series_id}: the response's output_type {str(output_type)[:40]!r} is not the "
+            f"requested {VINTAGE_OUTPUT_TYPE}; refused rather than read as observations by "
+            "real-time period"
+        )
+    units = payload.get("units")
+    if units != VINTAGE_UNITS:
+        raise FredError(
+            f"{series_id}: the response's units {str(units)[:40]!r} is not the requested "
+            f"{VINTAGE_UNITS!r}; refused rather than read as the series' levels"
+        )
     rows = payload.get("observations")
     if not isinstance(rows, list):
         raise FredError(f"{series_id}: the response carries no observations list")
@@ -676,8 +717,9 @@ class FredProvider:
     ) -> FredRefusal | None:
         """The response as FRED declining the series, or ``None`` if it is anything else.
 
-        Only a 400 whose body is FRED's own error object and whose message
-        says the series does not exist (:data:`_SERIES_REFUSED`). The message
+        Only a 400 whose body is FRED's own error object (``error_code`` the
+        integer 400) and whose message says the series does not exist in
+        ALFRED (:data:`_SERIES_REFUSED`). The message
         goes through the module's one scrubber, at the stored-row bound.
         """
         if response.status_code != 400:
@@ -692,7 +734,7 @@ class FredProvider:
         message = body.get("error_message")
         if isinstance(code, bool) or code != 400 or not isinstance(message, str):
             return None
-        if _SERIES_REFUSED not in " ".join(message.split()).lower():
+        if _SERIES_REFUSED not in " ".join(message.split()).casefold():
             return None
         return FredRefusal(
             series_id=series_id,
