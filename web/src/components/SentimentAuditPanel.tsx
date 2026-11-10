@@ -3,7 +3,13 @@ import { RequestFailed } from './RequestFailed'
 import { TableSkeleton } from './Skeleton'
 import { useSentimentAudit, useStartSentimentAudit } from '../lib/queries'
 import { NEWS_SOURCE_LABEL } from '../lib/news'
-import { formatDateTimeET, formatInteger, formatTenthsPct } from '../lib/format'
+import {
+  asSentence,
+  formatDateET,
+  formatDateTimeET,
+  formatInteger,
+  formatTenthsPct,
+} from '../lib/format'
 import {
   SENTIMENT_DEMOTE_SAMPLE,
   SENTIMENT_FLOOR,
@@ -21,6 +27,7 @@ import {
   nothingAuditedYet,
   repromotionProgress,
   sessionsFact,
+  shortCellLead,
   sourceStatusKind,
   statedSessionFloor,
   windowProgress,
@@ -96,8 +103,10 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
               : `${pill.label} since ${formatDateTimeET(source.changedAt)}.`}
       </p>
       {kind !== 'missing' && source.reason ? (
+        // `asSentence`: an engine reason that already ends in "." must not
+        // render "..".
         <p className="mt-1 max-w-prose text-caption text-on-surface-variant">
-          Audit’s reason: {source.reason}.
+          Audit’s reason: {asSentence(source.reason)}
         </p>
       ) : null}
       {progress.length > 0 ? (
@@ -143,10 +152,12 @@ function Figure({
     // starts. The session clause is the server's count against the server's
     // floor ("2 of 5 sessions"), or, on a row written before the floor, the
     // words saying no count exists. A row with no count is never shown as
-    // meeting the floor, so it never gets a percentage either.
+    // meeting the floor, so it never gets a percentage either. That row's
+    // lead is "not measured" rather than "insufficient": its sessions were
+    // never counted, which is not the same as counted and found short.
     return (
       <span className="text-data-sm text-on-surface-variant">
-        insufficient sample — {formatInteger(counts.graded)} of {formatInteger(floor)} labels,{' '}
+        {shortCellLead(progress)} — {formatInteger(counts.graded)} of {formatInteger(floor)} labels,{' '}
         {sessionsFact(progress, sessionFloor)}
       </span>
     )
@@ -178,10 +189,14 @@ function Split({
   watch,
   discovery,
   short,
+  lead,
 }: {
   watch: SentimentCounts
   discovery: SentimentCounts
   short: boolean
+  /** The cell's own lead, so the split never says "insufficient" under a
+   * cell that says "not measured". */
+  lead: string
 }) {
   const line = (label: string, counts: SentimentCounts) => {
     const tenths = accuracyTenths(counts)
@@ -205,7 +220,7 @@ function Split({
       {line('Discovery', discovery)}
       <p className="text-caption text-on-surface-variant">
         {short
-          ? 'insufficient sample — counts only until the combined cell reaches both floors; transitions act on the combined figure'
+          ? `${lead} — counts only until the combined cell reaches both floors; transitions act on the combined figure`
           : 'display only — transitions act on the combined figure'}
       </p>
     </div>
@@ -264,6 +279,7 @@ function AccuracyCell({
           watch={cell.watch}
           discovery={cell.discovery}
           short={isShort(counts, floor, progress)}
+          lead={shortCellLead(progress)}
         />
       ) : null}
     </td>
@@ -320,6 +336,11 @@ function runLine(run: AuditRunSummary): string {
  * button that let a person override that would make the audit advisory. Nor
  * is there a void, demote, or session-floor override (spec R4, R9).
  *
+ * A voided run is a **record**, one line each, in the server's order (newest
+ * void first): its id, the day it was voided in New York, and the operator's
+ * reason verbatim. Not a warning: no `error`, `caution` or `bearish`. Voiding
+ * happens only in `scripts/void_audit_run.py`, never here.
+ *
  * The session floor is shown, not judged: each cell states the server's
  * session count against the server's `sessionFloor`, and whether a source is
  * eligible is `eligibility.eligible` alone. */
@@ -375,11 +396,11 @@ export function SentimentAuditPanel() {
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span>, once each window
         has at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels {overSessions} over the trailing 28 days. An unaudited source becomes active when
+        labels {overSessions} in the trailing 28 days. An unaudited source becomes active when
         both windows are at{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better, with
         at least <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span>{' '}
-        graded labels {overSessions} each over the trailing 28 days. A demoted source is
+        graded labels {overSessions} each in the trailing 28 days. A demoted source is
         re-promoted only when both windows reach{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> or better,
         with at least{' '}
@@ -494,6 +515,17 @@ export function SentimentAuditPanel() {
           </>
         ) : null}
       </dl>
+
+      {status.voidedRuns.length > 0 ? (
+        <ul aria-label="Voided runs" className="mt-2 max-w-prose space-y-1">
+          {status.voidedRuns.map((run) => (
+            <li key={run.id} className="text-caption text-on-surface-variant">
+              Run <span className="text-data-sm text-on-surface">{run.id}</span> voided on{' '}
+              {formatDateET(run.voidedAt)}: {asSentence(run.reason)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       <div className="mt-4">
         {/* Not destructive — a run reads labels and returns, and only the

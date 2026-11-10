@@ -1049,8 +1049,18 @@ describe('sentiment accuracy', () => {
     expect(text).toMatch(/falls below\s*52%/)
     expect(text).toMatch(/reach\s*66%\s*or better/)
     expect(text).toMatch(
-      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels over at least\s*5\s*sessions each over the trailing 28 days/,
+      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels over at least\s*5\s*sessions each in the trailing 28 days/,
     )
+    expect(text).toMatch(
+      /once each window has at least\s*30\s*graded labels over at least\s*5\s*sessions in the trailing 28 days\./,
+    )
+    // "over" once per clause: never "over at least 5 sessions over the …".
+    // The rule paragraph only: an audit's reason is the engine's sentence,
+    // quoted verbatim, and its wording is the engine's to change.
+    const paragraph =
+      within(section('Sentiment accuracy')).getByText(/Between/, { selector: 'p' }).textContent ??
+      ''
+    expect(paragraph).not.toMatch(/sessions(\s+each)?\s+over the trailing/)
     expect(text).toMatch(/Between\s*52%\s*and\s*66%\s*an active or demoted source stays where it is/)
     expect(text).not.toMatch(/Between\s*52%\s*and\s*66%\s*a source stays/)
   })
@@ -1202,17 +1212,28 @@ describe('sentiment accuracy', () => {
 
   /** A row written before the floor carries no count: said in words, never
    * a number, never "0 of 5", and never a percentage that would read as
-   * meeting the floor. */
+   * meeting the floor. Its lead is "not measured", not "insufficient": 212
+   * labels is not short of 30, and its sessions were never counted at all. */
   it('says a pre-floor row has no session count, in words', async () => {
     stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.preSessionFloor) })
     render(<App />)
-    const rules = row(await sentimentTable(), 'Corollary rules')
+    const table = await sentimentTable()
+    const rules = row(table, 'Corollary rules')
 
     const facts = [212, 198].map((n) =>
       within(rules).getByText(
-        `insufficient sample — ${n} of 30 labels, sessions not counted: written before the session floor existed`,
+        `not measured — ${n} of 30 labels, sessions not counted: written before the session floor existed`,
       ),
     )
+    expect(table.textContent).not.toContain('insufficient sample')
+    // The same run wrote Massive's rows before the floor too (U3 C1).
+    const massive = row(table, 'Massive')
+    expect(
+      within(massive).getByText(
+        'not measured — 41 of 100 labels, sessions not counted: written before the session floor existed',
+      ),
+    ).toBeInTheDocument()
+    expect(massive.textContent).not.toMatch(/\d+ of \d+ sessions/)
     for (const fact of facts) {
       expect(fact.className).toContain('text-on-surface-variant')
       expect(fact.className).not.toMatch(/caution|error|bearish|bullish/)
@@ -1223,6 +1244,25 @@ describe('sentiment accuracy', () => {
     expect(rules.textContent).not.toContain('61.7')
     // Its status is the pre-floor run's, and its reason that run's wording.
     expect(within(rules).getByText('Active')).toBeInTheDocument()
+  })
+
+  /** One click down, the split keeps the cell's lead. */
+  it('expands a pre-floor cell under the same "not measured" lead', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.preSessionFloor) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    fireEvent.click(
+      within(rules).getByRole('button', { name: /^not measured — 212 of 30 labels.*1 hour/ }),
+    )
+    expect(
+      within(rules).getByText(
+        'not measured — counts only until the combined cell reaches both floors; transitions act on the combined figure',
+      ),
+    ).toBeInTheDocument()
+    // No measured figure (watch alone is 94 of 150 = 62.6%). The reason's
+    // "52%" is the engine's threshold, not a measurement.
+    expect(rules.textContent).not.toMatch(/\d+\.\d%/)
   })
 
   /** At the session floor exactly (5 of 5) the source is eligible, and the
@@ -1316,7 +1356,14 @@ describe('sentiment accuracy', () => {
   /** R4, R9: "there is still no control". Nothing on the panel voids a run,
    * demotes or re-promotes a source, or overrides the session floor, in any
    * state. The only buttons are the audit trigger and the cell toggles. */
-  it.each(['populated', 'sessionsShort', 'preSessionFloor', 'repromoted'] as const)(
+  it.each([
+    'populated',
+    'sessionsShort',
+    'preSessionFloor',
+    'repromoted',
+    'voided',
+    'voidedTwice',
+  ] as const)(
     'offers no void, demote or re-promote control (%s)',
     async (state) => {
       stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES[state]) })
@@ -1337,8 +1384,137 @@ describe('sentiment accuracy', () => {
       for (const role of ['checkbox', 'switch', 'textbox', 'spinbutton', 'combobox'] as const) {
         expect(within(panel).queryAllByRole(role)).toHaveLength(0)
       }
+      // No link or menu item either: a void lives only in the script (R4).
+      for (const role of ['link', 'menuitem'] as const) {
+        expect(within(panel).queryAllByRole(role)).toHaveLength(0)
+      }
     },
   )
+
+  /* -------------------------------------------------------------------- *
+   * Voided runs (spec R9): one line each, a record and not a warning.
+   * -------------------------------------------------------------------- */
+
+  function voidedList(): HTMLElement {
+    return within(section('Sentiment accuracy')).getByRole('list', { name: 'Voided runs' })
+  }
+
+  it('states a voided run in one line: id, New York date, and the reason verbatim', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const lines = within(voidedList()).getAllByRole('listitem')
+
+    expect(lines).toHaveLength(1)
+    // 2026-11-09T16:42:10Z is 11:42 AM on Nov 9 in New York (EST). The
+    // server's reason has no full stop; the line adds exactly one.
+    expect(lines[0].textContent).toBe(
+      'Run 8 voided on Nov 9, 2026: graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09).',
+    )
+  })
+
+  /** A void at 01:30Z on Nov 10 is still the evening of Nov 9 in New York. */
+  it('dates the void in New York, not UTC', async () => {
+    const voided = SENTIMENT_AUDIT_STATES.voided
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...voided,
+        voidedRuns: [{ ...voided.voidedRuns[0], voidedAt: '2026-11-10T01:30:00Z' }],
+      }),
+    })
+    render(<App />)
+    await sentimentTable()
+
+    expect(voidedList().textContent).toMatch(/^Run 8 voided on Nov 9, 2026: /)
+  })
+
+  it('sets the run id in the data face and the line in secondary text, with no warning colour', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const list = voidedList()
+    const line = within(list).getByRole('listitem')
+
+    expect(line.className).toContain('text-on-surface-variant')
+    const id = within(line).getByText('8')
+    expect(id.tagName).toBe('SPAN')
+    // `text-data-sm` is JetBrains Mono with tabular-nums (index.css).
+    expect(id.className).toContain('text-data-sm')
+    for (const el of [list, line, id]) {
+      expect(el.className).not.toMatch(/error|caution|bearish|bullish|outline|neutral/)
+    }
+    expect(list.closest('[role="alert"]')).toBeNull()
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  /** Newest void first, as the server sends it. Here that is ascending by
+   * id (R4 lets only the latest run be voided), so a re-sort by id would
+   * show. A reason that already ends in "." gains no second one. */
+  it('lists voided runs in the server’s order, without doubling a full stop', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voidedTwice) })
+    render(<App />)
+    await sentimentTable()
+    const lines = within(voidedList()).getAllByRole('listitem')
+
+    expect(lines.map((l) => l.textContent?.match(/^Run (\d+)/)?.[1])).toEqual(['8', '9'])
+    expect(lines[1].textContent).toBe(
+      'Run 9 voided on Nov 2, 2026: Started by hand while the label backfill was still writing, so it graded a partial week.',
+    )
+    expect(voidedList().textContent).not.toContain('..')
+  })
+
+  /** `lastRun` is the newest non-voided run (R9): run 7, never run 8. */
+  it('reports the last run that stands, not the voided one', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const text = section('Sentiment accuracy').textContent ?? ''
+
+    expect(text).toMatch(/Last run\s*Oct 10,? 10:00\sAM \(scheduled, succeeded/)
+    expect(text).not.toContain('Figures from')
+  })
+
+  it.each(['unaudited', 'populated', 'preSessionFloor', 'running'] as const)(
+    'renders no voided-run line when none is voided (%s)',
+    async (state) => {
+      stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES[state]) })
+      render(<App />)
+      await sentimentTable()
+      const panel = section('Sentiment accuracy')
+
+      expect(within(panel).queryByRole('list', { name: 'Voided runs' })).not.toBeInTheDocument()
+      expect(panel.textContent).not.toMatch(/voided on/)
+    },
+  )
+
+  /** The restorer's reason (R4) is quoted the same way: one full stop. */
+  it('states a restored source’s reason with one full stop', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+
+    expect(within(massive).getByText('Demoted')).toBeInTheDocument()
+    expect(massive.textContent).toContain(
+      'Audit’s reason: restored when run 8 was voided: graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09); the original reason text is not retained.',
+    )
+  })
+
+  /** An engine reason that already ends in "." used to render "..". */
+  it('never doubles the full stop on an audit reason', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const [rules, massive] = populated.sources
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...populated,
+        sources: [rules, { ...massive, reason: 'below 52% in 1h.' }],
+      }),
+    })
+    render(<App />)
+    const massiveRow = row(await sentimentTable(), 'Massive')
+
+    expect(within(massiveRow).getByText('Audit’s reason: below 52% in 1h.')).toBeInTheDocument()
+    expect(massiveRow.textContent).not.toContain('..')
+  })
 })
 
 describe('running the audit by hand', () => {

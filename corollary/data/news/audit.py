@@ -1760,8 +1760,10 @@ def window_is_eligible(graded: int, sessions: int | None, floor: int) -> bool:
     is never eligible.
 
     **The one copy of this rule.** :func:`decide_transition` reads it, and so
-    does ``GET /api/settings/sentiment``, so Settings can never call a source
-    eligible that the engine will not move. A source is eligible when every
+    does ``GET /api/settings/sentiment``, so Settings never calls a source
+    eligible that the engine would judge ineligible. Eligibility is
+    necessary for a transition, not sufficient: an eligible source at 61%
+    stays active, inside the 52-66% band. A source is eligible when every
     window is; each caller states that quantifier over its own windows.
     """
     if sessions is None:

@@ -324,3 +324,15 @@ export function formatPriceRange(low: string | null, high: string | null): strin
   if (high !== null) return `up to $${high}`
   return null
 }
+
+/** A server sentence, verbatim, ending in exactly one terminal mark: a full
+ * stop is appended only when `text` does not already end a sentence.
+ *
+ * For text the page quotes and closes with a period of its own — an audit's
+ * reason, a void reason. An engine reason that already ends in "." would
+ * otherwise render "..". A terminal mark inside a closing bracket or quote
+ * ("(see Q23a.)") counts as ending the sentence. Nothing else is touched:
+ * not abbreviated, not trimmed, not re-cased. */
+export function asSentence(text: string): string {
+  return /[.!?…]["'”’)\]]*\s*$/.test(text) ? text : `${text}.`
+}

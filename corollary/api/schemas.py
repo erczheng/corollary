@@ -177,6 +177,7 @@ __all__ = [
     "SentimentWindow",
     "SentimentWindowAccuracy",
     "SentimentWindowProgress",
+    "VoidedAuditRun",
 ]
 
 logger = logging.getLogger(__name__)
@@ -369,6 +370,9 @@ NotificationEvent: TypeAlias = Literal[
     # transition unit lands.
     "sentiment_demoted",
     "sentiment_repromoted",
+    # A sentiment audit run voided by the owner (R4, migration 0018):
+    # ``info``, emitted by ``scripts/void_audit_run.py``.
+    "sentiment_audit_voided",
     # A manual sentiment audit run started (step 6, migration 0014): ``info``,
     # emitted by ``POST /api/settings/sentiment/audit`` (decision 20).
     "sentiment_audit_requested",
@@ -2638,9 +2642,11 @@ class SentimentEligibility(ApiModel):
     ``audit.MIN_ELIGIBLE_SESSIONS``, served so no client restates it.
     ``eligible`` is every window at or over ``floor`` **and** at or over
     ``sessionFloor``, with a ``null`` session count never eligible; it is
-    the engine's own rule (``audit.window_is_eligible``), so Settings cannot
-    call a source eligible that the next run would not move.
-    ``asOfRunId`` is the run the counts come from; ``null`` when no run has
+    the engine's own rule (``audit.window_is_eligible``), so Settings never
+    calls a source eligible that the engine would judge ineligible.
+    Eligible means the floors are met, which a transition needs and which
+    does not make one: an eligible source at 61% stays active, inside the
+    52-66% band. ``asOfRunId`` is the run the counts come from; ``null`` when no run has
     counted anything on this basis yet -- no run has succeeded, or the latest
     one is the run that demoted the source, so nothing is graded *since*.
     Every window then reads ``graded: 0`` and ``sessions: 0``, with
@@ -2667,9 +2673,10 @@ class SentimentSourceAudit(ApiModel):
     database, since both are seeded. ``status``, ``changedAt`` and
     ``neverAudited`` are then a display fallback (``unaudited``), not a
     record, and claim nothing. ``reason`` is the latest transition's, as
-    the run wrote it. ``accuracy`` is the latest **succeeded** run's rows for
-    this source, every basis that run computed, ordered by window then basis;
-    empty when no run has succeeded.
+    the run wrote it. ``accuracy`` is ``accuracyRun``'s rows for this
+    source -- the newest **succeeded, non-voided** run -- every basis that
+    run computed, ordered by window then basis; empty when no standing run
+    has succeeded.
     """
 
     source: NewsLabelSource
@@ -2692,20 +2699,50 @@ class AuditRunSummary(ApiModel):
     finished_at: datetime | None
 
 
+class VoidedAuditRun(ApiModel):
+    """One ``audit_run`` row voided by ``scripts/void_audit_run.py`` (remainder
+    spec R4, migration 0018).
+
+    ``voidedAt`` is when it was voided, aware UTC. ``reason`` is the stored
+    ``void_reason``, verbatim: the owner's words, as given to the script.
+    Display only -- no route voids, demotes or re-promotes (R4, parent Q6).
+    The run's ``status`` still records what it did; this records that it no
+    longer stands.
+    """
+
+    id: int
+    voided_at: datetime
+    reason: str
+
+
 class SentimentAuditStatus(ApiModel):
     """``GET /api/settings/sentiment``.
 
-    ``lastRun`` is the newest run in any state; ``accuracyRun`` the newest
-    **succeeded** one, which every source's figures come from. ``nextRunAt``
-    is the scheduled job's next slot, ``null`` with no scheduler running.
-    ``manualAvailableAt`` is when the once-an-hour manual limit next admits a
-    run, ``null`` when it admits one now. Display only: the ``POST`` enforces
+    **A voided run never appears in ``lastRun`` or ``accuracyRun``** (R4
+    step 3: every reader excludes voided runs). ``lastRun`` is the newest
+    **non-voided** run in any state; ``accuracyRun`` the newest
+    **non-voided succeeded** one. Every source's accuracy figures and its
+    eligibility come from ``accuracyRun``, so once the newest run is voided
+    they come from the standing run before it, or there are none -- both
+    ``null`` when no run stands. A voided run's ``sentiment_accuracy`` rows
+    stay stored and are never served.
+
+    ``voidedRuns`` lists every voided run, **newest void first** (by
+    ``voidedAt``, then ``id``), and is empty -- never ``null`` -- when
+    nothing has been voided.
+
+    ``nextRunAt`` is the scheduled job's next slot, ``null`` with no
+    scheduler running. ``manualAvailableAt`` is when the once-an-hour manual
+    limit next admits a run, ``null`` when it admits one now. A voided
+    manual run still counts toward it: the limit is on how often a run
+    starts, not on whether it stands. Display only: the ``POST`` enforces
     the limit itself (rule 4).
     """
 
     sources: list[SentimentSourceAudit]
     last_run: AuditRunSummary | None
     accuracy_run: AuditRunSummary | None
+    voided_runs: list[VoidedAuditRun]
     next_run_at: datetime | None
     manual_available_at: datetime | None
 

@@ -410,6 +410,16 @@ export function sessionsFact(progress: SentimentWindowProgress | null, sessionFl
   return `${formatInteger(progress.sessions)} of ${formatInteger(sessionFloor)} sessions`
 }
 
+/** The lead of a cell that prints no percentage. "insufficient sample" is a
+ * count found short of a floor. A row written before the session floor
+ * (`sessions: null`) was never counted against it, so its lead is "not
+ * measured", whatever its label count: still no percentage, and no "0 of 5".
+ * A missing entry keeps "insufficient sample", since `sessionsFact` already
+ * says it was not reported. Wording only; it decides nothing. */
+export function shortCellLead(progress: SentimentWindowProgress | null): string {
+  return progress !== null && progress.sessions === null ? 'not measured' : 'insufficient sample'
+}
+
 /** The session floor the rule paragraph states, from the server's
  * `sessionFloor`, which every source carries. `null` with no sources, or if
  * two sources disagree. The paragraph then says the figure was not reported,

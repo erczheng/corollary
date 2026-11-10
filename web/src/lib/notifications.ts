@@ -54,6 +54,8 @@ export type { NotificationSeverity }
  * the audit withdrawing a source is the audit working as designed — a
  * degradation report, the same reasoning that makes `stop_loss_hit` one.
  * `sentiment_repromoted` is `info`: nothing is wrong. Both `account: null`.
+ * `sentiment_audit_voided` (remainder spec R4) is `info`, `account: null`: a
+ * run set aside by hand and the statuses it restored, on the same channels.
  * `sentiment_audit_requested` — an audit run started by hand — is `info`, on
  * the config events' terms (decision 20). `cash_session_confirmed` and
  * `cash_session_ended` — rule 5's server-checked Cash session, confirmed or
@@ -76,6 +78,7 @@ const SEVERITY: Record<NotificationEvent, NotificationSeverity> = {
   spdr_seed_amended: 'info',
   sentiment_demoted: 'warning',
   sentiment_repromoted: 'info',
+  sentiment_audit_voided: 'info',
   sentiment_audit_requested: 'info',
   calendar_changed: 'info',
   cash_session_confirmed: 'info',

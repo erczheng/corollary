@@ -225,8 +225,16 @@ def add_audit_run(
     trigger: str = "scheduled",
     status: str = "succeeded",
     detail: str | None = None,
+    voided_at: datetime | None = None,
+    void_reason: str | None = None,
 ) -> int:
-    """One ``audit_run`` row, as a run would have left it. Returns its id."""
+    """One ``audit_run`` row, as a run would have left it. Returns its id.
+
+    ``voided_at`` and ``void_reason`` are a void as ``audit_void`` leaves
+    the row (R4, migration 0018): both or neither, on a finished run --
+    ``ck_audit_run_voided`` refuses anything else, so a test cannot build a
+    void the schema would not hold.
+    """
     with Session(engine) as session:
         run = AuditRun(
             started_at=started_at,
@@ -234,6 +242,8 @@ def add_audit_run(
             trigger=trigger,
             status=status,
             detail=detail,
+            voided_at=voided_at,
+            void_reason=void_reason,
         )
         session.add(run)
         session.commit()

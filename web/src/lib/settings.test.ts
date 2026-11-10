@@ -39,6 +39,7 @@ import {
   riskDollars,
   riskLimitFor,
   sessionsFact,
+  shortCellLead,
   sourceStatusKind,
   statedSessionFloor,
   validateRiskLimit,
@@ -590,6 +591,24 @@ describe('sessionsFact', () => {
   })
 })
 
+/** "insufficient" is a count found short; a pre-floor row was never
+ * counted, so its lead says that instead. */
+describe('shortCellLead', () => {
+  it('is "not measured" for a row written before the session floor', () => {
+    const rules = SENTIMENT_AUDIT_STATES.preSessionFloor.sources[0]
+    expect(shortCellLead(windowProgress(rules, '1h'))).toBe('not measured')
+    expect(shortCellLead(windowProgress(rules, '1d'))).toBe('not measured')
+  })
+
+  it('is "insufficient sample" for any counted row, and a missing one', () => {
+    const short = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(shortCellLead(windowProgress(short, '1h'))).toBe('insufficient sample')
+    const never = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
+    expect(shortCellLead(windowProgress(never, '1h'))).toBe('insufficient sample')
+    expect(shortCellLead(null)).toBe('insufficient sample')
+  })
+})
+
 describe('statedSessionFloor', () => {
   it('is the floor every source carries', () => {
     expect(statedSessionFloor(SENTIMENT_AUDIT_STATES.populated.sources)).toBe(5)
@@ -642,6 +661,63 @@ describe('the session-floor fixtures', () => {
         }
       }
     }
+  })
+
+  /** A run writes `sessions` on every row or, before the floor existed, on
+   * none. One state mixing NULL and counted rows from the same run (U3 C1)
+   * draws something the engine cannot produce. */
+  it('never mix counted and uncounted rows from one run', () => {
+    for (const [name, state] of Object.entries(SENTIMENT_AUDIT_STATES)) {
+      const byRun = new Map<number, Set<boolean>>()
+      for (const source of state.sources) {
+        const run = source.eligibility.asOfRunId
+        if (run === null) continue
+        const seen = byRun.get(run) ?? new Set<boolean>()
+        for (const cell of source.accuracy) {
+          for (const c of [cell.combined, cell.watch, cell.discovery]) seen.add(c.sessions === null)
+        }
+        for (const w of source.eligibility.windows) seen.add(w.sessions === null)
+        byRun.set(run, seen)
+      }
+      for (const [run, seen] of byRun) {
+        expect({ state: name, run, mixed: seen.size > 1 }).toEqual({ state: name, run, mixed: false })
+      }
+    }
+  })
+})
+
+/** R9: `lastRun` and `accuracyRun` are the newest **non-voided** runs, and
+ * `voidedRuns` is newest void first. */
+describe('the voided-run fixtures', () => {
+  it('never report a voided run as the last run or the figures’ run', () => {
+    for (const [name, state] of Object.entries(SENTIMENT_AUDIT_STATES)) {
+      const voided = new Set(state.voidedRuns.map((v) => v.id))
+      expect({ state: name, last: voided.has(state.lastRun?.id ?? -1) }).toEqual({
+        state: name,
+        last: false,
+      })
+      expect({ state: name, figures: voided.has(state.accuracyRun?.id ?? -1) }).toEqual({
+        state: name,
+        figures: false,
+      })
+      for (const source of state.sources) {
+        expect(voided.has(source.eligibility.asOfRunId ?? -1)).toBe(false)
+      }
+    }
+  })
+
+  it('list voids newest first, and carry R5’s reason verbatim', () => {
+    const { voided, voidedTwice } = SENTIMENT_AUDIT_STATES
+    expect(voided.voidedRuns).toHaveLength(1)
+    expect(voided.voidedRuns[0].reason).toBe(
+      'graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09)',
+    )
+    const times = voidedTwice.voidedRuns.map((v) => Date.parse(v.voidedAt))
+    expect(times).toHaveLength(2)
+    expect(times[0]).toBeGreaterThan(times[1])
+    // Only the latest non-voided run can be voided (R4), so the newer void is
+    // the lower id here: server order, not id order.
+    expect(voidedTwice.voidedRuns.map((v) => v.id)).toEqual([8, 9])
   })
 })
 

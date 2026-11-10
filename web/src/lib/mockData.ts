@@ -43,6 +43,7 @@ import type {
   SentimentWindow,
   SentimentWindowAccuracy,
   AuditRunSummary,
+  VoidedAuditRun,
   SentimentComponent,
   SentimentTier,
   SocialAttentionItem,
@@ -1829,6 +1830,9 @@ export const NOTIFICATION_ROUTES: NotificationRoute[] = [
   // channels, so a withdrawal and its restoration arrive the same way.
   { event: 'sentiment_demoted', bell: true, discord: true },
   { event: 'sentiment_repromoted', bell: true, discord: true },
+  // Remainder spec R4, migration 0018: a voided audit run, on the same
+  // channels as the transitions it undoes.
+  { event: 'sentiment_audit_voided', bell: true, discord: true },
   // Step 6, migration 0014: a manual audit run, on decision 20's config terms.
   { event: 'sentiment_audit_requested', bell: false, discord: true },
   // Phase 3 decisions 9 and 20, migration 0015: a manual calendar entry.
@@ -2138,6 +2142,66 @@ const PRE_FLOOR_RULES: SentimentSourceAudit = {
   ),
 }
 
+/** Massive as the same pre-floor run wrote it: demoted, with every
+ * `sessions` `null` too. A run writes `sessions` on every row or, before the
+ * floor existed, on none, so a state pairing these with counted rows from the
+ * same run could not happen. The demotion reason never named sessions, so it
+ * reads the same either side of the floor. */
+const PRE_FLOOR_MASSIVE: SentimentSourceAudit = {
+  ...DEMOTED_MASSIVE,
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(88, 44, 19, null), counts(31, 15, 7, null), null),
+    cell('1h', 'since_demotion', counts(29, 17, 6, null), counts(12, 7, 3, null), null),
+    cell('1d', 'trailing_28d', counts(84, 46, 15, null), counts(30, 17, 5, null), null),
+    cell('1d', 'since_demotion', counts(26, 15, 4, null), counts(11, 6, 2, null), null),
+  ],
+  eligibility: eligibilityFor(
+    'repromote',
+    { '1h': 41, '1d': 37 },
+    { '1h': null, '1d': null },
+    SUCCEEDED_RUN.id,
+  ),
+}
+
+/** R5's void reason, verbatim. It ends without a full stop; the panel adds
+ * one. */
+const R5_VOID_REASON =
+  'graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09)'
+
+/** Run 8, graded after the owner replaced the reference rule on 2026-10-22
+ * but under the old one, and voided on 2026-11-09 (spec R5). A different
+ * world from `running`'s run 8, which shares only the id. Its figures no longer stand, so `lastRun` and
+ * `accuracyRun` fall back to run 7, the newest run that does. */
+const VOIDED_RUN_8: VoidedAuditRun = {
+  id: 8,
+  voidedAt: '2026-11-09T16:42:10Z',
+  reason: R5_VOID_REASON,
+}
+
+/** Run 9, voided first, on 2026-11-02. Only the latest non-voided terminal
+ * run can be voided (R4), so run 9 went before run 8 could, and newest void
+ * first lists them 8 then 9 — ascending by id. A panel that re-sorted by id
+ * descending would print them backwards. Its reason ends in a full stop
+ * already, the one that used to render "..". */
+const VOIDED_RUN_9: VoidedAuditRun = {
+  id: 9,
+  voidedAt: '2026-11-02T15:05:47Z',
+  reason: 'Started by hand while the label backfill was still writing, so it graded a partial week.',
+}
+
+/** Massive as voiding run 8 left it: run 8 had re-promoted it, and the void
+ * restored the demotion run 7's figures stand behind. `changedAt` is that
+ * earlier demotion's; the reason is the restorer's wording (R4), since
+ * `audit_log` never kept the original. */
+const RESTORED_MASSIVE: SentimentSourceAudit = {
+  ...DEMOTED_MASSIVE,
+  reason: `restored when run 8 was voided: ${R5_VOID_REASON}; the original reason text is not retained`,
+}
+
+/** Saturday 10:00 ET after the voids: the clocks went back on Nov 1, so
+ * 10:00 EST is 15:00Z. */
+const NEXT_AUDIT_AFTER_VOID_AT = '2026-11-14T15:00:00Z'
+
 /** No status row at all — a damaged database. The server shows it as
  * unaudited for display and says so; it is **not** "never audited". */
 const MISSING_STATUS_MASSIVE: SentimentSourceAudit = {
@@ -2155,6 +2219,8 @@ export type SentimentAuditFixture =
   | 'repromoted'
   | 'statusMissing'
   | 'running'
+  | 'voided'
+  | 'voidedTwice'
 
 export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAuditStatus> = {
   /** Nothing has ever run: every count is zero and nothing is a result. */
@@ -2162,6 +2228,7 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [NEVER_AUDITED_RULES, NEVER_AUDITED_MASSIVE],
     lastRun: null,
     accuracyRun: null,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2170,6 +2237,7 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [ACTIVE_RULES, DEMOTED_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2177,6 +2245,7 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [SHORT_SAMPLE_RULES, DEMOTED_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2185,14 +2254,16 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [SESSION_SHORT_RULES, DEMOTED_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
   /** The figures predate the session floor: no session count to show. */
   preSessionFloor: {
-    sources: [PRE_FLOOR_RULES, DEMOTED_MASSIVE],
+    sources: [PRE_FLOOR_RULES, PRE_FLOOR_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2202,6 +2273,7 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [ACTIVE_RULES, REPROMOTED_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2209,6 +2281,7 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     sources: [ACTIVE_RULES, MISSING_STATUS_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: null,
   },
@@ -2224,8 +2297,29 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
       finishedAt: null,
     },
     accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [],
     nextRunAt: NEXT_AUDIT_AT,
     manualAvailableAt: '2026-10-14T16:20:00Z',
+  },
+  /** Run 8 voided (spec R5): one line for it, and every figure from run 7,
+   * the newest run that stands. Massive is back to the demotion run 8 had
+   * reversed, with the restorer's reason. */
+  voided: {
+    sources: [ACTIVE_RULES, RESTORED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [VOIDED_RUN_8],
+    nextRunAt: NEXT_AUDIT_AFTER_VOID_AT,
+    manualAvailableAt: null,
+  },
+  /** Runs 9 then 8 voided, listed newest void first: 8, then 9. */
+  voidedTwice: {
+    sources: [ACTIVE_RULES, RESTORED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    voidedRuns: [VOIDED_RUN_8, VOIDED_RUN_9],
+    nextRunAt: NEXT_AUDIT_AFTER_VOID_AT,
+    manualAvailableAt: null,
   },
 }
 

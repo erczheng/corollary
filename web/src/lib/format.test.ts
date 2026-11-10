@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  asSentence,
   formatDateET,
   formatTenthsPct,
   formatDateOnly,
@@ -210,5 +211,30 @@ describe('formatTenthsPct', () => {
     expect(formatTenthsPct(1000)).toBe('100.0%')
     expect(formatTenthsPct(0)).toBe('0.0%')
     expect(formatTenthsPct(7)).toBe('0.7%')
+  })
+})
+
+/** A quoted server sentence ends in exactly one terminal mark. */
+describe('asSentence', () => {
+  it('appends a full stop to a reason that has none', () => {
+    expect(
+      asSentence(
+        'graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09)',
+      ),
+    ).toBe(
+      'graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09).',
+    )
+    expect(asSentence('below 52% in 1h')).toBe('below 52% in 1h.')
+  })
+
+  it('never doubles a terminal mark the server already wrote', () => {
+    expect(asSentence('graded a partial week.')).toBe('graded a partial week.')
+    expect(asSentence('was this right?')).toBe('was this right?')
+    expect(asSentence('see the note (Q23a.)')).toBe('see the note (Q23a.)')
+    expect(asSentence('cut short…')).toBe('cut short…')
+  })
+
+  it('leaves the text itself verbatim', () => {
+    expect(asSentence('Mixed Case, kept (Q6)')).toBe('Mixed Case, kept (Q6).')
   })
 })

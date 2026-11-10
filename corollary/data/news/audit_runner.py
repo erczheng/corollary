@@ -69,7 +69,11 @@ Decisions this module takes (flagged in the unit's report)
    ``running`` row may be another process's live run: it is treated as
    abandoned (a process that died mid-run) only when its ``started_at`` is
    more than :data:`ABANDONED_RUN_AFTER` before this run's start; a younger
-   one raises :class:`AuditAlreadyRunning` and nothing is written.
+   one raises :class:`AuditAlreadyRunning` and nothing is written. Step a
+   (:func:`_open_run`) begins with SQLite's write lock and reads the run's
+   ``started_at`` from the clock only after it, so a void
+   (``audit_void.void_audit_run``, which locks the same way) and a run's
+   open serialize instead of interleaving (R4, U4a-fix finding M1).
 2. **Accuracy rows are written in the closing transaction**, with the
    transitions, not in a transaction of their own: a failed run then leaves
    no ``sentiment_accuracy`` rows naming it, so "the latest run's figures"
@@ -170,6 +174,7 @@ from corollary.data.news.audit import (
     plan_audit,
     reference_instant,
 )
+from corollary.data.news.audit_void import take_write_lock
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels, verdict_histories
 from corollary.data.news.watchlist import MARKET_TICKER
@@ -416,23 +421,39 @@ def _fault_json(fault: BarFault) -> dict[str, str]:
 
 def _open_run(
     session_factory: Callable[[], Session],
-    started_at: datetime,
+    clock: Callable[[], datetime],
     trigger: AuditTrigger,
     correlation_id: str,
-) -> int:
+) -> tuple[int, datetime]:
     """Close any abandoned ``running`` row, then insert this run's. One commit.
+
+    Returns the new row's id and its ``started_at``. That is ``clock``'s one
+    reading, taken **after** the write lock
+    (:func:`~corollary.data.news.audit_void.take_write_lock`) and before
+    every check, so a void that committed first is in the past of this run.
+    A void that comes later waits for this commit and then sees the
+    ``running`` row and is refused (R4, finding M1). Reading the clock before
+    the lock let a void commit in between with a later ``voided_at``, and
+    that Saturday's run refused to start.
 
     Raises :class:`AuditAlreadyRunning`, writing nothing, when a ``running``
     row started no more than :data:`ABANDONED_RUN_AFTER` ago (decision 1).
     """
     with session_factory() as session:
+        take_write_lock(session)
+        started_at = _aware_utc(clock(), "the clock's reading")
+        # Every run, voided or not: the spans must stay disjoint for the
+        # history join (``models.SentimentSourceStatus``) whatever stands.
+        # ``voided_at`` too (R4): a void's restore rows are stamped with it,
+        # and a span holding that instant would hand them to this run.
         latest_finished = session.scalar(select(func.max(AuditRun.finished_at)))
         latest_started = session.scalar(select(func.max(AuditRun.started_at)))
-        for previous in (latest_finished, latest_started):
+        latest_voided = session.scalar(select(func.max(AuditRun.voided_at)))
+        for previous in (latest_finished, latest_started, latest_voided):
             if previous is not None and _aware_utc(previous, "a stored run instant") > started_at:
                 raise RuntimeError(
-                    "the clock reads earlier than a stored audit run; refusing to "
-                    "start a run whose span would overlap it"
+                    "the clock reads earlier than a stored audit run or void; refusing "
+                    "to start a run whose span would overlap it"
                 )
         running = [
             (row.id, _aware_utc(row.started_at, "started_at"))
@@ -475,7 +496,7 @@ def _open_run(
         session.flush()
         run_id = run.id
         session.commit()
-    return run_id
+    return run_id, started_at
 
 
 def _set_terminal(
@@ -1137,9 +1158,13 @@ def _call_on_opened(on_opened: OnOpened | None, run_id: int, correlation_id: str
 
 
 async def _open(
-    deps: SentimentAuditDeps, started_at: datetime, trigger: AuditTrigger, correlation_id: str
-) -> int:
-    """Step a, logged either way.
+    deps: SentimentAuditDeps, trigger: AuditTrigger, correlation_id: str
+) -> tuple[int, datetime]:
+    """Step a, logged either way. The run's id and ``started_at``.
+
+    ``started_at`` is read by :func:`_open_run` under the write lock, not
+    here and not earlier: see that function (R4, finding M1). The lines
+    logged before a row exists therefore carry no run instant.
 
     A cancellation here arrives after :func:`_on_worker` has waited for
     ``_open_run``'s thread -- which may well have committed this run's
@@ -1151,21 +1176,21 @@ async def _open(
     before the thread does; the row, if it then lands, is left for the
     abandonment bound to close -- shutdown is not held hostage.
     """
-    opened: list[int] = []
+    opened: list[tuple[int, datetime]] = []
 
     def open_and_note(
         session_factory: Callable[[], Session],
-        at: datetime,
+        clock: Callable[[], datetime],
         run_trigger: AuditTrigger,
         cid: str,
-    ) -> int:
-        new_id = _open_run(session_factory, at, run_trigger, cid)
-        opened.append(new_id)  # after the commit: this id names a row that exists
-        return new_id
+    ) -> tuple[int, datetime]:
+        new = _open_run(session_factory, clock, run_trigger, cid)
+        opened.append(new)  # after the commit: this id names a row that exists
+        return new
 
     try:
-        run_id = await _on_worker(
-            open_and_note, deps.session_factory, started_at, trigger, correlation_id
+        run_id, started_at = await _on_worker(
+            open_and_note, deps.session_factory, deps.clock, trigger, correlation_id
         )
     except asyncio.CancelledError as exc:
         if not opened:
@@ -1178,13 +1203,13 @@ async def _open(
                     "row_confirmed": False,
                     "trigger": trigger,
                     "error_type": type(exc).__name__,
-                    "started_at": started_at.isoformat(),
                     "correlation_id": correlation_id,
                 },
             )
             raise
         # Closes the row and logs; it re-raises only a further cancellation.
-        await _record_failure(deps, opened[0], started_at, "open", exc, correlation_id)
+        noted_id, noted_at = opened[0]
+        await _record_failure(deps, noted_id, noted_at, "open", exc, correlation_id)
         raise
     except AuditAlreadyRunning:
         # A refusal (another live run's row at step a), not a failure: the
@@ -1195,7 +1220,6 @@ async def _open(
                 "event": "sentiment_audit_not_started",
                 "rule": "one sentiment audit run at a time",
                 "trigger": trigger,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1207,7 +1231,6 @@ async def _open(
                 "event": "sentiment_audit_not_started",
                 "trigger": trigger,
                 "error_type": type(exc).__name__,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1222,14 +1245,16 @@ async def _open(
             "correlation_id": correlation_id,
         },
     )
-    return run_id
+    return run_id, started_at
 
 
 async def _run_locked(
     deps: SentimentAuditDeps, trigger: AuditTrigger, on_opened: OnOpened | None
 ) -> AuditRunResult:
     correlation_id = uuid.uuid4().hex
-    started_at = _aware_utc(deps.clock(), "the clock's reading")
+    # No clock reading here: the run's ``started_at`` is read by ``_open_run``
+    # under the write lock (R4, finding M1), so a void cannot commit between
+    # the reading and the run's row.
     # The universe first, before any row exists: a degraded one is a reason
     # not to run (WatchUniverseUnavailable), and leaves nothing behind.
     try:
@@ -1245,7 +1270,6 @@ async def _run_locked(
                 ),
                 "reason": str(exc),
                 "trigger": trigger,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1253,10 +1277,10 @@ async def _run_locked(
     except Exception as exc:
         # Any other failure reading it is a plan-stage failure like the rest:
         # a row, closed ``failed``, naming the stage and the type.
-        run_id = await _open(deps, started_at, trigger, correlation_id)
+        run_id, started_at = await _open(deps, trigger, correlation_id)
         await _record_failure(deps, run_id, started_at, "plan", exc, correlation_id)
         raise
-    run_id = await _open(deps, started_at, trigger, correlation_id)
+    run_id, started_at = await _open(deps, trigger, correlation_id)
     # The row is committed and the run goes on: the caller may now say so.
     _call_on_opened(on_opened, run_id, correlation_id)
 

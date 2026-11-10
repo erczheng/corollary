@@ -259,6 +259,49 @@ def test_a_run_that_does_not_count_leaves_the_slot_missing(
         assert runs[0][1] == "failed"  # closed as abandoned by the runner
 
 
+def _void_newest_run(engine: Engine, at: datetime) -> None:
+    """Mark the newest run voided, as ``audit_void.void_audit_run`` does."""
+    with Session(engine) as session:
+        run = session.scalars(select(AuditRun).order_by(AuditRun.id.desc())).first()
+        assert run is not None
+        run.voided_at, run.void_reason = at, "synthetic void"
+        session.commit()
+
+
+def test_a_voided_slot_run_leaves_the_slot_missing_and_the_next_start_runs_it(
+    db_engine: Engine,
+) -> None:
+    """R4: a voided run does not stand, so the start-up catch-up does not count
+    it. Voiding the slot's only run makes the next scheduler start run the
+    slot's audit by itself -- once, the scheduled kind -- and that run then
+    stands, so a restart runs nothing."""
+    _the_week(db_engine)
+    _insert_run(db_engine, started_at=SLOT, status="succeeded")
+    _void_newest_run(db_engine, SLOT + timedelta(hours=1))
+    assert _catch_up(_services(db_engine, FakeBars()), SteppedClock(SUNDAY)) is None
+    runs = _runs(db_engine)
+    assert [r[1] for r in runs] == ["succeeded", "succeeded"]
+    assert runs[-1] == ("scheduled", "succeeded", SUNDAY)
+
+    bars = FakeBars()
+    outcome = _catch_up(_services(db_engine, bars), SteppedClock(SUNDAY + timedelta(hours=1)))
+    assert isinstance(outcome, JobSkipped) and "already ran" in outcome.reason
+    assert len(_runs(db_engine)) == 2
+    assert bars.calls == []
+
+
+def test_a_voided_run_beside_a_standing_one_leaves_nothing_missing(db_engine: Engine) -> None:
+    _the_week(db_engine)
+    _insert_run(db_engine, started_at=SLOT, status="succeeded")
+    _insert_run(db_engine, started_at=SLOT + timedelta(hours=1), status="succeeded")
+    _void_newest_run(db_engine, SLOT + timedelta(hours=2))
+    bars = FakeBars()
+    outcome = _catch_up(_services(db_engine, bars), SteppedClock(SUNDAY))
+    assert isinstance(outcome, JobSkipped) and "already ran" in outcome.reason
+    assert len(_runs(db_engine)) == 2
+    assert bars.calls == []
+
+
 # ------------------------------------------------------- deferral to the close
 
 

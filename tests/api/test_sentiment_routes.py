@@ -25,8 +25,10 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, update
 from sqlalchemy.orm import Session
+from fastapi.routing import iter_route_contexts
+from starlette.routing import BaseRoute, Mount, WebSocketRoute
 
 from corollary.api import operator as operator_module
 from corollary.api.app import create_app, no_socket_supervisor
@@ -188,6 +190,7 @@ def test_unaudited_sources_say_never_audited_and_invent_no_date(
         }
     assert body["lastRun"] is None
     assert body["accuracyRun"] is None
+    assert body["voidedRuns"] == []  # nothing voided: an empty list, never null
     assert body["nextRunAt"] is None
     assert body["manualAvailableAt"] is None
 
@@ -365,40 +368,75 @@ def test_each_scope_carries_its_own_stored_session_count(
 
 
 @pytest.mark.parametrize(
-    ("graded", "sessions"),
+    ("status", "graded", "sessions", "expected"),
     [
-        (DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS),
-        (DEMOTION_FLOOR - 1, MIN_ELIGIBLE_SESSIONS),
-        (DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS - 1),
-        (DEMOTION_FLOOR + 50, None),
+        (SourceStatus.UNAUDITED, DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS, True),
+        (SourceStatus.UNAUDITED, DEMOTION_FLOOR - 1, MIN_ELIGIBLE_SESSIONS, False),
+        (SourceStatus.UNAUDITED, DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS - 1, False),
+        (SourceStatus.UNAUDITED, DEMOTION_FLOOR + 50, None, False),
+        # U3 B2: the re-promotion permit at its boundary, served by the route
+        # -- exactly the label floor over exactly the session floor since the
+        # demotion -- and the reject one short of each.
+        (SourceStatus.DEMOTED, REPROMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS, True),
+        (SourceStatus.DEMOTED, REPROMOTION_FLOOR - 1, MIN_ELIGIBLE_SESSIONS, False),
+        (SourceStatus.DEMOTED, REPROMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS - 1, False),
+        (SourceStatus.DEMOTED, REPROMOTION_FLOOR + 50, None, False),
     ],
 )
-def test_settings_calls_a_source_eligible_exactly_when_the_engine_would_move_it(
-    sentiment_client: TestClient, db_engine: Engine, graded: int, sessions: int | None
+def test_settings_never_calls_a_source_eligible_that_the_engine_would_judge_ineligible(
+    sentiment_client: TestClient,
+    db_engine: Engine,
+    status: SourceStatus,
+    graded: int,
+    sessions: int | None,
+    expected: bool,
 ) -> None:
     """The gap this closes: Settings once called a source eligible that the
-    engine would not move. Every label wrong, so an eligible unaudited source
-    is one the engine demotes and an ineligible one it leaves alone; the
-    route's ``eligible`` must say which, for the same stored counts."""
+    engine would not move.
+
+    ``eligible`` means "meets both floors", which a transition needs but
+    which does not make one: an eligible source at 61% stays where it is. So
+    the accuracy is pinned at the extreme that moves an eligible source --
+    every label wrong for an unaudited one (it demotes), every label right
+    for a demoted one (it re-promotes) -- and there the engine moves the
+    source exactly when it judges it eligible. The route's ``eligible`` must
+    say the same, for the same stored counts; ``expected`` pins which, so
+    the two cannot agree by both being wrong.
+    """
+    if status is SourceStatus.DEMOTED:
+        demoted_at = NOW - timedelta(days=14)
+        demoting = add_audit_run(db_engine, started_at=demoted_at, finished_at=demoted_at)
+        set_source_status(db_engine, "rules", "demoted", at=demoted_at, run_id=demoting)
+        bases = (AccuracyBasis.TRAILING_28D, AccuracyBasis.SINCE_DEMOTION)
+        correct = graded
+        current = CurrentStatus(source="rules", status=status, changed_at=demoted_at)
+    else:
+        bases = (AccuracyBasis.TRAILING_28D,)
+        correct = 0
+        current = CurrentStatus(source="rules", status=status, changed_at=None)
     run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
                         finished_at=NOW - timedelta(days=1))
-    for window in ("1h", "1d"):
-        add_accuracy(db_engine, run, source="rules", window=window, watch=(graded, 0, 0),
-                     sessions=sessions, watch_sessions=sessions,
-                     discovery_sessions=None if sessions is None else 0)
+    # Every basis the runner writes for this status, at the same counts.
+    for basis in bases:
+        for window in ("1h", "1d"):
+            add_accuracy(db_engine, run, source="rules", window=window, basis=basis.value,
+                         watch=(graded, correct, 0), sessions=sessions,
+                         watch_sessions=sessions,
+                         discovery_sessions=None if sessions is None else 0)
     served = _source(sentiment_client.get(SENTIMENT).json(), "rules")["eligibility"]
 
     rows = [
-        AccuracyRow(source="rules", window=window, basis=AccuracyBasis.TRAILING_28D,
-                    scope=AccuracyScope.ALL, graded=graded, correct=0, neutral=0,
-                    sessions=sessions)
+        AccuracyRow(source="rules", window=window, basis=basis, scope=AccuracyScope.ALL,
+                    graded=graded, correct=correct, neutral=0, sessions=sessions)
+        for basis in bases
         for window in ("1h", "1d")
     ]
-    moved = decide_transition(
-        CurrentStatus(source="rules", status=SourceStatus.UNAUDITED, changed_at=None),
-        rows, NOW,
-    )
+    moved = decide_transition(current, rows, NOW)
+    assert served["kind"] == ("repromote" if status is SourceStatus.DEMOTED else "demote")
+    assert served["eligible"] is expected
     assert served["eligible"] is (moved is not None)
+    if moved is not None:
+        assert moved.previous is status
 
 
 def test_a_demoted_source_one_session_short_since_the_demotion_is_not_eligible(
@@ -497,6 +535,154 @@ def test_a_source_demoted_by_the_latest_run_has_counted_nothing_since(
     }
     # The figure that demoted it is still shown, on its own basis.
     assert [a["basis"] for a in rules["accuracy"]] == ["trailing_28d", "trailing_28d"]
+
+
+# --------------------------------------------------------------------------
+# GET -- voided runs (remainder spec R4 step 3, R9)
+# --------------------------------------------------------------------------
+
+#: The reason R9's example line quotes, with a character outside ASCII so a
+#: re-encoding would show.
+_VOID_REASON = "graded under the replaced reference rule — see Q23"
+
+
+def test_a_voided_run_is_absent_from_last_run_and_accuracy_run(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """Every reader excludes a voided run: ``lastRun`` falls back to the
+    newest standing run in any state, ``accuracyRun`` to the newest standing
+    succeeded one."""
+    standing = add_audit_run(db_engine, started_at=NOW - timedelta(days=14),
+                             finished_at=NOW - timedelta(days=14) + timedelta(minutes=3))
+    standing_failed = add_audit_run(db_engine, started_at=NOW - timedelta(days=10),
+                                    finished_at=NOW - timedelta(days=10), status="failed",
+                                    detail='{"stage": "fetch"}')
+    voided = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                           finished_at=NOW - timedelta(days=7) + timedelta(minutes=3),
+                           voided_at=NOW - timedelta(days=1), void_reason=_VOID_REASON)
+
+    body = sentiment_client.get(SENTIMENT).json()
+    assert body["lastRun"]["id"] == standing_failed
+    assert body["lastRun"]["status"] == "failed"
+    assert body["accuracyRun"]["id"] == standing
+    assert voided not in {body["lastRun"]["id"], body["accuracyRun"]["id"]}
+
+
+def test_with_every_run_voided_there_is_no_last_run_and_no_figures(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """Nothing stands: ``null``, ``null``, and no figures -- the voided run's
+    rows are still stored (R4 step 3), and none of them is served."""
+    voided = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                           finished_at=NOW - timedelta(days=7),
+                           voided_at=NOW - timedelta(days=1), void_reason=_VOID_REASON)
+    for window in ("1h", "1d"):
+        add_accuracy(db_engine, voided, source="rules", window=window,
+                     watch=(DEMOTION_FLOOR, 0, 0), sessions=MIN_ELIGIBLE_SESSIONS,
+                     watch_sessions=MIN_ELIGIBLE_SESSIONS, discovery_sessions=0)
+
+    body = sentiment_client.get(SENTIMENT).json()
+    assert body["lastRun"] is None
+    assert body["accuracyRun"] is None
+    rules = _source(body, "rules")
+    assert rules["accuracy"] == []
+    assert rules["eligibility"]["eligible"] is False
+    assert rules["eligibility"]["asOfRunId"] is None
+    assert [w["graded"] for w in rules["eligibility"]["windows"]] == [0, 0]
+    assert [r["id"] for r in body["voidedRuns"]] == [voided]
+
+
+def test_the_figures_and_eligibility_come_from_the_newest_standing_succeeded_run(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """The voided newest run's rows would make the source eligible; the
+    standing run before it is one session short. The page shows the standing
+    run's rows and calls the source ineligible, as of that run."""
+    standing = add_audit_run(db_engine, started_at=NOW - timedelta(days=14),
+                             finished_at=NOW - timedelta(days=14))
+    voided = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                           finished_at=NOW - timedelta(days=7),
+                           voided_at=NOW - timedelta(days=1), void_reason=_VOID_REASON)
+    for window in ("1h", "1d"):
+        add_accuracy(db_engine, standing, source="massive", window=window,
+                     watch=(DEMOTION_FLOOR + 4, 21, 2), sessions=MIN_ELIGIBLE_SESSIONS - 1,
+                     watch_sessions=MIN_ELIGIBLE_SESSIONS - 1, discovery_sessions=0)
+        add_accuracy(db_engine, voided, source="massive", window=window,
+                     watch=(DEMOTION_FLOOR + 9, 11, 0), sessions=MIN_ELIGIBLE_SESSIONS + 2,
+                     watch_sessions=MIN_ELIGIBLE_SESSIONS + 2, discovery_sessions=0)
+
+    massive = _source(sentiment_client.get(SENTIMENT).json(), "massive")
+    assert [
+        (a["window"], a["combined"]["graded"], a["combined"]["correct"],
+         a["combined"]["sessions"])
+        for a in massive["accuracy"]
+    ] == [
+        ("1h", DEMOTION_FLOOR + 4, 21, MIN_ELIGIBLE_SESSIONS - 1),
+        ("1d", DEMOTION_FLOOR + 4, 21, MIN_ELIGIBLE_SESSIONS - 1),
+    ]
+    assert massive["eligibility"]["eligible"] is False
+    assert massive["eligibility"]["asOfRunId"] == standing
+    assert [w["sessionsNeeded"] for w in massive["eligibility"]["windows"]] == [1, 1]
+
+
+def test_voided_runs_are_listed_newest_void_first_with_the_reason_verbatim(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """Ordered by when each was voided, not by run id; a tie on the instant
+    falls to the higher id. The reason is the stored text, unaltered."""
+    add_audit_run(db_engine, started_at=NOW - timedelta(days=28),
+                  finished_at=NOW - timedelta(days=28))
+    # Run ids rise with start time; the voids land in a different order.
+    second = add_audit_run(db_engine, started_at=NOW - timedelta(days=21),
+                           finished_at=NOW - timedelta(days=21),
+                           voided_at=NOW - timedelta(days=2), void_reason="second voided")
+    third = add_audit_run(db_engine, started_at=NOW - timedelta(days=14),
+                          finished_at=NOW - timedelta(days=14), status="failed",
+                          voided_at=NOW - timedelta(days=3), void_reason=_VOID_REASON)
+    fourth = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                           finished_at=NOW - timedelta(days=7),
+                           voided_at=NOW - timedelta(days=2), void_reason="tied, higher id")
+
+    body = sentiment_client.get(SENTIMENT).json()
+    assert body["voidedRuns"] == [
+        {"id": fourth, "voidedAt": "2026-10-12T15:00:00Z", "reason": "tied, higher id"},
+        {"id": second, "voidedAt": "2026-10-12T15:00:00Z", "reason": "second voided"},
+        {"id": third, "voidedAt": "2026-10-11T15:00:00Z", "reason": _VOID_REASON},
+    ]
+
+
+def test_a_voided_run_with_no_stored_reason_is_left_out_and_logged(
+    sentiment_client: TestClient, db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``ck_audit_run_voided`` makes this a damaged database: forced past the
+    CHECK here. The run is still excluded -- ``voided_at`` is what voids it --
+    but no reason is invented for it, and the gap is logged."""
+    standing = add_audit_run(db_engine, started_at=NOW - timedelta(days=14),
+                             finished_at=NOW - timedelta(days=14))
+    damaged = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                            finished_at=NOW - timedelta(days=7))
+    with db_engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            update(AuditRun)
+            .where(AuditRun.id == damaged)
+            .values(voided_at=NOW - timedelta(days=1))
+        )
+        conn.commit()
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+    with Session(db_engine) as session:
+        row = session.get(AuditRun, damaged)
+        assert row is not None and row.voided_at is not None and row.void_reason is None
+
+    with caplog.at_level(logging.ERROR):
+        body = sentiment_client.get(SENTIMENT).json()
+    assert body["lastRun"]["id"] == standing
+    assert body["voidedRuns"] == []
+    (record,) = [
+        r for r in caplog.records if r.__dict__.get("event") == "audit_run_void_reason_missing"
+    ]
+    assert record.__dict__["audit_run_id"] == damaged
+    assert record.__dict__["rule"]
 
 
 def test_a_missing_status_row_says_so_rather_than_reading_as_never_audited(
@@ -860,6 +1046,31 @@ def test_a_scheduled_run_does_not_count_against_the_manual_limit(
     _wait_for_run(app)
 
 
+def test_a_voided_manual_run_still_holds_the_hourly_limit(
+    app: FastAPI,
+    sentiment_client: TestClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The orchestrator's ruling: the limit is on how often a run *starts*,
+    not on whether it stands. Voiding a manual run does not hand back its
+    hour -- otherwise void-and-rerun would be a way round the limit. The
+    run is gone from ``lastRun`` and still behind ``manualAvailableAt``."""
+    voided = add_audit_run(db_engine, started_at=NOW - timedelta(minutes=30),
+                           finished_at=NOW - timedelta(minutes=29), trigger="manual",
+                           voided_at=NOW - timedelta(minutes=10), void_reason=_VOID_REASON)
+    body = sentiment_client.get(SENTIMENT).json()
+    assert body["lastRun"] is None
+    assert [r["id"] for r in body["voidedRuns"]] == [voided]
+    assert datetime.fromisoformat(body["manualAvailableAt"]) == NOW + timedelta(minutes=30)
+
+    _arm(app, monkeypatch, _deps(db_engine))
+    response = sentiment_client.post(AUDIT)
+    assert response.status_code == 429, response.text
+    assert response.headers["Retry-After"] == "1800"
+    assert [r.id for r in _runs(db_engine)] == [voided]  # no row: nothing started
+
+
 def test_the_hourly_limit_survives_a_restart(
     registry: ServiceRegistry, db_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -901,6 +1112,59 @@ def test_the_only_sentiment_routes_are_the_read_and_the_audit_trigger(app: FastA
     }
 
 
+def _mounted(routes: Sequence[BaseRoute], prefix: str = "") -> Iterator[tuple[str, str]]:
+    """Every ``(path, method)`` the app answers, descending into mounts.
+
+    Read from ``app.routes`` rather than the OpenAPI document, so a route
+    declared ``include_in_schema=False`` is still seen. FastAPI 0.141 keeps
+    an included router as one nested entry, so the walk goes through
+    ``iter_route_contexts`` -- what FastAPI's own OpenAPI builder walks --
+    which yields each route with its include prefix applied. A websocket is
+    ``WEBSOCKET``: not a write method, but listed rather than skipped. A
+    route this cannot read fails the test rather than vanishing from it.
+    """
+    for context in iter_route_contexts(routes):
+        route = context.original_route
+        path = prefix + (context.path or "")
+        if isinstance(route, Mount):
+            yield from _mounted(route.routes, path)
+        elif isinstance(route, WebSocketRoute):
+            yield path, "WEBSOCKET"
+        elif context.methods is not None:
+            for method in sorted(context.methods):
+                yield path, method
+        else:  # pragma: no cover - a route kind this enumeration cannot read
+            raise AssertionError(f"unrecognised route {type(route).__name__} at {path!r}")
+
+
+#: Methods that read. Anything else could change state.
+_READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "WEBSOCKET"})
+#: A path that names one of the acts R4 confines to the script.
+_STATUS_ACT = re.compile(r"void|demot|re-?promot|reinstat|restor", re.IGNORECASE)
+
+
+def test_no_api_route_could_void_demote_or_repromote(app: FastAPI) -> None:
+    """R4: voiding runs through ``scripts/void_audit_run.py``, never a route,
+    and the audit run is the only thing that demotes or re-promotes (Q6).
+
+    Under ``/api``, every route on a ``sentiment`` path that does not read
+    is exactly the audit trigger -- the one writer starting itself, not a
+    hand on the status -- and no route at all is named for a void, a
+    demotion, a re-promotion, a reinstatement or a restore.
+    """
+    routes = set(_mounted(app.routes))
+    api = {(path, method) for path, method in routes if path.startswith("/api")}
+    assert (SENTIMENT, "GET") in api  # the enumeration sees the router at all
+
+    sentiment_writes = {
+        (path, method)
+        for path, method in api
+        if "sentiment" in path.lower() and method not in _READ_METHODS
+    }
+    assert sentiment_writes == {(AUDIT, "POST")}
+    assert sorted(path for path, _ in api if _STATUS_ACT.search(path)) == []
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
@@ -909,6 +1173,11 @@ def test_the_only_sentiment_routes_are_the_read_and_the_audit_trigger(app: FastA
         ("post", f"{SENTIMENT}/reinstate"),
         ("put", SENTIMENT),
         ("patch", SENTIMENT),
+        # R4: a void is the script's, never a request's.
+        ("post", f"{AUDIT}/1/void"),
+        ("post", f"{SENTIMENT}/void"),
+        ("delete", AUDIT),
+        ("delete", f"{AUDIT}/1"),
     ],
 )
 def test_a_reinstate_request_changes_nothing(
