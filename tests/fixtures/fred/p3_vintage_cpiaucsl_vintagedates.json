@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-11-10T00:04:20+00:00",
+  "path": "/series/vintagedates",
+  "params": {
+    "series_id": "CPIAUCSL",
+    "file_type": "json",
+    "realtime_start": "2026-09-10",
+    "realtime_end": "2026-11-09",
+    "sort_order": "asc"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"2026-09-10","realtime_end":"2026-11-09","order_by":"vintage_date","sort_order":"asc","count":2,"offset":0,"limit":10000,"vintage_dates":["2026-09-11","2026-10-14"]}
+}

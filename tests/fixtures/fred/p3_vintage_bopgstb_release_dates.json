@@ -1,0 +1,13 @@
+{
+  "recorded_at": "2026-11-10T00:04:29+00:00",
+  "path": "/release/dates",
+  "params": {
+    "release_id": "51",
+    "file_type": "json",
+    "sort_order": "desc",
+    "limit": "12"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"1776-07-04","realtime_end":"9999-12-31","order_by":"release_date","sort_order":"desc","count":360,"offset":0,"limit":12,"release_dates":[{"release_id":51,"date":"2026-11-04"},{"release_id":51,"date":"2026-10-06"},{"release_id":51,"date":"2026-09-03"},{"release_id":51,"date":"2026-08-04"},{"release_id":51,"date":"2026-07-07"},{"release_id":51,"date":"2026-06-09"},{"release_id":51,"date":"2026-05-05"},{"release_id":51,"date":"2026-04-02"},{"release_id":51,"date":"2026-03-12"},{"release_id":51,"date":"2026-02-19"},{"release_id":51,"date":"2026-01-29"},{"release_id":51,"date":"2026-01-08"}]}
+}
