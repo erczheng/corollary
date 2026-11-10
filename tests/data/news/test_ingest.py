@@ -21,13 +21,16 @@ import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+import corollary.data.news.ingest as ingest_module
 from corollary.data.news.article import NewsArticle, NewsFeed
 from corollary.data.news.ingest import (
     MARKET_TICKER,
     URL_MATCH_WINDOW,
     IngestResult,
+    Relink,
     filter_tags,
     headline_key,
+    relink_stored,
     store_articles,
     url_key,
 )
@@ -1140,3 +1143,398 @@ def test_a_finnhub_yahoo_row_through_the_decoder_links_to_its_massive_fool_twin(
     assert result.duplicates_linked == 1
     groups = {r.canonical_id if r.canonical_id is not None else r.id for r in all_rows(session)}
     assert groups == {row(session, "massive", "m-1").id}
+
+
+# ------------------------------------------- re-linking stored articles (R2)
+#
+# A Fool pair stored before SYNDICATION_SKEWS existed stayed unlinked, and
+# ingest links once, at insert. relink_stored runs the same matcher over the
+# stored unlinked rows, each bounded to the rows stored before it, so the
+# earlier-stored copy stays canonical: what ingest would have produced had the
+# allowance been live when the row arrived. "Before the fix" is the matcher
+# with SYNDICATION_SKEWS emptied, which is exactly what it was.
+
+
+def store_before_the_fix(
+    monkeypatch: pytest.MonkeyPatch, session: Session, *articles: NewsArticle
+) -> IngestResult:
+    """Store ``articles`` with the matcher as it was before ``SYNDICATION_SKEWS``."""
+    with monkeypatch.context() as patched:
+        patched.setattr(ingest_module, "SYNDICATION_SKEWS", ())
+        return store(session, *articles)
+
+
+def snapshot(session: Session) -> tuple[dict[int, dict[str, Any]], set[tuple[int, str]]]:
+    """Every column of every article row, and every ticker row, as now stored."""
+    session.expire_all()
+    columns = [attr.key for attr in ArticleRow.__mapper__.column_attrs]
+    rows = {r.id: {name: getattr(r, name) for name in columns} for r in all_rows(session)}
+    tags = {
+        (article_id, ticker)
+        for article_id, ticker in session.execute(
+            select(NewsArticleTicker.article_id, NewsArticleTicker.ticker)
+        )
+    }
+    return rows, tags
+
+
+def link_pairs(links: tuple[Relink, ...]) -> list[tuple[int, int]]:
+    return [(link.article_id, link.canonical_id) for link in links]
+
+
+RELINK_SINCE = FOOL_AT - timedelta(days=1)
+
+
+def test_relink_links_a_recorded_motley_fool_pair(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """The Massive half is RECORDED: the Motley Fool article in
+    ``tests/fixtures/massive/p4_reference_news_asc_page2.json``, through Massive's
+    decoder. No recorded fixture carries its Finnhub twin (none of the recorded
+    Finnhub Yahoo rows shares a headline with a recorded Massive Fool row), so
+    that half is a SYNTHETIC Finnhub row through Finnhub's decoder, stamped the
+    measured 1200 s late, as Finnhub serves it."""
+    from corollary.data.providers.finnhub import _news_article as finnhub_article
+    from corollary.data.providers.massive import _news_article as massive_article
+
+    body = json.loads(
+        (FIXTURES / "massive" / "p4_reference_news_asc_page2.json").read_text(encoding="utf-8")
+    )["body"]
+    recorded = next(
+        item for item in body["results"] if item["publisher"]["name"] == "The Motley Fool"
+    )
+    massive_copy = massive_article(recorded, lambda text: text)
+    assert massive_copy is not None
+    assert massive_copy.publisher == "The Motley Fool"
+    finnhub_copy = finnhub_article(
+        {
+            "category": "company",
+            "datetime": int((massive_copy.published_at + timedelta(minutes=20)).timestamp()),
+            "headline": massive_copy.headline,
+            "id": 5151,
+            "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+            "related": "NVDA",
+            "source": "Yahoo",
+            "summary": "synthetic",
+            "url": "https://finnhub.io/api/news?id=synthetic5151",
+        },
+        feed=NewsFeed.FINNHUB_COMPANY,
+        tickers=("NVDA",),
+        id_prefix="",
+        scrub=lambda text: text,
+    )
+    assert finnhub_copy is not None
+
+    store_before_the_fix(monkeypatch, session, massive_copy)
+    store_before_the_fix(monkeypatch, session, finnhub_copy)
+    massive_row = row(session, "massive", massive_copy.vendor_id)
+    finnhub_row = row(session, "finnhub", finnhub_copy.vendor_id)
+    assert finnhub_row.canonical_id is None  # the duplicate the fix arrived too late for
+
+    links = relink_stored(session, since=massive_copy.published_at - timedelta(days=1)).links
+    session.commit()
+
+    assert links == (
+        Relink(
+            article_id=finnhub_row.id,
+            vendor="finnhub",
+            publisher="Yahoo",
+            published_at=massive_copy.published_at + timedelta(minutes=20),
+            canonical_id=massive_row.id,
+            canonical_vendor="massive",
+            canonical_publisher="The Motley Fool",
+            canonical_published_at=massive_copy.published_at,
+        ),
+    )
+    session.expire_all()
+    assert row(session, "finnhub", finnhub_copy.vendor_id).canonical_id == massive_row.id
+    assert row(session, "massive", massive_copy.vendor_id).canonical_id is None
+
+
+@pytest.mark.parametrize("first", ["massive", "finnhub"])
+def test_relink_links_the_later_stored_copy_to_the_earlier_one(
+    monkeypatch: pytest.MonkeyPatch, session: Session, first: str
+) -> None:
+    """Never the reverse. Massive first, Finnhub joins Massive; Finnhub first,
+    Massive joins Finnhub -- the same direction ingest takes in each arrival
+    order (``test_the_fool_pair_links_in_either_arrival_order``). Linking an
+    earlier row to a later one would make the copy stored second canonical."""
+    copies = {"massive": fool_via_massive(), "finnhub": fool_via_finnhub_yahoo()}
+    second = "finnhub" if first == "massive" else "massive"
+    store_before_the_fix(monkeypatch, session, copies[first])
+    store_before_the_fix(monkeypatch, session, copies[second])
+    earlier = row(session, first, copies[first].vendor_id)
+    later = row(session, second, copies[second].vendor_id)
+    assert earlier.id < later.id
+    assert earlier.canonical_id is None and later.canonical_id is None
+
+    links = relink_stored(session, since=RELINK_SINCE).links
+    session.commit()
+
+    assert link_pairs(links) == [(later.id, earlier.id)]
+    session.expire_all()
+    assert row(session, first, copies[first].vendor_id).canonical_id is None
+    assert row(session, second, copies[second].vendor_id).canonical_id == earlier.id
+
+
+def test_relink_of_a_pair_stored_in_one_batch_keeps_the_true_stamp_canonical(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """A batch stores in published_at order, so Massive's earlier, true stamp got
+    the lower id; the re-link keeps it canonical."""
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo(), fool_via_massive())
+    massive_row = row(session, "massive", "m-1")
+    finnhub_row = row(session, "finnhub", "f-1")
+    assert massive_row.id < finnhub_row.id
+
+    links = relink_stored(session, since=RELINK_SINCE).links
+
+    assert link_pairs(links) == [(finnhub_row.id, massive_row.id)]
+
+
+def test_relink_joins_a_linked_twin_at_its_groups_canonical_row(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """The twin is itself a duplicate: the link names its group's canonical row,
+    as ingest's does, so a re-link never makes a chain."""
+    finnhub_url = "https://finnhub.io/api/news?id=synthetic-f-1"
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        article(
+            "alpaca",
+            "a-1",
+            url=finnhub_url,
+            headline="Micron, the earnings, and what comes next",
+            published_at=FOOL_AT + timedelta(minutes=20),
+        ),
+    )
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo(url=finnhub_url))
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    alpaca_row = row(session, "alpaca", "a-1")
+    finnhub_row = row(session, "finnhub", "f-1")
+    massive_row = row(session, "massive", "m-1")
+    assert finnhub_row.canonical_id == alpaca_row.id  # linked by URL at ingest
+    assert massive_row.canonical_id is None
+
+    links = relink_stored(session, since=RELINK_SINCE).links
+    session.commit()
+
+    assert link_pairs(links) == [(massive_row.id, alpaca_row.id)]
+    session.expire_all()
+    assert row(session, "massive", "m-1").canonical_id == alpaca_row.id
+    assert row(session, "finnhub", "f-1").canonical_id == alpaca_row.id
+    assert row(session, "alpaca", "a-1").canonical_id is None
+
+
+def test_relink_sets_canonical_id_only_and_never_deletes(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """An already-linked pair is left exactly as it was, nothing is deleted, and
+    no timestamp (or any other column) moves -- only the one relinked row's
+    ``canonical_id``."""
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        article("alpaca", "x-1", url="https://example.com/story/shared"),
+        article("massive", "x-2", url="https://example.com/story/shared"),
+        article("alpaca", "lone", headline="A story nobody else carries"),
+    )
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo())
+    linked = row(session, "massive", "x-2")
+    assert linked.canonical_id == row(session, "alpaca", "x-1").id
+    relinked_id = row(session, "finnhub", "f-1").id
+    canonical_id = row(session, "massive", "m-1").id
+    rows_before, tags_before = snapshot(session)
+
+    links = relink_stored(session, since=RELINK_SINCE).links
+    session.commit()
+
+    assert link_pairs(links) == [(relinked_id, canonical_id)]
+    rows_after, tags_after = snapshot(session)
+    assert rows_after.keys() == rows_before.keys()  # nothing deleted, nothing added
+    assert tags_after == tags_before
+    for article_id, before in rows_before.items():
+        expected = dict(before)
+        if article_id == relinked_id:
+            expected["canonical_id"] = canonical_id
+        assert rows_after[article_id] == expected, article_id
+
+
+def test_relink_matches_each_row_only_against_rows_stored_before_it(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """The case where ``before_id`` decides. In a two-row fixture only the later
+    row is ever examined (the prefilter wants an earlier row sharing a key), so
+    the bound cannot show. Here an old Massive row recycling the headline five
+    days earlier, outside every window, makes the Finnhub copy -- stored first,
+    as in Finnhub-first arrival -- a candidate too, examined before the Massive
+    copy. Matched only against the rows stored before it, the Finnhub copy finds
+    nothing, and the Massive copy then joins it: the link ingest makes in that
+    arrival order. Matched against every row, the Finnhub copy would join the
+    Massive copy stored after it, making the copy stored second canonical.
+    Mutation-checked 2026-11-09: with ``_stored_before`` stubbed to identity
+    this fails with ``[(f-1, m-1)]``."""
+    headline = "3 Top Stocks to Buy Right Now"
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        fool_via_massive("m-old", headline=headline, published_at=FOOL_AT - timedelta(days=5)),
+    )
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo(headline=headline))
+    store_before_the_fix(monkeypatch, session, fool_via_massive(headline=headline))
+    old_row = row(session, "massive", "m-old")
+    finnhub_row = row(session, "finnhub", "f-1")
+    massive_row = row(session, "massive", "m-1")
+    assert old_row.id < finnhub_row.id < massive_row.id
+    assert {r.canonical_id for r in (old_row, finnhub_row, massive_row)} == {None}
+
+    result = relink_stored(session, since=RELINK_SINCE)
+    session.commit()
+
+    assert result.examined == 2  # both copies, so the order they are matched in matters
+    assert link_pairs(result.links) == [(massive_row.id, finnhub_row.id)]
+    assert result.skipped == 0
+    session.expire_all()
+    assert row(session, "finnhub", "f-1").canonical_id is None
+    assert row(session, "massive", "m-1").canonical_id == finnhub_row.id
+    assert row(session, "massive", "m-old").canonical_id is None
+
+
+def test_a_second_relink_links_nothing(monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo())
+    assert len(relink_stored(session, since=RELINK_SINCE).links) == 1
+    session.commit()
+    after_first = snapshot(session)
+
+    assert relink_stored(session, since=RELINK_SINCE).links == ()
+    session.commit()
+    assert snapshot(session) == after_first
+
+
+def test_since_bounds_the_relink(monkeypatch: pytest.MonkeyPatch, session: Session) -> None:
+    """A pair published before ``since`` is not linked; one after it is."""
+    old_at = FOOL_AT - timedelta(days=3)
+    old_headline = "Is Micron a Sell After Its Last Earnings?"
+    store_before_the_fix(
+        monkeypatch, session, fool_via_massive("m-old", published_at=old_at, headline=old_headline)
+    )
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        fool_via_finnhub_yahoo(
+            "f-old", published_at=old_at + timedelta(minutes=20), headline=old_headline
+        ),
+    )
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo())
+
+    result = relink_stored(session, since=RELINK_SINCE)
+
+    assert link_pairs(result.links) == [
+        (row(session, "finnhub", "f-1").id, row(session, "massive", "m-1").id)
+    ]
+    assert row(session, "finnhub", "f-old").canonical_id is None
+    assert row(session, "massive", "m-old").canonical_id is None
+    # What the bound covered, so an operator can see it: the one row examined
+    # is the new Finnhub copy, and the old one -- unlinked, sharing its
+    # headline with an earlier row -- is the candidate the bound kept out.
+    assert result.examined == 1
+    assert result.earliest_examined == FOOL_AT + timedelta(minutes=20)
+    assert result.before_since == 1
+    assert result.skipped == 0
+
+
+@pytest.mark.parametrize(
+    ("since_after_stamp", "relinked"),
+    [(timedelta(0), True), (timedelta(seconds=1), False)],
+)
+def test_since_is_inclusive_of_the_relinked_rows_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+    session: Session,
+    since_after_stamp: timedelta,
+    relinked: bool,
+) -> None:
+    """``since`` bounds the row being linked (the later-stored one), inclusive."""
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo())
+    finnhub_stamp = FOOL_AT + timedelta(minutes=20)
+
+    links = relink_stored(session, since=finnhub_stamp + since_after_stamp).links
+
+    assert bool(links) is relinked
+
+
+def test_since_must_be_timezone_aware(session: Session) -> None:
+    with pytest.raises(ValueError):
+        relink_stored(session, since=datetime(2026, 9, 24))
+
+
+def test_relink_skips_a_row_other_rows_already_point_at(
+    monkeypatch: pytest.MonkeyPatch, session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Finnhub copy is unlinked but already canonical for an Alpaca copy.
+    Linking it would make a chain, and re-pointing the Alpaca row would change
+    a linked row, so it is left alone, and the missed link is logged with its rule."""
+    finnhub_url = "https://finnhub.io/api/news?id=synthetic-f-1"
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo(url=finnhub_url))
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        article(
+            "alpaca",
+            "a-1",
+            url=finnhub_url,
+            headline="Micron, the earnings, and what comes next",
+            published_at=FOOL_AT + timedelta(minutes=25),
+        ),
+    )
+    finnhub_row = row(session, "finnhub", "f-1")
+    assert row(session, "alpaca", "a-1").canonical_id == finnhub_row.id
+    before = snapshot(session)
+
+    with caplog.at_level(logging.WARNING, logger="corollary.data.news.ingest"):
+        result = relink_stored(session, since=RELINK_SINCE)
+    session.commit()
+
+    assert result.links == ()
+    assert result.skipped == 1  # counted, not only logged, so the script can print it
+    assert snapshot(session) == before
+    skipped = [r for r in caplog.records if getattr(r, "event", None) == "news_relink_skipped"]
+    assert len(skipped) == 1
+    fields: dict[str, Any] = skipped[0].__dict__
+    assert fields["article_id"] == finnhub_row.id
+    assert fields["canonical_id"] == row(session, "massive", "m-1").id
+    assert "chain" in fields["rule"]
+
+
+def test_relink_never_puts_two_rows_of_one_vendor_in_a_group(
+    monkeypatch: pytest.MonkeyPatch, session: Session
+) -> None:
+    """The Massive row's group gained a different Finnhub row after the Fool copy
+    was stored. The bound limits which rows *match*, never which rows a group
+    *holds*: the group as it stands already has a Finnhub row, so the Fool copy
+    stays unlinked rather than making a group no ingest could make."""
+    store_before_the_fix(monkeypatch, session, fool_via_massive())
+    store_before_the_fix(monkeypatch, session, fool_via_finnhub_yahoo())
+    store_before_the_fix(
+        monkeypatch,
+        session,
+        article(
+            "finnhub",
+            "f-2",
+            url="https://example.com/story/massive-m-1",
+            headline="A different Finnhub story",
+            published_at=FOOL_AT + timedelta(hours=1),
+        ),
+    )
+    massive_row = row(session, "massive", "m-1")
+    assert row(session, "finnhub", "f-2").canonical_id == massive_row.id  # by URL, at ingest
+
+    links = relink_stored(session, since=RELINK_SINCE).links
+
+    assert links == ()
+    assert row(session, "finnhub", "f-1").canonical_id is None
