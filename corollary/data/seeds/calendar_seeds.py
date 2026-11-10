@@ -53,6 +53,34 @@ as an instant (midnight UTC) groups under the previous day in New York.
 Validation is whole-file, as :mod:`corollary.data.seeds.nport` is: one bad row
 raises :class:`~corollary.data.seeds.SeedError` naming the file and line, and
 nothing from that file is returned.
+
+Economic release series (spec R7)
+---------------------------------
+
+``econ_release_series.csv`` names, per FRED release, the series that carries
+its headline figure and how to turn that series into the figure shown::
+
+    release_id,series_id,transform,scale,unit_label,decimals
+    10,CPIAUCSL,pct_change,1,% m/m,1
+    188,IR,pct_change,1,"% m/m, NSA",1
+
+``transform`` is exactly one of :data:`ECON_TRANSFORMS`. ``scale`` is a plain
+positive decimal (``0.001``, never ``1e-3``), parsed from its text straight to
+:class:`~decimal.Decimal` -- no float exists on the path. ``decimals`` is a
+non-negative integer, the display precision. A unit label holding a comma is
+CSV-quoted.
+
+The two econ tables are **one seed for validation purposes**: they are parsed
+and refused together, by :func:`parse_econ_release_seeds`. Every release in
+the times table has exactly one series row and every series row has a
+release in the times table; a missing row, an extra row, a duplicate, an
+unknown transform, an unparseable scale or bad decimals refuses **both**. The
+loaders enforce that structurally: :func:`load_econ_release_times` -- what
+the calendar job already calls -- is :func:`load_econ_release_seeds` keeping
+only the times, so a broken series file stops the times table loading too,
+and there is no loader that returns the series without the times check.
+:func:`parse_econ_release_times` remains as the single-file structural parse
+for test fixtures; no production path calls it directly.
 """
 
 from __future__ import annotations
@@ -62,10 +90,11 @@ import io
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Final, Literal, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from corollary.data.seeds import SeedError
@@ -149,13 +178,36 @@ ECON_RELEASE_COLUMNS: Final[tuple[str, ...]] = (
     "note",
 )
 
+ECON_RELEASE_SERIES_COLUMNS: Final[tuple[str, ...]] = (
+    "release_id",
+    "series_id",
+    "transform",
+    "scale",
+    "unit_label",
+    "decimals",
+)
+
 ECON_RELEASE_TIMES_PATH: Final[Path] = SEEDS_DIR / "econ_release_times.csv"
+ECON_RELEASE_SERIES_PATH: Final[Path] = SEEDS_DIR / "econ_release_series.csv"
+
+#: How a release's series becomes its figure (spec R7): ``level`` is the
+#: observation itself, ``change`` the difference from the prior observation,
+#: ``pct_change`` that difference as a percentage of the prior.
+EconTransform = Literal["level", "change", "pct_change"]
+ECON_TRANSFORMS: Final[tuple[EconTransform, ...]] = ("level", "change", "pct_change")
 
 #: ``HH:MM``, 24-hour, two digits each. ``time.fromisoformat`` alone also
 #: accepts seconds and offsets, which a hand-kept table should not carry.
 _HHMM_RE: Final = re.compile(r"\A([01][0-9]|2[0-3]):[0-5][0-9]\Z")
 _YEAR_RE: Final = re.compile(r"\A[0-9]{4}\Z")
 _RELEASE_ID_RE: Final = re.compile(r"\A[1-9][0-9]*\Z")
+#: FRED's own series-id convention: upper-case letters, digits, underscore.
+#: A stray space or lower-case typo is refused here rather than at fetch time.
+_SERIES_ID_RE: Final = re.compile(r"\A[A-Z0-9_]+\Z")
+#: Plain decimal notation only. ``Decimal()`` alone also accepts ``NaN``,
+#: ``Infinity``, exponents, underscores and surrounding whitespace.
+_SCALE_RE: Final = re.compile(r"\A[0-9]+(\.[0-9]+)?\Z")
+_DECIMALS_RE: Final = re.compile(r"\A(0|[1-9][0-9]*)\Z")
 
 
 @dataclass(frozen=True)
@@ -288,6 +340,41 @@ class EconReleaseTimes:
         if row is None:
             return None
         return _local_to_utc(day, row.et_time, ET_ZONE)
+
+
+@dataclass(frozen=True)
+class EconReleaseSeries:
+    """Which FRED series carries one release's figure, and how it is shown."""
+
+    release_id: int
+    series_id: str
+    transform: EconTransform
+    #: Multiplies the transformed figure into ``unit_label``'s unit. Exact.
+    scale: Decimal
+    unit_label: str
+    #: Display precision, a non-negative integer.
+    decimals: int
+
+
+@dataclass(frozen=True)
+class EconReleaseSeriesTable:
+    """The whole R7 series table, validated: one row per FRED release id."""
+
+    rows: tuple[EconReleaseSeries, ...]
+
+    def by_id(self, release_id: int) -> EconReleaseSeries | None:
+        for row in self.rows:
+            if row.release_id == release_id:
+                return row
+        return None
+
+
+@dataclass(frozen=True)
+class EconReleaseSeeds:
+    """The two econ tables, validated together: the same release ids, one row each."""
+
+    times: EconReleaseTimes
+    series: EconReleaseSeriesTable
 
 
 # --- parsing ---------------------------------------------------------------
@@ -574,7 +661,18 @@ def banks_without_seed(year: int, directory: Path | None = None) -> tuple[SeedGa
 
 
 def parse_econ_release_times(text: str, source: str = "<string>") -> EconReleaseTimes:
-    """Parse the Q3 table. Raises :class:`SeedError` naming ``source`` and the line."""
+    """Parse the Q3 table alone. Raises :class:`SeedError` naming ``source`` and the line.
+
+    This is the single-file structural check, for fixtures. The shipped table
+    is loaded with its series partner by :func:`load_econ_release_seeds`.
+    """
+    return _parse_econ_release_times_lines(text, source)[0]
+
+
+def _parse_econ_release_times_lines(
+    text: str, source: str
+) -> tuple[EconReleaseTimes, dict[int, int]]:
+    """The Q3 table, and the file line each ``release_id`` sits on."""
     records = _records(text)
     if not records:
         raise SeedError(f"{source}: empty file")
@@ -585,7 +683,7 @@ def parse_econ_release_times(text: str, source: str = "<string>") -> EconRelease
             f"{','.join(ECON_RELEASE_COLUMNS)!r}, not {header!r}"
         )
     rows: list[EconReleaseTime] = []
-    seen: set[int] = set()
+    lines: dict[int, int] = {}
     for line, record in records[1:]:
         if len(record) != len(ECON_RELEASE_COLUMNS):
             raise SeedError(
@@ -608,18 +706,158 @@ def parse_econ_release_times(text: str, source: str = "<string>") -> EconRelease
             )
         except ValueError as exc:
             raise SeedError(f"{source}, line {line}: {exc}") from None
-        if row.release_id in seen:
+        if row.release_id in lines:
             raise SeedError(f"{source}, line {line}: release_id {row.release_id} appears twice")
-        seen.add(row.release_id)
+        lines[row.release_id] = line
         rows.append(row)
     if not rows:
         raise SeedError(f"{source}: no release rows")
-    return EconReleaseTimes(rows=tuple(rows))
+    return EconReleaseTimes(rows=tuple(rows)), lines
 
 
-def load_econ_release_times(path: Path | None = None) -> EconReleaseTimes:
-    """The committed Q3 table. It ships with the package, so a missing file raises."""
-    target = ECON_RELEASE_TIMES_PATH if path is None else path
-    if not target.exists():
-        raise SeedError(f"{target}: the economic release times table is missing")
-    return parse_econ_release_times(_read(target), source=str(target))
+def _parse_transform(value: str) -> EconTransform:
+    # Spelled out rather than cast, so mypy checks each value against the Literal.
+    if value == "level":
+        return "level"
+    if value == "change":
+        return "change"
+    if value == "pct_change":
+        return "pct_change"
+    raise ValueError(f"transform {value!r} is not one of {list(ECON_TRANSFORMS)}")
+
+
+def _parse_scale(value: str) -> Decimal:
+    """``value`` as an exact :class:`Decimal`, finite and greater than zero."""
+    if not _SCALE_RE.fullmatch(value):
+        raise ValueError(f"scale {value!r} is not a plain decimal such as 1 or 0.001")
+    try:
+        scale = Decimal(value)
+    except InvalidOperation:  # pragma: no cover - the pattern admits only valid decimals
+        raise ValueError(f"scale {value!r} is not a decimal") from None
+    if not scale.is_finite() or scale <= 0:
+        raise ValueError(f"scale {value!r} must be greater than zero")
+    return scale
+
+
+def _parse_econ_release_series_lines(
+    text: str, source: str
+) -> tuple[EconReleaseSeriesTable, dict[int, int]]:
+    """The R7 table on its own, and the file line each ``release_id`` sits on.
+
+    Private on purpose: the series table is only ever returned by
+    :func:`parse_econ_release_seeds`, after the cross-check with the times.
+    """
+    records = _records(text)
+    if not records:
+        raise SeedError(f"{source}: empty file")
+    line, header = records[0]
+    if tuple(header) != ECON_RELEASE_SERIES_COLUMNS:
+        raise SeedError(
+            f"{source}, line {line}: the first row must be "
+            f"{','.join(ECON_RELEASE_SERIES_COLUMNS)!r}, not {header!r}"
+        )
+    rows: list[EconReleaseSeries] = []
+    lines: dict[int, int] = {}
+    for line, record in records[1:]:
+        if len(record) != len(ECON_RELEASE_SERIES_COLUMNS):
+            raise SeedError(
+                f"{source}, line {line}: expected {len(ECON_RELEASE_SERIES_COLUMNS)} fields, "
+                f"got {len(record)}: {record!r} (a unit label holding a comma must be quoted)"
+            )
+        id_text, series_id, transform_text, scale_text, unit_label, decimals_text = record
+        try:
+            if not _RELEASE_ID_RE.fullmatch(id_text):
+                raise ValueError(f"release_id {id_text!r} is not a positive integer")
+            if not _SERIES_ID_RE.fullmatch(series_id):
+                raise ValueError(
+                    f"series_id {series_id!r} is not a FRED series id "
+                    "(upper-case letters, digits and underscores)"
+                )
+            transform = _parse_transform(transform_text)
+            scale = _parse_scale(scale_text)
+            if not unit_label.strip():
+                raise ValueError("unit_label is empty")
+            if not _DECIMALS_RE.fullmatch(decimals_text):
+                raise ValueError(f"decimals {decimals_text!r} is not a non-negative integer")
+            row = EconReleaseSeries(
+                release_id=int(id_text),
+                series_id=series_id,
+                transform=transform,
+                scale=scale,
+                unit_label=unit_label,
+                decimals=int(decimals_text),
+            )
+        except ValueError as exc:
+            raise SeedError(f"{source}, line {line}: {exc}") from None
+        if row.release_id in lines:
+            raise SeedError(f"{source}, line {line}: release_id {row.release_id} appears twice")
+        lines[row.release_id] = line
+        rows.append(row)
+    if not rows:
+        raise SeedError(f"{source}: no series rows")
+    return EconReleaseSeriesTable(rows=tuple(rows)), lines
+
+
+def parse_econ_release_seeds(
+    times_text: str,
+    series_text: str,
+    *,
+    times_source: str = "<times>",
+    series_source: str = "<series>",
+) -> EconReleaseSeeds:
+    """Parse both econ tables and check them against each other, or refuse both.
+
+    Each file is first validated whole on its own; then every series row must
+    name a release in the times table, and every release in the times table
+    must have a series row. Duplicates are already refused per file, so
+    passing both checks means exactly one series row per release. The error
+    names the file and line of the row at fault.
+    """
+    times, time_lines = _parse_econ_release_times_lines(times_text, times_source)
+    series, series_lines = _parse_econ_release_series_lines(series_text, series_source)
+    for row in series.rows:
+        if times.by_id(row.release_id) is None:
+            raise SeedError(
+                f"{series_source}, line {series_lines[row.release_id]}: release_id "
+                f"{row.release_id} ({row.series_id}) is not in {times_source} -- every "
+                "series row needs its release's time row"
+            )
+    for time_row in times.rows:
+        if series.by_id(time_row.release_id) is None:
+            raise SeedError(
+                f"{times_source}, line {time_lines[time_row.release_id]}: release_id "
+                f"{time_row.release_id} ({time_row.release_name}) has no row in "
+                f"{series_source} -- every release needs exactly one series row"
+            )
+    return EconReleaseSeeds(times=times, series=series)
+
+
+def load_econ_release_seeds(
+    times_path: Path | None = None, series_path: Path | None = None
+) -> EconReleaseSeeds:
+    """The committed econ tables, validated together. Both ship with the package,
+    so either file missing raises, as does any row :func:`parse_econ_release_seeds` refuses.
+    """
+    times_target = ECON_RELEASE_TIMES_PATH if times_path is None else times_path
+    series_target = ECON_RELEASE_SERIES_PATH if series_path is None else series_path
+    if not times_target.exists():
+        raise SeedError(f"{times_target}: the economic release times table is missing")
+    if not series_target.exists():
+        raise SeedError(f"{series_target}: the economic release series table is missing")
+    return parse_econ_release_seeds(
+        _read(times_target),
+        _read(series_target),
+        times_source=str(times_target),
+        series_source=str(series_target),
+    )
+
+
+def load_econ_release_times(
+    path: Path | None = None, series_path: Path | None = None
+) -> EconReleaseTimes:
+    """The committed Q3 table -- loaded **with** its series partner (spec R7).
+
+    A series seed that fails validation refuses the times table too, so the
+    calendar cannot show releases whose figures have no defined series.
+    """
+    return load_econ_release_seeds(path, series_path).times
