@@ -44,7 +44,7 @@ from corollary.data.news.audit_runner import (
 )
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels
-from corollary.data.providers.interface import Bar, BarTimeframe, ProviderError
+from corollary.data.providers.interface import Bar, BarAdjustment, BarTimeframe, ProviderError
 from corollary.db.models import (
     AuditLog,
     AuditRun,
@@ -93,6 +93,9 @@ class FakeBars:
     calls: list[tuple[tuple[str, ...], BarTimeframe, datetime | None, datetime | None]] = field(
         default_factory=list
     )
+    #: Each call's ``adjustment``, in call order -- a list beside ``calls``
+    #: rather than a fifth tuple member, so no existing unpacking changes.
+    adjustments: list[BarAdjustment] = field(default_factory=list)
 
     async def stock_bars(
         self,
@@ -102,8 +105,10 @@ class FakeBars:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> dict[str, list[Bar]]:
         self.calls.append((tuple(symbols), timeframe, start, end))
+        self.adjustments.append(adjustment)
         assert start is not None and end is not None
         day = start.astimezone(_ET).date()
         if self.outage is not None:
@@ -625,6 +630,22 @@ def test_a_second_concurrent_run_is_refused_and_touches_nothing(db_engine: Engin
     finally:
         audit_runner._RUN_LOCK.release()
     assert _count(db_engine, AuditRun) == 0
+
+
+def test_bars_are_requested_dividend_and_split_adjusted(db_engine: Engine) -> None:
+    """Every audit fetch asks for ``all``, never the provider's ``split`` default.
+
+    A stock opens lower on its ex-date by about the dividend, so a
+    split-only 1d window spanning a ticker's ex-date reads a 0.2--1% loss
+    that is no loss to a holder, and SPY's quarterly ex-date shifts every
+    excess return that session. A correct bullish label would grade wrong.
+    """
+    _the_week(db_engine)
+    bars = FakeBars()
+    _run(_deps(db_engine, bars=bars))
+    assert bars.calls, "the week has labels, so the run fetches"
+    assert bars.adjustments == ["all"] * len(bars.calls)
+    assert audit_runner.AUDIT_BAR_ADJUSTMENT == "all"
 
 
 def test_bars_are_requested_only_through_the_provider_interface(db_engine: Engine) -> None:

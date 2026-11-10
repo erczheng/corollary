@@ -944,3 +944,199 @@ def test_a_finnhub_benzinga_twin_four_hours_early_on_the_wire_now_links(
     result = store(session, decoded)
     assert result.duplicates_linked == 1
     assert row(session, "finnhub", "4242").canonical_id == row(session, "alpaca", "1").id
+
+
+# ------------------------------------------- syndication clock skew (Fool via Yahoo)
+#
+# Measured 2026-09-25 -> 2026-10-09: 575 headline twins of Finnhub ``source``
+# "Yahoo" (finnhub_company) and Massive publisher "The Motley Fool" sat exactly
+# 1200 s apart, Finnhub later; fool.com's own published_time matched Massive on
+# 12 of 12 sampled pages. Finnhub's payload cannot tell those Yahoo rows from
+# its 0-offset Zacks/GlobeNewswire Yahoo rows, so the allowance lives in the
+# headline match, scoped to that exact publisher pair. All rows SYNTHETIC.
+
+FOOL_AT = T0
+
+
+def fool_via_massive(vendor_id: str = "m-1", **overrides: Any) -> NewsArticle:
+    fields: dict[str, Any] = {
+        "headline": "Is Micron a Buy After Its Earnings?",
+        "publisher": "The Motley Fool",
+        "published_at": FOOL_AT,
+    }
+    fields.update(overrides)
+    return article("massive", vendor_id, **fields)
+
+
+def fool_via_finnhub_yahoo(vendor_id: str = "f-1", **overrides: Any) -> NewsArticle:
+    fields: dict[str, Any] = {
+        "headline": "Is Micron a Buy After Its Earnings?",
+        "publisher": "Yahoo",
+        "published_at": FOOL_AT + timedelta(minutes=20),
+        "url": f"https://finnhub.io/api/news?id=synthetic-{vendor_id}",
+    }
+    fields.update(overrides)
+    return article("finnhub", vendor_id, **fields)
+
+
+def test_a_finnhub_yahoo_copy_twenty_minutes_after_massive_fool_links(session: Session) -> None:
+    """Massive first: the canonical row is the one carrying the true stamp."""
+    store(session, fool_via_massive())
+    result = store(session, fool_via_finnhub_yahoo())
+    assert result.duplicates_linked == 1
+    canonical = row(session, "massive", "m-1")
+    assert canonical.canonical_id is None
+    assert row(session, "finnhub", "f-1").canonical_id == canonical.id
+    # Nothing is re-stamped: the allowance is in the match, not the data.
+    stored_at = row(session, "finnhub", "f-1").published_at
+    assert stored_at.replace(tzinfo=timezone.utc) == FOOL_AT + timedelta(minutes=20)
+
+
+def test_the_fool_pair_links_in_either_arrival_order(session: Session) -> None:
+    store(session, fool_via_finnhub_yahoo())
+    result = store(session, fool_via_massive())
+    assert result.duplicates_linked == 1
+    assert row(session, "massive", "m-1").canonical_id == row(session, "finnhub", "f-1").id
+
+
+def test_the_fool_pair_links_in_one_batch(session: Session) -> None:
+    result = store(session, fool_via_finnhub_yahoo(), fool_via_massive())
+    assert result.duplicates_linked == 1
+
+
+@pytest.mark.parametrize("minutes", [10, 30])
+def test_the_skewed_window_is_inclusive_at_ten_minutes_either_side_of_the_offset(
+    session: Session, minutes: int
+) -> None:
+    store(session, fool_via_massive())
+    store(session, fool_via_finnhub_yahoo(published_at=FOOL_AT + timedelta(minutes=minutes)))
+    assert row(session, "finnhub", "f-1").canonical_id == row(session, "massive", "m-1").id
+
+
+def test_the_fool_pair_just_past_the_skewed_window_is_a_different_story(
+    session: Session,
+) -> None:
+    store(session, fool_via_massive())
+    store(
+        session,
+        fool_via_finnhub_yahoo(published_at=FOOL_AT + timedelta(minutes=30, seconds=1)),
+    )
+    assert row(session, "finnhub", "f-1").canonical_id is None
+
+
+def test_the_fool_pair_still_links_at_zero_offset_if_finnhub_fixes_its_clock(
+    session: Session,
+) -> None:
+    """The skewed window is added to decision 3's, never substituted for it."""
+    store(session, fool_via_massive())
+    store(session, fool_via_finnhub_yahoo(published_at=FOOL_AT))
+    assert row(session, "finnhub", "f-1").canonical_id == row(session, "massive", "m-1").id
+
+
+def test_the_skew_runs_one_way_only_finnhub_twenty_minutes_early_does_not_link(
+    session: Session,
+) -> None:
+    store(session, fool_via_massive())
+    store(session, fool_via_finnhub_yahoo(published_at=FOOL_AT - timedelta(minutes=20)))
+    assert row(session, "finnhub", "f-1").canonical_id is None
+
+
+@pytest.mark.parametrize(
+    ("finnhub_publisher", "massive_publisher"),
+    [
+        ("yahoo", "The Motley Fool"),  # case variants were never observed
+        ("Yahoo Finance", "The Motley Fool"),  # (whitespace is stripped by NewsArticle)
+        ("Yahoo", "Motley Fool"),
+        ("Yahoo", "Zacks Investment Research"),  # measured at 0, not 20
+        ("Yahoo", "GlobeNewswire Inc."),  # measured at 0, not 20
+        ("SeekingAlpha", "The Motley Fool"),
+        (None, "The Motley Fool"),
+        ("Yahoo", None),
+    ],
+)
+def test_the_skew_applies_to_the_exact_publisher_pair_only(
+    session: Session, finnhub_publisher: str | None, massive_publisher: str | None
+) -> None:
+    store(session, fool_via_massive(publisher=massive_publisher))
+    store(session, fool_via_finnhub_yahoo(publisher=finnhub_publisher))
+    assert row(session, "finnhub", "f-1").canonical_id is None
+
+
+def test_the_skew_is_scoped_to_finnhub_company_news(session: Session) -> None:
+    """Measured on /company-news only; the general feed keeps decision 3's window."""
+    store(session, fool_via_massive())
+    store(session, fool_via_finnhub_yahoo(vendor_id="mkt-1", feed=NewsFeed.FINNHUB_MARKET))
+    assert row(session, "finnhub", "mkt-1").canonical_id is None
+
+
+def test_the_skew_is_not_extended_to_other_vendor_pairs(session: Session) -> None:
+    """An Alpaca row stamped like Finnhub's Yahoo copy gets no allowance."""
+    store(session, fool_via_massive())
+    store(
+        session,
+        article(
+            "alpaca",
+            "a-1",
+            headline="Is Micron a Buy After Its Earnings?",
+            publisher="Yahoo",
+            published_at=FOOL_AT + timedelta(minutes=20),
+        ),
+    )
+    assert row(session, "alpaca", "a-1").canonical_id is None
+
+
+def test_a_different_headline_twenty_minutes_later_does_not_link(session: Session) -> None:
+    store(session, fool_via_massive())
+    store(session, fool_via_finnhub_yahoo(headline="Is Micron a Sell After Its Earnings?"))
+    assert row(session, "finnhub", "f-1").canonical_id is None
+
+
+def test_a_skewed_link_is_logged_with_the_offset(
+    session: Session, caplog: pytest.LogCaptureFixture
+) -> None:
+    store(session, fool_via_massive())
+    with caplog.at_level(logging.INFO, logger="corollary.data.news.ingest"):
+        store(session, fool_via_finnhub_yahoo())
+    events = [r for r in caplog.records if getattr(r, "event", None) == "news_syndication_skew_match"]
+    assert len(events) == 1
+    fields = events[0].__dict__
+    assert fields["offset_seconds"] == 1200
+    assert fields["vendor"] == "finnhub"
+    assert fields["publisher"] == "Yahoo"
+    assert fields["counterpart_publisher"] == "The Motley Fool"
+    assert fields["matches"] == 1
+
+
+def test_a_finnhub_yahoo_row_through_the_decoder_links_to_its_massive_fool_twin(
+    session: Session,
+) -> None:
+    """The decoder leaves a Yahoo stamp alone -- it cannot tell Fool from Zacks --
+    and the ingest's publisher-pair window is what links the measured pair."""
+    from corollary.data.providers.finnhub import _news_article
+
+    finnhub_row = {
+        "category": "company",
+        "datetime": int((FOOL_AT + timedelta(minutes=20)).timestamp()),
+        "headline": "Is Micron a Buy After Its Earnings?",
+        "id": 4343,
+        "image": "https://s.yimg.com/rz/stage/p/yahoo_finance_en-US_h_p_finance_2.png",
+        "related": "NVDA",
+        "source": "Yahoo",
+        "summary": "synthetic",
+        "url": "https://finnhub.io/api/news?id=synthetic4343",
+    }
+    decoded = _news_article(
+        finnhub_row,
+        feed=NewsFeed.FINNHUB_COMPANY,
+        tickers=("NVDA",),
+        id_prefix="",
+        scrub=lambda text: text,
+    )
+    assert decoded is not None
+    assert decoded.published_at == FOOL_AT + timedelta(minutes=20)  # raw, uncorrected
+
+    store(session, fool_via_massive())
+    result = store(session, decoded)
+    assert result.duplicates_linked == 1
+    groups = {r.canonical_id if r.canonical_id is not None else r.id for r in all_rows(session)}
+    assert groups == {row(session, "massive", "m-1").id}

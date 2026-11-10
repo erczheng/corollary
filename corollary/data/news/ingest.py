@@ -49,6 +49,16 @@ and when any one of them rules the URL out the headline check decides alone:
 Each bound can only turn a URL link into a headline check, so the cost of
 being wrong is a missed link, never a wrong one.
 
+**One measured publisher pair gets a skewed headline window.** Finnhub serves
+Motley Fool stories syndicated through Yahoo 20 minutes after the time fool.com
+itself states, which Massive reproduces exactly. That puts the pair outside
+decision 3's +/-10 minutes, so every such story showed twice. Finnhub labels
+the row only ``"Yahoo"``, the same label it gives Zacks and GlobeNewswire
+copies, which it stamps correctly, so its decoder has nothing to key a
+correction on. The allowance therefore lives here: for that exact pair, the
+headline match also looks +/-10 minutes around the shifted stamp. See
+:data:`SYNDICATION_SKEWS` for the evidence. No stamp is rewritten.
+
 **Link, then never re-link.** ``canonical_id`` is decided once, when a row is
 inserted. A later edit (a new headline or URL on a re-poll) updates the row's
 keys, so *future* articles match against the new text, but never re-points
@@ -102,7 +112,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.orm import Session
 
-from corollary.data.news.article import NewsArticle
+from corollary.data.news.article import NewsArticle, NewsFeed
 from corollary.data.providers.interface import AssetDirectory
 from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
 from corollary.db.models import NewsArticle as ArticleRow
@@ -112,9 +122,12 @@ from corollary.wire import require_aware
 __all__ = [
     "HEADLINE_MATCH_WINDOW",
     "MARKET_TICKER",
+    "SYNDICATION_SKEWS",
     "URL_MATCH_WINDOW",
     "IngestResult",
     "StoredArticle",
+    "SyndicationSide",
+    "SyndicationSkew",
     "filter_tags",
     "headline_key",
     "store_articles",
@@ -129,6 +142,68 @@ MARKET_TICKER: Final = "MARKET"
 
 #: Decision 3: the headline fallback matches within +/-10 minutes, inclusive.
 HEADLINE_MATCH_WINDOW: Final = timedelta(minutes=10)
+
+
+@dataclass(frozen=True)
+class SyndicationSide:
+    """One side of a :class:`SyndicationSkew`: a feed and its exact publisher text."""
+
+    vendor: str
+    feed: str
+    publisher: str
+
+
+@dataclass(frozen=True)
+class SyndicationSkew:
+    """A measured, constant lag between two vendors' copies of one publisher's stories.
+
+    ``late`` stamps the story ``offset`` after ``early`` does. When an incoming
+    article is exactly one side, the headline fallback *also* matches the
+    other side within :data:`HEADLINE_MATCH_WINDOW` of the stamp shifted by
+    ``offset``, in the measured direction only. The ordinary window still
+    applies alongside it, so the pair keeps linking if the lag is ever fixed
+    upstream. Publisher text is compared exactly: variants that were never
+    observed are not guessed at.
+    """
+
+    late: SyndicationSide
+    early: SyndicationSide
+    offset: timedelta
+
+
+#: Measured 2026-09-25 -> 2026-10-09 (phase-3 step 5 re-measurement, two weeks
+#: of real news): 575 headline twins of Finnhub ``/company-news`` rows with
+#: ``source`` ``"Yahoo"`` and Massive rows with publisher ``"The Motley Fool"``
+#: sat **exactly 1200 s apart, Finnhub later**. Four more pairs were recycled
+#: generic headlines matched to a different day's article, so not
+#: counter-examples. On 12 of 12 sampled pairs, fool.com's own
+#: ``article:published_time`` and JSON-LD ``datePublished`` equal Massive's
+#: stamp to the second, and Finnhub's ``url`` redirects to that same fool.com
+#: page. So **Finnhub is 20 minutes late and Massive is right.**
+#:
+#: Why this is not a decoder correction like ``correct_publisher_clock``:
+#: Finnhub gives the Fool rows the same ``source`` as its Zacks (466 twins) and
+#: GlobeNewswire (28 twins) Yahoo rows, which match Massive at offset 0. The
+#: image is a generic Yahoo placeholder and the url an opaque redirect id, so
+#: nothing in the payload separates them. Shifting every ``"Yahoo"`` row would
+#: break those 494 correct pairs. Only the counterpart's publisher identifies
+#: the story, and that is known only here, at match time.
+#:
+#: Residuals, accepted: a Finnhub Fool row with no Massive twin keeps its late
+#: stamp, which is the no-look-ahead direction. And if the Finnhub copy is
+#: stored first it stays canonical (links are never re-rooted), so the group
+#: shows the stamp 20 minutes late.
+#:
+#: Scoped to ``finnhub_company``. The general feed was not measured.
+SYNDICATION_SKEWS: Final[tuple[SyndicationSkew, ...]] = (
+    SyndicationSkew(
+        late=SyndicationSide(vendor="finnhub", feed=NewsFeed.FINNHUB_COMPANY.value, publisher="Yahoo"),
+        early=SyndicationSide(
+            vendor="massive", feed=NewsFeed.MASSIVE_NEWS.value, publisher="The Motley Fool"
+        ),
+        offset=timedelta(minutes=20),
+    ),
+)
 
 #: An implementation bound on decision 3's "normalised URL": a URL match
 #: counts only between rows published within +/-48 hours of each other,
@@ -447,6 +522,8 @@ def _insert(session: Session, article: NewsArticle, stamp: datetime) -> ArticleR
     canonical_id = _find_canonical(
         session,
         vendor=article.vendor,
+        feed=article.feed.value,
+        publisher=article.publisher,
         ukey=ukey,
         hkey=hkey,
         published_at=article.published_at,
@@ -479,7 +556,9 @@ def _insert(session: Session, article: NewsArticle, stamp: datetime) -> ArticleR
                 "rule": (
                     "decision 3: a cross-vendor copy links to one canonical row by "
                     "normalised URL (a story-identifying URL, within +/-48 hours), "
-                    "else normalised headline within +/-10 minutes"
+                    "else normalised headline within +/-10 minutes (also around a "
+                    "measured syndication lag, for the publisher pairs in "
+                    "SYNDICATION_SKEWS)"
                 ),
                 "article_id": row.id,
                 "canonical_id": canonical_id,
@@ -592,6 +671,8 @@ def _find_canonical(
     session: Session,
     *,
     vendor: str,
+    feed: str,
+    publisher: str | None,
     ukey: str,
     hkey: str,
     published_at: datetime,
@@ -604,6 +685,8 @@ def _find_canonical(
     within :data:`URL_MATCH_WINDOW`. Only other vendors' rows match, and only
     groups holding no row of ``vendor`` are joined. The headline fallback is
     tried when the URL finds no joinable group, not only when it finds no row.
+    It also takes the rows :func:`_skewed_headline_matches` finds for a
+    publisher pair in :data:`SYNDICATION_SKEWS`.
     """
     reason = _url_not_identifying(session, ukey)
     if reason is None:
@@ -630,15 +713,89 @@ def _find_canonical(
         )
     if not hkey:
         return None
-    by_headline = session.scalars(
-        select(ArticleRow).where(
-            ArticleRow.headline_key == hkey,
-            ArticleRow.vendor != vendor,
-            ArticleRow.published_at >= published_at - HEADLINE_MATCH_WINDOW,
-            ArticleRow.published_at <= published_at + HEADLINE_MATCH_WINDOW,
+    by_headline = list(
+        session.scalars(
+            select(ArticleRow).where(
+                ArticleRow.headline_key == hkey,
+                ArticleRow.vendor != vendor,
+                ArticleRow.published_at >= published_at - HEADLINE_MATCH_WINDOW,
+                ArticleRow.published_at <= published_at + HEADLINE_MATCH_WINDOW,
+            )
+        ).all()
+    )
+    if publisher is not None:
+        by_headline.extend(
+            _skewed_headline_matches(
+                session,
+                incoming=SyndicationSide(vendor=vendor, feed=feed, publisher=publisher),
+                hkey=hkey,
+                published_at=published_at,
+            )
         )
-    ).all()
     return _choose_canonical(session, by_headline, vendor)
+
+
+def _skewed_headline_matches(
+    session: Session,
+    *,
+    incoming: SyndicationSide,
+    hkey: str,
+    published_at: datetime,
+) -> list[ArticleRow]:
+    """Rows on ``hkey`` that a :data:`SYNDICATION_SKEWS` entry puts in reach of ``incoming``.
+
+    The incoming article must be one side of a skew exactly (vendor, feed and
+    publisher text). If it is the late side, the early side is searched
+    around ``published_at - offset``. If it is the early side, the late side is
+    searched around ``published_at + offset``. Both use
+    :data:`HEADLINE_MATCH_WINDOW`, inclusive. Each skew that finds rows is
+    logged as ``news_syndication_skew_match``.
+    """
+    found: list[ArticleRow] = []
+    for skew in SYNDICATION_SKEWS:
+        if incoming == skew.late:
+            other = skew.early
+            centre = published_at - skew.offset
+        elif incoming == skew.early:
+            other = skew.late
+            centre = published_at + skew.offset
+        else:
+            continue
+        rows = session.scalars(
+            select(ArticleRow).where(
+                ArticleRow.headline_key == hkey,
+                ArticleRow.vendor == other.vendor,
+                ArticleRow.feed == other.feed,
+                ArticleRow.publisher == other.publisher,
+                ArticleRow.published_at >= centre - HEADLINE_MATCH_WINDOW,
+                ArticleRow.published_at <= centre + HEADLINE_MATCH_WINDOW,
+            )
+        ).all()
+        if not rows:
+            continue
+        logger.info(
+            "news headline matched %d %s/%s row(s) across a measured %ds syndication lag",
+            len(rows),
+            other.vendor,
+            other.publisher,
+            int(skew.offset.total_seconds()),
+            extra={
+                "event": "news_syndication_skew_match",
+                "rule": (
+                    "a publisher pair in SYNDICATION_SKEWS also matches by headline "
+                    "within +/-10 minutes of the stamp shifted by its measured lag"
+                ),
+                "vendor": incoming.vendor,
+                "feed": incoming.feed,
+                "publisher": incoming.publisher,
+                "counterpart_vendor": other.vendor,
+                "counterpart_publisher": other.publisher,
+                "offset_seconds": int(skew.offset.total_seconds()),
+                "matches": len(rows),
+            },
+        )
+        found.extend(rows)
+    return found
 
 
 def _choose_canonical(
