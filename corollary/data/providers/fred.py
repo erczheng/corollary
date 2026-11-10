@@ -6,11 +6,13 @@ release dates) and, per decision 19, uses it first for the risk-free rate:
 wherever an observation has been obtained.
 
 **This is the entire FRED surface area**, the way ``data/providers/alpaca.py``
-is Alpaca's and ``finnhub.py`` Finnhub's. Two methods:
-:meth:`FredProvider.observations` (step 3's series) and
+is Alpaca's and ``finnhub.py`` Finnhub's. Three methods:
+:meth:`FredProvider.observations` (step 3's series),
 :meth:`FredProvider.release_dates` (Q3's economic calendar, unit 7.2b-R),
 which reads ``/fred/releases/dates`` forward with
-``include_release_dates_with_no_data=true`` -- dates only, never times.
+``include_release_dates_with_no_data=true`` -- dates only, never times --
+and :meth:`FredProvider.vintage_window` (spec R7's first prints, U6c), which
+reads one series as it stood across the day before and the day of a release.
 
 Four things this file is deliberate about
 -----------------------------------------
@@ -51,15 +53,22 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Final
+from typing import Any, Final, Literal, TypeAlias
 
 import httpx
 
 from corollary.data.providers.interface import ProviderError, RateLimitedError
 from corollary.ratelimit import FRED_HOST, FRED_REQUESTS_PER_MINUTE, HostRateLimiter, default_limiter
-from corollary.wire import WireFormatError, as_date, clean_params, decode_json, vendor_detail
+from corollary.wire import (
+    STORED_DETAIL_MAX,
+    WireFormatError,
+    as_date,
+    clean_params,
+    decode_json,
+    vendor_detail,
+)
 
 __all__ = [
     "FRED_API_KEY_ENV",
@@ -70,13 +79,21 @@ __all__ = [
     "FredError",
     "FredObservation",
     "FredProvider",
+    "FredRefusal",
     "FredReleaseDate",
     "FredReleaseDatesPage",
+    "FredVintageRow",
+    "FredVintageWindow",
     "RELEASE_DATES_MAX_PAGES",
     "RELEASE_DATES_PAGE_LIMIT",
+    "VINTAGE_LOOKBACK_MONTHS",
+    "VintageFrequency",
     "parse_observations",
     "parse_release_dates",
+    "parse_vintage_window",
     "release_dates_params",
+    "vintage_observation_start",
+    "vintage_window_params",
 ]
 
 logger = logging.getLogger(__name__)
@@ -329,6 +346,213 @@ def parse_release_dates(payload: Any) -> FredReleaseDatesPage:
     return FredReleaseDatesPage(count=count, rows=tuple(_release_date_row(r) for r in rows))
 
 
+# --------------------------------------------------------------------------
+# Vintages: one series as it stood on the day before and the day of a release
+# --------------------------------------------------------------------------
+
+#: How often a release series is observed. It sets the lookback, and
+#: ``econ_values`` checks the dates FRED returns against it. A parameter, not
+#: derived: the lookback must be known before the request, and the release
+#: series seed carries no frequency column.
+VintageFrequency: TypeAlias = Literal["monthly", "quarterly"]
+
+#: ``datetime.date`` under a second name, for :class:`FredVintageRow`: its
+#: field is called ``date``, after FRED's own key, and inside the class body
+#: that name would shadow the type for every annotation after it.
+_Day: TypeAlias = date
+
+#: Months before the release day's month that ``observation_start`` reaches
+#: (spec R7). The figure needs three observations, x(t), x(t-1) and x(t-2), and
+#: x(t) lags the release by up to two months for a monthly series (trade,
+#: construction, JOLTS) -- so x(t-2) sits at most four months back. A year
+#: holds three quarters with the same lag to spare. A release delayed past
+#: that is reported as no value naming the missing observation, never guessed.
+VINTAGE_LOOKBACK_MONTHS: Final[Mapping[VintageFrequency, int]] = {
+    "monthly": 4,
+    "quarterly": 12,
+}
+
+#: What a vintage query's 400 says when FRED declines the *series* -- matched
+#: in the whitespace-collapsed, lower-cased message. ``EXHOSLUSM495S`` (NAR's
+#: existing home sales) answers every dated query with "The series does not
+#: exist in ALFRED but may exist in FRED", and an unknown ID with "The series
+#: does not exist". Every other 400 stays a :class:`FredError`: FRED answers a
+#: bad key with a 400 too, and so would a malformed request of ours, and
+#: recording either as "not available from FRED" would hide a fault behind
+#: what reads as the vendor's data policy.
+_SERIES_REFUSED: Final = "series does not exist"
+
+
+def vintage_observation_start(release_day: date, frequency: VintageFrequency) -> date:
+    """The first day of the month :data:`VINTAGE_LOOKBACK_MONTHS` before ``release_day``'s."""
+    months = VINTAGE_LOOKBACK_MONTHS.get(frequency)
+    if months is None:
+        raise ValueError(
+            f"frequency {frequency!r} is not one of {sorted(VINTAGE_LOOKBACK_MONTHS)}"
+        )
+    index = release_day.year * 12 + (release_day.month - 1) - months
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def vintage_window_params(
+    series_id: str, release_day: date, frequency: VintageFrequency
+) -> dict[str, str]:
+    """The query for ``series_id``'s ``D-1 .. D`` vintage window, key excluded.
+
+    ``realtime_start = D-1`` and ``realtime_end = D``, not ``D .. D``: U6a's
+    probe found FRED clips every row's real-time period to the window asked
+    for, so a single-day vintage stamps every row ``D`` and cannot say which
+    value is new. Across two days a value valid on both is one row spanning
+    them, and a value new or revised on ``D`` starts on ``D`` (a revised one
+    leaving its old value in a row ending ``D-1``).
+
+    ``output_type`` is not sent: FRED's default, 1 (observations by real-time
+    period), is what U6a recorded and what that split depends on.
+    """
+    return {
+        "series_id": series_id,
+        "file_type": "json",
+        "realtime_start": (release_day - timedelta(days=1)).isoformat(),
+        "realtime_end": release_day.isoformat(),
+        "observation_start": vintage_observation_start(release_day, frequency).isoformat(),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class FredVintageRow:
+    """One observation in one real-time period of a vintage window.
+
+    ``value`` is ``None`` for FRED's ``"."`` and an exact ``Decimal`` parsed
+    from FRED's text otherwise. The real-time period is clipped to the window
+    requested, so ``realtime_start`` is "valid from" only within it.
+    """
+
+    date: _Day
+    value: Decimal | None
+    realtime_start: _Day
+    realtime_end: _Day
+
+
+@dataclass(frozen=True, slots=True)
+class FredVintageWindow:
+    """FRED's answer for one series across ``release_day - 1 .. release_day``.
+
+    ``rows`` are sorted by ``(date, realtime_start)``. :func:`parse_vintage_window`
+    guarantees every period lies inside the window and that no date has two
+    values on the same day. ``frequency`` is what the caller asked for, not
+    something FRED said.
+    """
+
+    series_id: str
+    release_day: date
+    frequency: VintageFrequency
+    rows: tuple[FredVintageRow, ...]
+
+    @property
+    def day_before(self) -> date:
+        return self.release_day - timedelta(days=1)
+
+
+@dataclass(frozen=True, slots=True)
+class FredRefusal:
+    """FRED declined to serve this series' vintages: an answer, not an error.
+
+    Distinct from :class:`FredError` on purpose. A 429, a 5xx or a dropped
+    connection is transient and the scheduler retries it; this is FRED saying
+    the series is not available this way at all. ``vendor_message`` is FRED's
+    ``error_message``, key-scrubbed and whitespace-collapsed, so a later unit
+    can show *why*. How a refusal is stored is not decided here.
+    """
+
+    series_id: str
+    release_day: date
+    vendor_message: str
+
+
+def _strict_day(series_id: str, raw: object, what: str) -> date:
+    """Exactly ``YYYY-MM-DD``, or :class:`FredError` naming ``what``."""
+    if not isinstance(raw, str) or not _ISO_DATE.fullmatch(raw):
+        raise FredError(f"{series_id}: {what} {str(raw)[:40]!r} is not YYYY-MM-DD")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise FredError(f"{series_id}: {what} {raw!r} is not a calendar date") from exc
+
+
+def parse_vintage_window(
+    series_id: str, payload: Any, *, release_day: date, frequency: VintageFrequency
+) -> FredVintageWindow:
+    """A ``D-1 .. D`` ``/fred/series/observations`` body, checked against the request.
+
+    Refused whole (:class:`FredError`) unless it is the window asked for:
+    FRED's echo of ``realtime_start``/``realtime_end`` must be ``D-1``/``D``,
+    every row's period must lie inside them and not end before it starts,
+    no date may have two values valid on the same day, and ``count`` must be
+    the rows returned -- a truncated vintage would be a partial answer read as
+    a whole one. The body's ``observation_start`` echo is not checked: a
+    deeper start changes how many rows come back, never what they say.
+    """
+    day_before = release_day - timedelta(days=1)
+    if not isinstance(payload, Mapping):
+        raise FredError(f"{series_id}: the response body is not an object")
+    for key, wanted in (("realtime_start", day_before), ("realtime_end", release_day)):
+        echoed = payload.get(key)
+        if echoed != wanted.isoformat():
+            raise FredError(
+                f"{series_id}: the response's {key} {str(echoed)[:40]!r} is not the "
+                f"requested {wanted.isoformat()}"
+            )
+    rows = payload.get("observations")
+    if not isinstance(rows, list):
+        raise FredError(f"{series_id}: the response carries no observations list")
+    count = payload.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count != len(rows):
+        raise FredError(
+            f"{series_id}: count {str(count)[:40]!r} is not the {len(rows)} observations "
+            "returned; refused rather than read as the whole vintage"
+        )
+
+    parsed: list[FredVintageRow] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise FredError(f"{series_id}: an observation is not an object")
+        day = _strict_day(series_id, row.get("date"), "observation date")
+        start = _strict_day(series_id, row.get("realtime_start"), f"{day} realtime_start")
+        end = _strict_day(series_id, row.get("realtime_end"), f"{day} realtime_end")
+        if not (day_before <= start <= release_day and day_before <= end <= release_day):
+            raise FredError(
+                f"{series_id} {day}: real-time period {start}..{end} is outside the "
+                f"requested {day_before}..{release_day}"
+            )
+        if end < start:
+            raise FredError(
+                f"{series_id} {day}: real-time period {start}..{end} ends before it starts"
+            )
+        parsed.append(
+            FredVintageRow(
+                date=day,
+                value=_observation_value(series_id, day, row.get("value")),
+                realtime_start=start,
+                realtime_end=end,
+            )
+        )
+
+    covered: set[tuple[date, date]] = set()
+    for vintage_row in parsed:
+        for valid_on in (day_before, release_day):
+            if vintage_row.realtime_start <= valid_on <= vintage_row.realtime_end:
+                if (vintage_row.date, valid_on) in covered:
+                    raise FredError(
+                        f"{series_id} {vintage_row.date}: two values valid on {valid_on}"
+                    )
+                covered.add((vintage_row.date, valid_on))
+
+    parsed.sort(key=lambda r: (r.date, r.realtime_start))
+    return FredVintageWindow(
+        series_id=series_id, release_day=release_day, frequency=frequency, rows=tuple(parsed)
+    )
+
+
 def _redact_query_key(text: str, secrets: Sequence[str]) -> str:
     """``text`` with the key and any ``api_key=`` value replaced. Unbounded."""
     for secret in secrets:
@@ -430,10 +654,14 @@ class FredProvider:
         return vendor_detail(text, secrets=self.secrets, patterns=(_API_KEY_PARAM,))
 
     async def _get(self, path: str, params: Mapping[str, Any]) -> Any:
+        return self._decode(path, await self._send(path, params))
+
+    async def _send(self, path: str, params: Mapping[str, Any]) -> httpx.Response:
+        """One metered GET. A transport failure is a :class:`FredError`, URL scrubbed."""
         await self._limiter.acquire(FRED_HOST)
         query = clean_params({**params, "api_key": self._credentials.api_key})
         try:
-            response = await self._client.get(
+            return await self._client.get(
                 f"{self._base_url}{path}",
                 params=query,
                 headers={"Accept": "application/json"},
@@ -443,6 +671,42 @@ class FredProvider:
                 f"GET {path} failed ({type(exc).__name__}): {self._scrub(str(exc))}"
             ) from exc
 
+    def _series_refusal(
+        self, series_id: str, release_day: date, response: httpx.Response
+    ) -> FredRefusal | None:
+        """The response as FRED declining the series, or ``None`` if it is anything else.
+
+        Only a 400 whose body is FRED's own error object and whose message
+        says the series does not exist (:data:`_SERIES_REFUSED`). The message
+        goes through the module's one scrubber, at the stored-row bound.
+        """
+        if response.status_code != 400:
+            return None
+        try:
+            body = decode_json(response.text)
+        except WireFormatError:
+            return None
+        if not isinstance(body, Mapping):
+            return None
+        code = body.get("error_code")
+        message = body.get("error_message")
+        if isinstance(code, bool) or code != 400 or not isinstance(message, str):
+            return None
+        if _SERIES_REFUSED not in " ".join(message.split()).lower():
+            return None
+        return FredRefusal(
+            series_id=series_id,
+            release_day=release_day,
+            vendor_message=vendor_detail(
+                message,
+                secrets=self.secrets,
+                patterns=(_API_KEY_PARAM,),
+                limit=STORED_DETAIL_MAX,
+            ),
+        )
+
+    def _decode(self, path: str, response: httpx.Response) -> Any:
+        """A response's body, or the error its status means."""
         if response.status_code == 429:
             raise RateLimitedError(
                 f"GET {path} returned 429 despite the local budget of "
@@ -565,4 +829,29 @@ class FredProvider:
             f"releases/dates: {start.isoformat()}..{end.isoformat()} needs more than "
             f"{RELEASE_DATES_MAX_PAGES} pages of {page_limit}; refused rather than "
             "spending the FRED budget on a count that is probably wrong"
+        )
+
+    async def vintage_window(
+        self, series_id: str, release_day: date, *, frequency: VintageFrequency
+    ) -> FredVintageWindow | FredRefusal:
+        """``series_id`` as it stood on ``release_day - 1`` and on ``release_day``.
+
+        **One request**, metered against the FRED bucket -- R8's budget per
+        attempt. Because this is a vintage, a fetch weeks late returns what was
+        known on the release day, not what is known now.
+
+        Returns :class:`FredRefusal` when FRED declines the series itself
+        (``EXHOSLUSM495S`` is not in ALFRED). Raises :class:`FredError` -- or
+        :class:`RateLimitedError` on a 429 -- for everything transient or
+        unexpected, which the scheduler retries, and for a body that is not
+        the window asked for (:func:`parse_vintage_window`).
+        """
+        path = "/series/observations"
+        params = vintage_window_params(series_id, release_day, frequency)
+        response = await self._send(path, params)
+        refusal = self._series_refusal(series_id, release_day, response)
+        if refusal is not None:
+            return refusal
+        return parse_vintage_window(
+            series_id, self._decode(path, response), release_day=release_day, frequency=frequency
         )
