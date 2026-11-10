@@ -241,6 +241,7 @@ def test_the_tables_have_exactly_the_specs_columns(any_engine: Engine) -> None:
         "sentiment_accuracy": {
             "audit_run_id", "source", "window", "basis", "scope", "graded",
             "correct", "neutral",
+            "sessions",  # 0017 (R3, Q23b)
         },
         "sentiment_source_status": {
             "source", "status", "changed_at", "reason", "audit_run_id",
@@ -557,6 +558,10 @@ _ACCURACY_ACCEPTED: list[dict[str, object]] = [
     {"scope": "watch"},
     {"graded": 0, "correct": 0, "neutral": 0},
     {"graded": 30, "correct": 30},  # correct may equal graded
+    # 0017 (R3): NULL is a row from before Q23b; zero and up are counts.
+    {"sessions": None},
+    {"sessions": 0},
+    {"sessions": 5},
 ]
 
 _ACCURACY_REFUSED: list[tuple[dict[str, object], str]] = [
@@ -568,6 +573,7 @@ _ACCURACY_REFUSED: list[tuple[dict[str, object], str]] = [
     ({"correct": -1}, "ck_sentiment_accuracy_correct"),
     ({"correct": 32}, "ck_sentiment_accuracy_correct"),  # more correct than graded
     ({"neutral": -1}, "ck_sentiment_accuracy_neutral"),
+    ({"sessions": -1}, "ck_sentiment_accuracy_sessions"),
 ]
 
 
@@ -598,8 +604,18 @@ def test_a_fractional_count_is_refused(any_engine: Engine) -> None:
         with pytest.raises(IntegrityError, match="ck_sentiment_accuracy_graded"):
             sess.execute(
                 text(
-                    "INSERT INTO sentiment_accuracy VALUES "
-                    "(:r, 'rules', '1h', 'trailing_28d', 'all', 30.5, 1, 0)"
+                    "INSERT INTO sentiment_accuracy "
+                    '(audit_run_id, source, "window", basis, scope, graded, correct, neutral) '
+                    "VALUES (:r, 'rules', '1h', 'trailing_28d', 'all', 30.5, 1, 0)"
+                ),
+                {"r": run_id},
+            )
+        with pytest.raises(IntegrityError, match="ck_sentiment_accuracy_sessions"):
+            sess.execute(
+                text(
+                    "INSERT INTO sentiment_accuracy "
+                    '(audit_run_id, source, "window", basis, scope, graded, correct, neutral, '
+                    "sessions) VALUES (:r, 'rules', '1h', 'trailing_28d', 'all', 30, 1, 0, 4.5)"
                 ),
                 {"r": run_id},
             )

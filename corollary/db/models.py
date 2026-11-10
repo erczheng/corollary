@@ -2237,6 +2237,16 @@ class SentimentAccuracy(Base):
       counted in neither of the others (Q5).
 
     Skipped outcomes are in none of the three.
+
+    ``sessions`` (migration 0017; R3, owner decision Q23b) is how many
+    distinct regular sessions the ``graded`` labels span --
+    ``corollary.data.news.audit.label_session``, counted over exactly the
+    labels ``graded`` counts. Decision 13's eligibility needs at least
+    ``MIN_ELIGIBLE_SESSIONS`` (5) in each window beside its 30 / 100 label
+    floor, so the figure a transition acted on is the figure stored here.
+    **NULL means the row was written before Q23b** and carries no session
+    count; no reader may treat NULL as eligible. The runner writes it on every
+    row it writes, zeros included.
     """
 
     __tablename__ = "sentiment_accuracy"
@@ -2255,6 +2265,10 @@ class SentimentAccuracy(Base):
             name="ck_sentiment_accuracy_correct",
         ),
         CheckConstraint(_non_negative_count("neutral"), name="ck_sentiment_accuracy_neutral"),
+        CheckConstraint(
+            f"sessions IS NULL OR ({_non_negative_count('sessions')})",
+            name="ck_sentiment_accuracy_sessions",
+        ),
     )
 
     audit_run_id: Mapped[int] = mapped_column(
@@ -2267,6 +2281,8 @@ class SentimentAccuracy(Base):
     graded: Mapped[int] = mapped_column(Integer, nullable=False)
     correct: Mapped[int] = mapped_column(Integer, nullable=False)
     neutral: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: NULL: written before Q23b, never eligible. See the class docstring.
+    sessions: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class SentimentSourceStatus(Base):

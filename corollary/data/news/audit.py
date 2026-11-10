@@ -287,10 +287,34 @@ stored for display):
   doing badly. Nothing transitions into ``unaudited``.
 
 *Eligible to demote*: at least :data:`DEMOTION_FLOOR` graded directional
-labels in **each** window over the trailing window. *Eligible to
+labels in **each** window over the trailing window, spanning at least
+:data:`MIN_ELIGIBLE_SESSIONS` distinct sessions in each window. *Eligible to
 re-promote*: at least :data:`REPROMOTION_FLOOR` in **each** window since the
-demotion. Every comparison is integer cross-multiplication --
+demotion, spanning at least :data:`MIN_ELIGIBLE_SESSIONS` distinct sessions in
+each window. Every comparison is an integer one -- the session count and the
+label count are compared as they are, and accuracy by cross-multiplication,
 ``correct * 100 < 52 * graded`` -- so no float decides a boundary.
+
+The session floor is R3 (owner decision Q23b,
+``docs/superpowers/specs/2026-11-09-phase-3-steps-5-7-remainder.md``):
+
+* **A label's session** is :func:`label_session`: the regular session, from
+  ``calendars.py``, that contains its reference instant. A story published
+  after the close (or before the open) is referenced at the next open, so it
+  counts toward that session. A half-day is a session, ending at its early
+  close.
+* **What is counted.** Sessions per source, window and basis, over exactly
+  the labels the label floor counts -- graded directional ones, so a neutral
+  label adds no session. ``all``'s count is the union of the splits'
+  sessions, not their sum. Stored as ``sentiment_accuracy.sessions``, so the
+  figure a transition acted on is the figure stored
+  (:attr:`AccuracyRow.sessions`).
+* **NULL is never eligible.** A row written before Q23b has no session
+  count; :func:`decide_transition` treats ``sessions is None`` as below the
+  floor, whatever ``graded`` says.
+* **Known limit, recorded rather than changed:** the rule is literal. 26
+  labels in one session plus one in each of four others passes; a cap on
+  any one session's share would be a rule the owner did not ask for.
 
 Three definitions the spec leaves to this unit, **set by the orchestrator**:
 
@@ -671,13 +695,17 @@ def reference_instant(label: AuditLabel) -> datetime:
     return published
 
 
-def reference_at(label: AuditLabel) -> datetime:
-    """The instant the reference price is taken at: in session, the reference
-    instant itself; out of session, the next session's open."""
-    instant = reference_instant(label)
+def _in_session_or_next_open(instant: datetime) -> datetime:
+    """In session, ``instant`` itself; out of session, the next session's open."""
     if nyse_session_containing(instant) is not None:
         return instant
     return nyse_next_open(instant)
+
+
+def reference_at(label: AuditLabel) -> datetime:
+    """The instant the reference price is taken at: in session, the reference
+    instant itself; out of session, the next session's open."""
+    return _in_session_or_next_open(reference_instant(label))
 
 
 def window_end(reference: datetime, window: str) -> datetime:
@@ -752,6 +780,26 @@ def _reference_session(reference: datetime) -> date:
     if day is None:
         raise AssertionError(f"reference {reference} is outside every session")
     return day
+
+
+def label_session(reference: datetime) -> date:
+    """The regular session a label counts toward for the session floor (R3).
+
+    The session from ``calendars.py`` whose ``[open, close)`` contains the
+    reference instant; one at or after a close, or before an open, counts
+    toward the next session's open -- an after-close story is the next
+    session's, and a half-day's session ends at its early close. This is
+    :func:`reference_at`'s mapping followed by :func:`_reference_session`,
+    the session grading prices the label in, so the two can never disagree.
+
+    A stored ``label_outcome.reference_at`` is already in session (it is
+    :func:`reference_at`, or at most :data:`FALLBACK_MAX_LAG` past that
+    session's open), so for every row the runner loads this is simply the
+    session containing it. The mapping is applied anyway, so any aware
+    instant -- a raw reference instant included -- gets the same answer.
+    """
+    _require_aware(reference, "reference")
+    return _reference_session(_in_session_or_next_open(reference.astimezone(timezone.utc)))
 
 
 def _outcome_session(outcome: datetime) -> date:
@@ -1309,6 +1357,12 @@ DEMOTION_FLOOR: Final = 30
 #: assumption, Q6.)*
 REPROMOTION_FLOOR: Final = 100
 
+#: R3 (Q23b): distinct sessions those labels must span, in **each** window,
+#: beside both floors above -- demotion (and first promotion) over the
+#: trailing window, re-promotion since the demotion. Sessions per
+#: :func:`label_session`, counted over exactly the labels the floor counts.
+MIN_ELIGIBLE_SESSIONS: Final = 5
+
 #: Decision 13's trailing window: 28 **calendar** days, not sessions.
 TRAILING_WINDOW: Final = timedelta(days=28)
 
@@ -1461,6 +1515,14 @@ class AccuracyRow:
 
     ``graded`` is graded **directional** labels, ``correct`` how many of them
     were right, ``neutral`` graded neutral labels (in neither of the others).
+
+    ``sessions`` is how many distinct sessions (:func:`label_session`) the
+    ``graded`` labels span -- neutral labels add none, as they add nothing to
+    ``graded`` (R3). :func:`compute_accuracy` always sets it. ``None`` is a
+    count that does not exist -- a ``sentiment_accuracy`` row written before
+    Q23b -- and :func:`decide_transition` never treats it as eligible.
+    Every graded label is in exactly one session, so a count is at most
+    ``graded`` and is zero exactly when ``graded`` is.
     """
 
     source: str
@@ -1470,6 +1532,20 @@ class AccuracyRow:
     graded: int
     correct: int
     neutral: int
+    sessions: int | None
+
+    def __post_init__(self) -> None:
+        if self.sessions is None:
+            return
+        if not 0 <= self.sessions <= self.graded:
+            raise ValueError(
+                f"sessions must be between 0 and graded ({self.graded}), got {self.sessions}"
+            )
+        if (self.sessions == 0) != (self.graded == 0):
+            raise ValueError(
+                f"sessions is zero exactly when graded is: graded {self.graded}, "
+                f"sessions {self.sessions}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1617,7 +1693,9 @@ def compute_accuracy(
     arrive in. ``trailing_28d`` counts outcomes with ``reference_at`` in
     ``(run_at - 28 days, run_at]``; ``since_demotion`` -- computed only for a
     ``demoted`` source -- those in ``(changed_at, run_at]``. Both are
-    orchestrator decisions; see the module docstring.
+    orchestrator decisions; see the module docstring. Each row's
+    ``sessions`` is the number of distinct :func:`label_session` s among the
+    directional outcomes its ``graded`` counts (R3).
 
     An outcome referenced after ``run_at`` is therefore in neither basis:
     counting it would be reading the future. It is left out here rather than
@@ -1626,39 +1704,60 @@ def compute_accuracy(
     """
     _require_aware(run_at, "run_at")
     bases = _bases_for(status)
+    keys = [(w, b, s) for w in _WINDOWS for b in bases for s in AccuracyScope]
     tally: dict[tuple[str, AccuracyBasis, AccuracyScope], list[int]] = {
-        (w, b, s): [0, 0, 0] for w in _WINDOWS for b in bases for s in AccuracyScope
+        key: [0, 0, 0] for key in keys
+    }
+    # R3: the distinct sessions the graded (directional) labels span, per
+    # row -- the same labels ``graded`` counts, so ``all`` is the union of
+    # its splits' sessions, never their sum.
+    sessions: dict[tuple[str, AccuracyBasis, AccuracyScope], set[date]] = {
+        key: set() for key in keys
     }
     for outcome in outcomes:
         if outcome.source != status.source:
             raise ValueError(
                 f"outcome for source {outcome.source!r} passed to {status.source!r}'s accuracy"
             )
-        for basis in bases:
-            if not _in_basis(basis, outcome.reference_at, status, run_at):
-                continue
-            for scope in (AccuracyScope.ALL, AccuracyScope(outcome.scope.value)):
-                counts = tally[(outcome.window, basis, scope)]
-                if outcome.neutral:
-                    counts[2] += 1
-                else:
-                    counts[0] += 1
-                    if outcome.correct:
-                        counts[1] += 1
+        in_bases = [b for b in bases if _in_basis(b, outcome.reference_at, status, run_at)]
+        if not in_bases:
+            continue
+        scopes = (AccuracyScope.ALL, AccuracyScope(outcome.scope.value))
+        if outcome.neutral:
+            for basis in in_bases:
+                for scope in scopes:
+                    tally[(outcome.window, basis, scope)][2] += 1
+            continue
+        day = label_session(outcome.reference_at)
+        for basis in in_bases:
+            for scope in scopes:
+                key = (outcome.window, basis, scope)
+                tally[key][0] += 1
+                if outcome.correct:
+                    tally[key][1] += 1
+                sessions[key].add(day)
     return tuple(
         AccuracyRow(
             source=status.source,
-            window=w,
-            basis=b,
-            scope=s,
-            graded=tally[(w, b, s)][0],
-            correct=tally[(w, b, s)][1],
-            neutral=tally[(w, b, s)][2],
+            window=key[0],
+            basis=key[1],
+            scope=key[2],
+            graded=tally[key][0],
+            correct=tally[key][1],
+            neutral=tally[key][2],
+            sessions=len(sessions[key]),
         )
-        for w in _WINDOWS
-        for b in bases
-        for s in AccuracyScope
+        for key in keys
     )
+
+
+def _eligible(row: AccuracyRow, floor: int) -> bool:
+    """At least ``floor`` graded directional labels, spanning at least
+    :data:`MIN_ELIGIBLE_SESSIONS` sessions (decision 13 and R3), in integers.
+    A ``None`` session count -- a row from before Q23b -- is never eligible."""
+    if row.sessions is None:
+        return False
+    return row.graded >= floor and row.sessions >= MIN_ELIGIBLE_SESSIONS
 
 
 def _below(row: AccuracyRow, pct: int) -> bool:
@@ -1757,8 +1856,10 @@ def decide_transition(
 
     ``accuracy`` is :func:`compute_accuracy`'s output for this source and
     run, so the figure acted on is the figure stored. Returns ``None`` when
-    the source is unchanged -- ineligible, in the 52-66% dead band, or a
-    demoted source doing badly -- so no row is written. One call decides one
+    the source is unchanged -- ineligible (under a label floor, under
+    :data:`MIN_ELIGIBLE_SESSIONS` in either window, or a ``None`` session
+    count), in the 52-66% dead band, or a demoted source doing badly -- so
+    no row is written. One call decides one
     transition from the state the run *found*; nothing re-evaluates the new
     state, so a source moves at most once per run.
     """
@@ -1766,19 +1867,20 @@ def decide_transition(
     if status.status is SourceStatus.DEMOTED:
         basis = AccuracyBasis.SINCE_DEMOTION
         acted_on = _acted_on(status, accuracy, basis)
-        if all(r.graded >= REPROMOTION_FLOOR for r in acted_on) and not any(
+        if all(_eligible(r, REPROMOTION_FLOOR) for r in acted_on) and not any(
             _below(r, REPROMOTE_AT_PCT) for r in acted_on
         ):
             rule = (
                 f"at or above {REPROMOTE_AT_PCT}% in both windows, at least "
-                f"{REPROMOTION_FLOOR} graded directional labels each since the demotion"
+                f"{REPROMOTION_FLOOR} graded directional labels over at least "
+                f"{MIN_ELIGIBLE_SESSIONS} sessions each since the demotion"
             )
             return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
         return None
 
     basis = AccuracyBasis.TRAILING_28D
     acted_on = _acted_on(status, accuracy, basis)
-    if not all(r.graded >= DEMOTION_FLOOR for r in acted_on):
+    if not all(_eligible(r, DEMOTION_FLOOR) for r in acted_on):
         return None
     failing = [r.window for r in acted_on if _below(r, DEMOTE_BELOW_PCT)]
     if failing:
@@ -1787,7 +1889,8 @@ def decide_transition(
     if status.status is SourceStatus.UNAUDITED:
         rule = (
             f"at or above {DEMOTE_BELOW_PCT}% in both windows, at least "
-            f"{DEMOTION_FLOOR} graded directional labels each over the trailing 28 days"
+            f"{DEMOTION_FLOOR} graded directional labels over at least "
+            f"{MIN_ELIGIBLE_SESSIONS} sessions each over the trailing 28 days"
         )
         return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
     return None

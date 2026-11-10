@@ -36,7 +36,7 @@ from corollary.engine.scheduler import (
     latest_sentiment_audit_slot,
 )
 from tests.api.news_support import make_seed
-from tests.data.news.test_audit_runner import FakeBars, _the_week
+from tests.data.news.test_audit_runner import FakeBars, _five_session_week, _the_week
 from tests.engine.test_scheduler import (
     FakeClock,
     _state_snapshot,
@@ -177,7 +177,8 @@ def test_the_job_has_a_catch_up(db_engine: Engine) -> None:
 def test_a_missed_saturday_runs_once_at_start_and_a_restart_does_not_run_it_again(
     db_engine: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    _the_week(db_engine)
+    # Five sessions: one (``_the_week``) is under R3's floor and moves nothing.
+    _five_session_week(db_engine)
     services = _services(db_engine, FakeBars())
     clock = SteppedClock(SUNDAY)
     caplog.set_level(logging.INFO, logger="corollary.engine.scheduler")

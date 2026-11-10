@@ -178,7 +178,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0016"]
+    assert script.get_heads() == ["0017"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:

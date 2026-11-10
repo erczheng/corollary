@@ -42,7 +42,8 @@ c. **Fetch.** One ``stock_bars`` call per session per
 d. **Grade** and write the ``label_outcome`` rows, committed on their own.
 e. **Accuracy.** Each source's graded outcomes referenced after
    :func:`~audit.earliest_reference_needed` go to :func:`~audit.audit_sources`.
-f. **Close**, in **one** transaction: the ``sentiment_accuracy`` rows, each
+f. **Close**, in **one** transaction: the ``sentiment_accuracy`` rows (each
+   with its ``sessions`` count, R3 -- the figure the transition read), each
    transition's ``audit_log`` row and ``sentiment_source_status`` update, and
    the run set ``succeeded`` with ``finished_at`` and ``detail``.
 g. **Notify**, after the commit: each transition's notice is handed to the
@@ -732,6 +733,9 @@ def _close_run(
                     graded=row.graded,
                     correct=row.correct,
                     neutral=row.neutral,
+                    # R3: the count the transition below acted on, on every
+                    # row -- NULL is reserved for rows from before Q23b.
+                    sessions=row.sessions,
                 )
                 for row in audit.accuracy
             )

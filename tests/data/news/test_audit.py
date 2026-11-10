@@ -10,6 +10,7 @@ proven against the type the runner will actually pass.
 
 import random
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -23,6 +24,7 @@ from corollary.data.news.audit import (
     DISCOVERY_TICKER_CAP,
     FALLBACK_MAX_LAG,
     MATURITY_DELAY,
+    MIN_ELIGIBLE_SESSIONS,
     PRICE_UNAVAILABLE_AFTER,
     REPROMOTE_AT_PCT,
     REPROMOTION_FLOOR,
@@ -55,6 +57,7 @@ from corollary.data.news.audit import (
     earliest_reference_needed,
     grade,
     graded_outcome,
+    label_session,
     plan_audit,
     reference_at,
     reference_instant,
@@ -1331,6 +1334,14 @@ DEMOTED_AT = RUN_AT - timedelta(days=10)
 #: span.
 RECENT = RUN_AT - timedelta(days=2)
 
+#: Five sessions at 10:00 ET, every one inside both the trailing window and
+#: the since-demotion span (``DEMOTED_AT`` is Wed 2026-09-30 10:00 ET, the run
+#: Sat 2026-10-10): Fri 2, Mon 5, Tue 6, Wed 7 and Thu 8 October. The default
+#: spread for :func:`outcomes`, so every test about something other than the
+#: session floor (R3) clears it without saying so.
+FIVE_SESSIONS: tuple[datetime, ...] = tuple(et(2026, 10, d, 10, 0) for d in (2, 5, 6, 7, 8))
+FOUR_SESSIONS: tuple[datetime, ...] = FIVE_SESSIONS[:4]
+
 
 def outcomes(
     window: str,
@@ -1338,19 +1349,25 @@ def outcomes(
     correct: int,
     *,
     scope: Scope = Scope.WATCH,
-    at: datetime = RECENT,
+    at: datetime | Sequence[datetime] = FIVE_SESSIONS,
     neutral: int = 0,
     source: str = "massive",
 ) -> list[GradedOutcome]:
     """``graded`` directional outcomes of which ``correct`` were right, plus
-    ``neutral`` neutral ones, all in one window, scope and instant."""
+    ``neutral`` neutral ones, all in one window and scope.
+
+    ``at`` is one instant for all of them, or several dealt out in turn --
+    the ``i``-th directional (and the ``i``-th neutral) outcome at
+    ``at[i % len(at)]``. The default deals across :data:`FIVE_SESSIONS`.
+    """
     assert 0 <= correct <= graded
+    instants = (at,) if isinstance(at, datetime) else tuple(at)
     made = [
         GradedOutcome(
             source=source,
             window=window,
             scope=scope,
-            reference_at=at,
+            reference_at=instants[i % len(instants)],
             correct=i < correct,
             neutral=False,
         )
@@ -1358,9 +1375,14 @@ def outcomes(
     ]
     made += [
         GradedOutcome(
-            source=source, window=window, scope=scope, reference_at=at, correct=None, neutral=True
+            source=source,
+            window=window,
+            scope=scope,
+            reference_at=instants[i % len(instants)],
+            correct=None,
+            neutral=True,
         )
-        for _ in range(neutral)
+        for i in range(neutral)
     ]
     return made
 
@@ -1371,7 +1393,7 @@ def both(
     correct_1d: int | None = None,
     *,
     scope: Scope = Scope.WATCH,
-    at: datetime = RECENT,
+    at: datetime | Sequence[datetime] = FIVE_SESSIONS,
     neutral: int = 0,
     source: str = "massive",
 ) -> list[GradedOutcome]:
@@ -1411,6 +1433,7 @@ def test_the_transition_constants_are_decision_13s() -> None:
     assert REPROMOTE_AT_PCT == 66
     assert DEMOTION_FLOOR == 30
     assert REPROMOTION_FLOOR == 100
+    assert MIN_ELIGIBLE_SESSIONS == 5  # R3 (Q23b), beside both label floors
     assert TRAILING_WINDOW == timedelta(days=28)
     assert SENTIMENT_AUDIT_CATEGORY == "sentiment"
     assert SENTIMENT_AUDIT_CATEGORY in AUDIT_CATEGORIES
@@ -2192,3 +2215,248 @@ def test_two_verdicts_for_one_session_are_refused() -> None:
             [],
             tradeable={"XYZ": [(_MONDAY, True), (_MONDAY, False)]},
         )
+
+
+# --------------------------------------------------------------------- #
+# The session floor (R3, Q23b) -- pure, one test per boundary
+# --------------------------------------------------------------------- #
+
+_T28 = AccuracyBasis.TRAILING_28D
+_SINCE = AccuracyBasis.SINCE_DEMOTION
+
+#: The Friday after Thanksgiving 2026: a real half-day, 13:00 ET close.
+HALF_DAY = date(2026, 11, 27)
+
+
+def sessions_of(
+    rows: Iterable[AccuracyRow],
+    window: str,
+    basis: AccuracyBasis = AccuracyBasis.TRAILING_28D,
+    scope: AccuracyScope = AccuracyScope.ALL,
+) -> int | None:
+    return row(rows, window, basis, scope).sessions
+
+
+def window_sessions(
+    rows: Iterable[AccuracyRow], basis: AccuracyBasis = AccuracyBasis.TRAILING_28D
+) -> list[int | None]:
+    kept = tuple(rows)
+    return [sessions_of(kept, w, basis) for w in SENTIMENT_WINDOWS]
+
+
+def test_a_labels_session_contains_its_reference_instant() -> None:
+    monday = date(2026, 10, 5)
+    # In session: its own day, from the open's instant to just before the close.
+    assert label_session(et(2026, 10, 5, 9, 30)) == monday
+    assert label_session(et(2026, 10, 5, 15, 59, 59)) == monday
+    # Pre-open: that morning's session.
+    assert label_session(et(2026, 10, 5, 8, 0)) == monday
+    # At the close and after it: the next open's session -- calendars.py's
+    # [open, close), the same half-open session grading reads.
+    assert label_session(et(2026, 10, 5, 16, 0)) == date(2026, 10, 6)
+    # Friday evening and the weekend: Monday's.
+    assert label_session(et(2026, 10, 2, 17, 0)) == monday
+    assert label_session(et(2026, 10, 3, 12, 0)) == monday
+    with pytest.raises(ValueError, match="timezone-aware"):
+        label_session(datetime(2026, 10, 5, 10, 0))
+
+
+def test_a_labels_session_is_the_one_grading_references() -> None:
+    """The raw reference instant and the stored ``reference_at`` (the next
+    open, for an after-close story) name the same session."""
+    late = label(1, "AAPL", BULL, et(2026, 10, 7, 17, 0))
+    assert reference_at(late) == et(2026, 10, 8, 9, 30)
+    assert label_session(reference_instant(late)) == date(2026, 10, 8)
+    assert label_session(reference_at(late)) == date(2026, 10, 8)
+
+
+@pytest.mark.parametrize("state", [SourceStatus.UNAUDITED, SourceStatus.ACTIVE])
+def test_thirty_labels_over_four_sessions_are_not_eligible_and_over_five_are(
+    state: SourceStatus,
+) -> None:
+    """0% correct demotes the moment the source is eligible, so the
+    transition is the eligibility test itself."""
+    four = audit_source(status(state), both(30, 0, at=FOUR_SESSIONS), RUN_AT)
+    assert window_sessions(four.accuracy) == [4, 4]
+    assert four.transition is None
+    five = audit_source(status(state), both(30, 0, at=FIVE_SESSIONS), RUN_AT)
+    assert five.transition is not None and five.transition.new is SourceStatus.DEMOTED
+    assert [(r.graded, r.sessions) for r in five.transition.acted_on] == [(30, 5), (30, 5)]
+
+
+def test_labels_do_not_stand_in_for_sessions() -> None:
+    assert transition(SourceStatus.ACTIVE, both(1000, 0, at=FOUR_SESSIONS)) is None
+
+
+def test_the_label_floor_still_applies_over_five_sessions() -> None:
+    assert transition(SourceStatus.ACTIVE, both(29, 0, at=FIVE_SESSIONS)) is None
+
+
+def test_each_window_counts_its_own_sessions() -> None:
+    """Five sessions in 1h and four in 1d is not eligible, nor the reverse."""
+    split = outcomes("1h", 30, 0, at=FIVE_SESSIONS) + outcomes("1d", 30, 0, at=FOUR_SESSIONS)
+    audit = audit_source(status(SourceStatus.ACTIVE), split, RUN_AT)
+    assert window_sessions(audit.accuracy) == [5, 4]
+    assert audit.transition is None
+    flipped = outcomes("1h", 30, 0, at=FOUR_SESSIONS) + outcomes("1d", 30, 0, at=FIVE_SESSIONS)
+    assert transition(SourceStatus.ACTIVE, flipped) is None
+
+
+def test_a_hundred_since_the_demotion_over_four_sessions_do_not_repromote() -> None:
+    four = audit_source(status(SourceStatus.DEMOTED), both(100, 100, at=FOUR_SESSIONS), RUN_AT)
+    assert window_sessions(four.accuracy, _SINCE) == [4, 4]
+    assert four.transition is None
+
+
+def test_a_hundred_since_the_demotion_over_five_sessions_repromote_at_66_percent() -> None:
+    t = transition(SourceStatus.DEMOTED, both(100, 66, at=FIVE_SESSIONS))
+    assert t is not None and t.new is SourceStatus.ACTIVE and t.basis is _SINCE
+    assert [(r.graded, r.correct, r.sessions) for r in t.acted_on] == [(100, 66, 5), (100, 66, 5)]
+    assert "100 graded directional labels over at least 5 sessions each" in t.reason
+    # Five sessions alone re-promote nothing: the accuracy still has to clear 66%.
+    assert transition(SourceStatus.DEMOTED, both(100, 65, at=FIVE_SESSIONS)) is None
+
+
+def test_sessions_are_counted_per_basis() -> None:
+    """A fifth session before the demotion is in the trailing figure and
+    never in the since-demotion one, which alone decides a re-promotion."""
+    before = et(2026, 9, 29, 10, 0)  # Tuesday: before DEMOTED_AT, inside 28 days
+    made = both(100, 100, at=FOUR_SESSIONS) + both(1, 1, at=before)
+    audit = audit_source(status(SourceStatus.DEMOTED), made, RUN_AT)
+    assert window_sessions(audit.accuracy, _T28) == [5, 5]
+    assert window_sessions(audit.accuracy, _SINCE) == [4, 4]
+    assert audit.transition is None
+
+
+def test_unaudited_to_active_needs_five_sessions() -> None:
+    assert transition(SourceStatus.UNAUDITED, both(30, 30, at=FOUR_SESSIONS)) is None
+    t = transition(SourceStatus.UNAUDITED, both(30, 30, at=FIVE_SESSIONS))
+    assert t is not None
+    assert (t.previous, t.new, t.notice) == (SourceStatus.UNAUDITED, SourceStatus.ACTIVE, None)
+    assert [r.sessions for r in t.acted_on] == [5, 5]
+    assert "30 graded directional labels over at least 5 sessions each" in t.reason
+
+
+def test_an_after_close_story_counts_toward_the_next_session() -> None:
+    """Four sessions, Fri 2 to Wed 7 October, then a story published at 17:00
+    ET on Wednesday -- after the close, and still Wednesday in UTC (21:00).
+    It is referenced at Thursday's open, so it is Thursday's: the fifth
+    session. Counted on its publication date it would be Wednesday's, a
+    fourth, and nothing would move."""
+    after_close = et(2026, 10, 7, 17, 0)
+    assert after_close.date() == date(2026, 10, 7)  # UTC: a UTC-date count is wrong too
+    made = both(29, 0, at=FOUR_SESSIONS) + both(1, 0, at=after_close)
+    audit = audit_source(status(SourceStatus.ACTIVE), made, RUN_AT)
+    assert window_sessions(audit.accuracy) == [5, 5]
+    assert audit.transition is not None and audit.transition.new is SourceStatus.DEMOTED
+    # The instant grading stores for that story -- Thursday's open -- counts the same.
+    stored = both(29, 0, at=FOUR_SESSIONS) + both(
+        1, 0, at=reference_at(label(1, "AAPL", BEAR, after_close))
+    )
+    assert window_sessions(compute_accuracy(status(SourceStatus.ACTIVE), stored, RUN_AT)) == [5, 5]
+
+
+def test_a_half_day_counts_as_one_session() -> None:
+    close = nyse_session_close(HALF_DAY)
+    assert close == et(2026, 11, 27, 13, 0)  # from the calendar, not assumed
+    run_at = et(2026, 11, 28, 10, 0)  # Saturday
+    active = CurrentStatus(
+        source="massive", status=SourceStatus.ACTIVE, changed_at=run_at - timedelta(days=60)
+    )
+    # Fri 20, Mon 23, Tue 24, Wed 25 -- Thanksgiving, Thu 26, is closed.
+    regular = tuple(et(2026, 11, d, 10, 0) for d in (20, 23, 24, 25))
+    assert audit_source(active, both(30, 0, at=regular), run_at).transition is None
+    # The half-day's morning is the fifth session, at either end of it.
+    morning = (et(2026, 11, 27, 9, 30), et(2026, 11, 27, 12, 59))
+    audit = audit_source(active, both(30, 0, at=regular + morning), run_at)
+    assert window_sessions(audit.accuracy) == [5, 5]
+    assert audit.transition is not None and audit.transition.new is SourceStatus.DEMOTED
+    # After its early close a story is the next session's, not the half-day's.
+    assert label_session(et(2026, 11, 27, 12, 59, 59)) == HALF_DAY
+    assert label_session(et(2026, 11, 27, 13, 0)) == date(2026, 11, 30)
+
+
+def test_a_null_sessions_row_is_never_eligible() -> None:
+    """A row written before Q23b carries no session count. With every count
+    the same and ``sessions`` NULL -- in both windows or either -- no
+    transition happens that otherwise would."""
+    cases = [
+        (SourceStatus.UNAUDITED, both(30, 30), SourceStatus.ACTIVE),
+        (SourceStatus.UNAUDITED, both(30, 0), SourceStatus.DEMOTED),
+        (SourceStatus.ACTIVE, both(30, 0), SourceStatus.DEMOTED),
+        (SourceStatus.DEMOTED, both(100, 100), SourceStatus.ACTIVE),
+    ]
+    for state, made, moved_to in cases:
+        rows = compute_accuracy(status(state), made, RUN_AT)
+        control = decide_transition(status(state), rows, RUN_AT)
+        assert control is not None and control.new is moved_to, state
+        unknown = tuple(replace(r, sessions=None) for r in rows)
+        assert decide_transition(status(state), unknown, RUN_AT) is None, state
+        for window in SENTIMENT_WINDOWS:
+            one = tuple(replace(r, sessions=None) if r.window == window else r for r in rows)
+            assert decide_transition(status(state), one, RUN_AT) is None, (state, window)
+
+
+def test_neutral_labels_add_no_session() -> None:
+    """Sessions are counted over the labels the floor counts: directional only."""
+    fifth = FIVE_SESSIONS[4]
+    made = both(30, 0, at=FOUR_SESSIONS) + both(0, 0, at=fifth, neutral=10)
+    audit = audit_source(status(SourceStatus.ACTIVE), made, RUN_AT)
+    assert window_sessions(audit.accuracy) == [4, 4]
+    assert audit.transition is None
+
+
+def test_the_combined_scope_counts_distinct_sessions_not_the_splits_sum() -> None:
+    made: list[GradedOutcome] = []
+    for window in SENTIMENT_WINDOWS:
+        made += outcomes(window, 15, 0, scope=Scope.WATCH, at=FIVE_SESSIONS[:3])
+        made += outcomes(window, 15, 0, scope=Scope.DISCOVERY, at=FIVE_SESSIONS[2:])
+    rows = compute_accuracy(status(SourceStatus.ACTIVE), made, RUN_AT)
+    for window in SENTIMENT_WINDOWS:
+        assert sessions_of(rows, window, _T28, AccuracyScope.WATCH) == 3
+        assert sessions_of(rows, window, _T28, AccuracyScope.DISCOVERY) == 3
+        assert sessions_of(rows, window, _T28, AccuracyScope.ALL) == 5  # Tue 6th is in both
+
+
+def test_an_empty_row_has_zero_sessions() -> None:
+    rows = compute_accuracy(status(SourceStatus.DEMOTED), [], RUN_AT)
+    assert all(r.sessions == 0 for r in rows)
+
+
+def test_the_floor_is_literal() -> None:
+    """R3's known limit, recorded rather than changed: 26 labels in one
+    session plus one in each of four others passes."""
+    made = both(26, 0, at=FIVE_SESSIONS[0]) + both(4, 0, at=FIVE_SESSIONS[1:])
+    t = transition(SourceStatus.ACTIVE, made)
+    assert t is not None and t.new is SourceStatus.DEMOTED
+    assert [(r.graded, r.sessions) for r in t.acted_on] == [(30, 5), (30, 5)]
+
+
+def test_session_counts_do_not_depend_on_outcome_order() -> None:
+    made = both(40, 17, at=FIVE_SESSIONS) + both(3, 1, at=et(2026, 10, 7, 17, 0))
+    shuffled = list(made)
+    random.Random(7).shuffle(shuffled)
+    for state in SourceStatus:
+        assert compute_accuracy(status(state), made, RUN_AT) == compute_accuracy(
+            status(state), shuffled, RUN_AT
+        )
+
+
+def test_an_accuracy_rows_session_count_is_coherent() -> None:
+    def make(graded: int, sessions: int | None) -> AccuracyRow:
+        return AccuracyRow(
+            source="massive",
+            window="1h",
+            basis=_T28,
+            scope=AccuracyScope.ALL,
+            graded=graded,
+            correct=0,
+            neutral=0,
+            sessions=sessions,
+        )
+
+    for graded, sessions in [(3, 3), (3, 1), (0, 0), (3, None), (0, None)]:
+        assert make(graded, sessions).sessions == sessions
+    for graded, sessions in [(3, -1), (3, 4), (3, 0), (0, 1)]:
+        with pytest.raises(ValueError, match="sessions"):
+            make(graded, sessions)

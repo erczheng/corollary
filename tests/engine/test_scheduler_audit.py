@@ -37,7 +37,13 @@ from corollary.engine.scheduler import (
 )
 from corollary.ratelimit import ALPACA_DATA_HOST
 from tests.api.news_support import make_seed
-from tests.data.news.test_audit_runner import SATURDAY_10, FakeBars, TickingClock, _the_week
+from tests.data.news.test_audit_runner import (
+    SATURDAY_10,
+    FakeBars,
+    TickingClock,
+    _five_session_week,
+    _the_week,
+)
 
 UTC = timezone.utc
 
@@ -105,7 +111,8 @@ def test_without_a_market_data_provider_the_audit_skips(db_engine: Engine) -> No
 
 
 def test_the_job_runs_scheduled_and_queues_its_notice_on_the_outbox(db_engine: Engine) -> None:
-    _the_week(db_engine)
+    # Five sessions: one (``_the_week``) is under R3's floor and moves nothing.
+    _five_session_week(db_engine)
     services = _services(db_engine, FakeBars())
     clock = TickingClock(SATURDAY_10)
     assert asyncio.run(_audit_job(services, clock).run()) is None
