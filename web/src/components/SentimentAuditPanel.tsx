@@ -19,16 +19,19 @@ import {
   SENTIMENT_WINDOW_LABEL,
   accuracyTenths,
   actingCell,
+  auditEmptyState,
   auditTriggerRefusal,
   cellCounts,
   demotedSources,
+  figuresFromFact,
   isInsufficientSample,
   isShortOfSessions,
-  nothingAuditedYet,
+  lastRunFact,
   repromotionProgress,
   sessionsFact,
   shortCellLead,
   sourceStatusKind,
+  startedRunPending,
   statedSessionFloor,
   windowProgress,
   type AuditTriggerRefusal,
@@ -74,7 +77,10 @@ const RUN_STATUS_LABEL: Record<AuditRunSummary['status'], string> = {
   failed: 'failed',
 }
 
-function StatusCell({ source }: { source: SentimentSourceAudit }) {
+/** `anyVoided`: whether the readout lists a voided run. A source restored to
+ * unaudited by a void has no figures from any run that stands, and "Never
+ * audited." beside "Run 1 voided on …" would deny the run that graded it. */
+function StatusCell({ source, anyVoided }: { source: SentimentSourceAudit; anyVoided: boolean }) {
   const kind = sourceStatusKind(source)
   const pill = STATUS_PILL[kind]
   const progress = repromotionProgress(source)
@@ -96,7 +102,9 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
                 // what says whether its figures came from a run at all.
                 source.neverAudited && source.eligibility.asOfRunId !== null
                 ? 'Graded, but not yet on enough labels over enough sessions to be given a status.'
-                : 'Never audited.'
+                : anyVoided
+                  ? 'Not graded by any run that stands.'
+                  : 'Never audited.'
               : `Unaudited since ${formatDateTimeET(source.changedAt)}.`
             : source.changedAt === null
               ? `${pill.label}; the change has no recorded time.`
@@ -322,6 +330,12 @@ function RefusalLine({ refusal }: { refusal: AuditTriggerRefusal }) {
   }
 }
 
+/** A run id in the data face, matching the voided-run lines it is read
+ * against. */
+function RunId({ id }: { id: number }) {
+  return <span className="text-data-sm text-on-surface">{id}</span>
+}
+
 function runLine(run: AuditRunSummary): string {
   const finished = run.finishedAt ? `, finished ${formatDateTimeET(run.finishedAt)}` : ''
   return `${formatDateTimeET(run.startedAt)} (${TRIGGER_LABEL[run.trigger]}, ${RUN_STATUS_LABEL[run.status]}${finished})`
@@ -373,6 +387,11 @@ export function SentimentAuditPanel() {
     )
   const demoted = demotedSources(status.sources)
   const missing = status.sources.filter((s) => s.statusMissing)
+  // Each run sentence is decided against `voidedRuns` too (R9), so none of
+  // them can contradict the voided-run list printed beneath them.
+  const empty = auditEmptyState(status)
+  const last = lastRunFact(status)
+  const figures = figuresFromFact(status)
   const refusal = start.isError
     ? auditTriggerRefusal(start.error, {
         requestedAt: start.submittedAt || null,
@@ -436,11 +455,13 @@ export function SentimentAuditPanel() {
         </p>
       ) : null}
 
-      {nothingAuditedYet(status) ? (
+      {empty ? (
         <p className="mb-4 max-w-prose text-caption text-on-surface-variant">
-          No audit has completed yet, so nothing below is a measurement.{' '}
+          {empty.lead === 'none_standing'
+            ? 'There is no standing audit: no run that stands has succeeded, and the voided runs are listed under the table. Nothing below is a measurement.'
+            : 'No audit has completed yet, so nothing below is a measurement.'}{' '}
           {status.nextRunAt
-            ? `The first scheduled run is ${formatDateTimeET(status.nextRunAt)}.`
+            ? `The ${empty.next} scheduled run is ${formatDateTimeET(status.nextRunAt)}.`
             : 'No scheduler is running, so no run is due.'}
         </p>
       ) : null}
@@ -468,7 +489,7 @@ export function SentimentAuditPanel() {
                 {NEWS_SOURCE_LABEL[source.source]}
               </th>
               <td className={TD}>
-                <StatusCell source={source} />
+                <StatusCell source={source} anyVoided={status.voidedRuns.length > 0} />
               </td>
               {SENTIMENT_WINDOWS.map((w) => {
                 const key = `${source.source}:${w}`
@@ -490,13 +511,33 @@ export function SentimentAuditPanel() {
       <dl className="mt-4 grid max-w-prose grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-caption">
         <dt className="text-on-surface-variant">Last run</dt>
         <dd className="text-on-surface">
-          {status.lastRun ? runLine(status.lastRun) : 'No run has ever started.'}
+          {last.kind === 'never' ? (
+            'No run has ever started.'
+          ) : last.kind === 'all_voided' ? (
+            'None standing; every run so far was voided (listed below).'
+          ) : last.laterVoided ? (
+            <>
+              Run <RunId id={last.run.id} />, {runLine(last.run)}, the newest run that stands;
+              every run after it was voided (listed below).
+            </>
+          ) : (
+            runLine(last.run)
+          )}
         </dd>
-        {status.accuracyRun && status.accuracyRun.id !== status.lastRun?.id ? (
+        {figures ? (
           <>
             <dt className="text-on-surface-variant">Figures from</dt>
             <dd className="text-on-surface">
-              the last run that succeeded, {runLine(status.accuracyRun)}
+              {figures.kind === 'none_standing' ? (
+                'none — no run that stands has succeeded'
+              ) : figures.kind === 'newest_standing' ? (
+                <>
+                  run <RunId id={figures.run.id} />, the newest standing run that succeeded
+                  {figures.sameAsLast ? '' : `, ${runLine(figures.run)}`}
+                </>
+              ) : (
+                <>the last run that succeeded, {runLine(figures.run)}</>
+              )}
             </dd>
           </>
         ) : null}
@@ -539,11 +580,10 @@ export function SentimentAuditPanel() {
         >
           {start.isPending ? 'Starting…' : 'Run audit now'}
         </button>
-        {/* Only while the run it names is open. Once the readout shows that
-            run closed, `Last run` states its outcome and "it takes a few
-            minutes" is no longer true. */}
-        {start.isSuccess &&
-        !(status.lastRun?.id === start.data.runId && status.lastRun.status !== 'running') ? (
+        {/* Only while the run it names may be open (`startedRunPending`).
+            Once the readout shows that run closed, or lists it voided,
+            "it takes a few minutes" is no longer true. */}
+        {start.isSuccess && startedRunPending(status, start.data.runId) ? (
           <p role="status" className="mt-2 max-w-prose text-caption text-on-surface-variant">
             Audit run {start.data.runId} started at {formatDateTimeET(start.data.requestedAt)}. It
             takes a few minutes; its outcome appears here when it finishes.

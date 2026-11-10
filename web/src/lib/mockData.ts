@@ -2202,6 +2202,49 @@ const RESTORED_MASSIVE: SentimentSourceAudit = {
  * 10:00 EST is 15:00Z. */
 const NEXT_AUDIT_AFTER_VOID_AT = '2026-11-14T15:00:00Z'
 
+/** The owner's own state the week voiding shipped, at its own ids: run 1,
+ * Saturday Oct 17 (10:00 EDT, 14:00Z), graded under the reference rule then
+ * in force and stands; run 2, a week later, graded under the rule the owner
+ * replaced on Oct 22 and is voided. Every figure is run 1's. */
+const FIRST_RUN: AuditRunSummary = {
+  id: 1,
+  trigger: 'scheduled',
+  status: 'succeeded',
+  startedAt: '2026-10-17T14:00:00Z',
+  finishedAt: '2026-10-17T14:06:52Z',
+}
+
+const VOIDED_RUN_2: VoidedAuditRun = {
+  id: 2,
+  voidedAt: '2026-11-10T15:12:30Z',
+  reason: R5_VOID_REASON,
+}
+
+/** The same source as of run 1, the first run there was: its status change is
+ * run 1's, and so are its figures. */
+function asOfFirstRun(source: SentimentSourceAudit, changedAt: string | null): SentimentSourceAudit {
+  return {
+    ...source,
+    changedAt,
+    eligibility: { ...source.eligibility, asOfRunId: FIRST_RUN.id },
+  }
+}
+
+/** Run 1 made the rules source active; Massive it graded but left short of
+ * the label floor, so it is still unaudited with no change ever written. */
+const FIRST_RUN_RULES = asOfFirstRun(ACTIVE_RULES, '2026-10-17T14:06:10Z')
+const FIRST_RUN_MASSIVE = asOfFirstRun({ ...SHORT_SAMPLE_RULES, source: 'massive' }, null)
+
+/** Run 1, the only run, voided: R4 lets the latest standing run be voided
+ * even when it is the only one. The void restored every status it moved
+ * back to unaudited, with `changedAt` null (R4), and archived its labels, so
+ * no figure stands and nothing counts toward a floor. */
+const ONLY_RUN_VOIDED: VoidedAuditRun = {
+  id: 1,
+  voidedAt: '2026-11-10T15:12:30Z',
+  reason: R5_VOID_REASON,
+}
+
 /** No status row at all — a damaged database. The server shows it as
  * unaudited for display and says so; it is **not** "never audited". */
 const MISSING_STATUS_MASSIVE: SentimentSourceAudit = {
@@ -2221,6 +2264,8 @@ export type SentimentAuditFixture =
   | 'running'
   | 'voided'
   | 'voidedTwice'
+  | 'secondRunVoided'
+  | 'everyRunVoided'
 
 export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAuditStatus> = {
   /** Nothing has ever run: every count is zero and nothing is a result. */
@@ -2318,6 +2363,27 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
     voidedRuns: [VOIDED_RUN_8, VOIDED_RUN_9],
+    nextRunAt: NEXT_AUDIT_AFTER_VOID_AT,
+    manualAvailableAt: null,
+  },
+  /** This week's shape: run 2 voided, run 1 standing as both `lastRun` and
+   * `accuracyRun`. "Last run" must not read as the newest run that ran, nor
+   * "Figures from" as the last run that succeeded — run 2 may have. */
+  secondRunVoided: {
+    sources: [FIRST_RUN_RULES, FIRST_RUN_MASSIVE],
+    lastRun: FIRST_RUN,
+    accuracyRun: FIRST_RUN,
+    voidedRuns: [VOIDED_RUN_2],
+    nextRunAt: NEXT_AUDIT_AFTER_VOID_AT,
+    manualAvailableAt: null,
+  },
+  /** The only run voided: both runs `null` beside a non-empty list. Nothing
+   * may say no run ever started, or that the next one is the first. */
+  everyRunVoided: {
+    sources: [NEVER_AUDITED_RULES, NEVER_AUDITED_MASSIVE],
+    lastRun: null,
+    accuracyRun: null,
+    voidedRuns: [ONLY_RUN_VOIDED],
     nextRunAt: NEXT_AUDIT_AFTER_VOID_AT,
     manualAvailableAt: null,
   },

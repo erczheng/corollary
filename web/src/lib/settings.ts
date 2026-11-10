@@ -6,6 +6,7 @@ import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
   type AuditLogEntry,
+  type AuditRunSummary,
   type DataFeed,
   type DataPlan,
   type FeedKey,
@@ -461,11 +462,107 @@ export function repromotionProgress(source: SentimentSourceAudit): string[] {
   )
 }
 
-/** Whether every source is waiting on its first run — the readout's empty
- * state, which says when the first one is due rather than drawing a table of
- * zeros as though they were results. */
-export function nothingAuditedYet(status: SentimentAuditStatus): boolean {
-  return status.accuracyRun === null
+/* ------------------------------------------------------------------------ *
+ * The run sentences under the audit table, made true against the voids (R9).
+ *
+ * `lastRun` and `accuracyRun` are the newest **non-voided** runs, so on their
+ * own they cannot say whether a newer run happened and was voided — and the
+ * voided-run list printed right beneath them says exactly that. Every
+ * sentence here is decided against `voidedRuns` too, so none of them can
+ * contradict that list. The owner's state the week this was written is run 2
+ * voided with run 1 standing; voiding the only run, which R4 allows, serves
+ * both runs `null` beside a non-empty list.
+ *
+ * "Newer" compares run **ids**. A voided run carries no `startedAt`, and ids
+ * are the run table's autoincrement key, so they rise with start order. Any
+ * run newer than `lastRun` is a voided one: `lastRun` is the newest that
+ * stands.
+ * ------------------------------------------------------------------------ */
+
+function voidedAfter(status: SentimentAuditStatus, run: AuditRunSummary): boolean {
+  return status.voidedRuns.some((v) => v.id > run.id)
+}
+
+/** The readout's empty state, or null when a standing run has figures.
+ *
+ * - `lead: 'never_succeeded'` — nothing was voided and no run has succeeded:
+ *   "No audit has completed yet".
+ * - `lead: 'none_standing'` — runs were voided and none that stands has
+ *   succeeded. "No audit has completed" would be false when the voided runs
+ *   had completed; this says only what is true either way.
+ * - `next: 'first'` only when no run has ever started. A scheduled slot after
+ *   any run, voided or not, is the next one, not the first. */
+export interface AuditEmptyState {
+  lead: 'never_succeeded' | 'none_standing'
+  next: 'first' | 'next'
+}
+
+export function auditEmptyState(status: SentimentAuditStatus): AuditEmptyState | null {
+  if (status.accuracyRun !== null) return null
+  const voided = status.voidedRuns.length > 0
+  return {
+    lead: voided ? 'none_standing' : 'never_succeeded',
+    next: status.lastRun === null && !voided ? 'first' : 'next',
+  }
+}
+
+/** What `Last run` may say.
+ *
+ * - `never` — no run at all: "No run has ever started."
+ * - `all_voided` — runs exist and every one was voided.
+ * - `run` — the newest standing run. `laterVoided` says every run after it
+ *   was voided, so the line names it as the newest that **stands** rather
+ *   than the newest that ran. */
+export type LastRunFact =
+  | { kind: 'never' }
+  | { kind: 'all_voided' }
+  | { kind: 'run'; run: AuditRunSummary; laterVoided: boolean }
+
+export function lastRunFact(status: SentimentAuditStatus): LastRunFact {
+  const run = status.lastRun
+  if (run === null) return status.voidedRuns.length > 0 ? { kind: 'all_voided' } : { kind: 'never' }
+  return { kind: 'run', run, laterVoided: voidedAfter(status, run) }
+}
+
+/** What `Figures from` may say, or null when the line is not needed.
+ *
+ * - null — the figures are plainly `Last run`'s, or no run has figures and
+ *   nothing was voided (the empty state already says so).
+ * - `last_succeeded` — an older run than `Last run`, with nothing voided
+ *   after it: every newer run stands and did not succeed, so it really is
+ *   "the last run that succeeded".
+ * - `newest_standing` — a run newer than it was voided, so "the last run that
+ *   succeeded" could be false: that voided run may have succeeded. Shown even
+ *   when it is `Last run` too, which is run 1 beside a voided run 2.
+ *   `sameAsLast` lets the line skip repeating the run it names.
+ * - `none_standing` — runs were voided and no standing run succeeded. */
+export type FiguresFromFact =
+  | { kind: 'last_succeeded'; run: AuditRunSummary }
+  | { kind: 'newest_standing'; run: AuditRunSummary; sameAsLast: boolean }
+  | { kind: 'none_standing' }
+
+export function figuresFromFact(status: SentimentAuditStatus): FiguresFromFact | null {
+  const run = status.accuracyRun
+  if (run === null) return status.voidedRuns.length > 0 ? { kind: 'none_standing' } : null
+  if (voidedAfter(status, run)) {
+    return { kind: 'newest_standing', run, sameAsLast: run.id === status.lastRun?.id }
+  }
+  return run.id === status.lastRun?.id ? null : { kind: 'last_succeeded', run }
+}
+
+/** Whether the run a manual trigger started (`runId`, from the 202) may
+ * still be open — the only time "its outcome appears here when it finishes"
+ * is true. It is not once the readout shows that run closed, once it is
+ * listed as voided (a voided run is never `lastRun` again, so the first test
+ * alone would bring a stale line back on the next refetch), or once a newer
+ * run stands, since only one run is ever open and `Last run` would then
+ * never show this one's outcome. */
+export function startedRunPending(status: SentimentAuditStatus, runId: number): boolean {
+  if (status.voidedRuns.some((v) => v.id === runId)) return false
+  const last = status.lastRun
+  if (last === null) return true
+  if (last.id > runId) return false
+  return !(last.id === runId && last.status !== 'running')
 }
 
 /** A refused `POST /api/settings/sentiment/audit`, sorted into what the page

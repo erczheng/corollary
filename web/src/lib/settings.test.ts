@@ -3,7 +3,9 @@ import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_AUDIT_STATES } from './mo
 import {
   NOTIFICATION_EVENT_LABEL,
   type NotificationEvent,
+  type AuditRunSummary,
   type RiskLimit,
+  type SentimentAuditStatus,
   type SentimentSourceAudit,
 } from './types'
 import {
@@ -22,18 +24,20 @@ import {
   SESSIONS_NOT_COUNTED,
   accuracyTenths,
   actingCell,
+  auditEmptyState,
   auditEntry,
   auditFieldLabel,
   auditTriggerRefusal,
   cellCounts,
   demotedSources,
   feedOptionsFor,
+  figuresFromFact,
   feedWarning,
   isCriticalEvent,
   isInsufficientSample,
   isRaise,
   isShortOfSessions,
-  nothingAuditedYet,
+  lastRunFact,
   notificationAuditField,
   repromotionProgress,
   riskDollars,
@@ -41,6 +45,7 @@ import {
   sessionsFact,
   shortCellLead,
   sourceStatusKind,
+  startedRunPending,
   statedSessionFloor,
   validateRiskLimit,
   windowProgress,
@@ -721,10 +726,161 @@ describe('the voided-run fixtures', () => {
   })
 })
 
-describe('nothingAuditedYet', () => {
-  it('is true only with no succeeded run', () => {
-    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.unaudited)).toBe(true)
-    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.populated)).toBe(false)
+/** R9: every run sentence is decided against `voidedRuns` as well as
+ * `lastRun`/`accuracyRun`, so none contradicts the voided-run list. Runs are
+ * built here rather than taken from fixtures so every combination is
+ * reachable, including ones no fixture draws. */
+describe('the run sentences against the voids', () => {
+  const run = (id: number, status: AuditRunSummary['status'] = 'succeeded'): AuditRunSummary => ({
+    id,
+    trigger: 'scheduled',
+    status,
+    startedAt: '2026-10-17T14:00:00Z',
+    finishedAt: status === 'running' ? null : '2026-10-17T14:06:00Z',
+  })
+  const voids = (...ids: number[]) =>
+    ids.map((id) => ({ id, voidedAt: '2026-11-10T15:00:00Z', reason: 'test' }))
+  const state = (
+    lastRun: AuditRunSummary | null,
+    accuracyRun: AuditRunSummary | null,
+    voidedRuns: ReturnType<typeof voids> = [],
+  ): SentimentAuditStatus => ({
+    ...SENTIMENT_AUDIT_STATES.populated,
+    lastRun,
+    accuracyRun,
+    voidedRuns,
+  })
+
+  describe('auditEmptyState', () => {
+    it('is null whenever a standing run has figures', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.populated)).toBeNull()
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.secondRunVoided)).toBeNull()
+      expect(auditEmptyState(state(run(9, 'failed'), run(7), voids(8)))).toBeNull()
+    })
+
+    it('calls the next run the first only when no run has ever started', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.unaudited)).toEqual({
+        lead: 'never_succeeded',
+        next: 'first',
+      })
+      // A failed or open run, nothing voided: no audit completed, but the
+      // scheduled slot is no longer the first.
+      for (const status of ['failed', 'running'] as const) {
+        expect(auditEmptyState(state(run(1, status), null))).toEqual({
+          lead: 'never_succeeded',
+          next: 'next',
+        })
+      }
+    })
+
+    /** Voiding the only run (R4) must not read as "no audit has completed". */
+    it('says no standing run has succeeded once runs were voided', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({
+        lead: 'none_standing',
+        next: 'next',
+      })
+      expect(auditEmptyState(state(run(2, 'failed'), null, voids(1)))).toEqual({
+        lead: 'none_standing',
+        next: 'next',
+      })
+    })
+  })
+
+  describe('lastRunFact', () => {
+    it('says no run ever started only when there are truly none', () => {
+      expect(lastRunFact(SENTIMENT_AUDIT_STATES.unaudited)).toEqual({ kind: 'never' })
+      expect(lastRunFact(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({ kind: 'all_voided' })
+    })
+
+    it('marks the newest standing run when a later one was voided', () => {
+      const { secondRunVoided, voided, voidedTwice, populated } = SENTIMENT_AUDIT_STATES
+      expect(lastRunFact(secondRunVoided)).toEqual({
+        kind: 'run',
+        run: secondRunVoided.lastRun,
+        laterVoided: true,
+      })
+      expect(lastRunFact(voided)).toMatchObject({ kind: 'run', laterVoided: true })
+      expect(lastRunFact(voidedTwice)).toMatchObject({ kind: 'run', laterVoided: true })
+      expect(lastRunFact(populated)).toMatchObject({ kind: 'run', laterVoided: false })
+    })
+
+    /** A void older than the run that stands is history, not a later run. */
+    it('leaves a run alone when every void is older than it', () => {
+      expect(lastRunFact(state(run(10), run(10), voids(9)))).toEqual({
+        kind: 'run',
+        run: run(10),
+        laterVoided: false,
+      })
+    })
+  })
+
+  describe('figuresFromFact', () => {
+    it('is not needed when the figures are plainly the last run’s', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.populated)).toBeNull()
+      expect(figuresFromFact(state(run(10), run(10), voids(9)))).toBeNull()
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.unaudited)).toBeNull()
+    })
+
+    it('calls an older run the last that succeeded only with nothing voided after it', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.running)).toEqual({
+        kind: 'last_succeeded',
+        run: SENTIMENT_AUDIT_STATES.running.accuracyRun,
+      })
+      expect(figuresFromFact(state(run(9, 'failed'), run(7)))).toEqual({
+        kind: 'last_succeeded',
+        run: run(7),
+      })
+    })
+
+    /** Run 2 voided beside run 1: run 2 may have succeeded, so run 1 is the
+     * newest **standing** run that did — named even though it is also the
+     * last run. */
+    it('names the newest standing run when a newer one was voided', () => {
+      const { secondRunVoided } = SENTIMENT_AUDIT_STATES
+      expect(figuresFromFact(secondRunVoided)).toEqual({
+        kind: 'newest_standing',
+        run: secondRunVoided.accuracyRun,
+        sameAsLast: true,
+      })
+      expect(figuresFromFact(state(run(9, 'failed'), run(7), voids(8)))).toEqual({
+        kind: 'newest_standing',
+        run: run(7),
+        sameAsLast: false,
+      })
+    })
+
+    it('says no standing run has figures once runs were voided', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({
+        kind: 'none_standing',
+      })
+      expect(figuresFromFact(state(run(2, 'failed'), null, voids(1)))).toEqual({
+        kind: 'none_standing',
+      })
+    })
+  })
+
+  describe('startedRunPending', () => {
+    it('holds while the readout has not caught up, or shows the run open', () => {
+      expect(startedRunPending(state(run(9), run(9)), 10)).toBe(true)
+      expect(startedRunPending(state(null, null), 1)).toBe(true)
+      expect(startedRunPending(state(run(10, 'running'), run(9)), 10)).toBe(true)
+    })
+
+    it('ends once the readout shows that run closed', () => {
+      expect(startedRunPending(state(run(10), run(10)), 10)).toBe(false)
+      expect(startedRunPending(state(run(10, 'failed'), run(9)), 10)).toBe(false)
+    })
+
+    /** A voided run is never `lastRun` again, so without this the stale line
+     * came back on the next refetch beside "Run 10 voided on …". */
+    it('ends once that run is listed as voided', () => {
+      expect(startedRunPending(state(run(9), run(9), voids(10)), 10)).toBe(false)
+      expect(startedRunPending(state(null, null, voids(10)), 10)).toBe(false)
+    })
+
+    it('ends once a newer run stands, which would never show this one’s outcome', () => {
+      expect(startedRunPending(state(run(11, 'running'), run(9)), 10)).toBe(false)
+    })
   })
 })
 

@@ -1363,6 +1363,8 @@ describe('sentiment accuracy', () => {
     'repromoted',
     'voided',
     'voidedTwice',
+    'secondRunVoided',
+    'everyRunVoided',
   ] as const)(
     'offers no void, demote or re-promote control (%s)',
     async (state) => {
@@ -1463,15 +1465,119 @@ describe('sentiment accuracy', () => {
     expect(voidedList().textContent).not.toContain('..')
   })
 
-  /** `lastRun` is the newest non-voided run (R9): run 7, never run 8. */
+  /** `lastRun` is the newest non-voided run (R9): run 7, never run 8 — and
+   * named as the newest that **stands**, since run 8 ran after it. */
   it('reports the last run that stands, not the voided one', async () => {
     stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
     render(<App />)
     await sentimentTable()
     const text = section('Sentiment accuracy').textContent ?? ''
 
-    expect(text).toMatch(/Last run\s*Oct 10,? 10:00\sAM \(scheduled, succeeded/)
-    expect(text).not.toContain('Figures from')
+    expect(text).toMatch(
+      /Last run\s*Run 7, Oct 10,? 10:00\sAM \(scheduled, succeeded, finished [^)]*\), the newest run that stands; every run after it was voided \(listed below\)\./,
+    )
+    expect(text).toContain('Figures fromrun 7, the newest standing run that succeeded')
+    expect(text).not.toContain('the last run that succeeded')
+  })
+
+  /* -------------------------------------------------------------------- *
+   * No run sentence may contradict the voided-run list (R9).
+   * -------------------------------------------------------------------- */
+
+  function runFacts(): HTMLElement {
+    // The dl under the table: Last run, Figures from, Next run.
+    return within(section('Sentiment accuracy')).getByText('Last run').closest('dl') as HTMLElement
+  }
+
+  /** The owner's state this week: run 2 voided, run 1 standing with every
+   * figure. Neither "Last run" nor "Figures from" may read as run 2's. */
+  it('names run 1 as the newest standing run, beside run 2 voided', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.secondRunVoided) })
+    render(<App />)
+    await sentimentTable()
+    const panel = section('Sentiment accuracy')
+    const facts = runFacts()
+
+    // Run 1 started Oct 17 14:00Z = 10:00 AM EDT.
+    expect(facts.textContent).toMatch(
+      /Last runRun 1, Oct 17,? 10:00\sAM \(scheduled, succeeded, finished [^)]*\), the newest run that stands; every run after it was voided \(listed below\)\./,
+    )
+    // Named, and not repeated: it is the run on the line above.
+    expect(facts.textContent).toMatch(
+      /Figures fromrun 1, the newest standing run that succeeded(?!,)Next run/,
+    )
+    expect(facts.textContent).not.toContain('the last run that succeeded')
+    expect(within(voidedList()).getByRole('listitem').textContent).toMatch(
+      /^Run 2 voided on Nov 10, 2026: graded under the reference rule/,
+    )
+    expect(panel.textContent).not.toMatch(/No audit has completed|No run has ever started/)
+    // Every run id beside the voided list is in the data face.
+    for (const id of within(facts).getAllByText('1')) {
+      expect(id.tagName).toBe('SPAN')
+      expect(id.className).toContain('text-data-sm')
+      expect(id.className).not.toMatch(/error|caution|bearish|bullish|outline|neutral/)
+    }
+  })
+
+  /** Voiding the only run (R4) serves both runs null beside a non-empty
+   * list. Every sentence that assumed "null means nothing ever ran" was
+   * false directly above "Run 1 voided on …". */
+  it('says no run stands when every run was voided, never that none ran', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.everyRunVoided) })
+    render(<App />)
+    const table = await sentimentTable()
+    const panel = section('Sentiment accuracy')
+    const text = panel.textContent ?? ''
+
+    expect(text).not.toMatch(
+      /No run has ever started|No audit has completed|first scheduled run|Never audited|the last run that succeeded/,
+    )
+    // Nov 14 15:00Z is 10:00 AM EST: the next run, not the first.
+    expect(text).toMatch(
+      /There is no standing audit: no run that stands has succeeded, and the voided runs are listed under the table\. Nothing below is a measurement\. The next scheduled run is Nov 14,? 10:00\sAM\./,
+    )
+    expect(runFacts().textContent).toContain(
+      'Last runNone standing; every run so far was voided (listed below).',
+    )
+    expect(runFacts().textContent).toContain(
+      'Figures fromnone — no run that stands has succeeded',
+    )
+    for (const source of ['Corollary rules', 'Massive']) {
+      expect(within(row(table, source)).getByText('Not graded by any run that stands.')).toBeInTheDocument()
+    }
+    expect(within(voidedList()).getByRole('listitem').textContent).toMatch(
+      /^Run 1 voided on Nov 10, 2026: /,
+    )
+  })
+
+  /** Run 9 failed, run 8 voided, run 7 the newest standing success: "the
+   * last run that succeeded" could be false, since run 8 may have. */
+  it('names the figures’ run when a newer voided run sits between it and the last run', async () => {
+    const voided = SENTIMENT_AUDIT_STATES.voided
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...voided,
+        lastRun: {
+          id: 9,
+          trigger: 'manual',
+          status: 'failed',
+          startedAt: '2026-11-10T15:00:00Z',
+          finishedAt: '2026-11-10T15:01:00Z',
+        },
+      }),
+    })
+    render(<App />)
+    await sentimentTable()
+    const facts = runFacts().textContent ?? ''
+
+    // Run 9 is newer than every void, so it is plainly the last run.
+    expect(facts).toMatch(
+      /Last runNov 10,? 10:00\sAM \(started by hand, failed, finished [^)]*\)Figures/,
+    )
+    expect(facts).toMatch(
+      /Figures fromrun 7, the newest standing run that succeeded, Oct 10,? 10:00\sAM \(scheduled, succeeded/,
+    )
+    expect(facts).not.toContain('the last run that succeeded')
   })
 
   it.each(['unaudited', 'populated', 'preSessionFloor', 'running'] as const)(
@@ -1560,6 +1666,26 @@ describe('running the audit by hand', () => {
       expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
     })
     expect(panel.textContent).toMatch(/started by hand, succeeded, finished/)
+  })
+
+  /** A voided run is never `lastRun` again, so "run 8 is not the closed last
+   * run" stays true forever after a void — and the stale line came back on
+   * the next refetch, beside "Run 8 voided on …". */
+  it('clears the started line once the readout lists that run voided', async () => {
+    served.sentiment = SENTIMENT_AUDIT_STATES.running
+    const { panel } = await run()
+
+    expect(await within(panel).findByText(/Audit run 8 started at/)).toBeInTheDocument()
+
+    // Run 8 finished and was voided: run 7 is the last run again.
+    served.sentiment = SENTIMENT_AUDIT_STATES.voided
+    await act(() => queryClient.invalidateQueries())
+
+    await waitFor(() => {
+      expect(within(panel).getByRole('list', { name: 'Voided runs' })).toBeInTheDocument()
+    })
+    expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
+    expect(panel.textContent).not.toMatch(/its outcome appears here/)
   })
 
   it('says when it is available again on a 429, from Retry-After', async () => {
