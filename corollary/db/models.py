@@ -2563,7 +2563,7 @@ ECON_FETCH_DETAIL_MAX = 1280
 
 
 class EconReleaseValue(Base):
-    """An economic release's first print (spec R6, unit U6d; migration 0017, provisional).
+    """An economic release's first print (spec R6, unit U6d; migration ``*_econ_release_value``).
 
     **Keyed to the calendar row, not stored on it.** ``(release_id,
     release_date)`` joins to ``calendar_event.vendor_id =
@@ -2613,7 +2613,7 @@ class EconReleaseValue(Base):
 
 
 class EconReleaseFetch(Base):
-    """The **last** fetch attempt for one release (U6d; migration 0017, provisional).
+    """The **last** fetch attempt for one release (U6d; migration ``*_econ_release_value``).
 
     A fact about attempts, upserted on every one, so the value table can stay
     write-once. The display state is **not** stored here or anywhere (R8): it

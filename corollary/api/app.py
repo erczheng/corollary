@@ -141,6 +141,7 @@ from corollary.engine.runtime import (
 )
 from corollary.data.calendar_dividends import CashDividendSource
 from corollary.data.calendar_releases import ReleaseDatesSource
+from corollary.data.econ_first_prints import VintageSource
 from corollary.engine.scheduler import (
     CASH_SESSION_WAKE_JOBS,
     AlpacaContextSource,
@@ -706,6 +707,7 @@ _FINNHUB_NEWS_METHODS: Final = ("company_news", "market_news", "ipo_date")
 _FINNHUB_CALENDAR_METHODS: Final = ("earnings_calendar", "ipo_calendar")
 _DIVIDEND_METHODS: Final = ("cash_dividends",)
 _RELEASE_DATES_METHODS: Final = ("release_dates",)
+_VINTAGE_METHODS: Final = ("vintage_window",)
 
 
 def _offers(service: object, methods: Sequence[str]) -> bool:
@@ -812,6 +814,17 @@ def _release_dates_source(fred: object | None) -> ReleaseDatesSource | None:
     if fred is None or not _offers(fred, _RELEASE_DATES_METHODS):
         return None
     return cast(ReleaseDatesSource, fred)
+
+
+def _vintage_source(fred: object | None) -> VintageSource | None:
+    """FRED's vintages, for ``econ_first_prints`` (spec R8) -- the one ``FredProvider``, or ``None``.
+
+    The same object as :attr:`ContextServices.fred`, so the FRED bucket is
+    counted once (decision 15).
+    """
+    if fred is None or not _offers(fred, _VINTAGE_METHODS):
+        return None
+    return cast(VintageSource, fred)
 
 
 def _cusip_source(provider: AlpacaContextSource | None) -> CusipResolver | None:
@@ -963,6 +976,7 @@ def _context_services(
         finnhub_calendar=_finnhub_calendar_source(registry),
         dividends=_dividend_source(alpaca),
         fred_releases=_release_dates_source(fred),
+        fred_vintages=_vintage_source(fred),
     )
 
 

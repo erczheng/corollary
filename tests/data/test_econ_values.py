@@ -930,10 +930,8 @@ def test_a_stored_value_is_filled_with_its_label_whenever_it_is_read(now: dateti
 @pytest.mark.parametrize(
     ("last", "note"),
     [
-        (Attempt("refused", "The series does not exist in ALFRED"), "The series does not exist in ALFRED"),
         (Attempt("no_value", "x(t-1) (2026-08-01) is '.'"), "x(t-1) (2026-08-01) is '.'"),
         (Attempt("not_posted", None), NOT_PUBLISHED_NOTE),
-        (Attempt("error", "FredError: GET failed"), NOT_PUBLISHED_NOTE),
         (Attempt("figure", None), NOT_PUBLISHED_NOTE),  # a figure attempt with no row stored
         (None, NOT_PUBLISHED_NOTE),  # never attempted
     ],
@@ -942,10 +940,91 @@ def test_the_unavailable_note_follows_the_last_attempt(last: Attempt | None, not
     assert _display(unavailable_from(RELEASE_AT), last=last) == ValueDisplay("unavailable", note)
 
 
-def test_a_refusal_inside_seven_days_is_still_awaiting() -> None:
-    # The table is the ruling: the 7 days alone moves a row to unavailable.
-    last = Attempt("refused", "The series does not exist in ALFRED")
-    assert _display(RELEASE_AT + timedelta(days=1), last=last) == ValueDisplay("awaiting", None)
+@pytest.mark.parametrize(
+    ("detail", "note"),
+    [
+        ("FredError: GET /series/observations failed: 400", "could not be fetched from FRED: FredError"),
+        ("RateLimitedError: 429 from api.stlouisfed.org", "could not be fetched from FRED: RateLimitedError"),
+        ("TimeoutError", "could not be fetched from FRED: TimeoutError"),  # an empty message
+    ],
+)
+def test_an_error_never_reads_as_fred_not_publishing(detail: str, note: str) -> None:
+    # A revoked FRED_API_KEY fails every attempt for a week. The row must say
+    # the fetch failed, never that FRED did not publish (audit L2).
+    shown = _display(unavailable_from(RELEASE_AT), last=Attempt("error", detail))
+    assert shown == ValueDisplay("unavailable", note)
+    assert shown.note is not None and "not published" not in shown.note
+
+
+def test_an_error_names_the_type_attempt_of_error_stored() -> None:
+    attempt = attempt_of_error(PermissionError("api_key rejected"), secrets=())
+    shown = _display(unavailable_from(RELEASE_AT), last=attempt)
+    assert shown == ValueDisplay("unavailable", "could not be fetched from FRED: PermissionError")
+
+
+def test_an_error_inside_seven_days_is_still_awaiting() -> None:
+    # Transient until the week is out: the next attempt may succeed.
+    last = Attempt("error", "FredError: GET failed")
+    assert _display(unavailable_from(RELEASE_AT) - TICK, last=last) == ValueDisplay("awaiting", None)
+
+
+REFUSAL: Final = "The series does not exist in ALFRED but may exist in FRED"
+
+
+@pytest.mark.parametrize(
+    "now",
+    [RELEASE_AT, RELEASE_AT + timedelta(days=1), unavailable_from(RELEASE_AT) - TICK,
+     unavailable_from(RELEASE_AT), unavailable_from(RELEASE_AT) + timedelta(days=30)],
+)
+def test_a_refusal_is_unavailable_at_once_with_the_vendors_reason(now: datetime) -> None:
+    # Spec *Not verified*: a refused vintage query shows "not available from
+    # FRED" with the vendor's reason. A permanent refusal is not lateness, so
+    # the seven days do not apply to it.
+    shown = _display(now, last=Attempt("refused", REFUSAL))
+    assert shown == ValueDisplay("unavailable", f"not available from FRED: {REFUSAL}")
+
+
+def test_a_refusal_before_the_release_instant_is_still_upcoming() -> None:
+    assert _display(RELEASE_AT - TICK, last=Attempt("refused", REFUSAL)) == ValueDisplay(
+        "upcoming", None
+    )
+
+
+def test_a_stored_value_outranks_a_refusal() -> None:
+    shown = _display(RELEASE_AT + timedelta(days=1), value="CPIAUCSL", last=Attempt("refused", REFUSAL))
+    assert shown.state == "filled"
+
+
+# Spring forward: 2027-03-14, 02:00 EST -> 03:00 EDT. A release at 08:30 EST
+# on 2027-03-10 is 13:30Z; seven calendar days on, 08:30 EDT on the 17th, is
+# 12:30Z -- 167 elapsed hours, not 168.
+SPRING_RELEASE: Final = datetime(2027, 3, 10, 13, 30, tzinfo=UTC)
+SPRING_BOUNDARY: Final = datetime(2027, 3, 17, 12, 30, tzinfo=UTC)
+
+
+def test_seven_calendar_days_across_spring_forward_is_167_hours() -> None:
+    assert unavailable_from(SPRING_RELEASE) == SPRING_BOUNDARY
+    assert SPRING_BOUNDARY - SPRING_RELEASE == timedelta(hours=167)
+
+
+def test_one_microsecond_before_the_spring_forward_boundary_is_awaiting() -> None:
+    before = value_display(SPRING_RELEASE, value_series_id=None, last_attempt=None, now=SPRING_BOUNDARY - TICK)
+    at = value_display(SPRING_RELEASE, value_series_id=None, last_attempt=None, now=SPRING_BOUNDARY)
+    assert before == ValueDisplay("awaiting", None)
+    assert at == ValueDisplay("unavailable", NOT_PUBLISHED_NOTE)
+
+
+def test_168_hours_after_a_spring_release_is_already_unavailable() -> None:
+    # 168 elapsed hours would put the boundary an hour late.
+    shown = value_display(SPRING_RELEASE, value_series_id=None, last_attempt=None, now=SPRING_RELEASE + timedelta(hours=168) - TICK)
+    assert shown.state == "unavailable"
+
+
+def test_one_microsecond_before_the_fall_back_boundary_is_awaiting() -> None:
+    released = datetime(2026, 10, 29, 12, 30, tzinfo=UTC)
+    boundary = datetime(2026, 11, 5, 13, 30, tzinfo=UTC)
+    before = value_display(released, value_series_id=None, last_attempt=None, now=boundary - TICK)
+    assert before == ValueDisplay("awaiting", None)
 
 
 @pytest.mark.parametrize(

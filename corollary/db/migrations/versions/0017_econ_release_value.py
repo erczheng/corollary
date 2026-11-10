@@ -7,6 +7,21 @@ uses 0017 and 0018, so this one is renumbered at merge -- its ``revision``,
 the spec's Q22 rule (``2026-11-09-phase-3-steps-5-7-remainder.md``,
 *Database*: numbers are assigned at merge, after head ``0016``).
 
+Renumber checklist, beyond this file's own ids and name:
+
+* ``tests/db/test_migrations.py`` -- the head assertion
+  (``test_there_is_exactly_one_head``) and the ``0017`` comments and
+  ``_0017_TABLES`` beside it. ``tests/db/test_cash_session_migration.py``
+  holds no head assertion (it says the assertion lives in
+  ``test_migrations.py``) and needs no edit.
+* ``tests/db/test_econ_release_value.py`` -- finds this revision by its file
+  name's ``_econ_release_value.py`` suffix, never a literal id, and asserts
+  it revises the revision numbered one before it. It follows the renumber
+  with no edit; run it after the merge to confirm it still finds exactly one
+  such file and the predecessor holds.
+* ``EconReleaseValue`` / ``EconReleaseFetch`` in ``corollary/db/models.py``
+  name the migration by that suffix, not by number, so they need no edit.
+
 Spec R6 and unit U6d:
 
 * ``econ_release_value`` -- one economic release's first print, primary key

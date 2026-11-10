@@ -176,6 +176,17 @@ from corollary.data.calendar_finnhub import (
     possibly_truncated,
     read_earnings_by_day,
 )
+from corollary.data.econ_first_prints import (
+    ATTEMPT_DELAY as ECON_ATTEMPT_DELAY,
+    ATTEMPT_EVERY as ECON_ATTEMPT_EVERY,
+    CATCH_UP_AT as ECON_CATCH_UP_AT,
+    RELEASE_DAY_UNTIL as ECON_RELEASE_DAY_UNTIL,
+    FirstPrintsRun,
+    VintageSource,
+    catch_up_day,
+    fill_first_prints,
+    next_release_day_slot,
+)
 from corollary.data.calendar_releases import (
     FRED_RELEASES_HORIZON_DAYS,
     ReleaseDatesSource,
@@ -225,8 +236,9 @@ from corollary.data.news.pollers import (
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
 from corollary.data.news.watchlist import watch_universe as watch_universe_of
 from corollary.data.providers.finnhub import CalendarAccessDenied
+from corollary.data.providers.fred import FRED_API_KEY_ENV
 from corollary.data.seeds import SpdrSeed
-from corollary.data.seeds.calendar_seeds import load_econ_release_times
+from corollary.data.seeds.calendar_seeds import load_econ_release_seeds, load_econ_release_times
 from corollary.data.seeds.isin import IsinMappingSource, OpenFigiIsinResolver
 from corollary.data.seeds.nport import (
     CusipResolver,
@@ -263,6 +275,10 @@ __all__ = [
     "CALENDAR_EARNINGS_AT",
     "CALENDAR_IPO_AT",
     "CALENDAR_RELEASES_AT",
+    "ECON_FIRST_PRINTS_JOB",
+    "EconFirstPrintCadence",
+    "EconFirstPrintsFailed",
+    "ReleaseAttemptPlan",
     "DividendsNotFetched",
     "FinnhubCalendarSource",
     "FINNHUB_MARKET_NEWS_EVERY",
@@ -649,6 +665,70 @@ class WatchTierCadence:
         return (
             "one watch-tier symbol every 15 min / W in the watch window "
             "(06:00 ET to the calendar's close + 1h), every 1 h / W otherwise"
+        )
+
+
+class ReleaseAttemptPlan:
+    """The release instants :class:`EconFirstPrintCadence` wakes for. Mutable, loop-only.
+
+    Replaced by the ``econ_first_prints`` body after every run with
+    :attr:`~corollary.data.econ_first_prints.FirstPrintsRun.pending` -- the
+    unfilled stored releases whose release day still has a slot -- and read
+    by the schedule on the same event loop. The body's start-up catch-up runs
+    before the schedule is first asked, so the plan is populated by then.
+
+    Only this job's runs refresh it, so a row ``calendar_releases`` stores
+    after the last run waits for the next one, at worst the 10:00 catch-up.
+    That is a known limit, documented in
+    :mod:`corollary.data.econ_first_prints` (*Known limit*).
+    """
+
+    def __init__(self) -> None:
+        self._pending: tuple[datetime, ...] = ()
+
+    @property
+    def pending(self) -> tuple[datetime, ...]:
+        return self._pending
+
+    def replace(self, pending: Iterable[datetime]) -> None:
+        self._pending = tuple(sorted(_require_utc(moment) for moment in pending))
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class EconFirstPrintCadence:
+    """R8's two clocks for ``econ_first_prints``, as one schedule.
+
+    The next slot is the earliest of:
+
+    * the daily catch-up, :data:`~corollary.data.econ_first_prints.CATCH_UP_AT`
+      (10:00 ET) on the days
+      :func:`~corollary.data.econ_first_prints.catch_up_day` allows -- NYSE
+      trading days, half-days included, from the calendar;
+    * each pending release's next release-day slot: its release time + 10
+      minutes, then every 30 minutes until 18:00 ET (``next_release_day_slot``),
+      so a 09:15 release is first tried at 09:25, not on another release's grid.
+
+    Like :class:`WatchTierCadence`, not a fixed grid: the pending releases are
+    read from :attr:`plan` on every question. A slot only wakes the body; the
+    body decides per release, from the stored attempts, whether that release
+    is due (``econ_first_prints.is_due``), so a wake for another release's
+    slot costs no request.
+    """
+
+    plan: ReleaseAttemptPlan
+
+    def next_run(self, after: datetime) -> datetime | None:
+        moment = _require_utc(after)
+        candidates = [AtTime(ECON_CATCH_UP_AT, catch_up_day).next_run(moment)]
+        candidates.extend(next_release_day_slot(at, moment) for at in self.plan.pending)
+        found = [slot for slot in candidates if slot is not None]
+        return min(found) if found else None
+
+    def describe(self) -> str:
+        return (
+            f"each release at its ET time + {ECON_ATTEMPT_DELAY}, then every "
+            f"{ECON_ATTEMPT_EVERY} until {ECON_RELEASE_DAY_UNTIL.isoformat(timespec='minutes')} "
+            f"ET; and at {ECON_CATCH_UP_AT.isoformat(timespec='minutes')} ET on trading days"
         )
 
 
@@ -1924,6 +2004,11 @@ class ContextServices:
     #: is unset; the releases job then skips. In production the same
     #: ``FredProvider`` as :attr:`fred`.
     fred_releases: ReleaseDatesSource | None = None
+    #: FRED's vintages, for the ``econ_first_prints`` job (spec R8), or
+    #: ``None`` when ``FRED_API_KEY`` is unset; the job then skips. In
+    #: production the same ``FredProvider`` as :attr:`fred`, so its one
+    #: ``api.stlouisfed.org`` limiter meters every FRED request.
+    fred_vintages: VintageSource | None = None
 
     def __post_init__(self) -> None:
         if self.seed_loader is None:
@@ -3916,6 +4001,93 @@ def _calendar_jobs(
     ]
 
 
+# -- economic first prints (spec R8, unit U6e) ------------------------------
+
+ECON_FIRST_PRINTS_JOB: Final = "econ_first_prints"
+
+_NO_FRED_VINTAGES: Final = (
+    f"FRED is unavailable ({FRED_API_KEY_ENV} is unset); no economic first print "
+    "was fetched"
+)
+
+
+class EconFirstPrintsFailed(RuntimeError):
+    """One or more releases' attempts in a run were errors. Raised **after** every due release ran.
+
+    So the job's status reads failing -- a revoked key fails every attempt --
+    while one release's failure never stopped another's attempt. Carries the
+    release ids and error types only: each attempt's scrubbed detail is in
+    ``econ_release_fetch`` and the attempt's own log record.
+    """
+
+
+def _first_prints_summary(run: FirstPrintsRun) -> str:
+    parts = []
+    for failed in run.errors:
+        kind = "unrecorded" if failed.unrecorded else "bug" if failed.bug else "error"
+        detail = failed.attempt.detail or ""
+        error_type = detail.partition(":")[0].strip() or "unknown error"
+        parts.append(
+            f"release {failed.release_id} on {failed.release_date.isoformat()} "
+            f"({failed.series_id}): {kind}, {error_type}"
+        )
+    return (
+        f"{len(run.errors)} of {len(run.attempted)} economic first-print attempts "
+        f"failed: {'; '.join(parts)}"
+    )
+
+
+async def _econ_first_prints(
+    services: ContextServices, clock: UtcClock, plan: ReleaseAttemptPlan
+) -> JobSkipped | None:
+    """Attempt every stored economic release that is due now (R8). The body and its catch-up.
+
+    No FRED key: a skip, before any read. Otherwise the committed econ seeds
+    are loaded on a worker thread -- a refused seed raises ``SeedError`` and
+    fails the run, as ``calendar_releases`` does; it is **not** caught here --
+    and :func:`~corollary.data.econ_first_prints.fill_first_prints` attempts
+    each due release in its own transaction. The plan is replaced with what
+    is still pending, so the schedule wakes for the next release-day slot.
+    """
+    source = services.fred_vintages
+    if source is None:
+        return JobSkipped(_NO_FRED_VINTAGES)
+    seeds = await asyncio.to_thread(load_econ_release_seeds)
+    run = await fill_first_prints(source, services.session_factory, seeds, clock=clock)
+    plan.replace(run.pending)
+    if run.errors:
+        raise EconFirstPrintsFailed(_first_prints_summary(run))
+    if not run.attempted:
+        now = _require_utc(clock())
+        return JobSkipped(
+            f"no stored economic release was due an attempt at {now.isoformat()}; "
+            f"{len(run.pending)} still to be fetched on their release day"
+        )
+    return None
+
+
+def _econ_first_prints_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
+    """``econ_first_prints``: its schedule and body share one :class:`ReleaseAttemptPlan`."""
+    plan = ReleaseAttemptPlan()
+    body: JobBody = functools.partial(_econ_first_prints, services, clock, plan)
+    return ScheduledJob(
+        name=ECON_FIRST_PRINTS_JOB,
+        schedule=EconFirstPrintCadence(plan),
+        run=body,
+        # The same body: it decides from the stored attempts what is due, so a
+        # restart fetches a slot it missed and nothing it already tried.
+        catch_up=body,
+        rule=(
+            "spec R8's economic first prints: each stored release's figure from "
+            "FRED's release-day vintage, at its ET time + 10 min then every 30 min "
+            "until 18:00 ET, and a 10:00 ET catch-up on trading days for every "
+            "unfilled release already out; when this fails the row keeps saying "
+            "awaiting, and after 7 days why it has no value. Never a rule 9 input"
+        ),
+        inputs={"host": FRED_HOST, "endpoint": "/fred/series/observations", "query": "vintage"},
+    )
+
+
 def context_jobs(
     services: ContextServices,
     *,
@@ -3961,6 +4133,7 @@ def context_jobs(
         _spdr_job(services, clock, sleep),
         _sentiment_audit_job(services, clock, sleep),
         *_calendar_jobs(services, _watch_universe_source(services), clock),
+        _econ_first_prints_job(services, clock),
     ]
 
 

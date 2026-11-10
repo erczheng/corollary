@@ -14,9 +14,13 @@ What this module does, and only this:
   that date as a UTC instant (:meth:`EconReleaseTimes.at`), ``title`` the
   table's release name, ``vendor_id`` ``<release_id>:<date>``.
 * :func:`fetch_release_events` -- one FRED read for ``today ..
-  today + horizon`` and the mapping above. No storage, **no scheduler
-  wiring**: a later unit wires every job and calls
-  :func:`corollary.data.calendar.upsert_events` with the result.
+  today + horizon`` and the mapping above. **No storage here**: the
+  scheduler's ``calendar_releases`` job (``corollary.engine.scheduler``,
+  10:00 ET on trading days, with a start-up catch-up) runs it and writes the
+  result through :func:`corollary.data.calendar.replace_window` -- the
+  ``fred``/``economic`` rows of that window, withdrawing any FRED no longer
+  lists. The ``econ_first_prints`` job then reads those rows for the
+  releases to fetch.
 
 What it refuses to do
 ---------------------
@@ -31,10 +35,11 @@ for release 441" is a stated outcome, never a silent one.
 unavailable on every free source (Q3), and ``CalendarEventInput`` refuses one
 on an economic row anyway.
 
-**Choose a headline figure.** ``prior`` and ``actual`` are ``None`` today, and
-deliberately so -- see :func:`actual_for`. The spec says they "come from FRED
-after release" but never says which series and transform is a release's
-headline figure, and that is an owner decision this unit does not make.
+**Carry a figure on the row.** ``prior`` and ``actual`` are always ``None`` on
+an economic row -- see :func:`prior_for`. The headline figure (R7's series
+and transform) is stored once in ``econ_release_value`` by the
+``econ_first_prints`` job and joined on read (R6), because this module's
+daily refresh rewrites the row.
 
 **Report an empty fetch as a success.** No key, or a fetch that maps to no
 event at all, is :class:`ReleasesNotFetched` with the reason -- step 3's
@@ -187,32 +192,27 @@ def release_vendor_id(release_id: int, day: date) -> str:
 
 
 def prior_for(release_id: int, day: date) -> Decimal | None:
-    """The previous period's headline figure for this issue. **Always ``None`` today.**
+    """The calendar row's ``prior``. **Always ``None``, by design** (spec R6).
 
-    Blocked on the same owner decision as :func:`actual_for`; the two will be
-    filled in together, from the same series and transform.
+    An economic release's figures are not on its calendar row. The daily
+    release-dates refresh rewrites every row it fetches through
+    ``corollary.data.calendar._apply``, so a figure written here would be
+    overwritten each morning. The first print -- actual *and* prior, from one
+    FRED vintage -- lives in ``econ_release_value`` instead, written once by
+    ``corollary.data.econ_store.store_first_print`` and joined to the row on
+    read by ``read_economic_releases`` (``vendor_id`` =
+    ``"<release_id>:<release_date>"``). Kept so :func:`release_events` states
+    the column's value rather than omitting it.
     """
     return None
 
 
 def actual_for(release_id: int, day: date) -> Decimal | None:
-    """This issue's headline figure, once published. **Always ``None`` today.**
+    """The calendar row's ``actual``. **Always ``None``, by design** (spec R6).
 
-    **The open question (sent to the owner, unit 7.2b-R):** Q3 says prior and
-    actual "come from FRED after release", but not *which* FRED series and
-    transform is a release's headline figure. For CPI (release 10) that could
-    be the index level ``CPIAUCSL``, its month-over-month percent change, or
-    its year-over-year change; for the Employment Situation (release 50),
-    the ``PAYEMS`` monthly change or ``UNRATE``. Each choice is a different
-    number under the same column, so it is not guessed here.
-
-    The fill-in, once decided: a committed ``release_id -> (series_id,
-    transform, unit)`` table beside ``econ_release_times.csv``, an observation
-    fetch ~10 minutes after each scheduled ``at`` (spec *Feeds and budgets*),
-    and this function -- or its replacement taking the stored observations --
-    computing the figure as a ``Decimal`` from FRED's string values. The
-    mapping in :func:`release_events` already routes ``prior`` and ``actual``
-    through these two functions, so that change does not touch it.
+    See :func:`prior_for`: the figure is ``econ_release_value``'s, fetched by
+    the ``econ_first_prints`` scheduler job (R8) from the series and transform
+    in ``econ_release_series.csv`` (R7), and never filled onto this row.
     """
     return None
 

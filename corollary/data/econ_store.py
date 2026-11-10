@@ -45,7 +45,6 @@ from corollary.data.calendar_event import CalendarKind
 from corollary.data.econ_values import (
     FETCH_OUTCOMES,
     Attempt,
-    FetchOutcome,
     Figure,
     ValueDisplay,
     value_display,
@@ -282,20 +281,30 @@ def record_attempt(
     session: Session,
     release_id: int,
     release_date: date,
-    outcome: FetchOutcome,
-    detail: str | None,
+    attempt: Attempt,
     *,
     at: datetime,
 ) -> StoredFetchAttempt:
     """Make this attempt the release's last attempt (upsert).
 
-    ``outcome``/``detail`` are validated as an
-    :class:`~corollary.data.econ_values.Attempt` first -- ``ValueError``,
-    nothing written, for an unknown outcome, a detail on ``figure`` or
-    ``not_posted``, or a missing one on the other three. Build them with
-    ``econ_values.attempt_of`` / ``attempt_of_error``. Flushes, never commits.
+    ``attempt`` is an :class:`~corollary.data.econ_values.Attempt`, taken
+    whole and never as a raw ``(outcome, detail)`` pair (U6d audit P4).
+    ``TypeError``, nothing written, for anything else. Flushes, never commits.
+
+    **The type check guarantees the shape, not the scrub.** ``Attempt``
+    refuses what the table's CHECKs refuse, but ``Attempt("error", str(exc))``
+    is still an ``Attempt`` and would be stored unscrubbed. Scrubbing is the
+    caller's duty: an ``error`` attempt must come from
+    ``econ_values.attempt_of_error``, which scrubs the provider's secrets, and
+    a fetch's result from ``attempt_of`` (U6e audit L6b). That is enforced by
+    convention and by tests, not by this function:
+    ``tests/data/test_econ_value_writers.py`` fails on any ``Attempt(...)``
+    built outside ``econ_values`` (and this module's read-back of a stored
+    row), and ``test_an_error_is_recorded_scrubbed_and_the_others_proceed``
+    shows the job's error path stores no key.
     """
-    attempt = Attempt(outcome, detail)
+    if not isinstance(attempt, Attempt):
+        raise TypeError(f"record_attempt takes an Attempt, got {type(attempt).__name__}")
     at = _utc(at, "at")
     row = session.get(EconReleaseFetch, (release_id, release_date))
     if row is None:

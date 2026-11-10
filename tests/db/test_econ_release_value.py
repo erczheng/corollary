@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from alembic import command
 from alembic.config import Config
-from alembic.script import ScriptDirectory
+from alembic.script import Script, ScriptDirectory
 from sqlalchemy import Engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError, StatementError
 from sqlalchemy.orm import Session
@@ -90,10 +90,33 @@ def _add(eng: Engine, *rows: object) -> None:
         sess.commit()
 
 
-def test_0017_revises_0016() -> None:
-    revision = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_revision("0017")
-    assert revision is not None
-    assert revision.down_revision == "0016"
+#: This migration's module, by the name it keeps through a renumber. Found by
+#: file name, never by a literal revision id: the merge renumbers it (see its
+#: docstring), and a hardcoded ``"0017"`` would then test another branch's
+#: migration and stay green.
+MIGRATION_SUFFIX = "_econ_release_value.py"
+
+
+def _this_migration() -> Script:
+    scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
+    found = [s for s in scripts.walk_revisions() if Path(s.path).name.endswith(MIGRATION_SUFFIX)]
+    assert len(found) == 1, f"expected one *{MIGRATION_SUFFIX} migration, found {found}"
+    return found[0]
+
+
+def _previous_revision() -> str:
+    down = _this_migration().down_revision
+    assert isinstance(down, str), f"expected a single down_revision, got {down!r}"
+    return down
+
+
+def test_the_migration_revises_the_revision_numbered_before_it() -> None:
+    script = _this_migration()
+    number = Path(script.path).name.removesuffix(MIGRATION_SUFFIX)
+    assert script.revision == number
+    assert script.down_revision == f"{int(number) - 1:04d}"
+    scripts = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
+    assert scripts.get_revision(_previous_revision()) is not None
 
 
 def test_the_outcome_lists_agree() -> None:
@@ -200,7 +223,7 @@ def test_one_fetch_row_per_release_and_date(any_engine: Engine) -> None:
         _add(any_engine, _fetch(outcome="figure"))
 
 
-def test_0017_downgrades_to_0016_and_back(db_path: Path) -> None:
+def test_the_migration_downgrades_to_its_predecessor_and_back(db_path: Path) -> None:
     url = sqlite_url(db_path)
     cfg = _config(url)
     command.upgrade(cfg, "head")
@@ -209,7 +232,7 @@ def test_0017_downgrades_to_0016_and_back(db_path: Path) -> None:
     assert TABLES <= set(inspect(eng).get_table_names())
     eng.dispose()
 
-    command.downgrade(cfg, "0016")
+    command.downgrade(cfg, _previous_revision())
     eng = create_db_engine(url)
     tables = set(inspect(eng).get_table_names())
     eng.dispose()

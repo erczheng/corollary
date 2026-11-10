@@ -33,6 +33,7 @@ from corollary.data.econ_values import (
     Figure,
     NotPosted,
     ValueDisplay,
+    attempt_of_error,
     unavailable_from,
 )
 from corollary.data.providers.fred import FredReleaseDate
@@ -211,7 +212,7 @@ def test_the_attempt_row_keeps_only_the_last_attempt(engine: Engine) -> None:
     for minutes, (outcome, detail) in zip((10, 40, 70), attempts):
         with Session(engine) as sess:
             record_attempt(
-                sess, 10, CPI_DAY, outcome, detail, at=CPI_AT + timedelta(minutes=minutes)
+                sess, 10, CPI_DAY, Attempt(outcome, detail), at=CPI_AT + timedelta(minutes=minutes)
             )
             sess.commit()
     with Session(engine) as sess:
@@ -225,14 +226,26 @@ def test_the_attempt_row_keeps_only_the_last_attempt(engine: Engine) -> None:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "detail"), [("figure", "no"), ("refused", None), ("posted", None)]
+    "raw",
+    [("figure", None), ("error", "FredError: api_key=abcdef0123456789abcdef0123456789"), "not_posted", None],
 )
-def test_an_attempt_of_the_wrong_shape_writes_nothing(
-    session: Session, outcome: Any, detail: str | None
-) -> None:
-    with pytest.raises(ValueError):
-        record_attempt(session, 10, CPI_DAY, outcome, detail, at=CPI_AT)
+def test_record_attempt_takes_an_attempt_never_a_raw_outcome(session: Session, raw: Any) -> None:
+    # Audit P4: a raw (outcome, detail) could carry an unscrubbed error text
+    # into the table. Only an Attempt -- from attempt_of / attempt_of_error --
+    # is accepted.
+    with pytest.raises(TypeError, match="Attempt"):
+        record_attempt(session, 10, CPI_DAY, raw, at=CPI_AT)
     assert session.scalar(select(func.count()).select_from(EconReleaseFetch)) == 0
+
+
+def test_an_error_attempt_reaches_the_table_scrubbed(session: Session) -> None:
+    key = "abcdef0123456789abcdef0123456789"
+    exc = RuntimeError(f"GET https://api.stlouisfed.org/fred/x?api_key={key} failed, key {key}")
+    record_attempt(session, 10, CPI_DAY, attempt_of_error(exc, secrets=(key,)), at=CPI_AT)
+    row = session.get(EconReleaseFetch, (10, CPI_DAY))
+    assert row is not None and row.outcome == "error"
+    assert row.detail is not None and row.detail.startswith("RuntimeError: ")
+    assert key not in row.detail
 
 
 # --------------------------------------------------------------------------
@@ -274,8 +287,8 @@ def test_storing_and_attempting_never_touch_the_calendar_row(engine: Engine) -> 
             for r in sess.scalars(select(CalendarEvent))
         }
         store_first_print(sess, 10, CPI_DAY, CPI, CPI_FIGURE, fetched_at=FETCHED)
-        record_attempt(sess, 10, CPI_DAY, "figure", None, at=FETCHED)
-        record_attempt(sess, 50, PAYEMS_DAY, "not_posted", None, at=PAYEMS_AT)
+        record_attempt(sess, 10, CPI_DAY, Attempt("figure", None), at=FETCHED)
+        record_attempt(sess, 50, PAYEMS_DAY, Attempt("not_posted", None), at=PAYEMS_AT)
         sess.commit()
     with Session(engine) as sess:
         after = {
@@ -290,9 +303,9 @@ def test_the_read_joins_value_seed_and_last_attempt_per_row(engine: Engine) -> N
     with Session(engine) as sess:
         _refresh(sess)
         store_first_print(sess, 10, CPI_DAY, CPI, CPI_FIGURE, fetched_at=FETCHED)
-        record_attempt(sess, 10, CPI_DAY, "figure", None, at=FETCHED)
+        record_attempt(sess, 10, CPI_DAY, Attempt("figure", None), at=FETCHED)
         record_attempt(
-            sess, 50, PAYEMS_DAY, "no_value", "x(t-1) (2026-09-01) is '.'", at=PAYEMS_AT
+            sess, 50, PAYEMS_DAY, Attempt("no_value", "x(t-1) (2026-09-01) is '.'"), at=PAYEMS_AT
         )
         sess.commit()
         releases = read_economic_releases(sess, *WINDOW, seeds=SEEDS)

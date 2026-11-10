@@ -74,6 +74,13 @@ and not one microsecond before. Across a daylight-saving change that is 167
 or 169 elapsed hours, not 168: "calendar days", as the spec says. Every
 release time in the seed is between 08:30 and 14:00 ET, so the result never
 lands in the hour a clock change skips or repeats.
+
+**A refusal is not lateness; an error is not FRED's silence.** A series FRED
+refuses (not in ALFRED) is ``unavailable`` from its first refused attempt,
+with the vendor's reason -- waiting seven days for a permanent answer would
+only hide it. An ``error`` attempt stays ``awaiting`` for the week, and after
+it says the fetch failed and names the error's type: a revoked key must not
+read as "not published on FRED".
 """
 
 from collections.abc import Sequence
@@ -466,8 +473,29 @@ VALUE_STATES: Final[tuple[ValueState, ...]] = ("upcoming", "awaiting", "filled",
 #: ``unavailable``. See the module docstring, *Exactly seven days*.
 UNAVAILABLE_AFTER_DAYS: Final = 7
 
-#: The ``unavailable`` note when no refusal or computed reason explains it.
+#: The ``unavailable`` note when no refusal, computed reason or error explains it.
 NOT_PUBLISHED_NOTE: Final = f"not published on FRED within {UNAVAILABLE_AFTER_DAYS} days"
+
+#: What a refused series' note leads with, before the vendor's own reason
+#: (spec *Not verified*: "that release shows 'not available from FRED' with
+#: the vendor's reason").
+NOT_AVAILABLE_PREFIX: Final = "not available from FRED"
+
+#: What an ``error`` attempt's note leads with, before the error's type. It
+#: says the *fetch* failed: a revoked ``FRED_API_KEY`` fails every attempt for
+#: a week, and must never read as FRED not publishing (U6d audit L2).
+NOT_FETCHED_PREFIX: Final = "could not be fetched from FRED"
+
+
+def _error_type(detail: str | None) -> str:
+    """The exception type an ``error`` attempt's detail leads with.
+
+    :func:`attempt_of_error` writes ``"<Type>: <message>"``, or ``"<Type>"``
+    alone for an empty message; the type is the text before the first colon.
+    """
+    if detail is None:  # pragma: no cover - Attempt refuses an error without one
+        return "unknown error"
+    return detail.partition(":")[0].strip() or "unknown error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,12 +543,17 @@ def value_display(
     * a stored value is ``filled``, labelled with its series, whenever it is
       read;
     * before ``release_at`` is ``upcoming``;
+    * a last attempt FRED ``refused`` is ``unavailable`` **at once**, with
+      :data:`NOT_AVAILABLE_PREFIX` and the vendor's reason. A refusal is
+      permanent (the series is not in ALFRED), not lateness, so the seven
+      days do not apply to it (spec *Not verified*; U6e ruling);
     * from ``release_at`` up to, not including, :func:`unavailable_from` is
-      ``awaiting`` -- a refusal inside that week too, since the seven days
-      alone move a row on (R8's table);
-    * from that instant on is ``unavailable``, with the vendor's message if
-      the last attempt was ``refused``, the computed reason if it was
-      ``no_value``, and :data:`NOT_PUBLISHED_NOTE` otherwise.
+      ``awaiting`` -- an ``error`` inside that week too, since the next
+      attempt may succeed;
+    * from that instant on is ``unavailable``, with the computed reason if
+      the last attempt was ``no_value``, :data:`NOT_FETCHED_PREFIX` and the
+      error's type if it was ``error`` (never a claim that FRED did not
+      publish: the fetch failed), and :data:`NOT_PUBLISHED_NOTE` otherwise.
     """
     release_at = _aware(release_at, "release_at")
     now = _aware(now, "now")
@@ -528,8 +561,12 @@ def value_display(
         return ValueDisplay("filled", computed_label(value_series_id))
     if now < release_at:
         return ValueDisplay("upcoming", None)
+    if last_attempt is not None and last_attempt.outcome == "refused":
+        return ValueDisplay("unavailable", f"{NOT_AVAILABLE_PREFIX}: {last_attempt.detail}")
     if now < unavailable_from(release_at):
         return ValueDisplay("awaiting", None)
-    if last_attempt is not None and last_attempt.outcome in ("refused", "no_value"):
+    if last_attempt is not None and last_attempt.outcome == "no_value":
         return ValueDisplay("unavailable", last_attempt.detail)
+    if last_attempt is not None and last_attempt.outcome == "error":
+        return ValueDisplay("unavailable", f"{NOT_FETCHED_PREFIX}: {_error_type(last_attempt.detail)}")
     return ValueDisplay("unavailable", NOT_PUBLISHED_NOTE)
