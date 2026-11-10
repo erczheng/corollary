@@ -19,6 +19,11 @@ real-time period to that window (U6a's probe), so:
   not a revision. A value that became ``"."`` on ``D`` did change.
 * **The release's observation**, x(t), is the latest-dated new-or-revised
   one. If there is none, FRED has not posted the release: :class:`NotPosted`.
+  It must also be the **newest-dated observation in the D vintage**; if a
+  newer one is there unchanged, D revised only an older month and the release
+  is not posted either (:class:`NotPosted`, fail closed -- the catch-up
+  retries). Every normal release, whose new period is the newest, is
+  unaffected.
 * **x(t-1) and x(t-2)** are the observations immediately before it **in the D
   vintage**, so a revision published that day is in the prior. Each must be
   exactly one period earlier at the seed row's ``frequency`` -- the same
@@ -51,10 +56,29 @@ observation either one needs, or a ``pct_change`` over zero, is
 :class:`NoValue` with a reason naming the observation. Never an actual beside
 an invented or zero prior. Display rounding to the seed's ``decimals``
 (``ROUND_HALF_UP``) is not done here.
+
+What an attempt recorded, and what a row shows (U6d)
+----------------------------------------------------
+
+Also pure, and here for the same reason: they are rules about these values,
+not about storage. :func:`attempt_of` and :func:`attempt_of_error` turn one
+fetch's result into the :class:`Attempt` that ``econ_release_fetch`` keeps
+(``corollary.data.econ_store`` writes it). :func:`value_display` derives the
+R8 display state from the release instant, whether a value is stored, and the
+last attempt -- derived on every read, never stored.
+
+**Exactly seven days** (:func:`unavailable_from`): the release instant on the
+``America/New_York`` wall clock plus seven calendar days, so CPI at 08:30 ET
+on the 14th becomes unavailable at 08:30 ET on the 21st -- at that instant,
+and not one microsecond before. Across a daylight-saving change that is 167
+or 169 elapsed hours, not 168: "calendar days", as the spec says. Every
+release time in the seed is between 08:30 and 14:00 ET, so the result never
+lands in the hour a clock change skips or repeats.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import (
     ROUND_HALF_EVEN,
     Context,
@@ -63,29 +87,47 @@ from decimal import (
     InvalidOperation,
     Overflow,
 )
-from typing import Final, TypeAlias
+from typing import Final, Literal, TypeAlias
 
 from corollary.data.providers.fred import (
+    API_KEY_QUERY_PATTERN,
     FredRefusal,
     FredVintageRow,
     FredVintageWindow,
 )
 from corollary.data.seeds.calendar_seeds import (
+    ET_ZONE,
     MAX_DISPLAY_DECIMALS,
     EconFrequency,
     EconReleaseSeries,
 )
+from corollary.wire import STORED_DETAIL_MAX, vendor_detail
 
 __all__ = [
+    "ATTEMPT_DETAIL_MAX",
     "COMPUTED_FROM_FRED",
+    "DETAILED_OUTCOMES",
+    "ERROR_DETAIL_MAX",
+    "FETCH_OUTCOMES",
+    "NOT_PUBLISHED_NOTE",
     "STORED_EXPONENT",
+    "UNAVAILABLE_AFTER_DAYS",
+    "VALUE_STATES",
+    "Attempt",
+    "FetchOutcome",
     "Figure",
     "FirstPrint",
     "NoValue",
     "NotPosted",
     "Refused",
+    "ValueDisplay",
+    "ValueState",
+    "attempt_of",
+    "attempt_of_error",
     "computed_label",
     "first_print",
+    "unavailable_from",
+    "value_display",
 ]
 
 #: What every figure is labelled, with its series ID (spec R7, *Labelling*),
@@ -257,6 +299,13 @@ def first_print(
         return NotPosted(series.series_id, release_day)
 
     period = changed[-1]
+    # Carried fix P1: x(t) must also be the newest-dated observation in the D
+    # vintage. A vintage that revises only an old month, with nothing newer
+    # new, is a revision day, not the release -- reading it as one printed a
+    # five-month-old period as the first print. Fails closed: NotPosted, and
+    # the catch-up retries.
+    if not on_day or period != max(on_day):
+        return NotPosted(series.series_id, release_day)
     if not _starts_a_period(period, frequency):
         return no_value(
             f"x(t) is dated {period}, which does not start a {frequency} period"
@@ -306,3 +355,181 @@ def first_print(
         prior=_stored(prior, series.scale),
         vintage_date=release_day,
     )
+
+
+# --------------------------------------------------------------------------
+# U6d: one attempt's record, and the display state (R8)
+# --------------------------------------------------------------------------
+
+#: What one fetch attempt came to: ``econ_release_fetch.outcome``'s CHECK.
+FetchOutcome: TypeAlias = Literal["figure", "not_posted", "no_value", "refused", "error"]
+FETCH_OUTCOMES: Final[tuple[FetchOutcome, ...]] = (
+    "figure",
+    "not_posted",
+    "no_value",
+    "refused",
+    "error",
+)
+
+#: The outcomes whose attempt must say why: the vendor's message for
+#: ``refused``, the computed reason for ``no_value``, the error's type and a
+#: short message for ``error``. ``figure`` and ``not_posted`` carry none.
+DETAILED_OUTCOMES: Final[frozenset[FetchOutcome]] = frozenset({"no_value", "refused", "error"})
+
+#: The stored detail's bound, after the ``ledger_rejection.detail``
+#: precedent: :data:`~corollary.wire.STORED_DETAIL_MAX` bounds the *content*,
+#: and ``vendor_detail`` may append a truncation notice of at most 32
+#: characters past it (a refusal's message is bounded that way by the provider).
+ATTEMPT_DETAIL_MAX: Final = 1280
+
+#: An ``error`` attempt's bound. Short: the full text is in the log record.
+ERROR_DETAIL_MAX: Final = 300
+
+#: What ``vendor_detail`` is asked to keep of an error's text. With its
+#: truncation notice (at most 32 characters) that stays under
+#: :data:`ERROR_DETAIL_MAX`.
+_ERROR_TEXT_LIMIT: Final = 256
+
+if STORED_DETAIL_MAX + 32 > ATTEMPT_DETAIL_MAX:  # pragma: no cover - a constant drifted
+    raise AssertionError("ATTEMPT_DETAIL_MAX no longer holds a bounded vendor message")
+
+
+@dataclass(frozen=True, slots=True)
+class Attempt:
+    """One fetch attempt's outcome and its detail, as ``econ_release_fetch`` stores it.
+
+    Refused at construction in exactly the shapes the table's CHECKs refuse:
+    an unknown outcome, a detail on ``figure``/``not_posted``, a missing or
+    blank one on the other three, or one over :data:`ATTEMPT_DETAIL_MAX`.
+    """
+
+    outcome: FetchOutcome
+    detail: str | None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in FETCH_OUTCOMES:
+            raise ValueError(f"outcome {self.outcome!r} is not one of {list(FETCH_OUTCOMES)}")
+        if self.outcome not in DETAILED_OUTCOMES:
+            if self.detail is not None:
+                raise ValueError(f"a {self.outcome} attempt carries no detail")
+            return
+        if self.detail is None or not self.detail.strip():
+            raise ValueError(f"a {self.outcome} attempt must say why: its detail is empty")
+        if len(self.detail) > ATTEMPT_DETAIL_MAX:
+            raise ValueError(
+                f"a {self.outcome} attempt's detail is {len(self.detail)} characters, "
+                f"over {ATTEMPT_DETAIL_MAX}"
+            )
+
+
+def attempt_of(result: FirstPrint | FredRefusal) -> Attempt:
+    """The attempt one fetch came to, from :func:`first_print`'s result.
+
+    A :class:`FredRefusal` straight from the provider maps as its
+    :class:`Refused` would, so a caller need not run :func:`first_print` on it.
+    """
+    if isinstance(result, Figure):
+        return Attempt("figure", None)
+    if isinstance(result, NotPosted):
+        return Attempt("not_posted", None)
+    if isinstance(result, NoValue):
+        return Attempt("no_value", result.reason)
+    if isinstance(result, (Refused, FredRefusal)):
+        return Attempt("refused", result.vendor_message)
+    raise TypeError(f"not a fetch result: {type(result).__name__}")
+
+
+def attempt_of_error(exc: Exception, *, secrets: Sequence[str]) -> Attempt:
+    """An ``error`` attempt: the exception's type and a short, scrubbed message.
+
+    ``secrets`` is the provider's (``FredProvider.secrets``). The provider
+    already scrubs every message it composes; this scrubs again, with the
+    same ``api_key=`` pattern, because the text is about to be stored.
+    """
+    name = type(exc).__name__
+    if not str(exc).strip():
+        return Attempt("error", name)
+    detail = vendor_detail(
+        f"{name}: {exc}",
+        secrets=secrets,
+        patterns=(API_KEY_QUERY_PATTERN,),
+        limit=_ERROR_TEXT_LIMIT,
+    )
+    return Attempt("error", detail)
+
+
+#: The four display states (R8), derived on read and never stored.
+ValueState: TypeAlias = Literal["upcoming", "awaiting", "filled", "unavailable"]
+VALUE_STATES: Final[tuple[ValueState, ...]] = ("upcoming", "awaiting", "filled", "unavailable")
+
+#: How many calendar days a release may go unfilled before it reads
+#: ``unavailable``. See the module docstring, *Exactly seven days*.
+UNAVAILABLE_AFTER_DAYS: Final = 7
+
+#: The ``unavailable`` note when no refusal or computed reason explains it.
+NOT_PUBLISHED_NOTE: Final = f"not published on FRED within {UNAVAILABLE_AFTER_DAYS} days"
+
+
+@dataclass(frozen=True, slots=True)
+class ValueDisplay:
+    """What one economic row shows: its state, and the note beside it.
+
+    ``note`` is the computed-from label on ``filled``, the reason on
+    ``unavailable``, and ``None`` on ``upcoming`` and ``awaiting``.
+    """
+
+    state: ValueState
+    note: str | None
+
+
+def _aware(at: datetime, name: str) -> datetime:
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError(f"{name} must be a timezone-aware datetime, got {at!r}")
+    return at
+
+
+def unavailable_from(release_at: datetime) -> datetime:
+    """The first instant an unfilled release reads ``unavailable``, in UTC.
+
+    ``release_at`` on the ET wall clock plus :data:`UNAVAILABLE_AFTER_DAYS`
+    calendar days. Adding a ``timedelta`` to a ``ZoneInfo``-aware datetime is
+    wall-clock arithmetic, so a daylight-saving change in between moves the
+    elapsed hours, not the wall-clock time.
+    """
+    local = _aware(release_at, "release_at").astimezone(ET_ZONE)
+    return (local + timedelta(days=UNAVAILABLE_AFTER_DAYS)).astimezone(UTC)
+
+
+def value_display(
+    release_at: datetime,
+    *,
+    value_series_id: str | None,
+    last_attempt: Attempt | None,
+    now: datetime,
+) -> ValueDisplay:
+    """The R8 display state of one economic row at ``now``.
+
+    ``value_series_id`` is the stored value's series, ``None`` when no value
+    is stored. In order:
+
+    * a stored value is ``filled``, labelled with its series, whenever it is
+      read;
+    * before ``release_at`` is ``upcoming``;
+    * from ``release_at`` up to, not including, :func:`unavailable_from` is
+      ``awaiting`` -- a refusal inside that week too, since the seven days
+      alone move a row on (R8's table);
+    * from that instant on is ``unavailable``, with the vendor's message if
+      the last attempt was ``refused``, the computed reason if it was
+      ``no_value``, and :data:`NOT_PUBLISHED_NOTE` otherwise.
+    """
+    release_at = _aware(release_at, "release_at")
+    now = _aware(now, "now")
+    if value_series_id is not None:
+        return ValueDisplay("filled", computed_label(value_series_id))
+    if now < release_at:
+        return ValueDisplay("upcoming", None)
+    if now < unavailable_from(release_at):
+        return ValueDisplay("awaiting", None)
+    if last_attempt is not None and last_attempt.outcome in ("refused", "no_value"):
+        return ValueDisplay("unavailable", last_attempt.detail)
+    return ValueDisplay("unavailable", NOT_PUBLISHED_NOTE)

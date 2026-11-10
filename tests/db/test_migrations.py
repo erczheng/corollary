@@ -76,10 +76,17 @@ EXPECTED_TABLES = {
     "sentiment_source_status",
     # 0015 -- step 7: the News calendar (Q22: merged second, renumbered from 0014).
     "calendar_event",
+    # 0017 (provisional; renumbered at merge, Q22) -- U6d: economic first prints
+    "econ_release_value",
+    "econ_release_fetch",
 }
 
-#: Everything 0015 created.
-_0015_TABLES = {"calendar_event"}
+#: Everything 0017 created (a provisional number: see its docstring).
+_0017_TABLES = {"econ_release_value", "econ_release_fetch"}
+
+#: Everything 0015 created -- and 0017's tables with it, which revise it, so
+#: every downgrade below 0015 that subtracts this subtracts both.
+_0015_TABLES = {"calendar_event"} | _0017_TABLES
 
 #: Everything 0014 created -- and 0015's table with it, which revises it, so
 #: every downgrade below 0014 that subtracts this subtracts both.
@@ -178,7 +185,9 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0016"]
+    # 0017 is provisional (U6d's econ tables): the other Phase 3 remainder
+    # branch holds 0017 and 0018, so this one is renumbered at merge (Q22).
+    assert script.get_heads() == ["0017"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:

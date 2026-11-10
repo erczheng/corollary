@@ -13,6 +13,7 @@ posting, a ``"."``), it is derived from a recorded one, and says so.
 import copy
 import dataclasses
 import json
+import re
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +39,7 @@ from corollary.data.providers.fred import (
     FredVintageWindow,
     VintageFrequency,
     parse_vintage_window,
+    vintage_window_params,
 )
 from corollary.data.seeds.calendar_seeds import (
     MAX_DISPLAY_DECIMALS,
@@ -157,6 +159,52 @@ def test_cpi_pct_change_from_the_recorded_window() -> None:
     )
     assert isinstance(figure, Figure)
     assert (str(figure.actual), str(figure.prior)) == ("0.6485", "0.3960")
+
+
+#: Carried fix P2: the CPI window as ``FredProvider.vintage_window`` itself
+#: requests it, ``output_type`` and ``units`` sent explicitly, recorded by
+#: ``tests/fixtures/record_fred_provider_vintage.py``.
+PROVIDER_CPI: Final = FIXTURE_DIR / "p3_provider_vintage_cpiaucsl_window.json"
+
+
+def _provider_cpi() -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(PROVIDER_CPI.read_text(encoding="utf-8"))
+    return loaded
+
+
+def test_the_provider_recorded_window_sent_and_got_back_the_explicit_params() -> None:
+    loaded = _provider_cpi()
+    text = PROVIDER_CPI.read_text(encoding="utf-8")
+    assert not re.search(r"(?i)api_key=(?!<redacted>)", text)
+    assert "api_key" not in {k.lower() for k in loaded["params"]}
+    assert loaded["status_code"] == 200
+    # What the provider sent ...
+    assert loaded["params"] == vintage_window_params("CPIAUCSL", CPI_DAY, "monthly")
+    assert (loaded["params"]["output_type"], loaded["params"]["units"]) == ("1", "lin")
+    # ... and FRED's echo, exactly what the strict check requires: the integer
+    # 1 (not "1", not True) and "lin".
+    echoed = loaded["body"]["output_type"]
+    assert type(echoed) is int and echoed == 1
+    assert loaded["body"]["units"] == "lin"
+
+
+@pytest.mark.asyncio
+async def test_the_provider_recorded_window_gives_the_committed_cpi_figure() -> None:
+    """Replayed through ``vintage_window`` itself, so the strict echo check and
+    the parser run on FRED's real answer to the provider's real query. Being a
+    vintage, it must equal the U6a recording's figure: 0.6485 and 0.3960."""
+    replay = json.dumps(_provider_cpi()["body"]).encode()
+    answer = await _fetch(CPI, CPI_DAY, lambda request: httpx.Response(200, content=replay))
+
+    assert isinstance(answer, FredVintageWindow)
+    assert first_print(answer, CPI) == Figure(
+        series_id="CPIAUCSL",
+        period=date(2026, 9, 1),
+        actual=Decimal("0.6485"),
+        prior=Decimal("0.3960"),
+        vintage_date=CPI_DAY,
+    )
+    assert first_print(answer, CPI) == first_print(recorded("cpiaucsl", "CPIAUCSL", CPI_DAY), CPI)
 
 
 def test_payems_change_uses_the_same_vintage_prior() -> None:
@@ -578,6 +626,70 @@ async def test_the_wider_window_keeps_one_period_strictness() -> None:
     assert outcome.reason.startswith("x(t-1) should be 2026-07-01")
 
 
+#: The audit's case (carried fix P1): a monthly vintage on D in which only
+#: 2026-06-01 is revised and nothing newer is new. June is the latest
+#: new-or-revised observation, but September is in the D vintage too, so June
+#: is not the release: the agency has not posted yet.
+_OLD_MONTH_REVISED_ONLY: Final = [
+    ("2026-04-01", "90", B, D),
+    ("2026-05-01", "100", B, D),
+    ("2026-06-01", "104", B, B),
+    ("2026-06-01", "105", D, D),
+    ("2026-07-01", "110", B, D),
+    ("2026-08-01", "121", B, D),
+    ("2026-09-01", "130", B, D),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transform", ["level", "change", "pct_change"])
+async def test_a_revision_to_an_old_month_alone_is_not_posted(
+    transform: EconTransform,
+) -> None:
+    """Before the fix, ``level`` gave ``Figure(period=2026-06-01, actual=105,
+    prior=100)``: a five-month-old period printed as the release's first
+    print. ``change`` and ``pct_change`` gave ``NoValue`` naming x(t-2),
+    because April is outside the six-month lookback -- also wrong, since it
+    reads as "posted, cannot be computed". x(t) must also be the newest-dated
+    observation in the D vintage, or it is not posted."""
+    series = _series(transform)
+    answer = await _fetch(
+        series, PAYEMS_DAY, _fred_honouring_observation_start(_OLD_MONTH_REVISED_ONLY)
+    )
+    assert isinstance(answer, FredVintageWindow)
+    assert max(row.date for row in answer.rows) == date(2026, 9, 1)
+
+    assert first_print(answer, series) == NotPosted("TEST", PAYEMS_DAY)
+
+
+def test_a_revision_to_a_recent_old_month_alone_is_not_posted() -> None:
+    # The same with July revised, so ``change`` has its x(t-2) in the window:
+    # before the fix it gave Figure(2026-07-01, 111 - 104 = 7, 104 - 100 = 4)
+    # with September (newest in the D vintage) left unreleased.
+    rows = [
+        ("2026-05-01", "100", B, D),
+        ("2026-06-01", "104", B, D),
+        ("2026-07-01", "110", B, B),
+        ("2026-07-01", "111", D, D),
+        ("2026-08-01", "121", B, D),
+        ("2026-09-01", "130", B, D),
+    ]
+    for transform in ("level", "change", "pct_change"):
+        assert first_print(_synthetic(rows), _series(transform)) == NotPosted(
+            "TEST", PAYEMS_DAY
+        )
+
+
+def test_a_revision_beside_a_new_newest_month_is_still_the_release() -> None:
+    # The control: the same June revision, with September new on D. September
+    # is both the latest new-or-revised date and the newest in the vintage.
+    rows = [*_OLD_MONTH_REVISED_ONLY[:-1], ("2026-09-01", "130", D, D)]
+    figure = first_print(_synthetic(rows), _series("change"))
+    assert figure == Figure(
+        "TEST", date(2026, 9, 1), Decimal("9.0000"), Decimal("11.0000"), PAYEMS_DAY
+    )
+
+
 # --------------------------------------------------------------------------
 # Arithmetic: exact, quantized half-even, never float
 # --------------------------------------------------------------------------
@@ -668,3 +780,181 @@ def test_a_window_for_another_series_is_a_caller_bug() -> None:
 def test_the_label_names_the_series() -> None:
     assert COMPUTED_FROM_FRED == "computed from FRED's levels"
     assert computed_label("CPIAUCSL") == "computed from FRED's levels: CPIAUCSL"
+
+
+# --------------------------------------------------------------------------
+# U6d: what one attempt recorded, and the display state (R8) -- both pure
+# --------------------------------------------------------------------------
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+from corollary.data.econ_values import (  # noqa: E402
+    FETCH_OUTCOMES,
+    NOT_PUBLISHED_NOTE,
+    Attempt,
+    ValueDisplay,
+    attempt_of,
+    attempt_of_error,
+    unavailable_from,
+    value_display,
+)
+from corollary.data.providers.fred import FredError  # noqa: E402
+from corollary.data.providers.interface import RateLimitedError  # noqa: E402
+
+_KEY: Final = "notarealfredkeynotarealfredkey00"
+
+
+def test_the_outcomes_are_the_five_the_ruling_names() -> None:
+    assert FETCH_OUTCOMES == ("figure", "not_posted", "no_value", "refused", "error")
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            Figure("CPIAUCSL", date(2026, 9, 1), Decimal("0.6485"), Decimal("0.3960"), CPI_DAY),
+            Attempt("figure", None),
+        ),
+        (NotPosted("CPIAUCSL", CPI_DAY), Attempt("not_posted", None)),
+        (
+            NoValue("CPIAUCSL", CPI_DAY, "x(t-1) (2026-08-01) is FRED's missing-observation marker"),
+            Attempt("no_value", "x(t-1) (2026-08-01) is FRED's missing-observation marker"),
+        ),
+        (
+            Refused("EXHOSLUSM495S", CPI_DAY, "The series does not exist in ALFRED"),
+            Attempt("refused", "The series does not exist in ALFRED"),
+        ),
+        # The provider's own refusal maps the same, without first_print.
+        (
+            FredRefusal("EXHOSLUSM495S", CPI_DAY, "The series does not exist in ALFRED"),
+            Attempt("refused", "The series does not exist in ALFRED"),
+        ),
+    ],
+)
+def test_each_result_maps_to_its_attempt(result: Any, expected: Attempt) -> None:
+    assert attempt_of(result) == expected
+
+
+def test_an_error_attempt_names_the_type_and_never_the_key() -> None:
+    exc = FredError(f"GET /series/observations failed: https://x/?api_key={_KEY}&a=1 {_KEY}")
+    attempt = attempt_of_error(exc, secrets=(_KEY,))
+    assert attempt.outcome == "error"
+    assert attempt.detail is not None
+    assert attempt.detail.startswith("FredError: GET /series/observations failed")
+    assert _KEY not in attempt.detail
+    assert "<redacted>" in attempt.detail
+
+
+def test_an_error_attempt_is_short() -> None:
+    attempt = attempt_of_error(RateLimitedError("x" * 5000), secrets=(_KEY,))
+    assert attempt.detail is not None
+    assert attempt.detail.startswith("RateLimitedError: xxx")
+    assert len(attempt.detail) <= 300
+
+
+def test_an_error_with_no_message_still_has_a_detail() -> None:
+    assert attempt_of_error(FredError(), secrets=(_KEY,)) == Attempt("error", "FredError")
+
+
+@pytest.mark.parametrize(
+    ("outcome", "detail"),
+    [
+        ("figure", "a detail"),  # figure and not_posted carry none
+        ("not_posted", "a detail"),
+        ("no_value", None),  # the other three must say why
+        ("refused", None),
+        ("error", "   "),
+        ("posted", None),  # not an outcome
+        ("refused", "x" * 1281),  # over the stored column's bound
+    ],
+)
+def test_an_attempt_refuses_a_shape_the_table_would(outcome: Any, detail: Any) -> None:
+    with pytest.raises(ValueError):
+        Attempt(outcome, detail)
+
+
+# The release instant: CPI on 2026-10-14 at 08:30 ET (EDT) is 12:30Z.
+RELEASE_AT: Final = datetime(2026, 10, 14, 12, 30, tzinfo=UTC)
+TICK: Final = timedelta(microseconds=1)
+
+
+def _display(now: datetime, *, value: str | None = None, last: Attempt | None = None) -> ValueDisplay:
+    return value_display(RELEASE_AT, value_series_id=value, last_attempt=last, now=now)
+
+
+def test_exactly_seven_days_is_the_release_instant_plus_seven_et_calendar_days() -> None:
+    # 08:30 ET on the 21st: the same wall-clock time seven calendar days on.
+    assert unavailable_from(RELEASE_AT) == datetime(2026, 10, 21, 12, 30, tzinfo=UTC)
+
+
+def test_seven_calendar_days_across_the_dst_change_is_not_168_hours() -> None:
+    # 08:30 EDT on 2026-10-29 (12:30Z); clocks fall back on 1 November, so
+    # 08:30 EST on 5 November is 13:30Z -- 169 elapsed hours.
+    released = datetime(2026, 10, 29, 12, 30, tzinfo=UTC)
+    boundary = unavailable_from(released)
+    assert boundary == datetime(2026, 11, 5, 13, 30, tzinfo=UTC)
+    after_168h = released + timedelta(hours=168)
+    assert value_display(released, value_series_id=None, last_attempt=None, now=after_168h).state == "awaiting"
+    assert value_display(released, value_series_id=None, last_attempt=None, now=boundary).state == "unavailable"
+
+
+def test_before_the_release_instant_is_upcoming() -> None:
+    assert _display(RELEASE_AT - TICK) == ValueDisplay("upcoming", None)
+
+
+def test_at_the_release_instant_is_awaiting() -> None:
+    assert _display(RELEASE_AT) == ValueDisplay("awaiting", None)
+
+
+def test_one_tick_before_seven_days_is_awaiting() -> None:
+    assert _display(unavailable_from(RELEASE_AT) - TICK) == ValueDisplay("awaiting", None)
+
+
+def test_exactly_seven_days_is_unavailable() -> None:
+    assert _display(unavailable_from(RELEASE_AT)) == ValueDisplay(
+        "unavailable", NOT_PUBLISHED_NOTE
+    )
+    assert NOT_PUBLISHED_NOTE == "not published on FRED within 7 days"
+
+
+@pytest.mark.parametrize(
+    "now",
+    [RELEASE_AT, unavailable_from(RELEASE_AT) - TICK, unavailable_from(RELEASE_AT) + timedelta(days=30)],
+)
+def test_a_stored_value_is_filled_with_its_label_whenever_it_is_read(now: datetime) -> None:
+    assert _display(now, value="CPIAUCSL") == ValueDisplay(
+        "filled", "computed from FRED's levels: CPIAUCSL"
+    )
+
+
+@pytest.mark.parametrize(
+    ("last", "note"),
+    [
+        (Attempt("refused", "The series does not exist in ALFRED"), "The series does not exist in ALFRED"),
+        (Attempt("no_value", "x(t-1) (2026-08-01) is '.'"), "x(t-1) (2026-08-01) is '.'"),
+        (Attempt("not_posted", None), NOT_PUBLISHED_NOTE),
+        (Attempt("error", "FredError: GET failed"), NOT_PUBLISHED_NOTE),
+        (Attempt("figure", None), NOT_PUBLISHED_NOTE),  # a figure attempt with no row stored
+        (None, NOT_PUBLISHED_NOTE),  # never attempted
+    ],
+)
+def test_the_unavailable_note_follows_the_last_attempt(last: Attempt | None, note: str) -> None:
+    assert _display(unavailable_from(RELEASE_AT), last=last) == ValueDisplay("unavailable", note)
+
+
+def test_a_refusal_inside_seven_days_is_still_awaiting() -> None:
+    # The table is the ruling: the 7 days alone moves a row to unavailable.
+    last = Attempt("refused", "The series does not exist in ALFRED")
+    assert _display(RELEASE_AT + timedelta(days=1), last=last) == ValueDisplay("awaiting", None)
+
+
+@pytest.mark.parametrize(
+    ("release_at", "now"),
+    [
+        (RELEASE_AT.replace(tzinfo=None), RELEASE_AT),
+        (RELEASE_AT, RELEASE_AT.replace(tzinfo=None)),
+    ],
+)
+def test_a_naive_instant_is_refused(release_at: datetime, now: datetime) -> None:
+    with pytest.raises(ValueError, match="aware"):
+        value_display(release_at, value_series_id=None, last_attempt=None, now=now)

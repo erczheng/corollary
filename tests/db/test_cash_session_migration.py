@@ -77,9 +77,11 @@ def _insert(eng: Engine, *, field: str, previous: str, new: str) -> None:
         sess.commit()
 
 
-def test_the_head_is_0016() -> None:
+def test_0016_revises_0015() -> None:
+    # The head assertion lives in test_migrations.py; 0016 is no longer it.
     cfg = Config(str(ALEMBIC_INI))
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0016"]
+    revision = ScriptDirectory.from_config(cfg).get_revision("0016")
+    assert revision is not None and revision.down_revision == "0015"
 
 
 def test_account_is_an_audit_category() -> None:

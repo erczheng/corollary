@@ -72,6 +72,7 @@ from corollary.wire import (
 )
 
 __all__ = [
+    "API_KEY_QUERY_PATTERN",
     "FRED_API_KEY_ENV",
     "FRED_BASE_URL",
     "MISSING_VALUE",
@@ -117,6 +118,10 @@ _HTTPX_LOGGER: Final = "httpx"
 #: carries a key other than the one this provider holds (a second process's,
 #: or one set after a reload).
 _API_KEY_PARAM: Final = re.compile(r"(?i)(api_key=)[^&\s\"'<>]+")
+
+#: The same pattern, public, for code that stores text a FRED call produced
+#: (``econ_values.attempt_of_error``) and so must scrub it the provider's way.
+API_KEY_QUERY_PATTERN: Final = _API_KEY_PARAM
 
 #: How many observations a default request asks for. Ten covers a fortnight of
 #: sessions, so a missed day or two of refreshes is back-filled by the next.
@@ -371,10 +376,12 @@ _Day: TypeAlias = date
 #: to two months for a monthly series (trade, construction, JOLTS) -- so x(t-2)
 #: sits at most four months back. Six months holds a series lagging three or
 #: four; fifteen holds three quarters with two quarters' lag. It is one request
-#: either way, and a wider window changes only how many rows come back, never
-#: which are x(t-1) and x(t-2): ``econ_values`` still requires each to be
-#: exactly one period earlier. A release delayed past this is reported as no
-#: value naming the missing observation, never guessed.
+#: either way, and a wider window cannot change which are x(t-1) and x(t-2):
+#: ``econ_values`` still requires each to be exactly one period earlier. It
+#: *can* bring an older revised month into view, which is why ``econ_values``
+#: also requires x(t) to be the newest-dated observation in the D vintage
+#: (carried fix P1). A release delayed past this is reported as no value
+#: naming the missing observation, never guessed.
 VINTAGE_LOOKBACK_MONTHS: Final[Mapping[VintageFrequency, int]] = {
     "monthly": 6,
     "quarterly": 15,
@@ -514,7 +521,10 @@ def parse_vintage_window(
     values valid on the same day, and ``count`` must be
     the rows returned -- a truncated vintage would be a partial answer read as
     a whole one. The body's ``observation_start`` echo is not checked: a
-    deeper start changes how many rows come back, never what they say.
+    deeper start changes how many rows come back, never what any row says.
+    It can change which revised rows are in view, so x(t)'s selection is
+    guarded in ``econ_values`` (x(t) must be the newest date in the D vintage),
+    not here.
     """
     day_before = release_day - timedelta(days=1)
     if not isinstance(payload, Mapping):
