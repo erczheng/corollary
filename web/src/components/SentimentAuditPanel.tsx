@@ -17,9 +17,13 @@ import {
   cellCounts,
   demotedSources,
   isInsufficientSample,
+  isShortOfSessions,
   nothingAuditedYet,
   repromotionProgress,
+  sessionsFact,
   sourceStatusKind,
+  statedSessionFloor,
+  windowProgress,
   type AuditTriggerRefusal,
   type SourceStatusKind,
 } from '../lib/settings'
@@ -29,6 +33,7 @@ import type {
   SentimentCounts,
   SentimentSourceAudit,
   SentimentWindow,
+  SentimentWindowProgress,
 } from '../lib/types'
 
 const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
@@ -83,7 +88,7 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
                 // short of the floor keeps `changedAt` null. `asOfRunId` is
                 // what says whether its figures came from a run at all.
                 source.neverAudited && source.eligibility.asOfRunId !== null
-                ? 'Graded, but not yet on enough labels to be given a status.'
+                ? 'Graded, but not yet on enough labels over enough sessions to be given a status.'
                 : 'Never audited.'
               : `Unaudited since ${formatDateTimeET(source.changedAt)}.`
             : source.changedAt === null
@@ -108,21 +113,54 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
   )
 }
 
-function Figure({ counts, floor }: { counts: SentimentCounts; floor: number }) {
+/** Whether a cell is short of a floor it is judged against: labels from its
+ * counts, sessions from the server's `sessionsNeeded`. Display only. It
+ * decides whether a percentage is printed, never whether a source is
+ * eligible. That is `eligibility.eligible`. */
+function isShort(
+  counts: SentimentCounts,
+  floor: number,
+  progress: SentimentWindowProgress | null,
+): boolean {
+  return isInsufficientSample(counts, floor) || isShortOfSessions(progress)
+}
+
+function Figure({
+  counts,
+  floor,
+  progress,
+  sessionFloor,
+}: {
+  counts: SentimentCounts
+  floor: number
+  progress: SentimentWindowProgress | null
+  sessionFloor: number
+}) {
   const tenths = accuracyTenths(counts)
-  if (isInsufficientSample(counts, floor) || tenths === null) {
+  if (isShort(counts, floor, progress) || tenths === null) {
     // A sample-size fact, not a warning: `on-surface-variant`, never
-    // `caution`. Too few labels is where every source starts.
+    // `caution`. Too few labels, or too few sessions, is where every source
+    // starts. The session clause is the server's count against the server's
+    // floor ("2 of 5 sessions"), or, on a row written before the floor, the
+    // words saying no count exists. A row with no count is never shown as
+    // meeting the floor, so it never gets a percentage either.
     return (
       <span className="text-data-sm text-on-surface-variant">
-        insufficient sample — {formatInteger(counts.graded)} of {formatInteger(floor)}
+        insufficient sample — {formatInteger(counts.graded)} of {formatInteger(floor)} labels,{' '}
+        {sessionsFact(progress, sessionFloor)}
       </span>
     )
   }
+  // Past both floors, so `progress.sessions` is a count. The guard is for
+  // the type, not a state the server sends.
+  const sessions = progress?.sessions ?? null
   return (
     <span className="text-data-md text-on-surface">
       {formatTenthsPct(tenths)}{' '}
-      <span className="text-data-sm text-on-surface-variant">n {formatInteger(counts.graded)}</span>
+      <span className="text-data-sm text-on-surface-variant">
+        n {formatInteger(counts.graded)}
+        {sessions === null ? '' : `, ${formatInteger(sessions)} sessions`}
+      </span>
     </span>
   )
 }
@@ -167,7 +205,7 @@ function Split({
       {line('Discovery', discovery)}
       <p className="text-caption text-on-surface-variant">
         {short
-          ? 'insufficient sample — counts only until the combined cell reaches the floor; transitions act on the combined figure'
+          ? 'insufficient sample — counts only until the combined cell reaches both floors; transitions act on the combined figure'
           : 'display only — transitions act on the combined figure'}
       </p>
     </div>
@@ -188,11 +226,20 @@ function AccuracyCell({
   const cell = actingCell(source, window)
   const counts = cellCounts(cell)
   const floor = source.eligibility.floor
+  const progress = windowProgress(source, window)
+  const figure = (
+    <Figure
+      counts={counts}
+      floor={floor}
+      progress={progress}
+      sessionFloor={source.eligibility.sessionFloor}
+    />
+  )
   const label = `${NEWS_SOURCE_LABEL[source.source]}, ${SENTIMENT_WINDOW_LABEL[window]}`
   return (
     <td className={`${TD} text-right`}>
       {cell === null || counts.graded + counts.neutral === 0 ? (
-        <Figure counts={counts} floor={floor} />
+        figure
       ) : (
         // No `aria-label`: it would replace the visible figure as the
         // button's name, so "61.7% n 212" would never be announced (WCAG
@@ -203,7 +250,7 @@ function AccuracyCell({
           onClick={onToggle}
           className="rounded px-1 text-right hover:bg-surface-container"
         >
-          <Figure counts={counts} floor={floor} />
+          {figure}
           <span className="sr-only">
             {` — ${label}: ${expanded ? 'hide' : 'show'} the watch and discovery split`}
           </span>
@@ -216,7 +263,7 @@ function AccuracyCell({
         <Split
           watch={cell.watch}
           discovery={cell.discovery}
-          short={isInsufficientSample(counts, floor)}
+          short={isShort(counts, floor, progress)}
         />
       ) : null}
     </td>
@@ -270,7 +317,12 @@ function runLine(run: AuditRunSummary): string {
  * written by the audit run and nothing else, so the page reads it and derives
  * only display from the counts. There is **no re-promote or reinstate
  * control** (Q6): a demoted source comes back when a run says so, and a
- * button that let a person override that would make the audit advisory. */
+ * button that let a person override that would make the audit advisory. Nor
+ * is there a void, demote, or session-floor override (spec R4, R9).
+ *
+ * The session floor is shown, not judged: each cell states the server's
+ * session count against the server's `sessionFloor`, and whether a source is
+ * eligible is `eligibility.eligible` alone. */
 export function SentimentAuditPanel() {
   const query = useSentimentAudit()
   const start = useStartSentimentAudit()
@@ -284,6 +336,20 @@ export function SentimentAuditPanel() {
   }
 
   const status = query.data
+  // The server's session floor (R3), never a constant here. If the sources
+  // disagree, or none were sent, the sentence says it was not reported
+  // rather than picking one.
+  const sessionFloor = statedSessionFloor(status.sources)
+  const overSessions =
+    sessionFloor === null ? (
+      <>over a minimum number of sessions the server did not report</>
+    ) : (
+      <>
+        over at least{' '}
+        <span className="text-data-sm text-on-surface">{formatInteger(sessionFloor)}</span>{' '}
+        sessions
+      </>
+    )
   const demoted = demotedSources(status.sources)
   const missing = status.sources.filter((s) => s.statusMissing)
   const refusal = start.isError
@@ -309,15 +375,17 @@ export function SentimentAuditPanel() {
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span>, once each window
         has at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels over the trailing 28 days. An unaudited source becomes active when both windows are
-        at <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better,
+        labels {overSessions} over the trailing 28 days. An unaudited source becomes active when
+        both windows are at{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better, with
+        at least <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span>{' '}
+        graded labels {overSessions} each over the trailing 28 days. A demoted source is
+        re-promoted only when both windows reach{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> or better,
         with at least{' '}
-        <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels each over the trailing 28 days. A demoted source is re-promoted only when both
-        windows reach <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span>{' '}
-        or better, with at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE_SAMPLE}</span> graded
-        labels each since the demotion. Between{' '}
+        labels {overSessions} each since the demotion. A session is a regular trading session; a
+        story published after the close counts toward the next one. Between{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> and{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> an active or
         demoted source stays where it is: an active one is not demoted and a demoted one is not

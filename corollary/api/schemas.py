@@ -2569,17 +2569,25 @@ SentimentEligibilityKind: TypeAlias = Literal["demote", "repromote"]
 
 
 class SentimentCounts(ApiModel):
-    """One ``sentiment_accuracy`` row's three counts. **No percentage**: the
+    """One ``sentiment_accuracy`` row's counts. **No percentage**: the
     client derives one, so no rounded figure travels beside its numbers.
 
     ``graded`` is graded **directional** labels -- the accuracy denominator
     and what the 30 / 100 floors count; ``correct`` is at most ``graded``;
     ``neutral`` is graded neutral labels, in neither (Q5).
+
+    ``sessions`` is how many distinct sessions the ``graded`` labels span,
+    the count the five-session floor reads (R3). It is each scope's own
+    stored figure: the ``watch`` and ``discovery`` counts do **not** sum to
+    the combined one, since one session can hold a label of each. ``null``
+    means the row was written before that floor existed and carries no
+    count -- never read it as meeting the floor.
     """
 
     graded: int
     correct: int
     neutral: int
+    sessions: int | None
 
 
 class SentimentWindowAccuracy(ApiModel):
@@ -2598,12 +2606,26 @@ class SentimentWindowAccuracy(ApiModel):
 
 
 class SentimentWindowProgress(ApiModel):
-    """One window's progress toward its floor: ``needed`` more graded labels,
-    ``0`` once ``graded`` has reached it."""
+    """One window's progress toward its floors: ``needed`` more graded labels,
+    ``0`` once ``graded`` has reached it; ``sessionsNeeded`` more distinct
+    sessions, ``0`` once ``sessions`` has reached ``sessionFloor`` (R3).
+
+    ``sessions`` and ``sessionsNeeded`` are ``null`` together, exactly when
+    the row predates the session floor: a shortfall from a count nobody took
+    would be a number nobody counted.
+    """
 
     window: SentimentWindow
     graded: int
     needed: int
+    sessions: int | None
+    sessions_needed: int | None
+
+    @model_validator(mode="after")
+    def _sessions_needed_exactly_when_counted(self) -> "SentimentWindowProgress":
+        if (self.sessions is None) != (self.sessions_needed is None):
+            raise ValueError("sessions and sessions_needed are null together or not at all")
+        return self
 
 
 class SentimentEligibility(ApiModel):
@@ -2611,16 +2633,25 @@ class SentimentEligibility(ApiModel):
 
     ``kind`` follows the status: ``demote`` for ``unaudited`` / ``active``
     (floor 30, ``trailing_28d``), ``repromote`` for ``demoted`` (floor 100,
-    ``since_demotion``). ``eligible`` is every window at or over ``floor``.
+    ``since_demotion``). ``sessionFloor`` is the distinct sessions each
+    window needs beside its label floor, on either kind --
+    ``audit.MIN_ELIGIBLE_SESSIONS``, served so no client restates it.
+    ``eligible`` is every window at or over ``floor`` **and** at or over
+    ``sessionFloor``, with a ``null`` session count never eligible; it is
+    the engine's own rule (``audit.window_is_eligible``), so Settings cannot
+    call a source eligible that the next run would not move.
     ``asOfRunId`` is the run the counts come from; ``null`` when no run has
     counted anything on this basis yet -- no run has succeeded, or the latest
     one is the run that demoted the source, so nothing is graded *since*.
-    Every window then reads ``graded: 0``, which is a count, not a guess.
+    Every window then reads ``graded: 0`` and ``sessions: 0``, with
+    ``sessionsNeeded`` the whole ``sessionFloor``, which are counts, not
+    guesses.
     """
 
     kind: SentimentEligibilityKind
     basis: SentimentAccuracyBasis
     floor: int
+    session_floor: int
     eligible: bool
     windows: list[SentimentWindowProgress]
     as_of_run_id: int | None

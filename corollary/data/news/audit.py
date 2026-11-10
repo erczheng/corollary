@@ -391,6 +391,7 @@ __all__ = [
     "DISCOVERY_TICKER_CAP",
     "FALLBACK_MAX_LAG",
     "MATURITY_DELAY",
+    "MIN_ELIGIBLE_SESSIONS",
     "PRICE_UNAVAILABLE_AFTER",
     "REPROMOTE_AT_PCT",
     "REPROMOTION_FLOOR",
@@ -431,6 +432,7 @@ __all__ = [
     "reference_at",
     "reference_instant",
     "window_end",
+    "window_is_eligible",
 ]
 
 #: The benchmark every non-market label's return is taken in excess of (Q5).
@@ -1751,13 +1753,25 @@ def compute_accuracy(
     )
 
 
-def _eligible(row: AccuracyRow, floor: int) -> bool:
-    """At least ``floor`` graded directional labels, spanning at least
-    :data:`MIN_ELIGIBLE_SESSIONS` sessions (decision 13 and R3), in integers.
-    A ``None`` session count -- a row from before Q23b -- is never eligible."""
-    if row.sessions is None:
+def window_is_eligible(graded: int, sessions: int | None, floor: int) -> bool:
+    """One window's eligibility: at least ``floor`` graded directional labels,
+    spanning at least :data:`MIN_ELIGIBLE_SESSIONS` sessions (decision 13 and
+    R3), in integers. A ``None`` session count -- a row from before Q23b --
+    is never eligible.
+
+    **The one copy of this rule.** :func:`decide_transition` reads it, and so
+    does ``GET /api/settings/sentiment``, so Settings can never call a source
+    eligible that the engine will not move. A source is eligible when every
+    window is; each caller states that quantifier over its own windows.
+    """
+    if sessions is None:
         return False
-    return row.graded >= floor and row.sessions >= MIN_ELIGIBLE_SESSIONS
+    return graded >= floor and sessions >= MIN_ELIGIBLE_SESSIONS
+
+
+def _eligible(row: AccuracyRow, floor: int) -> bool:
+    """:func:`window_is_eligible` on a row's ``graded`` and ``sessions``."""
+    return window_is_eligible(row.graded, row.sessions, floor)
 
 
 def _below(row: AccuracyRow, pct: int) -> bool:

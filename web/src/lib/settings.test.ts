@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_AUDIT_STATES } from './mockData'
-import { NOTIFICATION_EVENT_LABEL, type NotificationEvent, type RiskLimit } from './types'
+import {
+  NOTIFICATION_EVENT_LABEL,
+  type NotificationEvent,
+  type RiskLimit,
+  type SentimentSourceAudit,
+} from './types'
 import {
   ApiError,
   NETWORK_UNREACHABLE,
@@ -14,6 +19,7 @@ import {
   SENTIMENT_FLOOR,
   SENTIMENT_REPROMOTE,
   SENTIMENT_REPROMOTE_SAMPLE,
+  SESSIONS_NOT_COUNTED,
   accuracyTenths,
   actingCell,
   auditEntry,
@@ -26,13 +32,17 @@ import {
   isCriticalEvent,
   isInsufficientSample,
   isRaise,
+  isShortOfSessions,
   nothingAuditedYet,
   notificationAuditField,
   repromotionProgress,
   riskDollars,
   riskLimitFor,
+  sessionsFact,
   sourceStatusKind,
+  statedSessionFloor,
   validateRiskLimit,
+  windowProgress,
 } from './settings'
 
 const limit = (key: string): RiskLimit => {
@@ -349,28 +359,28 @@ describe('the thresholds the page states', () => {
 
 describe('accuracyTenths', () => {
   it('is correct over graded, neutral in neither', () => {
-    expect(accuracyTenths({ graded: 200, correct: 123, neutral: 999 })).toBe(615)
+    expect(accuracyTenths({ graded: 200, correct: 123, neutral: 999, sessions: 9 })).toBe(615)
   })
 
   it('is null with nothing graded — 0 of 0 is not 0%', () => {
-    expect(accuracyTenths({ graded: 0, correct: 0, neutral: 12 })).toBeNull()
+    expect(accuracyTenths({ graded: 0, correct: 0, neutral: 12, sessions: 0 })).toBeNull()
   })
 
   /** The engine compares `correct * 100 < 52 * graded` in integers. A figure
    * that rounded would print 52.0% beside a source just demoted for being
    * under 52. */
   it('truncates, so a figure never rounds across a threshold', () => {
-    const tenths = accuracyTenths({ graded: 25_000, correct: 12_999, neutral: 0 })
+    const tenths = accuracyTenths({ graded: 25_000, correct: 12_999, neutral: 0, sessions: 20 })
     expect(tenths).toBe(519)
     expect(formatTenthsPct(tenths!)).toBe('51.9%')
-    expect(formatTenthsPct(accuracyTenths({ graded: 50, correct: 33, neutral: 0 })!)).toBe('66.0%')
+    expect(formatTenthsPct(accuracyTenths({ graded: 50, correct: 33, neutral: 0, sessions: 6 })!)).toBe('66.0%')
   })
 })
 
 describe('isInsufficientSample', () => {
   it('is below the floor, and the floor itself is enough', () => {
-    expect(isInsufficientSample({ graded: 29, correct: 20, neutral: 0 }, 30)).toBe(true)
-    expect(isInsufficientSample({ graded: 30, correct: 20, neutral: 0 }, 30)).toBe(false)
+    expect(isInsufficientSample({ graded: 29, correct: 20, neutral: 0, sessions: 5 }, 30)).toBe(true)
+    expect(isInsufficientSample({ graded: 30, correct: 20, neutral: 0, sessions: 5 }, 30)).toBe(false)
   })
 })
 
@@ -394,7 +404,7 @@ describe('actingCell', () => {
   it('is null, and counts as zero, with no row on the basis', () => {
     const rules = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
     expect(actingCell(rules, '1d')).toBeNull()
-    expect(cellCounts(null)).toEqual({ graded: 0, correct: 0, neutral: 0 })
+    expect(cellCounts(null)).toEqual({ graded: 0, correct: 0, neutral: 0, sessions: 0 })
   })
 })
 
@@ -414,7 +424,7 @@ describe('demotedSources', () => {
       ...rules,
       accuracy: rules.accuracy.map((a) => ({
         ...a,
-        combined: { graded: 300, correct: 30, neutral: 0 },
+        combined: { graded: 300, correct: 30, neutral: 0, sessions: 12 },
       })),
     }
     expect(demotedSources([low])).toEqual([])
@@ -441,13 +451,197 @@ describe('sourceStatusKind', () => {
 describe('repromotionProgress', () => {
   it('states each window against the re-promotion floor', () => {
     expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[1])).toEqual([
-      'since demotion: 41 of 100 in the 1h window',
-      'since demotion: 37 of 100 in the 1d window',
+      'since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions',
+      'since demotion, 1d window: 37 of 100 labels, 4 of 5 sessions',
     ])
   })
 
   it('is empty for a source not counting toward re-promotion', () => {
     expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[0])).toEqual([])
+  })
+
+  /** "100 of 100 labels" alone would promise a re-promotion the session floor
+   * is still holding back, so the sessions clause rides on every line. */
+  it('states the session floor beside the label floor, from the server', () => {
+    const massive = SENTIMENT_AUDIT_STATES.populated.sources[1]
+    const atLabels: SentimentSourceAudit = {
+      ...massive,
+      eligibility: {
+        ...massive.eligibility,
+        sessionFloor: 7,
+        windows: massive.eligibility.windows.map((w) => ({
+          ...w,
+          graded: 100,
+          needed: 0,
+          sessions: 3,
+          sessionsNeeded: 4,
+        })),
+      },
+    }
+    expect(repromotionProgress(atLabels)).toEqual([
+      'since demotion, 1h window: 100 of 100 labels, 3 of 7 sessions',
+      'since demotion, 1d window: 100 of 100 labels, 3 of 7 sessions',
+    ])
+  })
+
+  it('says in words that a pre-floor row has no session count', () => {
+    const massive = SENTIMENT_AUDIT_STATES.populated.sources[1]
+    const preFloor: SentimentSourceAudit = {
+      ...massive,
+      eligibility: {
+        ...massive.eligibility,
+        windows: massive.eligibility.windows.map((w) => ({
+          ...w,
+          sessions: null,
+          sessionsNeeded: null,
+        })),
+      },
+    }
+    const lines = repromotionProgress(preFloor)
+    expect(lines[0]).toBe(`since demotion, 1h window: 41 of 100 labels, ${SESSIONS_NOT_COUNTED}`)
+    for (const line of lines) expect(line).not.toMatch(/\d+ of \d+ sessions/)
+  })
+})
+
+/* ---------------------------------------------------------------------- *
+ * The five-session floor (spec R3, R9). These format what the server sent
+ * and decide nothing: none of them returns, or is, an eligibility.
+ * ---------------------------------------------------------------------- */
+
+describe('windowProgress', () => {
+  it('is the server’s entry for the window', () => {
+    const rules = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(windowProgress(rules, '1h')).toEqual({
+      window: '1h',
+      graded: 31,
+      needed: 0,
+      sessions: 2,
+      sessionsNeeded: 3,
+    })
+  })
+
+  it('is null for a window the server sent no entry for', () => {
+    const rules = SENTIMENT_AUDIT_STATES.populated.sources[0]
+    const oneWindow: SentimentSourceAudit = {
+      ...rules,
+      eligibility: {
+        ...rules.eligibility,
+        windows: rules.eligibility.windows.filter((w) => w.window === '1h'),
+      },
+    }
+    expect(windowProgress(oneWindow, '1d')).toBeNull()
+  })
+})
+
+describe('isShortOfSessions', () => {
+  const progress = (sessions: number | null, sessionsNeeded: number | null) => ({
+    window: '1h' as const,
+    graded: 40,
+    needed: 0,
+    sessions,
+    sessionsNeeded,
+  })
+
+  it('reads the server’s sessionsNeeded, and the floor itself is enough', () => {
+    expect(isShortOfSessions(progress(4, 1))).toBe(true)
+    expect(isShortOfSessions(progress(5, 0))).toBe(false)
+  })
+
+  /** It compares nothing to a constant: a server floor of 8 met at 8. */
+  it('follows the server, not a client-side 5', () => {
+    expect(isShortOfSessions(progress(8, 0))).toBe(false)
+    expect(isShortOfSessions(progress(6, 2))).toBe(true)
+  })
+
+  /** R3: no reader may treat NULL as eligible. */
+  it('is short for a pre-floor row, and for a window with no entry', () => {
+    expect(isShortOfSessions(progress(null, null))).toBe(true)
+    expect(isShortOfSessions(null)).toBe(true)
+  })
+})
+
+describe('sessionsFact', () => {
+  it('is the count against the server’s floor', () => {
+    const rules = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)).toBe(
+      '2 of 5 sessions',
+    )
+    expect(sessionsFact(windowProgress(rules, '1h'), 6)).toBe('2 of 6 sessions')
+  })
+
+  /** Nothing has run: a real zero, not the pre-floor null. */
+  it('says 0 of the floor when nothing has been graded', () => {
+    const rules = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
+    expect(rules.eligibility.asOfRunId).toBeNull()
+    expect(sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)).toBe(
+      '0 of 5 sessions',
+    )
+  })
+
+  it('says a pre-floor row was not counted, with no number at all', () => {
+    const rules = SENTIMENT_AUDIT_STATES.preSessionFloor.sources[0]
+    const fact = sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)
+    expect(fact).toBe(SESSIONS_NOT_COUNTED)
+    expect(fact).not.toMatch(/\d/)
+  })
+
+  it('says a missing window was not reported', () => {
+    expect(sessionsFact(null, 5)).toBe('sessions not reported')
+  })
+})
+
+describe('statedSessionFloor', () => {
+  it('is the floor every source carries', () => {
+    expect(statedSessionFloor(SENTIMENT_AUDIT_STATES.populated.sources)).toBe(5)
+  })
+
+  it('is null with no sources, or with two that disagree', () => {
+    expect(statedSessionFloor([])).toBeNull()
+    const [rules, massive] = SENTIMENT_AUDIT_STATES.populated.sources
+    const other = { ...massive, eligibility: { ...massive.eligibility, sessionFloor: 6 } }
+    expect(statedSessionFloor([rules, other])).toBeNull()
+  })
+})
+
+/** The fixtures play the server, so they must hold what the server holds:
+ * `eligible` needs both floors in both windows, and a pre-floor row never
+ * is. Pinned here so a fixture edit cannot quietly draw an impossible state. */
+describe('the session-floor fixtures', () => {
+  it('cover every state, with eligible as the server would send it', () => {
+    const { unaudited, populated, sessionsShort, preSessionFloor } = SENTIMENT_AUDIT_STATES
+    // asOfRunId null: zero sessions, the whole floor still needed.
+    expect(unaudited.sources[0].eligibility.windows.map((w) => w.sessionsNeeded)).toEqual([5, 5])
+    // At the floor exactly, and eligible.
+    expect(populated.sources[0].eligibility.windows[0].sessions).toBe(5)
+    expect(populated.sources[0].eligibility.eligible).toBe(true)
+    // Label floor met, session floor not.
+    expect(sessionsShort.sources[0].eligibility.windows.every((w) => w.needed === 0)).toBe(true)
+    expect(sessionsShort.sources[0].eligibility.eligible).toBe(false)
+    // Pre-floor: null together, never eligible.
+    for (const w of preSessionFloor.sources[0].eligibility.windows) {
+      expect([w.sessions, w.sessionsNeeded]).toEqual([null, null])
+    }
+    expect(preSessionFloor.sources[0].eligibility.eligible).toBe(false)
+  })
+
+  it('keep sessions within the engine’s invariants on every cell', () => {
+    for (const state of Object.values(SENTIMENT_AUDIT_STATES)) {
+      for (const source of state.sources) {
+        for (const cell of source.accuracy) {
+          const { combined, watch, discovery } = cell
+          for (const c of [combined, watch, discovery]) {
+            if (c.sessions === null) continue
+            expect(c.sessions).toBeLessThanOrEqual(c.graded)
+            expect(c.sessions === 0).toBe(c.graded === 0)
+          }
+          // Sessions are a distinct union, never a sum.
+          if (combined.sessions !== null && watch.sessions !== null && discovery.sessions !== null) {
+            expect(combined.sessions).toBeGreaterThanOrEqual(Math.max(watch.sessions, discovery.sessions))
+            expect(combined.sessions).toBeLessThanOrEqual(watch.sessions + discovery.sessions)
+          }
+        }
+      }
+    }
   })
 })
 

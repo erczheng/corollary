@@ -1904,18 +1904,29 @@ export const DATA_FEEDS: DataFeed[] = [
  * nobody can see.
  * ---------------------------------------------------------------------- */
 
-function counts(graded: number, correct: number, neutral: number): SentimentCounts {
-  return { graded, correct, neutral }
+/** `sessions` follows the engine's `AccuracyRow` invariants: at most
+ * `graded`, zero exactly when `graded` is, and `null` only on a row written
+ * before the five-session floor (R3). */
+function counts(
+  graded: number,
+  correct: number,
+  neutral: number,
+  sessions: number | null,
+): SentimentCounts {
+  return { graded, correct, neutral, sessions }
 }
 
 /** One window on one basis. `watch` and `discovery` sum to `combined` —
  * the runner writes all three and the split is decision 12's display-only
- * view of the same labels. */
+ * view of the same labels. **Sessions do not sum**: a session both scopes
+ * graded labels in is one session, so `combined`'s count is passed in — at
+ * least the larger split's, at most their total. */
 function cell(
   window: SentimentWindow,
   basis: SentimentAccuracyBasis,
   watch: SentimentCounts,
   discovery: SentimentCounts,
+  combinedSessions: number | null,
 ): SentimentWindowAccuracy {
   return {
     window,
@@ -1924,28 +1935,47 @@ function cell(
       watch.graded + discovery.graded,
       watch.correct + discovery.correct,
       watch.neutral + discovery.neutral,
+      combinedSessions,
     ),
     watch,
     discovery,
   }
 }
 
+/** The server's `sessionFloor`, standing in for `MIN_ELIGIBLE_SESSIONS`. A
+ * fixture plays the server here; the page reads the field and never this. */
+const FIXTURE_SESSION_FLOOR = 5
+
+/** What the server sends: progress against both floors per window, and an
+ * `eligible` that needs both in both windows. A window whose `sessions` is
+ * `null` (a pre-floor row) is never eligible (R3), and its two session
+ * fields are `null` together. */
 function eligibilityFor(
   kind: 'demote' | 'repromote',
   graded: Record<SentimentWindow, number>,
+  sessions: Record<SentimentWindow, number | null>,
   asOfRunId: number | null,
 ): SentimentEligibility {
   const floor = kind === 'demote' ? 30 : 100
-  const windows = (['1h', '1d'] as const).map((window) => ({
-    window,
-    graded: graded[window],
-    needed: Math.max(floor - graded[window], 0),
-  }))
+  const sessionFloor = FIXTURE_SESSION_FLOOR
+  const windows = (['1h', '1d'] as const).map((window) => {
+    const spanned = sessions[window]
+    return {
+      window,
+      graded: graded[window],
+      needed: Math.max(floor - graded[window], 0),
+      sessions: spanned,
+      sessionsNeeded: spanned === null ? null : Math.max(sessionFloor - spanned, 0),
+    }
+  })
   return {
     kind,
     basis: kind === 'demote' ? 'trailing_28d' : 'since_demotion',
     floor,
-    eligible: windows.every((w) => w.graded >= floor),
+    sessionFloor,
+    eligible: windows.every(
+      (w) => w.graded >= floor && w.sessions !== null && w.sessions >= sessionFloor,
+    ),
     windows,
     asOfRunId,
   }
@@ -1970,26 +2000,35 @@ const NEVER_AUDITED_RULES: SentimentSourceAudit = {
   statusMissing: false,
   reason: null,
   accuracy: [],
-  eligibility: eligibilityFor('demote', { '1h': 0, '1d': 0 }, null),
+  // Nothing has run: zero sessions, the whole floor still needed. A count,
+  // not the pre-floor `null`: nothing was written before the floor.
+  eligibility: eligibilityFor('demote', { '1h': 0, '1d': 0 }, { '1h': 0, '1d': 0 }, null),
 }
 
 const NEVER_AUDITED_MASSIVE: SentimentSourceAudit = { ...NEVER_AUDITED_RULES, source: 'massive' }
 
-/** Active, well past the floor in both windows, 61.7% and 64.1% — inside the
- * dead band's upper half, which is the point: an active source there stays
- * active. */
+/** Active, well past the label floor in both windows, 61.7% and 64.1% —
+ * inside the dead band's upper half, which is the point: an active source
+ * there stays active. Its 1h window spans **exactly** the session floor, 5,
+ * so the eligible state is drawn at its boundary. */
 const ACTIVE_RULES: SentimentSourceAudit = {
   source: 'rules',
   status: 'active',
   changedAt: '2026-10-03T14:05:12Z',
   neverAudited: false,
   statusMissing: false,
-  reason: 'at or above 52% in both windows, at least 30 graded directional labels each over the trailing 28 days',
+  reason:
+    'at or above 52% in both windows, at least 30 graded directional labels over at least 5 sessions each over the trailing 28 days',
   accuracy: [
-    cell('1h', 'trailing_28d', counts(150, 94, 28), counts(62, 37, 12)),
-    cell('1d', 'trailing_28d', counts(141, 92, 22), counts(57, 35, 9)),
+    cell('1h', 'trailing_28d', counts(150, 94, 28, 5), counts(62, 37, 12, 4), 5),
+    cell('1d', 'trailing_28d', counts(141, 92, 22, 11), counts(57, 35, 9, 8), 12),
   ],
-  eligibility: eligibilityFor('demote', { '1h': 212, '1d': 198 }, SUCCEEDED_RUN.id),
+  eligibility: eligibilityFor(
+    'demote',
+    { '1h': 212, '1d': 198 },
+    { '1h': 5, '1d': 12 },
+    SUCCEEDED_RUN.id,
+  ),
 }
 
 /** Demoted on its 1h window, and partway back: 41 and 37 graded since, of
@@ -2003,12 +2042,45 @@ const DEMOTED_MASSIVE: SentimentSourceAudit = {
   statusMissing: false,
   reason: 'below 52% in 1h',
   accuracy: [
-    cell('1h', 'trailing_28d', counts(88, 44, 19), counts(31, 15, 7)),
-    cell('1h', 'since_demotion', counts(29, 17, 6), counts(12, 7, 3)),
-    cell('1d', 'trailing_28d', counts(84, 46, 15), counts(30, 17, 5)),
-    cell('1d', 'since_demotion', counts(26, 15, 4), counts(11, 6, 2)),
+    cell('1h', 'trailing_28d', counts(88, 44, 19, 14), counts(31, 15, 7, 10), 16),
+    cell('1h', 'since_demotion', counts(29, 17, 6, 4), counts(12, 7, 3, 3), 4),
+    cell('1d', 'trailing_28d', counts(84, 46, 15, 13), counts(30, 17, 5, 9), 15),
+    cell('1d', 'since_demotion', counts(26, 15, 4, 4), counts(11, 6, 2, 2), 4),
   ],
-  eligibility: eligibilityFor('repromote', { '1h': 41, '1d': 37 }, SUCCEEDED_RUN.id),
+  // Short of both floors since the demotion: 41 and 37 of 100 labels, 4 of
+  // 5 sessions each.
+  eligibility: eligibilityFor(
+    'repromote',
+    { '1h': 41, '1d': 37 },
+    { '1h': 4, '1d': 4 },
+    SUCCEEDED_RUN.id,
+  ),
+}
+
+/** Re-promoted by run 7, past both floors since its demotion: 107 and 103 of
+ * 100 labels, over 7 and 6 sessions, at 67.2% and 67.9%. Active again, it is
+ * judged on the trailing 28 days once more. Its since-demotion rows are the
+ * ones that re-promoted it, and they are still served. */
+const REPROMOTED_MASSIVE: SentimentSourceAudit = {
+  source: 'massive',
+  status: 'active',
+  changedAt: '2026-10-10T14:06:02Z',
+  neverAudited: false,
+  statusMissing: false,
+  reason:
+    'at or above 66% in both windows, at least 100 graded directional labels over at least 5 sessions each since the demotion',
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(118, 79, 21, 17), counts(44, 29, 8, 12), 18),
+    cell('1h', 'since_demotion', counts(78, 53, 12, 6), counts(29, 19, 5, 5), 7),
+    cell('1d', 'trailing_28d', counts(112, 76, 18, 16), counts(41, 28, 6, 11), 17),
+    cell('1d', 'since_demotion', counts(76, 52, 10, 6), counts(27, 18, 4, 4), 6),
+  ],
+  eligibility: eligibilityFor(
+    'demote',
+    { '1h': 162, '1d': 153 },
+    { '1h': 18, '1d': 17 },
+    SUCCEEDED_RUN.id,
+  ),
 }
 
 /** Audited, but short of the floor in both windows — 18 and 12 of 30 — so it
@@ -2016,10 +2088,54 @@ const DEMOTED_MASSIVE: SentimentSourceAudit = {
 const SHORT_SAMPLE_RULES: SentimentSourceAudit = {
   ...NEVER_AUDITED_RULES,
   accuracy: [
-    cell('1h', 'trailing_28d', counts(13, 9, 4), counts(5, 2, 1)),
-    cell('1d', 'trailing_28d', counts(9, 5, 2), counts(3, 2, 0)),
+    cell('1h', 'trailing_28d', counts(13, 9, 4, 3), counts(5, 2, 1, 2), 3),
+    cell('1d', 'trailing_28d', counts(9, 5, 2, 2), counts(3, 2, 0, 2), 2),
   ],
-  eligibility: eligibilityFor('demote', { '1h': 18, '1d': 12 }, SUCCEEDED_RUN.id),
+  eligibility: eligibilityFor(
+    'demote',
+    { '1h': 18, '1d': 12 },
+    { '1h': 3, '1d': 2 },
+    SUCCEEDED_RUN.id,
+  ),
+}
+
+/** Past the **label** floor in both windows, 31 and 34 of 30, but over only
+ * two sessions each, so not eligible and still unaudited. This is the shape
+ * spec R3 was written for: enough labels, nearly all from one day. Its 1h
+ * figure, 20 of 31, would print 64.5% if the cell let it. */
+const SESSION_SHORT_RULES: SentimentSourceAudit = {
+  ...NEVER_AUDITED_RULES,
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(22, 15, 6, 2), counts(9, 5, 2, 1), 2),
+    cell('1d', 'trailing_28d', counts(24, 14, 5, 2), counts(10, 6, 1, 2), 2),
+  ],
+  eligibility: eligibilityFor(
+    'demote',
+    { '1h': 31, '1d': 34 },
+    { '1h': 2, '1d': 2 },
+    SUCCEEDED_RUN.id,
+  ),
+}
+
+/** Rows the last run wrote **before** the five-session floor existed: every
+ * `sessions` is `null`, both session fields of each window are `null`
+ * together, and the source is not eligible, because a NULL row never is
+ * (R3). Its status and reason are that earlier run's, so the reason is the
+ * engine's old wording. */
+const PRE_FLOOR_RULES: SentimentSourceAudit = {
+  ...ACTIVE_RULES,
+  reason:
+    'at or above 52% in both windows, at least 30 graded directional labels each over the trailing 28 days',
+  accuracy: [
+    cell('1h', 'trailing_28d', counts(150, 94, 28, null), counts(62, 37, 12, null), null),
+    cell('1d', 'trailing_28d', counts(141, 92, 22, null), counts(57, 35, 9, null), null),
+  ],
+  eligibility: eligibilityFor(
+    'demote',
+    { '1h': 212, '1d': 198 },
+    { '1h': null, '1d': null },
+    SUCCEEDED_RUN.id,
+  ),
 }
 
 /** No status row at all — a damaged database. The server shows it as
@@ -2034,6 +2150,9 @@ export type SentimentAuditFixture =
   | 'unaudited'
   | 'populated'
   | 'insufficientSample'
+  | 'sessionsShort'
+  | 'preSessionFloor'
+  | 'repromoted'
   | 'statusMissing'
   | 'running'
 
@@ -2056,6 +2175,31 @@ export const SENTIMENT_AUDIT_STATES: Record<SentimentAuditFixture, SentimentAudi
   },
   insufficientSample: {
     sources: [SHORT_SAMPLE_RULES, DEMOTED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  /** Label floor met, session floor not: 31 of 30 labels, 2 of 5 sessions. */
+  sessionsShort: {
+    sources: [SESSION_SHORT_RULES, DEMOTED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  /** The figures predate the session floor: no session count to show. */
+  preSessionFloor: {
+    sources: [PRE_FLOOR_RULES, DEMOTED_MASSIVE],
+    lastRun: SUCCEEDED_RUN,
+    accuracyRun: SUCCEEDED_RUN,
+    nextRunAt: NEXT_AUDIT_AT,
+    manualAvailableAt: null,
+  },
+  /** Both sources active, Massive by re-promotion, with the engine's
+   * `demoted → active` reason. */
+  repromoted: {
+    sources: [ACTIVE_RULES, REPROMOTED_MASSIVE],
     lastRun: SUCCEEDED_RUN,
     accuracyRun: SUCCEEDED_RUN,
     nextRunAt: NEXT_AUDIT_AT,

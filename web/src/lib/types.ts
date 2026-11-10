@@ -1783,6 +1783,10 @@ export interface SentimentCounts {
   graded: number
   correct: number
   neutral: number
+  /** Distinct sessions the graded directional labels span (R3). `null` on a
+   * row written before the five-session floor existed: it carries no count,
+   * so say so in words, and never read it as meeting the floor. */
+  sessions: number | null
 }
 
 /** One window on one basis. `combined` is the figure transitions act on;
@@ -1795,11 +1799,16 @@ export interface SentimentWindowAccuracy {
   discovery: SentimentCounts
 }
 
-/** `needed` more graded labels to reach the floor; `0` once reached. */
+/** `needed` more graded labels to reach the floor; `0` once reached.
+ * `sessionsNeeded` more distinct sessions to reach `sessionFloor`; `0` once
+ * reached. Both session fields are `null` together, exactly when the row
+ * predates the session floor (R3). */
 export interface SentimentWindowProgress {
   window: SentimentWindow
   graded: number
   needed: number
+  sessions: number | null
+  sessionsNeeded: number | null
 }
 
 /** Eligibility as of the last run. `asOfRunId: null` means nothing has been
@@ -1808,6 +1817,9 @@ export interface SentimentEligibility {
   kind: SentimentEligibilityKind
   basis: SentimentAccuracyBasis
   floor: number
+  /** Distinct sessions each window needs (R3), from the server. Never
+   * hardcode 5. `eligible` is the server's and already includes it. */
+  sessionFloor: number
   eligible: boolean
   windows: SentimentWindowProgress[]
   asOfRunId: number | null

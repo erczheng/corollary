@@ -1,6 +1,7 @@
 import { DATA_FEEDS, RISK_LIMITS } from './mockData'
 import { isApiError, isUnreachable } from './api'
 import { NEWS_SOURCE_LABEL } from './news'
+import { formatInteger } from './format'
 import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
@@ -17,6 +18,7 @@ import {
   type SentimentSourceAudit,
   type SentimentWindow,
   type SentimentWindowAccuracy,
+  type SentimentWindowProgress,
 } from './types'
 
 /** Every rule the Settings page needs, as pure functions with no React and
@@ -368,7 +370,53 @@ export function actingCell(
 
 /** The counts a cell shows; zeros for a window with no row on the basis. */
 export function cellCounts(cell: SentimentWindowAccuracy | null): SentimentCounts {
-  return cell?.combined ?? { graded: 0, correct: 0, neutral: 0 }
+  return cell?.combined ?? { graded: 0, correct: 0, neutral: 0, sessions: 0 }
+}
+
+/** The server's progress for one window, on the basis `actingCell` reads.
+ * `null` when the server sent no entry for that window. */
+export function windowProgress(
+  source: SentimentSourceAudit,
+  window: SentimentWindow,
+): SentimentWindowProgress | null {
+  return source.eligibility.windows.find((w) => w.window === window) ?? null
+}
+
+/** Whether the **server** reports a window short of the session floor (R3).
+ * It reads `sessionsNeeded` and compares nothing against a constant, so the
+ * cell can never disagree with the engine about which side of the floor a
+ * window is on.
+ *
+ * A row written before the floor (`sessions: null`) carries no count, and it
+ * is short: the engine never treats NULL as eligible, so nor does a
+ * percentage here. A missing entry is short for the same reason. Display only.
+ * Whether a source is eligible is `eligibility.eligible`, never this. */
+export function isShortOfSessions(progress: SentimentWindowProgress | null): boolean {
+  if (progress === null || progress.sessions === null || progress.sessionsNeeded === null) {
+    return true
+  }
+  return progress.sessionsNeeded > 0
+}
+
+/** What a row written before the five-session floor says in place of a
+ * count. No number: "0 of 5" would state a count nobody took. */
+export const SESSIONS_NOT_COUNTED = 'sessions not counted: written before the session floor existed'
+
+/** "2 of 5 sessions", against the server's `sessionFloor`, or the words for
+ * a row with no count. Formats what the server sent and decides nothing. */
+export function sessionsFact(progress: SentimentWindowProgress | null, sessionFloor: number): string {
+  if (progress === null) return 'sessions not reported'
+  if (progress.sessions === null) return SESSIONS_NOT_COUNTED
+  return `${formatInteger(progress.sessions)} of ${formatInteger(sessionFloor)} sessions`
+}
+
+/** The session floor the rule paragraph states, from the server's
+ * `sessionFloor`, which every source carries. `null` with no sources, or if
+ * two sources disagree. The paragraph then says the figure was not reported,
+ * rather than picking one or falling back to a constant. */
+export function statedSessionFloor(sources: readonly SentimentSourceAudit[]): number | null {
+  const floors = new Set(sources.map((s) => s.eligibility.sessionFloor))
+  return floors.size === 1 ? [...floors][0] : null
 }
 
 /** The sources the banner names: those whose **server** status is
@@ -390,12 +438,16 @@ export function sourceStatusKind(source: SentimentSourceAudit): SourceStatusKind
 }
 
 /** A demoted source's road back, one sentence per window:
- * "since demotion: 41 of 100 in the 1h window". Empty for any source the
- * server is not counting toward re-promotion. */
+ * "since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions". Both
+ * floors, because a line reading "100 of 100" with the sessions left off
+ * would promise a re-promotion the session floor is still holding back.
+ * Empty for any source the server is not counting toward re-promotion. */
 export function repromotionProgress(source: SentimentSourceAudit): string[] {
-  if (source.eligibility.kind !== 'repromote') return []
-  return source.eligibility.windows.map(
-    (w) => `since demotion: ${w.graded} of ${source.eligibility.floor} in the ${w.window} window`,
+  const { eligibility } = source
+  if (eligibility.kind !== 'repromote') return []
+  return eligibility.windows.map(
+    (w) =>
+      `since demotion, ${w.window} window: ${formatInteger(w.graded)} of ${formatInteger(eligibility.floor)} labels, ${sessionsFact(w, eligibility.sessionFloor)}`,
   )
 }
 

@@ -34,7 +34,17 @@ from corollary.api.deps import ServiceRegistry, scheduler_status
 from corollary.api.routes import sentiment as sentiment_routes
 from corollary.api.routes.sentiment import MANUAL_AUDIT_INTERVAL, audit_now
 from corollary.data.news import audit_runner
-from corollary.data.news.audit import DEMOTION_FLOOR, REPROMOTION_FLOOR
+from corollary.data.news.audit import (
+    DEMOTION_FLOOR,
+    MIN_ELIGIBLE_SESSIONS,
+    REPROMOTION_FLOOR,
+    AccuracyBasis,
+    AccuracyRow,
+    AccuracyScope,
+    CurrentStatus,
+    SourceStatus,
+    decide_transition,
+)
 from corollary.data.news.audit_runner import SentimentAuditDeps, WatchUniverseUnavailable
 from corollary.data.providers.interface import Bar
 from corollary.db.models import AuditRun, SentimentSourceStatus
@@ -160,14 +170,19 @@ def test_unaudited_sources_say_never_audited_and_invent_no_date(
         assert source["statusMissing"] is False
         assert source["reason"] is None
         assert source["accuracy"] == []
+        # Nothing counted on this basis: zero labels over zero sessions, a
+        # count rather than a guess, so the whole session floor is needed.
         assert source["eligibility"] == {
             "kind": "demote",
             "basis": "trailing_28d",
             "floor": DEMOTION_FLOOR,
+            "sessionFloor": MIN_ELIGIBLE_SESSIONS,
             "eligible": False,
             "windows": [
-                {"window": "1h", "graded": 0, "needed": DEMOTION_FLOOR},
-                {"window": "1d", "graded": 0, "needed": DEMOTION_FLOOR},
+                {"window": "1h", "graded": 0, "needed": DEMOTION_FLOOR,
+                 "sessions": 0, "sessionsNeeded": MIN_ELIGIBLE_SESSIONS},
+                {"window": "1d", "graded": 0, "needed": DEMOTION_FLOOR,
+                 "sessions": 0, "sessionsNeeded": MIN_ELIGIBLE_SESSIONS},
             ],
             "asOfRunId": None,
         }
@@ -180,14 +195,18 @@ def test_unaudited_sources_say_never_audited_and_invent_no_date(
 def test_an_active_source_serves_counts_split_and_how_many_more_at_the_floor(
     sentiment_client: TestClient, db_engine: Engine
 ) -> None:
-    """29 graded needs one more; 30 needs none. Counts only -- no percentage."""
+    """29 graded needs one more; 30 needs none. One session under the floor
+    needs one more; over it needs none. Counts only -- no percentage."""
     run = add_audit_run(db_engine, started_at=NOW - timedelta(days=2),
                         finished_at=NOW - timedelta(days=2) + timedelta(minutes=3))
     set_source_status(db_engine, "rules", "active", at=NOW - timedelta(days=2), run_id=run)
     add_accuracy(db_engine, run, source="rules", window="1h",
-                 watch=(20, 12, 3), discovery=(DEMOTION_FLOOR - 1 - 20, 5, 1))
+                 watch=(20, 12, 3), discovery=(DEMOTION_FLOOR - 1 - 20, 5, 1),
+                 sessions=MIN_ELIGIBLE_SESSIONS - 1, watch_sessions=3, discovery_sessions=2)
     add_accuracy(db_engine, run, source="rules", window="1d",
-                 watch=(DEMOTION_FLOOR, 18, 0))
+                 watch=(DEMOTION_FLOOR, 18, 0),
+                 sessions=MIN_ELIGIBLE_SESSIONS + 1,
+                 watch_sessions=MIN_ELIGIBLE_SESSIONS + 1, discovery_sessions=0)
     add_accuracy(db_engine, run, source="massive", window="1h")
     add_accuracy(db_engine, run, source="massive", window="1d")
     failed = add_audit_run(db_engine, started_at=NOW - timedelta(hours=5),
@@ -205,26 +224,34 @@ def test_an_active_source_serves_counts_split_and_how_many_more_at_the_floor(
         {
             "window": "1h",
             "basis": "trailing_28d",
-            "combined": {"graded": DEMOTION_FLOOR - 1, "correct": 17, "neutral": 4},
-            "watch": {"graded": 20, "correct": 12, "neutral": 3},
-            "discovery": {"graded": DEMOTION_FLOOR - 1 - 20, "correct": 5, "neutral": 1},
+            "combined": {"graded": DEMOTION_FLOOR - 1, "correct": 17, "neutral": 4,
+                         "sessions": MIN_ELIGIBLE_SESSIONS - 1},
+            "watch": {"graded": 20, "correct": 12, "neutral": 3, "sessions": 3},
+            "discovery": {"graded": DEMOTION_FLOOR - 1 - 20, "correct": 5, "neutral": 1,
+                          "sessions": 2},
         },
         {
             "window": "1d",
             "basis": "trailing_28d",
-            "combined": {"graded": DEMOTION_FLOOR, "correct": 18, "neutral": 0},
-            "watch": {"graded": DEMOTION_FLOOR, "correct": 18, "neutral": 0},
-            "discovery": {"graded": 0, "correct": 0, "neutral": 0},
+            "combined": {"graded": DEMOTION_FLOOR, "correct": 18, "neutral": 0,
+                         "sessions": MIN_ELIGIBLE_SESSIONS + 1},
+            "watch": {"graded": DEMOTION_FLOOR, "correct": 18, "neutral": 0,
+                      "sessions": MIN_ELIGIBLE_SESSIONS + 1},
+            "discovery": {"graded": 0, "correct": 0, "neutral": 0, "sessions": 0},
         },
     ]
     assert rules["eligibility"] == {
         "kind": "demote",
         "basis": "trailing_28d",
         "floor": DEMOTION_FLOOR,
+        "sessionFloor": MIN_ELIGIBLE_SESSIONS,
         "eligible": False,
         "windows": [
-            {"window": "1h", "graded": DEMOTION_FLOOR - 1, "needed": 1},
-            {"window": "1d", "graded": DEMOTION_FLOOR, "needed": 0},
+            {"window": "1h", "graded": DEMOTION_FLOOR - 1, "needed": 1,
+             "sessions": MIN_ELIGIBLE_SESSIONS - 1, "sessionsNeeded": 1},
+            # Over the session floor is "none needed", never a negative count.
+            {"window": "1d", "graded": DEMOTION_FLOOR, "needed": 0,
+             "sessions": MIN_ELIGIBLE_SESSIONS + 1, "sessionsNeeded": 0},
         ],
         "asOfRunId": run,
     }
@@ -237,19 +264,166 @@ def test_an_active_source_serves_counts_split_and_how_many_more_at_the_floor(
     assert body["manualAvailableAt"] is None
 
 
-def test_a_source_at_the_floor_in_both_windows_is_eligible(
+def test_a_source_at_both_floors_in_both_windows_is_eligible(
     sentiment_client: TestClient, db_engine: Engine
 ) -> None:
+    """The permit at the boundary: exactly the label floor over exactly the
+    session floor, in both windows."""
     run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
                         finished_at=NOW - timedelta(days=1))
-    add_accuracy(db_engine, run, source="massive", window="1h", watch=(DEMOTION_FLOOR, 16, 0))
+    add_accuracy(db_engine, run, source="massive", window="1h", watch=(DEMOTION_FLOOR, 16, 0),
+                 sessions=MIN_ELIGIBLE_SESSIONS, watch_sessions=MIN_ELIGIBLE_SESSIONS,
+                 discovery_sessions=0)
     # Over the floor is still "none needed", never a negative count.
     add_accuracy(db_engine, run, source="massive", window="1d",
-                 watch=(DEMOTION_FLOOR + 1, 16, 0))
+                 watch=(DEMOTION_FLOOR + 1, 16, 0),
+                 sessions=MIN_ELIGIBLE_SESSIONS, watch_sessions=MIN_ELIGIBLE_SESSIONS,
+                 discovery_sessions=0)
     massive = _source(sentiment_client.get(SENTIMENT).json(), "massive")
     assert massive["status"] == "unaudited"
     assert massive["eligibility"]["eligible"] is True
     assert [w["needed"] for w in massive["eligibility"]["windows"]] == [0, 0]
+    assert [w["sessionsNeeded"] for w in massive["eligibility"]["windows"]] == [0, 0]
+
+
+def test_one_session_under_the_floor_is_not_eligible_at_any_label_count(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """The reject at the boundary: well over the label floor, one session
+    short in one window. The other window meeting both floors does not carry it."""
+    run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
+                        finished_at=NOW - timedelta(days=1))
+    add_accuracy(db_engine, run, source="rules", window="1h", watch=(DEMOTION_FLOOR + 10, 20, 0),
+                 sessions=MIN_ELIGIBLE_SESSIONS - 1, watch_sessions=MIN_ELIGIBLE_SESSIONS - 1,
+                 discovery_sessions=0)
+    add_accuracy(db_engine, run, source="rules", window="1d", watch=(DEMOTION_FLOOR + 10, 20, 0),
+                 sessions=MIN_ELIGIBLE_SESSIONS, watch_sessions=MIN_ELIGIBLE_SESSIONS,
+                 discovery_sessions=0)
+    eligibility = _source(sentiment_client.get(SENTIMENT).json(), "rules")["eligibility"]
+    assert eligibility["eligible"] is False
+    assert eligibility["windows"] == [
+        {"window": "1h", "graded": DEMOTION_FLOOR + 10, "needed": 0,
+         "sessions": MIN_ELIGIBLE_SESSIONS - 1, "sessionsNeeded": 1},
+        {"window": "1d", "graded": DEMOTION_FLOOR + 10, "needed": 0,
+         "sessions": MIN_ELIGIBLE_SESSIONS, "sessionsNeeded": 0},
+    ]
+
+
+def test_a_row_from_before_the_session_floor_is_never_eligible(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """NULL ``sessions`` is a count that does not exist: served as ``null``,
+    with ``sessionsNeeded`` ``null`` beside it rather than a number nobody
+    counted, and never eligible however many labels it carries."""
+    run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
+                        finished_at=NOW - timedelta(days=1))
+    for window in ("1h", "1d"):
+        add_accuracy(db_engine, run, source="rules", window=window,
+                     watch=(DEMOTION_FLOOR + 20, 30, 0), discovery=(DEMOTION_FLOOR, 20, 0))
+    rules = _source(sentiment_client.get(SENTIMENT).json(), "rules")
+    assert rules["eligibility"] == {
+        "kind": "demote",
+        "basis": "trailing_28d",
+        "floor": DEMOTION_FLOOR,
+        "sessionFloor": MIN_ELIGIBLE_SESSIONS,
+        "eligible": False,
+        "windows": [
+            {"window": "1h", "graded": 2 * DEMOTION_FLOOR + 20, "needed": 0,
+             "sessions": None, "sessionsNeeded": None},
+            {"window": "1d", "graded": 2 * DEMOTION_FLOOR + 20, "needed": 0,
+             "sessions": None, "sessionsNeeded": None},
+        ],
+        "asOfRunId": run,
+    }
+    for cell in rules["accuracy"]:
+        for scope in ("combined", "watch", "discovery"):
+            assert cell[scope]["sessions"] is None
+
+
+def test_each_scope_carries_its_own_stored_session_count(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """Sessions do not sum across the split -- one session can hold a watch
+    and a discovery label -- so each scope is read from its own row, never
+    derived from the others."""
+    run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
+                        finished_at=NOW - timedelta(days=1))
+    add_accuracy(db_engine, run, source="massive", window="1h",
+                 watch=(10, 6, 0), discovery=(8, 4, 0),
+                 sessions=5, watch_sessions=4, discovery_sessions=3)
+    add_accuracy(db_engine, run, source="massive", window="1d",
+                 watch=(9, 6, 0), discovery=(7, 4, 0),
+                 sessions=6, watch_sessions=2, discovery_sessions=7)
+    massive = _source(sentiment_client.get(SENTIMENT).json(), "massive")
+    assert [
+        (c["window"], c["combined"]["sessions"], c["watch"]["sessions"],
+         c["discovery"]["sessions"])
+        for c in massive["accuracy"]
+    ] == [("1h", 5, 4, 3), ("1d", 6, 2, 7)]
+    # Eligibility reads the combined figure, the one a transition acts on.
+    assert [w["sessions"] for w in massive["eligibility"]["windows"]] == [5, 6]
+
+
+@pytest.mark.parametrize(
+    ("graded", "sessions"),
+    [
+        (DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS),
+        (DEMOTION_FLOOR - 1, MIN_ELIGIBLE_SESSIONS),
+        (DEMOTION_FLOOR, MIN_ELIGIBLE_SESSIONS - 1),
+        (DEMOTION_FLOOR + 50, None),
+    ],
+)
+def test_settings_calls_a_source_eligible_exactly_when_the_engine_would_move_it(
+    sentiment_client: TestClient, db_engine: Engine, graded: int, sessions: int | None
+) -> None:
+    """The gap this closes: Settings once called a source eligible that the
+    engine would not move. Every label wrong, so an eligible unaudited source
+    is one the engine demotes and an ineligible one it leaves alone; the
+    route's ``eligible`` must say which, for the same stored counts."""
+    run = add_audit_run(db_engine, started_at=NOW - timedelta(days=1),
+                        finished_at=NOW - timedelta(days=1))
+    for window in ("1h", "1d"):
+        add_accuracy(db_engine, run, source="rules", window=window, watch=(graded, 0, 0),
+                     sessions=sessions, watch_sessions=sessions,
+                     discovery_sessions=None if sessions is None else 0)
+    served = _source(sentiment_client.get(SENTIMENT).json(), "rules")["eligibility"]
+
+    rows = [
+        AccuracyRow(source="rules", window=window, basis=AccuracyBasis.TRAILING_28D,
+                    scope=AccuracyScope.ALL, graded=graded, correct=0, neutral=0,
+                    sessions=sessions)
+        for window in ("1h", "1d")
+    ]
+    moved = decide_transition(
+        CurrentStatus(source="rules", status=SourceStatus.UNAUDITED, changed_at=None),
+        rows, NOW,
+    )
+    assert served["eligible"] is (moved is not None)
+
+
+def test_a_demoted_source_one_session_short_since_the_demotion_is_not_eligible(
+    sentiment_client: TestClient, db_engine: Engine
+) -> None:
+    """Re-promotion has the same session floor as demotion, on ``since_demotion``."""
+    demoting = add_audit_run(db_engine, started_at=NOW - timedelta(days=14),
+                             finished_at=NOW - timedelta(days=14))
+    set_source_status(db_engine, "massive", "demoted", at=NOW - timedelta(days=14),
+                      run_id=demoting)
+    latest = add_audit_run(db_engine, started_at=NOW - timedelta(days=7),
+                           finished_at=NOW - timedelta(days=7))
+    for window in ("1h", "1d"):
+        add_accuracy(db_engine, latest, source="massive", window=window,
+                     watch=(140, 90, 0), sessions=12, watch_sessions=12, discovery_sessions=0)
+        add_accuracy(db_engine, latest, source="massive", window=window, basis="since_demotion",
+                     watch=(REPROMOTION_FLOOR, 80, 0), sessions=MIN_ELIGIBLE_SESSIONS - 1,
+                     watch_sessions=MIN_ELIGIBLE_SESSIONS - 1, discovery_sessions=0)
+    eligibility = _source(sentiment_client.get(SENTIMENT).json(), "massive")["eligibility"]
+    assert eligibility["kind"] == "repromote"
+    assert eligibility["eligible"] is False
+    assert [(w["needed"], w["sessionsNeeded"]) for w in eligibility["windows"]] == [
+        (0, 1),
+        (0, 1),
+    ]
 
 
 def test_a_demoted_source_reports_repromotion_progress_since_the_demotion(
@@ -266,9 +440,11 @@ def test_a_demoted_source_reports_repromotion_progress_since_the_demotion(
         add_accuracy(db_engine, latest, source="massive", window=window,
                      watch=(140, 70, 2))
     add_accuracy(db_engine, latest, source="massive", window="1h", basis="since_demotion",
-                 watch=(60, 40, 0), discovery=(REPROMOTION_FLOOR - 1 - 60, 25, 1))
+                 watch=(60, 40, 0), discovery=(REPROMOTION_FLOOR - 1 - 60, 25, 1),
+                 sessions=8, watch_sessions=6, discovery_sessions=5)
     add_accuracy(db_engine, latest, source="massive", window="1d", basis="since_demotion",
-                 watch=(REPROMOTION_FLOOR, 70, 0))
+                 watch=(REPROMOTION_FLOOR, 70, 0),
+                 sessions=9, watch_sessions=9, discovery_sessions=0)
 
     massive = _source(sentiment_client.get(SENTIMENT).json(), "massive")
     assert massive["status"] == "demoted"
@@ -282,10 +458,13 @@ def test_a_demoted_source_reports_repromotion_progress_since_the_demotion(
         "kind": "repromote",
         "basis": "since_demotion",
         "floor": REPROMOTION_FLOOR,
+        "sessionFloor": MIN_ELIGIBLE_SESSIONS,
         "eligible": False,
         "windows": [
-            {"window": "1h", "graded": REPROMOTION_FLOOR - 1, "needed": 1},
-            {"window": "1d", "graded": REPROMOTION_FLOOR, "needed": 0},
+            {"window": "1h", "graded": REPROMOTION_FLOOR - 1, "needed": 1,
+             "sessions": 8, "sessionsNeeded": 0},
+            {"window": "1d", "graded": REPROMOTION_FLOOR, "needed": 0,
+             "sessions": 9, "sessionsNeeded": 0},
         ],
         "asOfRunId": latest,
     }
@@ -306,10 +485,13 @@ def test_a_source_demoted_by_the_latest_run_has_counted_nothing_since(
         "kind": "repromote",
         "basis": "since_demotion",
         "floor": REPROMOTION_FLOOR,
+        "sessionFloor": MIN_ELIGIBLE_SESSIONS,
         "eligible": False,
         "windows": [
-            {"window": "1h", "graded": 0, "needed": REPROMOTION_FLOOR},
-            {"window": "1d", "graded": 0, "needed": REPROMOTION_FLOOR},
+            {"window": "1h", "graded": 0, "needed": REPROMOTION_FLOOR,
+             "sessions": 0, "sessionsNeeded": MIN_ELIGIBLE_SESSIONS},
+            {"window": "1d", "graded": 0, "needed": REPROMOTION_FLOOR,
+             "sessions": 0, "sessionsNeeded": MIN_ELIGIBLE_SESSIONS},
         ],
         "asOfRunId": None,
     }

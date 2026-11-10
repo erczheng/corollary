@@ -935,7 +935,8 @@ describe('sentiment accuracy', () => {
     expect(within(row(table, 'Corollary rules')).getByText('Never audited.')).toBeInTheDocument()
     expect(within(row(table, 'Massive')).getByText('Never audited.')).toBeInTheDocument()
     expect(within(table).queryByText(/Graded, but not yet/)).not.toBeInTheDocument()
-    expect(within(table).getAllByText('insufficient sample — 0 of 30')).toHaveLength(4)
+    expect(within(table).getAllByText('insufficient sample — 0 of 30 labels, 0 of 5 sessions'),
+    ).toHaveLength(4)
     expect(within(panel).getByText(/No audit has completed yet/)).toBeInTheDocument()
     expect(within(panel).getByText('No run has ever started.')).toBeInTheDocument()
     expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
@@ -959,13 +960,15 @@ describe('sentiment accuracy', () => {
 
     expect(within(massive).getByText('Demoted')).toBeInTheDocument()
     expect(
-      within(massive).getByText('since demotion: 41 of 100 in the 1h window'),
+      within(massive).getByText('since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions'),
     ).toBeInTheDocument()
     expect(
-      within(massive).getByText('since demotion: 37 of 100 in the 1d window'),
+      within(massive).getByText('since demotion, 1d window: 37 of 100 labels, 4 of 5 sessions'),
     ).toBeInTheDocument()
     // Judged on since_demotion: 41 graded, below the 100 floor.
-    expect(within(massive).getByText('insufficient sample — 41 of 100')).toBeInTheDocument()
+    expect(
+      within(massive).getByText('insufficient sample — 41 of 100 labels, 4 of 5 sessions'),
+    ).toBeInTheDocument()
 
     const banner = within(panel).getByRole('status')
     expect(banner.textContent).toContain('Massive')
@@ -980,10 +983,12 @@ describe('sentiment accuracy', () => {
     render(<App />)
     const rules = row(await sentimentTable(), 'Corollary rules')
 
-    const short = within(rules).getByText('insufficient sample — 18 of 30')
+    const short = within(rules).getByText('insufficient sample — 18 of 30 labels, 3 of 5 sessions')
     expect(short.className).toContain('text-on-surface-variant')
     expect(short.className).not.toMatch(/caution|error|bearish|bullish/)
-    expect(within(rules).getByText('insufficient sample — 12 of 30')).toBeInTheDocument()
+    expect(
+      within(rules).getByText('insufficient sample — 12 of 30 labels, 2 of 5 sessions'),
+    ).toBeInTheDocument()
     expect(rules.textContent).not.toContain('%')
   })
 
@@ -996,7 +1001,9 @@ describe('sentiment accuracy', () => {
     const rules = row(await sentimentTable(), 'Corollary rules')
 
     expect(
-      within(rules).getByText('Graded, but not yet on enough labels to be given a status.'),
+      within(rules).getByText(
+        'Graded, but not yet on enough labels over enough sessions to be given a status.',
+      ),
     ).toBeInTheDocument()
     expect(within(rules).queryByText('Never audited.')).not.toBeInTheDocument()
   })
@@ -1009,7 +1016,7 @@ describe('sentiment accuracy', () => {
     const rules = row(await sentimentTable(), 'Corollary rules')
 
     const toggle = within(rules).getByRole('button', {
-      name: /^insufficient sample — 18 of 30\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+      name: /^insufficient sample — 18 of 30 labels, 3 of 5 sessions\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
     })
     fireEvent.click(toggle)
 
@@ -1042,7 +1049,7 @@ describe('sentiment accuracy', () => {
     expect(text).toMatch(/falls below\s*52%/)
     expect(text).toMatch(/reach\s*66%\s*or better/)
     expect(text).toMatch(
-      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels each over the trailing 28 days/,
+      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels over at least\s*5\s*sessions each over the trailing 28 days/,
     )
     expect(text).toMatch(/Between\s*52%\s*and\s*66%\s*an active or demoted source stays where it is/)
     expect(text).not.toMatch(/Between\s*52%\s*and\s*66%\s*a source stays/)
@@ -1060,7 +1067,8 @@ describe('sentiment accuracy', () => {
     const figures = Array.from(paragraph.querySelectorAll('span.text-data-sm')).map(
       (el) => el.textContent,
     )
-    expect(figures).toEqual(['52%', '30', '52%', '30', '66%', '100', '52%', '66%'])
+    // The session floor (5, the server's) after each label floor.
+    expect(figures).toEqual(['52%', '30', '5', '52%', '30', '5', '66%', '100', '5', '52%', '66%'])
   })
 
   it('expands a cell into its watch and discovery split, labelled display only', async () => {
@@ -1071,7 +1079,7 @@ describe('sentiment accuracy', () => {
     expect(within(rules).queryByText(/display only/)).not.toBeInTheDocument()
     // The figure is the name (WCAG 2.5.3); the action follows it, hidden.
     const toggle = within(rules).getByRole('button', {
-      name: /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+      name: /^61\.7%\s*n 212, 5 sessions\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
     })
     expect(toggle).not.toHaveAttribute('aria-label')
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -1079,7 +1087,7 @@ describe('sentiment accuracy', () => {
 
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(toggle).toHaveAccessibleName(
-      /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
+      /^61\.7%\s*n 212, 5 sessions\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
     )
     expect(
       within(rules).getByText('display only — transitions act on the combined figure'),
@@ -1141,6 +1149,196 @@ describe('sentiment accuracy', () => {
       await within(section('Sentiment accuracy')).findByRole('alert', {}, { timeout: 4000 }),
     ).toHaveTextContent('boom')
   })
+
+  /* -------------------------------------------------------------------- *
+   * The five-session floor (spec R3, R9). Every session figure on screen
+   * is the server's, against the server's `sessionFloor`.
+   * -------------------------------------------------------------------- */
+
+  function ruleParagraph(): HTMLElement {
+    return within(section('Sentiment accuracy')).getByText(/Between/, { selector: 'p' })
+  }
+
+  /** R9: "2 of 5 sessions" beside "31 of 30 labels", as a sample-size fact
+   * exactly as the label shortfall is. The label floor is met, so the only
+   * thing withholding 20 of 31 = 64.5% is the session floor. */
+  it('states sessions beside labels when only the session floor is short', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.sessionsShort) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const fact = within(rules).getByText('insufficient sample — 31 of 30 labels, 2 of 5 sessions')
+    expect(fact.className).toContain('text-on-surface-variant')
+    expect(fact.className).toContain('text-data-sm')
+    expect(fact.className).not.toMatch(/caution|error|bearish|bullish/)
+    expect(
+      within(rules).getByText('insufficient sample — 34 of 30 labels, 2 of 5 sessions'),
+    ).toBeInTheDocument()
+    expect(rules.textContent).not.toContain('64.5')
+    expect(rules.textContent).not.toContain('%')
+    expect(
+      within(rules).getByText(
+        'Graded, but not yet on enough labels over enough sessions to be given a status.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  /** The split one click down withholds the percentage too: watch alone is
+   * 15 of 22 = 68.1%. */
+  it('expands a session-short cell into counts only', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.sessionsShort) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    fireEvent.click(
+      within(rules).getByRole('button', {
+        name: /^insufficient sample — 31 of 30 labels, 2 of 5 sessions\s*— Corollary rules, 1 hour/,
+      }),
+    )
+    expect(rules.textContent).toContain('n 22')
+    expect(rules.textContent).not.toContain('68.1')
+    expect(rules.textContent).toContain('reaches both floors')
+  })
+
+  /** A row written before the floor carries no count: said in words, never
+   * a number, never "0 of 5", and never a percentage that would read as
+   * meeting the floor. */
+  it('says a pre-floor row has no session count, in words', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.preSessionFloor) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const facts = [212, 198].map((n) =>
+      within(rules).getByText(
+        `insufficient sample — ${n} of 30 labels, sessions not counted: written before the session floor existed`,
+      ),
+    )
+    for (const fact of facts) {
+      expect(fact.className).toContain('text-on-surface-variant')
+      expect(fact.className).not.toMatch(/caution|error|bearish|bullish/)
+    }
+    expect(rules.textContent).not.toMatch(/\d+ of \d+ sessions/)
+    expect(rules.textContent).not.toMatch(/\d+ sessions/)
+    // 131 of 212 would print 61.7% as though the row were a measurement.
+    expect(rules.textContent).not.toContain('61.7')
+    // Its status is the pre-floor run's, and its reason that run's wording.
+    expect(within(rules).getByText('Active')).toBeInTheDocument()
+  })
+
+  /** At the session floor exactly (5 of 5) the source is eligible, and the
+   * cell is a measurement: the percentage, n, and the sessions it spans. */
+  it('renders the eligible state as a measurement with its sessions', async () => {
+    stubFetch()
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    expect(SENTIMENT_AUDIT_STATES.populated.sources[0].eligibility.eligible).toBe(true)
+    expect(within(rules).getByText('n 212, 5 sessions')).toBeInTheDocument()
+    expect(within(rules).getByText('n 198, 12 sessions')).toBeInTheDocument()
+    expect(rules.textContent).toContain('61.7%')
+    expect(within(rules).queryByText(/insufficient sample/)).not.toBeInTheDocument()
+  })
+
+  /** `asOfRunId: null`: a real zero against the floor, not the pre-floor
+   * words. */
+  it('counts zero sessions when nothing has run', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.unaudited) })
+    render(<App />)
+    const table = await sentimentTable()
+
+    expect(table.textContent).not.toContain('sessions not counted')
+    expect(within(table).getAllByText(/0 of 5 sessions$/)).toHaveLength(4)
+  })
+
+  /** The floor is the server's `sessionFloor`, never a client 5: the rule
+   * sentence and every cell move with it. */
+  it('states and applies the session floor the server sends', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const floor = 7
+    const status: SentimentAuditStatus = {
+      ...populated,
+      sources: populated.sources.map((s) => ({
+        ...s,
+        eligibility: {
+          ...s.eligibility,
+          sessionFloor: floor,
+          eligible: false,
+          windows: s.eligibility.windows.map((w) => ({
+            ...w,
+            sessionsNeeded: w.sessions === null ? null : Math.max(floor - w.sessions, 0),
+          })),
+        },
+      })),
+    }
+    stubFetch({ sentiment: jsonResponse(200, status) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+    // The rule paragraph only: the audit's reason is the engine's own
+    // sentence and states the floor its run applied.
+    const text = ruleParagraph().textContent ?? ''
+
+    expect(text.match(/over at least\s*7\s*sessions/g)).toHaveLength(3)
+    expect(text).not.toMatch(/over at least\s*5\s*sessions/)
+    // 1h spans 5 sessions, short of the server's 7; 1d spans 12, past it.
+    expect(
+      within(rules).getByText('insufficient sample — 212 of 30 labels, 5 of 7 sessions'),
+    ).toBeInTheDocument()
+    expect(within(rules).getByText('n 198, 12 sessions')).toBeInTheDocument()
+  })
+
+  it('says the session floor was not reported when the sources disagree', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const [rules, massive] = populated.sources
+    const status: SentimentAuditStatus = {
+      ...populated,
+      sources: [rules, { ...massive, eligibility: { ...massive.eligibility, sessionFloor: 6 } }],
+    }
+    stubFetch({ sentiment: jsonResponse(200, status) })
+    render(<App />)
+    await sentimentTable()
+    const text = ruleParagraph().textContent ?? ''
+
+    expect(text).toContain('over a minimum number of sessions the server did not report')
+    expect(text).not.toMatch(/over at least\s*\d+\s*sessions/)
+  })
+
+  it('states the engine’s re-promotion reason, sessions included', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.repromoted) })
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+
+    expect(within(massive).getByText('Active')).toBeInTheDocument()
+    expect(massive.textContent).toContain(
+      'at or above 66% in both windows, at least 100 graded directional labels over at least 5 sessions each since the demotion',
+    )
+  })
+
+  /** R4, R9: "there is still no control". Nothing on the panel voids a run,
+   * demotes or re-promotes a source, or overrides the session floor, in any
+   * state. The only buttons are the audit trigger and the cell toggles. */
+  it.each(['populated', 'sessionsShort', 'preSessionFloor', 'repromoted'] as const)(
+    'offers no void, demote or re-promote control (%s)',
+    async (state) => {
+      stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES[state]) })
+      render(<App />)
+      await sentimentTable()
+      const panel = section('Sentiment accuracy')
+
+      for (const button of screen.getAllByRole('button')) {
+        const name = `${button.textContent ?? ''} ${button.getAttribute('aria-label') ?? ''}`
+        expect(name).not.toMatch(/\bvoid|re-?promot|reinstat|undemot|\bdemote\b/i)
+      }
+      for (const button of within(panel).getAllByRole('button')) {
+        const name = button.textContent ?? ''
+        expect(
+          name === 'Run audit now' || /show the watch and discovery split$/.test(name),
+        ).toBe(true)
+      }
+      for (const role of ['checkbox', 'switch', 'textbox', 'spinbutton', 'combobox'] as const) {
+        expect(within(panel).queryAllByRole(role)).toHaveLength(0)
+      }
+    },
+  )
 })
 
 describe('running the audit by hand', () => {

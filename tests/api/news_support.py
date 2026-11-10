@@ -249,15 +249,26 @@ def add_accuracy(
     basis: str = "trailing_28d",
     watch: tuple[int, int, int] = (0, 0, 0),
     discovery: tuple[int, int, int] = (0, 0, 0),
+    sessions: int | None = None,
+    watch_sessions: int | None = None,
+    discovery_sessions: int | None = None,
 ) -> None:
     """One window's three ``sentiment_accuracy`` rows: ``all`` is the sum of
-    the ``(graded, correct, neutral)`` splits, as ``compute_accuracy`` writes it."""
+    the ``(graded, correct, neutral)`` splits, as ``compute_accuracy`` writes it.
+
+    ``sessions`` is the ``all`` row's session count, ``watch_sessions`` and
+    ``discovery_sessions`` the splits'. They are given separately because
+    they do **not** sum: one session can hold a watch label and a discovery
+    label. Each defaults to NULL -- a row written before Q23b, which no
+    reader may treat as eligible -- so a test that wants the floor met
+    states its session counts.
+    """
     combined = tuple(w + d for w, d in zip(watch, discovery, strict=True))
     with Session(engine) as session:
-        for scope, (graded, correct, neutral) in (
-            ("all", combined),
-            ("watch", watch),
-            ("discovery", discovery),
+        for scope, (graded, correct, neutral), scope_sessions in (
+            ("all", combined, sessions),
+            ("watch", watch, watch_sessions),
+            ("discovery", discovery, discovery_sessions),
         ):
             session.add(
                 SentimentAccuracy(
@@ -269,6 +280,7 @@ def add_accuracy(
                     graded=graded,
                     correct=correct,
                     neutral=neutral,
+                    sessions=scope_sessions,
                 )
             )
         session.commit()

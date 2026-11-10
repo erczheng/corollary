@@ -31,10 +31,17 @@ came from, and no float exists anywhere on the path.
   ``trailing_28d``), a ``demoted`` one toward *re-promotion*
   (``REPROMOTION_FLOOR``, ``since_demotion``). ``needed`` is how many more
   graded directional labels a window needs to reach its floor, ``0`` once it
-  has. A demoted source whose latest run is the one that demoted it has
-  counted nothing since: that run judged it as ``active``, on
-  ``trailing_28d``, so it wrote no ``since_demotion`` row. That reads as
-  ``graded: 0`` with ``asOfRunId: null`` -- a true count, not a stand-in.
+  has. Beside it, on either kind, ``sessions`` is how many distinct sessions
+  those labels span and ``sessionsNeeded`` how many more reach
+  ``sessionFloor`` (``audit.MIN_ELIGIBLE_SESSIONS``, R3); both are ``null``
+  on a row written before that floor, which is never eligible. ``eligible``
+  is ``audit.window_is_eligible`` over every window -- the rule
+  ``decide_transition`` applies, not a copy of it, so Settings cannot call a
+  source eligible that the engine will not move. A demoted source whose
+  latest run is the one that demoted it has counted nothing since: that run
+  judged it as ``active``, on ``trailing_28d``, so it wrote no
+  ``since_demotion`` row. That reads as ``graded: 0`` and ``sessions: 0``
+  with ``asOfRunId: null`` -- true counts, not stand-ins.
 * **Next run** is the ``sentiment_audit`` job's next slot from the
   scheduler's status, ``null`` with no scheduler running.
 
@@ -117,7 +124,12 @@ from corollary.api.schemas import (
     SentimentWindowAccuracy,
     SentimentWindowProgress,
 )
-from corollary.data.news.audit import DEMOTION_FLOOR, REPROMOTION_FLOOR
+from corollary.data.news.audit import (
+    DEMOTION_FLOOR,
+    MIN_ELIGIBLE_SESSIONS,
+    REPROMOTION_FLOOR,
+    window_is_eligible,
+)
 from corollary.data.news.audit_runner import (
     ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
@@ -267,7 +279,11 @@ def _live_running(session: Session, now: datetime) -> AuditRun | None:
 
 
 def _counts(row: SentimentAccuracy) -> SentimentCounts:
-    return SentimentCounts(graded=row.graded, correct=row.correct, neutral=row.neutral)
+    """One row's stored counts. ``sessions`` is the row's own -- NULL stays
+    ``None`` -- never summed from the other scopes, which do not add up to it."""
+    return SentimentCounts(
+        graded=row.graded, correct=row.correct, neutral=row.neutral, sessions=row.sessions
+    )
 
 
 def _accuracy_by_source(
@@ -318,7 +334,13 @@ def _eligibility(
     cells: Mapping[tuple[str, str], SentimentWindowAccuracy],
     run: AuditRun | None,
 ) -> SentimentEligibility:
-    """Decision 13's eligibility for the status the source is in now."""
+    """Decision 13's eligibility for the status the source is in now.
+
+    Whether a window is eligible is :func:`audit.window_is_eligible`'s
+    answer, the function ``decide_transition`` reads -- never a second copy
+    of the rule here. A window with no cell on this basis counted nothing:
+    zero labels over zero sessions, which is a count.
+    """
     if status == "demoted":
         kind: SentimentEligibilityKind = "repromote"
         basis = "since_demotion"
@@ -328,23 +350,32 @@ def _eligibility(
         basis = "trailing_28d"
         floor = DEMOTION_FLOOR
     windows: list[SentimentWindowProgress] = []
+    eligible_windows: list[bool] = []
     counted_on_basis = False
     for window in SENTIMENT_WINDOWS:
         cell = cells.get((window, basis))
         graded = 0 if cell is None else cell.combined.graded
+        sessions = 0 if cell is None else cell.combined.sessions
         counted_on_basis = counted_on_basis or cell is not None
+        eligible_windows.append(window_is_eligible(graded, sessions, floor))
         windows.append(
             SentimentWindowProgress(
                 window=_WIRE_WINDOW[window],
                 graded=graded,
                 needed=max(floor - graded, 0),
+                sessions=sessions,
+                # None with a NULL count: no shortfall from a count never taken.
+                sessions_needed=(
+                    None if sessions is None else max(MIN_ELIGIBLE_SESSIONS - sessions, 0)
+                ),
             )
         )
     return SentimentEligibility(
         kind=kind,
         basis=_WIRE_BASIS[basis],
         floor=floor,
-        eligible=all(w.graded >= floor for w in windows),
+        session_floor=MIN_ELIGIBLE_SESSIONS,
+        eligible=all(eligible_windows),
         windows=windows,
         as_of_run_id=run.id if run is not None and counted_on_basis else None,
     )
