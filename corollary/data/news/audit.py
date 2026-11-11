@@ -40,6 +40,25 @@ Decision 12, as the spec states it
 * **The windows are in regular-session minutes**: 1h is the reference plus
   60, 1d plus 390, from :func:`corollary.calendars.add_session_minutes`.
   Half-days are real.
+* **Prices are adjusted, not as printed.** The runner fetches bars adjusted
+  for splits, cash dividends and spin-offs
+  (:data:`~corollary.data.news.audit_runner.AUDIT_BAR_ADJUSTMENT`), so a
+  stored ``reference_price`` / ``outcome_price`` is the print rescaled by
+  every corporate action between it and the run -- adjusted *as of fetch
+  time*. That is right for a return and wrong for anything else. An ex-date
+  drop is value paid to the holder, not a move: split-only, a 1d window over
+  a ticker's ex-date reads the dividend as a loss, and SPY's ex-date shifts
+  every excess return that session. And an ex-date *after* a window scales
+  its two prices by the same factor, so their ratio is unchanged. Do not read
+  the stored levels as prints.
+
+  The two ends of a 1d window come from **two requests**, one per session
+  (:class:`BarRequest` never spans an overnight), within the same run.
+  They are consistently adjusted because the vendor's adjustment factors
+  change only when a new ex-date takes effect, and a run lasts minutes. A
+  run that straddled that moment -- a manual run across midnight before an
+  ex-date -- could pair one end adjusted for it with one not. The Saturday
+  run cannot.
 
 Decisions the spec leaves open -- for the owner's review
 --------------------------------------------------------
@@ -50,22 +69,20 @@ always cited as "the design's decision N" to keep the two apart.
 Each was set by the orchestrator for unit 6.2 unless marked otherwise, and
 each is a parent-session assumption the owner can override.
 
-1. **The reference instant is ``max(published_at, labeled_at)``.** Corollary
-   must not be credited with a move that happened before it saw the story. A
-   pre-0013 article re-fetched in overlap is labelled late; for a label seen
-   live the two are near-equal and this is the spec's rule.
-   **Amended (fifth pass): ``max`` holds unless ``published_at`` is more
-   than :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at``**, and then the
-   reference is ``labeled_at``. ``labeled_at`` is the *poll's* start
-   (``label_stored`` is given the poll's ``now``, read before the fetch), so
-   ``published_at`` can honestly fall a few seconds after it -- a story
-   arriving on a later page of the same fetch. Using ``labeled_at`` there
-   would put the reference before publication and credit the label with
-   the minute before the story existed, which is the move decision 1
-   exists to refuse. Far past ``labeled_at`` (a 2062 typo) the vendor stamp
-   is an error, and ``labeled_at`` is when the story demonstrably existed.
-   Decision 18's per-label catch covers any instant past the calendar's
-   schedule either way. Flagged for the owner.
+1. **The reference instant is ``published_at``** -- owner decision,
+   2026-10-22: a label is graded from when the story was published, since
+   that is when the price reacts. (It was ``max(published_at, labeled_at)``,
+   which graded a late-fetched story from when Corollary saw it; the owner
+   chose the signal's quality over Corollary's delay. The label itself is a
+   function of the headline alone, so grading from publication lets no
+   outcome into the label.) **One guard stays:** a ``published_at`` more than
+   :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at`` is impossible -- no
+   poll fetches a story that far ahead of its own start -- so the vendor's
+   stamp is wrong (a 2062 typo, say) and ``labeled_at``, when the story
+   demonstrably existed, is the reference. A few seconds after
+   ``labeled_at`` is honest (``labeled_at`` is the poll's start), and is
+   published_at as usual. Decision 18's per-label catch covers any instant
+   past the calendar's schedule either way.
 2. **In session, past the first minute, the reference price is the close of
    the last completed 1Min bar** -- ``bar.at + 1 minute <= instant`` --
    within that session. No look-ahead: a bar stamped 10:15 is not known
@@ -270,10 +287,34 @@ stored for display):
   doing badly. Nothing transitions into ``unaudited``.
 
 *Eligible to demote*: at least :data:`DEMOTION_FLOOR` graded directional
-labels in **each** window over the trailing window. *Eligible to
+labels in **each** window over the trailing window, spanning at least
+:data:`MIN_ELIGIBLE_SESSIONS` distinct sessions in each window. *Eligible to
 re-promote*: at least :data:`REPROMOTION_FLOOR` in **each** window since the
-demotion. Every comparison is integer cross-multiplication --
+demotion, spanning at least :data:`MIN_ELIGIBLE_SESSIONS` distinct sessions in
+each window. Every comparison is an integer one -- the session count and the
+label count are compared as they are, and accuracy by cross-multiplication,
 ``correct * 100 < 52 * graded`` -- so no float decides a boundary.
+
+The session floor is R3 (owner decision Q23b,
+``docs/superpowers/specs/2026-11-09-phase-3-steps-5-7-remainder.md``):
+
+* **A label's session** is :func:`label_session`: the regular session, from
+  ``calendars.py``, that contains its reference instant. A story published
+  after the close (or before the open) is referenced at the next open, so it
+  counts toward that session. A half-day is a session, ending at its early
+  close.
+* **What is counted.** Sessions per source, window and basis, over exactly
+  the labels the label floor counts -- graded directional ones, so a neutral
+  label adds no session. ``all``'s count is the union of the splits'
+  sessions, not their sum. Stored as ``sentiment_accuracy.sessions``, so the
+  figure a transition acted on is the figure stored
+  (:attr:`AccuracyRow.sessions`).
+* **NULL is never eligible.** A row written before Q23b has no session
+  count; :func:`decide_transition` treats ``sessions is None`` as below the
+  floor, whatever ``graded`` says.
+* **Known limit, recorded rather than changed:** the rule is literal. 26
+  labels in one session plus one in each of four others passes; a cap on
+  any one session's share would be a rule the owner did not ask for.
 
 Three definitions the spec leaves to this unit, **set by the orchestrator**:
 
@@ -282,7 +323,7 @@ Three definitions the spec leaves to this unit, **set by the orchestrator**:
     rather than the grading run's instant, because it is a fact about the
     label that no later run can move.
 20. **``since_demotion`` is outcomes with ``reference_at`` in ``(changed_at,
-    run_at]``** -- labels produced after the demotion -- computed only for a
+    run_at]``** -- stories published after the demotion -- computed only for a
     ``demoted`` source, with no lookback. A transition's ``changed_at`` is the run
     instant, and every outcome a run counted had matured by it (its window
     ended at least :data:`MATURITY_DELAY` earlier), so its ``reference_at``
@@ -350,6 +391,7 @@ __all__ = [
     "DISCOVERY_TICKER_CAP",
     "FALLBACK_MAX_LAG",
     "MATURITY_DELAY",
+    "MIN_ELIGIBLE_SESSIONS",
     "PRICE_UNAVAILABLE_AFTER",
     "REPROMOTE_AT_PCT",
     "REPROMOTION_FLOOR",
@@ -390,6 +432,7 @@ __all__ = [
     "reference_at",
     "reference_instant",
     "window_end",
+    "window_is_eligible",
 ]
 
 #: The benchmark every non-market label's return is taken in excess of (Q5).
@@ -637,14 +680,13 @@ def _require_aware(instant: datetime, what: str) -> None:
 
 
 def reference_instant(label: AuditLabel) -> datetime:
-    """Decision 1 as amended, in UTC.
+    """Decision 1 as the owner set it (2026-10-22), in UTC.
 
-    ``max(published_at, labeled_at)`` -- never before the story was
-    published, never before Corollary wrote the label -- except when
-    ``published_at`` is more than :data:`VENDOR_STAMP_TOLERANCE` after
-    ``labeled_at``: no poll fetches a story that far ahead of its own start,
-    so the vendor's stamp is wrong and ``labeled_at`` is used. Both must be
-    aware.
+    ``published_at`` -- the price reacts to the story when it is published,
+    so that is where the grade starts -- except when ``published_at`` is
+    more than :data:`VENDOR_STAMP_TOLERANCE` after ``labeled_at``: no poll
+    fetches a story that far ahead of its own start, so the vendor's stamp is
+    wrong and ``labeled_at`` is used. Both must be aware.
     """
     _require_aware(label.published_at, "published_at")
     _require_aware(label.labeled_at, "labeled_at")
@@ -652,16 +694,20 @@ def reference_instant(label: AuditLabel) -> datetime:
     labeled = label.labeled_at.astimezone(timezone.utc)
     if published - labeled > VENDOR_STAMP_TOLERANCE:
         return labeled
-    return max(published, labeled)
+    return published
+
+
+def _in_session_or_next_open(instant: datetime) -> datetime:
+    """In session, ``instant`` itself; out of session, the next session's open."""
+    if nyse_session_containing(instant) is not None:
+        return instant
+    return nyse_next_open(instant)
 
 
 def reference_at(label: AuditLabel) -> datetime:
     """The instant the reference price is taken at: in session, the reference
     instant itself; out of session, the next session's open."""
-    instant = reference_instant(label)
-    if nyse_session_containing(instant) is not None:
-        return instant
-    return nyse_next_open(instant)
+    return _in_session_or_next_open(reference_instant(label))
 
 
 def window_end(reference: datetime, window: str) -> datetime:
@@ -736,6 +782,26 @@ def _reference_session(reference: datetime) -> date:
     if day is None:
         raise AssertionError(f"reference {reference} is outside every session")
     return day
+
+
+def label_session(reference: datetime) -> date:
+    """The regular session a label counts toward for the session floor (R3).
+
+    The session from ``calendars.py`` whose ``[open, close)`` contains the
+    reference instant; one at or after a close, or before an open, counts
+    toward the next session's open -- an after-close story is the next
+    session's, and a half-day's session ends at its early close. This is
+    :func:`reference_at`'s mapping followed by :func:`_reference_session`,
+    the session grading prices the label in, so the two can never disagree.
+
+    A stored ``label_outcome.reference_at`` is already in session (it is
+    :func:`reference_at`, or at most :data:`FALLBACK_MAX_LAG` past that
+    session's open), so for every row the runner loads this is simply the
+    session containing it. The mapping is applied anyway, so any aware
+    instant -- a raw reference instant included -- gets the same answer.
+    """
+    _require_aware(reference, "reference")
+    return _reference_session(_in_session_or_next_open(reference.astimezone(timezone.utc)))
 
 
 def _outcome_session(outcome: datetime) -> date:
@@ -1093,7 +1159,7 @@ def _reference(
     * at the open exactly (an out-of-session label, or one stamped at the
       open to the microsecond), the open print, at the open;
     * inside the first minute, the open-stamped bar's close, at open + 1
-      minute -- the open print predates the label;
+      minute -- the open print predates the reference instant;
     * with no open-stamped bar, the first bar's open at its stamp, provided
       it is within :data:`FALLBACK_MAX_LAG` of the open and before the
       window's end.
@@ -1293,6 +1359,12 @@ DEMOTION_FLOOR: Final = 30
 #: assumption, Q6.)*
 REPROMOTION_FLOOR: Final = 100
 
+#: R3 (Q23b): distinct sessions those labels must span, in **each** window,
+#: beside both floors above -- demotion (and first promotion) over the
+#: trailing window, re-promotion since the demotion. Sessions per
+#: :func:`label_session`, counted over exactly the labels the floor counts.
+MIN_ELIGIBLE_SESSIONS: Final = 5
+
 #: Decision 13's trailing window: 28 **calendar** days, not sessions.
 TRAILING_WINDOW: Final = timedelta(days=28)
 
@@ -1445,6 +1517,14 @@ class AccuracyRow:
 
     ``graded`` is graded **directional** labels, ``correct`` how many of them
     were right, ``neutral`` graded neutral labels (in neither of the others).
+
+    ``sessions`` is how many distinct sessions (:func:`label_session`) the
+    ``graded`` labels span -- neutral labels add none, as they add nothing to
+    ``graded`` (R3). :func:`compute_accuracy` always sets it. ``None`` is a
+    count that does not exist -- a ``sentiment_accuracy`` row written before
+    Q23b -- and :func:`decide_transition` never treats it as eligible.
+    Every graded label is in exactly one session, so a count is at most
+    ``graded`` and is zero exactly when ``graded`` is.
     """
 
     source: str
@@ -1454,6 +1534,20 @@ class AccuracyRow:
     graded: int
     correct: int
     neutral: int
+    sessions: int | None
+
+    def __post_init__(self) -> None:
+        if self.sessions is None:
+            return
+        if not 0 <= self.sessions <= self.graded:
+            raise ValueError(
+                f"sessions must be between 0 and graded ({self.graded}), got {self.sessions}"
+            )
+        if (self.sessions == 0) != (self.graded == 0):
+            raise ValueError(
+                f"sessions is zero exactly when graded is: graded {self.graded}, "
+                f"sessions {self.sessions}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1601,7 +1695,9 @@ def compute_accuracy(
     arrive in. ``trailing_28d`` counts outcomes with ``reference_at`` in
     ``(run_at - 28 days, run_at]``; ``since_demotion`` -- computed only for a
     ``demoted`` source -- those in ``(changed_at, run_at]``. Both are
-    orchestrator decisions; see the module docstring.
+    orchestrator decisions; see the module docstring. Each row's
+    ``sessions`` is the number of distinct :func:`label_session` s among the
+    directional outcomes its ``graded`` counts (R3).
 
     An outcome referenced after ``run_at`` is therefore in neither basis:
     counting it would be reading the future. It is left out here rather than
@@ -1610,39 +1706,74 @@ def compute_accuracy(
     """
     _require_aware(run_at, "run_at")
     bases = _bases_for(status)
+    keys = [(w, b, s) for w in _WINDOWS for b in bases for s in AccuracyScope]
     tally: dict[tuple[str, AccuracyBasis, AccuracyScope], list[int]] = {
-        (w, b, s): [0, 0, 0] for w in _WINDOWS for b in bases for s in AccuracyScope
+        key: [0, 0, 0] for key in keys
+    }
+    # R3: the distinct sessions the graded (directional) labels span, per
+    # row -- the same labels ``graded`` counts, so ``all`` is the union of
+    # its splits' sessions, never their sum.
+    sessions: dict[tuple[str, AccuracyBasis, AccuracyScope], set[date]] = {
+        key: set() for key in keys
     }
     for outcome in outcomes:
         if outcome.source != status.source:
             raise ValueError(
                 f"outcome for source {outcome.source!r} passed to {status.source!r}'s accuracy"
             )
-        for basis in bases:
-            if not _in_basis(basis, outcome.reference_at, status, run_at):
-                continue
-            for scope in (AccuracyScope.ALL, AccuracyScope(outcome.scope.value)):
-                counts = tally[(outcome.window, basis, scope)]
-                if outcome.neutral:
-                    counts[2] += 1
-                else:
-                    counts[0] += 1
-                    if outcome.correct:
-                        counts[1] += 1
+        in_bases = [b for b in bases if _in_basis(b, outcome.reference_at, status, run_at)]
+        if not in_bases:
+            continue
+        scopes = (AccuracyScope.ALL, AccuracyScope(outcome.scope.value))
+        if outcome.neutral:
+            for basis in in_bases:
+                for scope in scopes:
+                    tally[(outcome.window, basis, scope)][2] += 1
+            continue
+        day = label_session(outcome.reference_at)
+        for basis in in_bases:
+            for scope in scopes:
+                key = (outcome.window, basis, scope)
+                tally[key][0] += 1
+                if outcome.correct:
+                    tally[key][1] += 1
+                sessions[key].add(day)
     return tuple(
         AccuracyRow(
             source=status.source,
-            window=w,
-            basis=b,
-            scope=s,
-            graded=tally[(w, b, s)][0],
-            correct=tally[(w, b, s)][1],
-            neutral=tally[(w, b, s)][2],
+            window=key[0],
+            basis=key[1],
+            scope=key[2],
+            graded=tally[key][0],
+            correct=tally[key][1],
+            neutral=tally[key][2],
+            sessions=len(sessions[key]),
         )
-        for w in _WINDOWS
-        for b in bases
-        for s in AccuracyScope
+        for key in keys
     )
+
+
+def window_is_eligible(graded: int, sessions: int | None, floor: int) -> bool:
+    """One window's eligibility: at least ``floor`` graded directional labels,
+    spanning at least :data:`MIN_ELIGIBLE_SESSIONS` sessions (decision 13 and
+    R3), in integers. A ``None`` session count -- a row from before Q23b --
+    is never eligible.
+
+    **The one copy of this rule.** :func:`decide_transition` reads it, and so
+    does ``GET /api/settings/sentiment``, so Settings never calls a source
+    eligible that the engine would judge ineligible. Eligibility is
+    necessary for a transition, not sufficient: an eligible source at 61%
+    stays active, inside the 52-66% band. A source is eligible when every
+    window is; each caller states that quantifier over its own windows.
+    """
+    if sessions is None:
+        return False
+    return graded >= floor and sessions >= MIN_ELIGIBLE_SESSIONS
+
+
+def _eligible(row: AccuracyRow, floor: int) -> bool:
+    """:func:`window_is_eligible` on a row's ``graded`` and ``sessions``."""
+    return window_is_eligible(row.graded, row.sessions, floor)
 
 
 def _below(row: AccuracyRow, pct: int) -> bool:
@@ -1741,8 +1872,10 @@ def decide_transition(
 
     ``accuracy`` is :func:`compute_accuracy`'s output for this source and
     run, so the figure acted on is the figure stored. Returns ``None`` when
-    the source is unchanged -- ineligible, in the 52-66% dead band, or a
-    demoted source doing badly -- so no row is written. One call decides one
+    the source is unchanged -- ineligible (under a label floor, under
+    :data:`MIN_ELIGIBLE_SESSIONS` in either window, or a ``None`` session
+    count), in the 52-66% dead band, or a demoted source doing badly -- so
+    no row is written. One call decides one
     transition from the state the run *found*; nothing re-evaluates the new
     state, so a source moves at most once per run.
     """
@@ -1750,19 +1883,20 @@ def decide_transition(
     if status.status is SourceStatus.DEMOTED:
         basis = AccuracyBasis.SINCE_DEMOTION
         acted_on = _acted_on(status, accuracy, basis)
-        if all(r.graded >= REPROMOTION_FLOOR for r in acted_on) and not any(
+        if all(_eligible(r, REPROMOTION_FLOOR) for r in acted_on) and not any(
             _below(r, REPROMOTE_AT_PCT) for r in acted_on
         ):
             rule = (
                 f"at or above {REPROMOTE_AT_PCT}% in both windows, at least "
-                f"{REPROMOTION_FLOOR} graded directional labels each since the demotion"
+                f"{REPROMOTION_FLOOR} graded directional labels over at least "
+                f"{MIN_ELIGIBLE_SESSIONS} sessions each since the demotion"
             )
             return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
         return None
 
     basis = AccuracyBasis.TRAILING_28D
     acted_on = _acted_on(status, accuracy, basis)
-    if not all(r.graded >= DEMOTION_FLOOR for r in acted_on):
+    if not all(_eligible(r, DEMOTION_FLOOR) for r in acted_on):
         return None
     failing = [r.window for r in acted_on if _below(r, DEMOTE_BELOW_PCT)]
     if failing:
@@ -1771,7 +1905,8 @@ def decide_transition(
     if status.status is SourceStatus.UNAUDITED:
         rule = (
             f"at or above {DEMOTE_BELOW_PCT}% in both windows, at least "
-            f"{DEMOTION_FLOOR} graded directional labels each over the trailing 28 days"
+            f"{DEMOTION_FLOOR} graded directional labels over at least "
+            f"{MIN_ELIGIBLE_SESSIONS} sessions each over the trailing 28 days"
         )
         return _transition(status, SourceStatus.ACTIVE, basis, acted_on, rule, run_at)
     return None

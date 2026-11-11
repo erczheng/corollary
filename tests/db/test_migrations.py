@@ -22,7 +22,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect
+from sqlalchemy import CheckConstraint, Engine, inspect
 from sqlalchemy.orm import Session
 
 from corollary.db.models import Base, DataFeed, EngineState, NotificationRoute, RiskLimit
@@ -76,20 +76,28 @@ EXPECTED_TABLES = {
     "sentiment_source_status",
     # 0015 -- step 7: the News calendar (Q22: merged second, renumbered from 0014).
     "calendar_event",
-    # 0017 (provisional; renumbered at merge, Q22) -- U6d: economic first prints
+    # 0017 (R3's ``sentiment_accuracy.sessions``) adds a column, no table.
+    # 0018 -- R4: the void tool's copy of a voided run's grades
+    "label_outcome_voided",
+    # 0019 -- U6d: economic first prints (Q22: numbered at merge, after 0018)
     "econ_release_value",
     "econ_release_fetch",
 }
 
-#: Everything 0017 created (a provisional number: see its docstring).
-_0017_TABLES = {"econ_release_value", "econ_release_fetch"}
+#: Everything 0019 created.
+_0019_TABLES = {"econ_release_value", "econ_release_fetch"}
 
-#: Everything 0015 created -- and 0017's tables with it, which revise it, so
-#: every downgrade below 0015 that subtracts this subtracts both.
-_0015_TABLES = {"calendar_event"} | _0017_TABLES
+#: Everything 0018 created -- and 0019's tables with it, which revise it.
+_0018_TABLES = {"label_outcome_voided"} | _0019_TABLES
 
-#: Everything 0014 created -- and 0015's table with it, which revises it, so
-#: every downgrade below 0014 that subtracts this subtracts both.
+#: Everything 0015 created -- and, since 0016, 0017, 0018 and 0019 each
+#: revise the one before, 0018's and 0019's tables with it, so every
+#: downgrade below 0015 that subtracts this subtracts all of them.
+_0015_TABLES = {"calendar_event"} | _0018_TABLES
+
+#: Everything 0014 created -- and every later revision's tables with it
+#: (``_0015_TABLES``: 0015 through 0019), so every downgrade below 0014 that
+#: subtracts this subtracts them all.
 _0014_TABLES = {
     "audit_run",
     "label_outcome",
@@ -185,9 +193,9 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    # 0017 is provisional (U6d's econ tables): the other Phase 3 remainder
-    # branch holds 0017 and 0018, so this one is renumbered at merge (Q22).
-    assert script.get_heads() == ["0017"]
+    # 0019 (U6d's econ tables) revises 0018 (R4's void tool), which revises
+    # 0017 (R3's session count): Q22 numbered the econ revision at merge.
+    assert script.get_heads() == ["0019"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -227,10 +235,10 @@ def test_0014_seeds_the_sentiment_audit_requested_routes_and_downgrades_to_0013(
     assert not {event for event, _channel in routes} & {
         "sentiment_audit_requested", "sentiment_demoted", "sentiment_repromoted"
     }
-    # 0014's six sentiment rows, and 0015's two ``calendar_changed`` rows
-    # and 0016's four Cash session rows with them, since each revises the
-    # one before.
-    assert len(routes) == at_head - 12
+    # 0014's six sentiment rows, and 0015's two ``calendar_changed`` rows,
+    # 0016's four Cash session rows and 0018's two ``sentiment_audit_voided``
+    # rows with them, since each revises the one before.
+    assert len(routes) == at_head - 14
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("sentiment_audit_requested", "discord")] is True
@@ -336,7 +344,8 @@ def test_0015_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> No
 
 
 def test_0015_downgrades_to_0014_and_back(db_path: Path) -> None:
-    """``calendar_event`` comes and goes alone; 0014's audit tables, 0013's
+    """``calendar_event`` comes and goes with the later revisions' tables
+    (0018's and 0019's, in ``_0015_TABLES``); 0014's audit tables, 0013's
     labels and 0012's cache stay."""
     url = sqlite_url(db_path)
     cfg = _config(url)
@@ -502,8 +511,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     # 0006's ten back, plus 0008's two ``watchlist_changed`` rows,
     # 0011's two ``spdr_seed_amended`` rows, 0014's four sentiment rows
     # plus its two ``sentiment_audit_requested`` rows, 0015's two
-    # ``calendar_changed`` rows, and 0016's four Cash session rows.
-    assert len(_route_rows(url)) == 42
+    # ``calendar_changed`` rows, 0016's four Cash session rows, and 0018's
+    # two ``sentiment_audit_voided`` rows.
+    assert len(_route_rows(url)) == 44
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
@@ -557,10 +567,37 @@ def test_upgrade_head_matches_the_models(migrated: Engine) -> None:
     ) -> bool:
         return not (type_ == "table" and name == "alembic_version")
 
+    # Alembic compares CHECKs by name from ``Table.constraints`` only, so a
+    # CHECK the model declares on a *column* -- ``ck_audit_run_voided``, which
+    # 0018 can only add with its column (see its docstring) -- is invisible on
+    # the model side and reported as "remove" against any database, a
+    # ``create_all()`` one included. Exactly those names are left out here,
+    # computed from the models rather than listed;
+    # ``tests/db/test_audit_void_migration.py`` compares their tables' DDL
+    # with ``create_all()``'s text instead, which is the stronger check.
+    column_checks = {
+        constraint.name
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        for constraint in column.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    # Pinned, not merely computed: a new column-level CHECK -- named or not --
+    # must be a decision (a table-level CHECK Alembic can compare, or an entry
+    # here with its own DDL test), never a name this filter drops silently.
+    assert column_checks == {"ck_audit_run_voided"}
+
+    def _skip_column_checks(name: str | None, type_: str, parent_names: Any) -> bool:
+        return not (type_ == "check_constraint" and name in column_checks)
+
     with migrated.connect() as conn:
         ctx = MigrationContext.configure(
             conn,
-            opts={"compare_type": True, "include_object": _skip_alembic_version},
+            opts={
+                "compare_type": True,
+                "include_object": _skip_alembic_version,
+                "include_name": _skip_column_checks,
+            },
         )
         diff = compare_metadata(ctx, Base.metadata)
     assert diff == []

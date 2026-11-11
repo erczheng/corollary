@@ -91,9 +91,11 @@ def _add(eng: Engine, *rows: object) -> None:
 
 
 #: This migration's module, by the name it keeps through a renumber. Found by
-#: file name, never by a literal revision id: the merge renumbers it (see its
-#: docstring), and a hardcoded ``"0017"`` would then test another branch's
-#: migration and stay green.
+#: file name, never by a literal revision id: the merge renumbered it from a
+#: provisional 0017 to 0019 (see its docstring), and a hardcoded ``"0017"``
+#: would then have tested another branch's migration -- R3's
+#: ``sentiment_accuracy.sessions`` -- and stayed green. The derived pin below
+#: now reads 0019 revising 0018.
 MIGRATION_SUFFIX = "_econ_release_value.py"
 
 
@@ -238,6 +240,7 @@ def test_the_migration_downgrades_to_its_predecessor_and_back(db_path: Path) -> 
     eng.dispose()
     assert not tables & TABLES
     assert "calendar_event" in tables  # 0015's table is untouched
+    assert "label_outcome_voided" in tables  # and so is 0018's, the predecessor's
 
     command.upgrade(cfg, "head")
     eng = create_db_engine(url)

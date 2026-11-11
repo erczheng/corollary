@@ -1,10 +1,12 @@
 import { DATA_FEEDS, RISK_LIMITS } from './mockData'
 import { isApiError, isUnreachable } from './api'
 import { NEWS_SOURCE_LABEL } from './news'
+import { formatInteger } from './format'
 import {
   NOTIFICATION_EVENT_LABEL,
   type AuditCategory,
   type AuditLogEntry,
+  type AuditRunSummary,
   type DataFeed,
   type DataPlan,
   type FeedKey,
@@ -17,6 +19,7 @@ import {
   type SentimentSourceAudit,
   type SentimentWindow,
   type SentimentWindowAccuracy,
+  type SentimentWindowProgress,
 } from './types'
 
 /** Every rule the Settings page needs, as pure functions with no React and
@@ -368,7 +371,63 @@ export function actingCell(
 
 /** The counts a cell shows; zeros for a window with no row on the basis. */
 export function cellCounts(cell: SentimentWindowAccuracy | null): SentimentCounts {
-  return cell?.combined ?? { graded: 0, correct: 0, neutral: 0 }
+  return cell?.combined ?? { graded: 0, correct: 0, neutral: 0, sessions: 0 }
+}
+
+/** The server's progress for one window, on the basis `actingCell` reads.
+ * `null` when the server sent no entry for that window. */
+export function windowProgress(
+  source: SentimentSourceAudit,
+  window: SentimentWindow,
+): SentimentWindowProgress | null {
+  return source.eligibility.windows.find((w) => w.window === window) ?? null
+}
+
+/** Whether the **server** reports a window short of the session floor (R3).
+ * It reads `sessionsNeeded` and compares nothing against a constant, so the
+ * cell can never disagree with the engine about which side of the floor a
+ * window is on.
+ *
+ * A row written before the floor (`sessions: null`) carries no count, and it
+ * is short: the engine never treats NULL as eligible, so nor does a
+ * percentage here. A missing entry is short for the same reason. Display only.
+ * Whether a source is eligible is `eligibility.eligible`, never this. */
+export function isShortOfSessions(progress: SentimentWindowProgress | null): boolean {
+  if (progress === null || progress.sessions === null || progress.sessionsNeeded === null) {
+    return true
+  }
+  return progress.sessionsNeeded > 0
+}
+
+/** What a row written before the five-session floor says in place of a
+ * count. No number: "0 of 5" would state a count nobody took. */
+export const SESSIONS_NOT_COUNTED = 'sessions not counted: written before the session floor existed'
+
+/** "2 of 5 sessions", against the server's `sessionFloor`, or the words for
+ * a row with no count. Formats what the server sent and decides nothing. */
+export function sessionsFact(progress: SentimentWindowProgress | null, sessionFloor: number): string {
+  if (progress === null) return 'sessions not reported'
+  if (progress.sessions === null) return SESSIONS_NOT_COUNTED
+  return `${formatInteger(progress.sessions)} of ${formatInteger(sessionFloor)} sessions`
+}
+
+/** The lead of a cell that prints no percentage. "insufficient sample" is a
+ * count found short of a floor. A row written before the session floor
+ * (`sessions: null`) was never counted against it, so its lead is "not
+ * measured", whatever its label count: still no percentage, and no "0 of 5".
+ * A missing entry keeps "insufficient sample", since `sessionsFact` already
+ * says it was not reported. Wording only; it decides nothing. */
+export function shortCellLead(progress: SentimentWindowProgress | null): string {
+  return progress !== null && progress.sessions === null ? 'not measured' : 'insufficient sample'
+}
+
+/** The session floor the rule paragraph states, from the server's
+ * `sessionFloor`, which every source carries. `null` with no sources, or if
+ * two sources disagree. The paragraph then says the figure was not reported,
+ * rather than picking one or falling back to a constant. */
+export function statedSessionFloor(sources: readonly SentimentSourceAudit[]): number | null {
+  const floors = new Set(sources.map((s) => s.eligibility.sessionFloor))
+  return floors.size === 1 ? [...floors][0] : null
 }
 
 /** The sources the banner names: those whose **server** status is
@@ -390,20 +449,120 @@ export function sourceStatusKind(source: SentimentSourceAudit): SourceStatusKind
 }
 
 /** A demoted source's road back, one sentence per window:
- * "since demotion: 41 of 100 in the 1h window". Empty for any source the
- * server is not counting toward re-promotion. */
+ * "since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions". Both
+ * floors, because a line reading "100 of 100" with the sessions left off
+ * would promise a re-promotion the session floor is still holding back.
+ * Empty for any source the server is not counting toward re-promotion. */
 export function repromotionProgress(source: SentimentSourceAudit): string[] {
-  if (source.eligibility.kind !== 'repromote') return []
-  return source.eligibility.windows.map(
-    (w) => `since demotion: ${w.graded} of ${source.eligibility.floor} in the ${w.window} window`,
+  const { eligibility } = source
+  if (eligibility.kind !== 'repromote') return []
+  return eligibility.windows.map(
+    (w) =>
+      `since demotion, ${w.window} window: ${formatInteger(w.graded)} of ${formatInteger(eligibility.floor)} labels, ${sessionsFact(w, eligibility.sessionFloor)}`,
   )
 }
 
-/** Whether every source is waiting on its first run — the readout's empty
- * state, which says when the first one is due rather than drawing a table of
- * zeros as though they were results. */
-export function nothingAuditedYet(status: SentimentAuditStatus): boolean {
-  return status.accuracyRun === null
+/* ------------------------------------------------------------------------ *
+ * The run sentences under the audit table, made true against the voids (R9).
+ *
+ * `lastRun` and `accuracyRun` are the newest **non-voided** runs, so on their
+ * own they cannot say whether a newer run happened and was voided — and the
+ * voided-run list printed right beneath them says exactly that. Every
+ * sentence here is decided against `voidedRuns` too, so none of them can
+ * contradict that list. The owner's state the week this was written is run 2
+ * voided with run 1 standing; voiding the only run, which R4 allows, serves
+ * both runs `null` beside a non-empty list.
+ *
+ * "Newer" compares run **ids**. A voided run carries no `startedAt`, and ids
+ * are the run table's autoincrement key, so they rise with start order. Any
+ * run newer than `lastRun` is a voided one: `lastRun` is the newest that
+ * stands.
+ * ------------------------------------------------------------------------ */
+
+function voidedAfter(status: SentimentAuditStatus, run: AuditRunSummary): boolean {
+  return status.voidedRuns.some((v) => v.id > run.id)
+}
+
+/** The readout's empty state, or null when a standing run has figures.
+ *
+ * - `lead: 'never_succeeded'` — nothing was voided and no run has succeeded:
+ *   "No audit has completed yet".
+ * - `lead: 'none_standing'` — runs were voided and none that stands has
+ *   succeeded. "No audit has completed" would be false when the voided runs
+ *   had completed; this says only what is true either way.
+ * - `next: 'first'` only when no run has ever started. A scheduled slot after
+ *   any run, voided or not, is the next one, not the first. */
+export interface AuditEmptyState {
+  lead: 'never_succeeded' | 'none_standing'
+  next: 'first' | 'next'
+}
+
+export function auditEmptyState(status: SentimentAuditStatus): AuditEmptyState | null {
+  if (status.accuracyRun !== null) return null
+  const voided = status.voidedRuns.length > 0
+  return {
+    lead: voided ? 'none_standing' : 'never_succeeded',
+    next: status.lastRun === null && !voided ? 'first' : 'next',
+  }
+}
+
+/** What `Last run` may say.
+ *
+ * - `never` — no run at all: "No run has ever started."
+ * - `all_voided` — runs exist and every one was voided.
+ * - `run` — the newest standing run. `laterVoided` says every run after it
+ *   was voided, so the line names it as the newest that **stands** rather
+ *   than the newest that ran. */
+export type LastRunFact =
+  | { kind: 'never' }
+  | { kind: 'all_voided' }
+  | { kind: 'run'; run: AuditRunSummary; laterVoided: boolean }
+
+export function lastRunFact(status: SentimentAuditStatus): LastRunFact {
+  const run = status.lastRun
+  if (run === null) return status.voidedRuns.length > 0 ? { kind: 'all_voided' } : { kind: 'never' }
+  return { kind: 'run', run, laterVoided: voidedAfter(status, run) }
+}
+
+/** What `Figures from` may say, or null when the line is not needed.
+ *
+ * - null — the figures are plainly `Last run`'s, or no run has figures and
+ *   nothing was voided (the empty state already says so).
+ * - `last_succeeded` — an older run than `Last run`, with nothing voided
+ *   after it: every newer run stands and did not succeed, so it really is
+ *   "the last run that succeeded".
+ * - `newest_standing` — a run newer than it was voided, so "the last run that
+ *   succeeded" could be false: that voided run may have succeeded. Shown even
+ *   when it is `Last run` too, which is run 1 beside a voided run 2.
+ *   `sameAsLast` lets the line skip repeating the run it names.
+ * - `none_standing` — runs were voided and no standing run succeeded. */
+export type FiguresFromFact =
+  | { kind: 'last_succeeded'; run: AuditRunSummary }
+  | { kind: 'newest_standing'; run: AuditRunSummary; sameAsLast: boolean }
+  | { kind: 'none_standing' }
+
+export function figuresFromFact(status: SentimentAuditStatus): FiguresFromFact | null {
+  const run = status.accuracyRun
+  if (run === null) return status.voidedRuns.length > 0 ? { kind: 'none_standing' } : null
+  if (voidedAfter(status, run)) {
+    return { kind: 'newest_standing', run, sameAsLast: run.id === status.lastRun?.id }
+  }
+  return run.id === status.lastRun?.id ? null : { kind: 'last_succeeded', run }
+}
+
+/** Whether the run a manual trigger started (`runId`, from the 202) may
+ * still be open — the only time "its outcome appears here when it finishes"
+ * is true. It is not once the readout shows that run closed, once it is
+ * listed as voided (a voided run is never `lastRun` again, so the first test
+ * alone would bring a stale line back on the next refetch), or once a newer
+ * run stands, since only one run is ever open and `Last run` would then
+ * never show this one's outcome. */
+export function startedRunPending(status: SentimentAuditStatus, runId: number): boolean {
+  if (status.voidedRuns.some((v) => v.id === runId)) return false
+  const last = status.lastRun
+  if (last === null) return true
+  if (last.id > runId) return false
+  return !(last.id === runId && last.status !== 'running')
 }
 
 /** A refused `POST /api/settings/sentiment/audit`, sorted into what the page

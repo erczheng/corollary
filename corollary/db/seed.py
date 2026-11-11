@@ -124,6 +124,12 @@ NOTIFICATION_ROUTE_DEFAULTS: tuple[tuple[str, str, bool], ...] = (
     ("sentiment_demoted", "discord", True),
     ("sentiment_repromoted", "bell", True),
     ("sentiment_repromoted", "discord", True),
+    # A sentiment audit run voided by the owner (R4, migration 0018):
+    # ``info``, the same channels as ``sentiment_repromoted`` -- it changes
+    # what Phase 4 may read, and Q8 is "any action i do should be put into
+    # the discord". Emitted by ``scripts/void_audit_run.py`` only.
+    ("sentiment_audit_voided", "bell", True),
+    ("sentiment_audit_voided", "discord", True),
     # A manual sentiment audit run started (step 6, migration 0014): an
     # operator action on decision 20's config-event terms -- ``info``, bell
     # off, Discord on.

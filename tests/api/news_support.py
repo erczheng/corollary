@@ -225,8 +225,16 @@ def add_audit_run(
     trigger: str = "scheduled",
     status: str = "succeeded",
     detail: str | None = None,
+    voided_at: datetime | None = None,
+    void_reason: str | None = None,
 ) -> int:
-    """One ``audit_run`` row, as a run would have left it. Returns its id."""
+    """One ``audit_run`` row, as a run would have left it. Returns its id.
+
+    ``voided_at`` and ``void_reason`` are a void as ``audit_void`` leaves
+    the row (R4, migration 0018): both or neither, on a finished run --
+    ``ck_audit_run_voided`` refuses anything else, so a test cannot build a
+    void the schema would not hold.
+    """
     with Session(engine) as session:
         run = AuditRun(
             started_at=started_at,
@@ -234,6 +242,8 @@ def add_audit_run(
             trigger=trigger,
             status=status,
             detail=detail,
+            voided_at=voided_at,
+            void_reason=void_reason,
         )
         session.add(run)
         session.commit()
@@ -249,15 +259,26 @@ def add_accuracy(
     basis: str = "trailing_28d",
     watch: tuple[int, int, int] = (0, 0, 0),
     discovery: tuple[int, int, int] = (0, 0, 0),
+    sessions: int | None = None,
+    watch_sessions: int | None = None,
+    discovery_sessions: int | None = None,
 ) -> None:
     """One window's three ``sentiment_accuracy`` rows: ``all`` is the sum of
-    the ``(graded, correct, neutral)`` splits, as ``compute_accuracy`` writes it."""
+    the ``(graded, correct, neutral)`` splits, as ``compute_accuracy`` writes it.
+
+    ``sessions`` is the ``all`` row's session count, ``watch_sessions`` and
+    ``discovery_sessions`` the splits'. They are given separately because
+    they do **not** sum: one session can hold a watch label and a discovery
+    label. Each defaults to NULL -- a row written before Q23b, which no
+    reader may treat as eligible -- so a test that wants the floor met
+    states its session counts.
+    """
     combined = tuple(w + d for w, d in zip(watch, discovery, strict=True))
     with Session(engine) as session:
-        for scope, (graded, correct, neutral) in (
-            ("all", combined),
-            ("watch", watch),
-            ("discovery", discovery),
+        for scope, (graded, correct, neutral), scope_sessions in (
+            ("all", combined, sessions),
+            ("watch", watch, watch_sessions),
+            ("discovery", discovery, discovery_sessions),
         ):
             session.add(
                 SentimentAccuracy(
@@ -269,6 +290,7 @@ def add_accuracy(
                     graded=graded,
                     correct=correct,
                     neutral=neutral,
+                    sessions=scope_sessions,
                 )
             )
         session.commit()

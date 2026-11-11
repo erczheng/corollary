@@ -683,6 +683,7 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
         "spdr_seed_amended",
         "sentiment_demoted",
         "sentiment_repromoted",
+        "sentiment_audit_voided",
         "sentiment_audit_requested",
         "calendar_changed",
         "cash_session_confirmed",
@@ -713,6 +714,13 @@ def test_the_shipped_routing_table_is_served(settings_client: TestClient) -> Non
     # the same channels.
     for event in ("sentiment_demoted", "sentiment_repromoted"):
         assert routed[event] == {"event": event, "bell": True, "discord": True}
+    # R4 (migration 0018): a void changes what Phase 4 may read, so it takes
+    # ``sentiment_repromoted``'s channels -- bell on, Discord on.
+    assert routed["sentiment_audit_voided"] == {
+        "event": "sentiment_audit_voided",
+        "bell": True,
+        "discord": True,
+    }
     # Step 6's manual audit trigger (migration 0014): an operator action on
     # decision 20's config-event terms -- a record for Discord, not a bell.
     assert routed["sentiment_audit_requested"] == {

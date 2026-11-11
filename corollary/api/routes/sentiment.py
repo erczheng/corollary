@@ -3,19 +3,31 @@
 Design spec, *API*: ``GET /api/settings/sentiment`` -- per source: status and
 since when, the accuracy per window with its graded count and basis, whether
 the source is eligible to demote or re-promote and how many more labels it
-needs, last and next run. ``POST /api/settings/sentiment/audit`` (hourly
-limit). **No reinstate route** -- the audit is the only writer of the status
-(Q6). Nothing in this module writes ``sentiment_source_status``; the
-``POST`` starts the same runner the Saturday job runs, and that runner is
-what writes it.
+needs, last and next run, and the voided runs. ``POST
+/api/settings/sentiment/audit`` (hourly limit). **No reinstate route and no
+void route** -- the audit is the only thing that decides a status (Q6), and
+voiding a run is ``scripts/void_audit_run.py``'s, never a request's (R4).
+Nothing in this module writes ``sentiment_source_status`` or ``audit_run``'s
+void columns; the ``POST`` starts the same runner the Saturday job runs,
+and that runner is what writes the status.
 
 ``GET /api/settings/sentiment``
 -------------------------------
 
-Read only, and counts only. Every figure comes from the **latest succeeded**
-``audit_run``'s ``sentiment_accuracy`` rows, as integers: no percentage is
-computed here, so no rounded number crosses the wire beside the counts it
-came from, and no float exists anywhere on the path.
+Read only, and counts only. Every figure comes from the **latest succeeded,
+non-voided** ``audit_run``'s ``sentiment_accuracy`` rows, as integers: no
+percentage is computed here, so no rounded number crosses the wire beside
+the counts it came from, and no float exists anywhere on the path.
+
+* **Voided runs** (remainder spec R4, migration 0018) are excluded from
+  every "latest run" here: ``lastRun`` is the newest non-voided run in any
+  state, ``accuracyRun`` the newest non-voided succeeded one, and the
+  figures and eligibility follow ``accuracyRun`` -- so after a void they
+  come from the standing run before it, or there are none. A voided run's
+  accuracy rows stay stored (R4 step 3) and are never served. Each voided
+  run is listed in ``voidedRuns``, newest void first, with its stored
+  reason verbatim. **The manual limit is the one reader that keeps a voided
+  run**: see refusal 4.
 
 * **Since when.** ``changed_at`` is NULL on an ``unaudited`` row by design
   (``SentimentSourceStatus``): seeding is not a change. It is served as
@@ -31,10 +43,19 @@ came from, and no float exists anywhere on the path.
   ``trailing_28d``), a ``demoted`` one toward *re-promotion*
   (``REPROMOTION_FLOOR``, ``since_demotion``). ``needed`` is how many more
   graded directional labels a window needs to reach its floor, ``0`` once it
-  has. A demoted source whose latest run is the one that demoted it has
-  counted nothing since: that run judged it as ``active``, on
-  ``trailing_28d``, so it wrote no ``since_demotion`` row. That reads as
-  ``graded: 0`` with ``asOfRunId: null`` -- a true count, not a stand-in.
+  has. Beside it, on either kind, ``sessions`` is how many distinct sessions
+  those labels span and ``sessionsNeeded`` how many more reach
+  ``sessionFloor`` (``audit.MIN_ELIGIBLE_SESSIONS``, R3); both are ``null``
+  on a row written before that floor, which is never eligible. ``eligible``
+  is ``audit.window_is_eligible`` over every window -- the rule
+  ``decide_transition`` applies, not a copy of it, so Settings never calls a
+  source eligible that the engine would judge ineligible. Eligible means
+  both floors are met, which a transition needs and which does not make
+  one: an eligible source at 61% stays active. A demoted source whose
+  latest run is the one that demoted it has counted nothing since: that run
+  judged it as ``active``, on ``trailing_28d``, so it wrote no
+  ``since_demotion`` row. That reads as ``graded: 0`` and ``sessions: 0``
+  with ``asOfRunId: null`` -- true counts, not stand-ins.
 * **Next run** is the ``sentiment_audit`` job's next slot from the
   scheduler's status, ``null`` with no scheduler running.
 
@@ -64,6 +85,8 @@ inputs and timestamp (CLAUDE.md rule 8's spirit: silent rejection is a bug):
    restart does not reset it (rule 4: enforced server-side, from stored
    state). Scheduled runs do not count against it: the limit is on the
    owner's button, and the unique index already stops two runs overlapping.
+   **A voided manual run does count**: the limit is on how often a run
+   starts, not on whether it stands, so voiding one hands back no hour.
 
 Then the run starts, and refuses in its own order before it opens a row:
 
@@ -116,8 +139,14 @@ from corollary.api.schemas import (
     SentimentWindow,
     SentimentWindowAccuracy,
     SentimentWindowProgress,
+    VoidedAuditRun,
 )
-from corollary.data.news.audit import DEMOTION_FLOOR, REPROMOTION_FLOOR
+from corollary.data.news.audit import (
+    DEMOTION_FLOOR,
+    MIN_ELIGIBLE_SESSIONS,
+    REPROMOTION_FLOOR,
+    window_is_eligible,
+)
 from corollary.data.news.audit_runner import (
     ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
@@ -197,16 +226,51 @@ AuditNowDep = Annotated[datetime, Depends(audit_now)]
 
 
 def _latest_run(session: Session, *, succeeded_only: bool) -> AuditRun | None:
-    """The newest run, or the newest succeeded one.
+    """The newest **non-voided** run, or the newest non-voided succeeded one.
 
+    A voided run no longer stands (R4 step 3: every reader excludes it), so
+    it is never "the last run" and never the run the figures come from.
     ``started_at`` is ``UtcDateTime``, whose SQL ordering is chronological
     (see ``audit.earliest_reference_needed``); ``id`` breaks a tie.
     """
-    stmt = select(AuditRun)
+    stmt = select(AuditRun).where(AuditRun.voided_at.is_(None))
     if succeeded_only:
         stmt = stmt.where(AuditRun.status == "succeeded")
     stmt = stmt.order_by(AuditRun.started_at.desc(), AuditRun.id.desc()).limit(1)
     return session.scalars(stmt).first()
+
+
+def _voided_runs(session: Session, correlation_id: str) -> list[VoidedAuditRun]:
+    """Every voided run, newest void first: ``voided_at``, then ``id``.
+
+    ``voided_at`` is ``UtcDateTime``, chronological in SQL, as above. The
+    reason is served exactly as stored. A voided row with no reason is one
+    ``ck_audit_run_voided`` refuses, so only a damaged database holds it: it
+    is left out and logged rather than given a reason nobody wrote. It is
+    still excluded from :func:`_latest_run` -- ``voided_at`` is what voids it.
+    """
+    stmt = (
+        select(AuditRun)
+        .where(AuditRun.voided_at.is_not(None))
+        .order_by(AuditRun.voided_at.desc(), AuditRun.id.desc())
+    )
+    out: list[VoidedAuditRun] = []
+    for run in session.scalars(stmt):
+        voided_at, reason = run.voided_at, run.void_reason
+        if voided_at is None or reason is None:
+            logger.error(
+                "a voided audit_run has no stored reason; not listed",
+                extra={
+                    "event": "audit_run_void_reason_missing",
+                    "rule": "a voided run carries voided_at and void_reason together",
+                    "audit_run_id": run.id,
+                    "voided_at": None if voided_at is None else voided_at.isoformat(),
+                    "correlation_id": correlation_id,
+                },
+            )
+            continue
+        out.append(VoidedAuditRun(id=run.id, voided_at=voided_at, reason=reason))
+    return out
 
 
 def _summary(run: AuditRun | None) -> AuditRunSummary | None:
@@ -222,6 +286,14 @@ def _summary(run: AuditRun | None) -> AuditRunSummary | None:
 
 
 def _last_manual_start(session: Session) -> datetime | None:
+    """The newest manual run's start, **voided or not**.
+
+    Deliberately *not* filtered on ``voided_at``, unlike :func:`_latest_run`.
+    The once-an-hour limit is on how often a manual run starts, not on
+    whether the run stands: voiding one hands back no hour, or void-and-rerun
+    would be a way round the limit. ``started_at`` orders chronologically, as
+    above.
+    """
     stmt = (
         select(AuditRun.started_at)
         .where(AuditRun.trigger == "manual")
@@ -267,7 +339,11 @@ def _live_running(session: Session, now: datetime) -> AuditRun | None:
 
 
 def _counts(row: SentimentAccuracy) -> SentimentCounts:
-    return SentimentCounts(graded=row.graded, correct=row.correct, neutral=row.neutral)
+    """One row's stored counts. ``sessions`` is the row's own -- NULL stays
+    ``None`` -- never summed from the other scopes, which do not add up to it."""
+    return SentimentCounts(
+        graded=row.graded, correct=row.correct, neutral=row.neutral, sessions=row.sessions
+    )
 
 
 def _accuracy_by_source(
@@ -318,7 +394,13 @@ def _eligibility(
     cells: Mapping[tuple[str, str], SentimentWindowAccuracy],
     run: AuditRun | None,
 ) -> SentimentEligibility:
-    """Decision 13's eligibility for the status the source is in now."""
+    """Decision 13's eligibility for the status the source is in now.
+
+    Whether a window is eligible is :func:`audit.window_is_eligible`'s
+    answer, the function ``decide_transition`` reads -- never a second copy
+    of the rule here. A window with no cell on this basis counted nothing:
+    zero labels over zero sessions, which is a count.
+    """
     if status == "demoted":
         kind: SentimentEligibilityKind = "repromote"
         basis = "since_demotion"
@@ -328,23 +410,32 @@ def _eligibility(
         basis = "trailing_28d"
         floor = DEMOTION_FLOOR
     windows: list[SentimentWindowProgress] = []
+    eligible_windows: list[bool] = []
     counted_on_basis = False
     for window in SENTIMENT_WINDOWS:
         cell = cells.get((window, basis))
         graded = 0 if cell is None else cell.combined.graded
+        sessions = 0 if cell is None else cell.combined.sessions
         counted_on_basis = counted_on_basis or cell is not None
+        eligible_windows.append(window_is_eligible(graded, sessions, floor))
         windows.append(
             SentimentWindowProgress(
                 window=_WIRE_WINDOW[window],
                 graded=graded,
                 needed=max(floor - graded, 0),
+                sessions=sessions,
+                # None with a NULL count: no shortfall from a count never taken.
+                sessions_needed=(
+                    None if sessions is None else max(MIN_ELIGIBLE_SESSIONS - sessions, 0)
+                ),
             )
         )
     return SentimentEligibility(
         kind=kind,
         basis=_WIRE_BASIS[basis],
         floor=floor,
-        eligible=all(w.graded >= floor for w in windows),
+        session_floor=MIN_ELIGIBLE_SESSIONS,
+        eligible=all(eligible_windows),
         windows=windows,
         as_of_run_id=run.id if run is not None and counted_on_basis else None,
     )
@@ -414,6 +505,7 @@ def read_sentiment_audit(
         ],
         last_run=_summary(last_run),
         accuracy_run=_summary(accuracy_run),
+        voided_runs=_voided_runs(session, correlation_id),
         next_run_at=None if job is None else job.next_run,
         manual_available_at=_manual_available_at(_last_manual_start(session), now),
     )

@@ -32,7 +32,8 @@ b. **Plan.** The labels with an unwritten window, the keys already written,
    than its reference session, so each label's own verdict is loaded
    (decision 25).
 c. **Fetch.** One ``stock_bars`` call per session per
-   :data:`BAR_BATCH_MAX_SYMBOLS` symbols (decision 6), through
+   :data:`BAR_BATCH_MAX_SYMBOLS` symbols (decision 6), adjusted for splits,
+   dividends and spin-offs (:data:`AUDIT_BAR_ADJUSTMENT`), through
    :class:`MinuteBarSource` -- the provider interface, whose implementation
    meters the shared ``data.`` bucket and **waits** on it rather than
    refusing. A failed batch is retried one symbol at a time, and a raise
@@ -41,7 +42,8 @@ c. **Fetch.** One ``stock_bars`` call per session per
 d. **Grade** and write the ``label_outcome`` rows, committed on their own.
 e. **Accuracy.** Each source's graded outcomes referenced after
    :func:`~audit.earliest_reference_needed` go to :func:`~audit.audit_sources`.
-f. **Close**, in **one** transaction: the ``sentiment_accuracy`` rows, each
+f. **Close**, in **one** transaction: the ``sentiment_accuracy`` rows (each
+   with its ``sessions`` count, R3 -- the figure the transition read), each
    transition's ``audit_log`` row and ``sentiment_source_status`` update, and
    the run set ``succeeded`` with ``finished_at`` and ``detail``.
 g. **Notify**, after the commit: each transition's notice is handed to the
@@ -67,7 +69,11 @@ Decisions this module takes (flagged in the unit's report)
    ``running`` row may be another process's live run: it is treated as
    abandoned (a process that died mid-run) only when its ``started_at`` is
    more than :data:`ABANDONED_RUN_AFTER` before this run's start; a younger
-   one raises :class:`AuditAlreadyRunning` and nothing is written.
+   one raises :class:`AuditAlreadyRunning` and nothing is written. Step a
+   (:func:`_open_run`) begins with SQLite's write lock and reads the run's
+   ``started_at`` from the clock only after it, so a void
+   (``audit_void.void_audit_run``, which locks the same way) and a run's
+   open serialize instead of interleaving (R4, U4a-fix finding M1).
 2. **Accuracy rows are written in the closing transaction**, with the
    transitions, not in a transaction of their own: a failed run then leaves
    no ``sentiment_accuracy`` rows naming it, so "the latest run's figures"
@@ -171,7 +177,7 @@ from corollary.data.news.audit import (
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels, verdict_histories
 from corollary.data.news.watchlist import MARKET_TICKER
-from corollary.data.providers.interface import Bar, BarTimeframe
+from corollary.data.providers.interface import Bar, BarAdjustment, BarTimeframe
 from corollary.db.models import (
     AuditLog,
     AuditRun,
@@ -181,10 +187,12 @@ from corollary.db.models import (
     SentimentLabelRow,
     SentimentSourceStatus,
 )
+from corollary.db.session import take_write_lock
 from corollary.wire import WireFormatError
 
 __all__ = [
     "ABANDONED_RUN_AFTER",
+    "AUDIT_BAR_ADJUSTMENT",
     "BAR_BATCH_MAX_SYMBOLS",
     "FETCH_ABORT_AFTER",
     "AuditAlreadyRunning",
@@ -231,6 +239,24 @@ FETCH_ABORT_AFTER: Final = 5
 #: at the spec's request budget -- so a slow run is never closed under itself.
 ABANDONED_RUN_AFTER: Final = timedelta(hours=2)
 
+#: The audit's bars are adjusted for **every** corporate action -- splits,
+#: cash dividends and spin-offs (Alpaca's ``all``; see
+#: :data:`~corollary.data.providers.interface.BarAdjustment`) -- never the
+#: provider's ``split`` default. A stock opens lower on its ex-date by about
+#: the dividend, and that drop is a transfer to the holder, not a loss: with
+#: split-only bars a 1d window spanning a ticker's ex-date reads a 0.2--1%
+#: decline that never happened to anyone holding it, and SPY's quarterly
+#: ex-date shifts every excess return that session, so a correct bullish
+#: label could grade wrong. A spin-off is the same artefact, larger.
+#:
+#: The cost, stated where it is paid: the stored ``reference_price`` and
+#: ``outcome_price`` are **adjusted as of the run**, not as printed. Every
+#: ex-date after a window scales both of its prices by the same factor, so
+#: their ratio -- the return, the only thing graded -- is unchanged; it is
+#: only the levels that drift from the tape. They are never to be read as
+#: prints. See :mod:`corollary.data.news.audit`.
+AUDIT_BAR_ADJUSTMENT: Final[BarAdjustment] = "all"
+
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -241,6 +267,8 @@ class MinuteBarSource(Protocol):
     Bars come from the provider's **historical** feed -- SIP, from
     ``ALPACA_STOCK_FEED_HISTORICAL`` inside the provider; no feed name is
     spelled here -- and the request waits on the shared ``data.`` bucket.
+    The audit always passes ``adjustment=``:data:`AUDIT_BAR_ADJUSTMENT`, so
+    an implementation must honour it rather than accept and ignore it.
     """
 
     async def stock_bars(
@@ -251,6 +279,7 @@ class MinuteBarSource(Protocol):
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> Mapping[str, Sequence[Bar]]: ...
 
 
@@ -392,23 +421,39 @@ def _fault_json(fault: BarFault) -> dict[str, str]:
 
 def _open_run(
     session_factory: Callable[[], Session],
-    started_at: datetime,
+    clock: Callable[[], datetime],
     trigger: AuditTrigger,
     correlation_id: str,
-) -> int:
+) -> tuple[int, datetime]:
     """Close any abandoned ``running`` row, then insert this run's. One commit.
+
+    Returns the new row's id and its ``started_at``. That is ``clock``'s one
+    reading, taken **after** the write lock
+    (:func:`~corollary.db.session.take_write_lock`) and before
+    every check, so a void that committed first is in the past of this run.
+    A void that comes later waits for this commit and then sees the
+    ``running`` row and is refused (R4, finding M1). Reading the clock before
+    the lock let a void commit in between with a later ``voided_at``, and
+    that Saturday's run refused to start.
 
     Raises :class:`AuditAlreadyRunning`, writing nothing, when a ``running``
     row started no more than :data:`ABANDONED_RUN_AFTER` ago (decision 1).
     """
     with session_factory() as session:
+        take_write_lock(session)
+        started_at = _aware_utc(clock(), "the clock's reading")
+        # Every run, voided or not: the spans must stay disjoint for the
+        # history join (``models.SentimentSourceStatus``) whatever stands.
+        # ``voided_at`` too (R4): a void's restore rows are stamped with it,
+        # and a span holding that instant would hand them to this run.
         latest_finished = session.scalar(select(func.max(AuditRun.finished_at)))
         latest_started = session.scalar(select(func.max(AuditRun.started_at)))
-        for previous in (latest_finished, latest_started):
+        latest_voided = session.scalar(select(func.max(AuditRun.voided_at)))
+        for previous in (latest_finished, latest_started, latest_voided):
             if previous is not None and _aware_utc(previous, "a stored run instant") > started_at:
                 raise RuntimeError(
-                    "the clock reads earlier than a stored audit run; refusing to "
-                    "start a run whose span would overlap it"
+                    "the clock reads earlier than a stored audit run or void; refusing "
+                    "to start a run whose span would overlap it"
                 )
         running = [
             (row.id, _aware_utc(row.started_at, "started_at"))
@@ -451,7 +496,7 @@ def _open_run(
         session.flush()
         run_id = run.id
         session.commit()
-    return run_id
+    return run_id, started_at
 
 
 def _set_terminal(
@@ -709,6 +754,9 @@ def _close_run(
                     graded=row.graded,
                     correct=row.correct,
                     neutral=row.neutral,
+                    # R3: the count the transition below acted on, on every
+                    # row -- NULL is reserved for rows from before Q23b.
+                    sessions=row.sessions,
                 )
                 for row in audit.accuracy
             )
@@ -843,6 +891,7 @@ async def _fetch(bars: MinuteBarSource, plan: AuditPlan, correlation_id: str) ->
                 timeframe=BarTimeframe.MINUTE,
                 start=start,
                 end=end,
+                adjustment=AUDIT_BAR_ADJUSTMENT,
             )
         except Exception as exc:  # per batch, by design: see step c
             data_fault = _is_data_fault(exc)
@@ -1109,9 +1158,13 @@ def _call_on_opened(on_opened: OnOpened | None, run_id: int, correlation_id: str
 
 
 async def _open(
-    deps: SentimentAuditDeps, started_at: datetime, trigger: AuditTrigger, correlation_id: str
-) -> int:
-    """Step a, logged either way.
+    deps: SentimentAuditDeps, trigger: AuditTrigger, correlation_id: str
+) -> tuple[int, datetime]:
+    """Step a, logged either way. The run's id and ``started_at``.
+
+    ``started_at`` is read by :func:`_open_run` under the write lock, not
+    here and not earlier: see that function (R4, finding M1). The lines
+    logged before a row exists therefore carry no run instant.
 
     A cancellation here arrives after :func:`_on_worker` has waited for
     ``_open_run``'s thread -- which may well have committed this run's
@@ -1123,21 +1176,21 @@ async def _open(
     before the thread does; the row, if it then lands, is left for the
     abandonment bound to close -- shutdown is not held hostage.
     """
-    opened: list[int] = []
+    opened: list[tuple[int, datetime]] = []
 
     def open_and_note(
         session_factory: Callable[[], Session],
-        at: datetime,
+        clock: Callable[[], datetime],
         run_trigger: AuditTrigger,
         cid: str,
-    ) -> int:
-        new_id = _open_run(session_factory, at, run_trigger, cid)
-        opened.append(new_id)  # after the commit: this id names a row that exists
-        return new_id
+    ) -> tuple[int, datetime]:
+        new = _open_run(session_factory, clock, run_trigger, cid)
+        opened.append(new)  # after the commit: this id names a row that exists
+        return new
 
     try:
-        run_id = await _on_worker(
-            open_and_note, deps.session_factory, started_at, trigger, correlation_id
+        run_id, started_at = await _on_worker(
+            open_and_note, deps.session_factory, deps.clock, trigger, correlation_id
         )
     except asyncio.CancelledError as exc:
         if not opened:
@@ -1150,13 +1203,13 @@ async def _open(
                     "row_confirmed": False,
                     "trigger": trigger,
                     "error_type": type(exc).__name__,
-                    "started_at": started_at.isoformat(),
                     "correlation_id": correlation_id,
                 },
             )
             raise
         # Closes the row and logs; it re-raises only a further cancellation.
-        await _record_failure(deps, opened[0], started_at, "open", exc, correlation_id)
+        noted_id, noted_at = opened[0]
+        await _record_failure(deps, noted_id, noted_at, "open", exc, correlation_id)
         raise
     except AuditAlreadyRunning:
         # A refusal (another live run's row at step a), not a failure: the
@@ -1167,7 +1220,6 @@ async def _open(
                 "event": "sentiment_audit_not_started",
                 "rule": "one sentiment audit run at a time",
                 "trigger": trigger,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1179,7 +1231,6 @@ async def _open(
                 "event": "sentiment_audit_not_started",
                 "trigger": trigger,
                 "error_type": type(exc).__name__,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1194,14 +1245,16 @@ async def _open(
             "correlation_id": correlation_id,
         },
     )
-    return run_id
+    return run_id, started_at
 
 
 async def _run_locked(
     deps: SentimentAuditDeps, trigger: AuditTrigger, on_opened: OnOpened | None
 ) -> AuditRunResult:
     correlation_id = uuid.uuid4().hex
-    started_at = _aware_utc(deps.clock(), "the clock's reading")
+    # No clock reading here: the run's ``started_at`` is read by ``_open_run``
+    # under the write lock (R4, finding M1), so a void cannot commit between
+    # the reading and the run's row.
     # The universe first, before any row exists: a degraded one is a reason
     # not to run (WatchUniverseUnavailable), and leaves nothing behind.
     try:
@@ -1217,7 +1270,6 @@ async def _run_locked(
                 ),
                 "reason": str(exc),
                 "trigger": trigger,
-                "started_at": started_at.isoformat(),
                 "correlation_id": correlation_id,
             },
         )
@@ -1225,10 +1277,10 @@ async def _run_locked(
     except Exception as exc:
         # Any other failure reading it is a plan-stage failure like the rest:
         # a row, closed ``failed``, naming the stage and the type.
-        run_id = await _open(deps, started_at, trigger, correlation_id)
+        run_id, started_at = await _open(deps, trigger, correlation_id)
         await _record_failure(deps, run_id, started_at, "plan", exc, correlation_id)
         raise
-    run_id = await _open(deps, started_at, trigger, correlation_id)
+    run_id, started_at = await _open(deps, trigger, correlation_id)
     # The row is committed and the run goes on: the caller may now say so.
     _call_on_opened(on_opened, run_id, correlation_id)
 

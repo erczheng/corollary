@@ -49,6 +49,7 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "AuditRunSummary": schemas.AuditRunSummary,
     "SentimentAuditStarted": schemas.SentimentAuditStarted,
     "SentimentAuditStatus": schemas.SentimentAuditStatus,
+    "VoidedAuditRun": schemas.VoidedAuditRun,
     "SentimentCounts": schemas.SentimentCounts,
     "SentimentEligibility": schemas.SentimentEligibility,
     "SentimentSourceAudit": schemas.SentimentSourceAudit,

@@ -4,7 +4,7 @@ This is the storage half of news ingest. The pollers that fetch articles from
 the vendors call :func:`store_articles` with what they fetched; nothing here
 talks to a vendor.
 
-Four pieces:
+Five pieces:
 
 * :func:`url_key` and :func:`headline_key` -- the two normalisers whose output
   is stored in ``news_article.url_key`` / ``headline_key``. A stored key must
@@ -16,6 +16,9 @@ Four pieces:
 * :func:`store_articles` -- the upsert. Idempotent on ``(vendor, vendor_id)``,
   merges tags on a re-seen article, and links a new cross-vendor copy to its
   group's canonical row.
+* :func:`relink_stored` -- R2: the same matcher, run once over rows already
+  stored, for duplicates that arrived before a matcher fix
+  (``scripts/relink_articles.py``).
 
 Decisions this module makes, stated so they can be disagreed with
 ------------------------------------------------------------------
@@ -49,10 +52,23 @@ and when any one of them rules the URL out the headline check decides alone:
 Each bound can only turn a URL link into a headline check, so the cost of
 being wrong is a missed link, never a wrong one.
 
+**One measured publisher pair gets a skewed headline window.** Finnhub serves
+Motley Fool stories syndicated through Yahoo 20 minutes after the time fool.com
+itself states, which Massive reproduces exactly. That puts the pair outside
+decision 3's +/-10 minutes, so every such story showed twice. Finnhub labels
+the row only ``"Yahoo"``, the same label it gives Zacks and GlobeNewswire
+copies, which it stamps correctly, so its decoder has nothing to key a
+correction on. The allowance therefore lives here: for that exact pair, the
+headline match also looks +/-10 minutes around the shifted stamp. See
+:data:`SYNDICATION_SKEWS` for the evidence. No stamp is rewritten.
+
 **Link, then never re-link.** ``canonical_id`` is decided once, when a row is
 inserted. A later edit (a new headline or URL on a re-poll) updates the row's
 keys, so *future* articles match against the new text, but never re-points
 the row or its group -- re-pointing is how a chain or an orphan gets made.
+The one exception is :func:`relink_stored`, and it only fills a NULL: it links
+an unlinked row to a row stored before it, never a row other rows point at,
+and never touches a row that is already linked.
 
 **No chains, enforced here.** The schema cannot say "a canonical row is itself
 canonical" (SQLite admits no subquery in a CHECK). Every match is resolved to
@@ -96,13 +112,13 @@ import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Final
+from typing import Any, Final, TypeVar
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
-from sqlalchemy import delete, exists, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Select, delete, exists, func, or_, select
+from sqlalchemy.orm import Session, aliased
 
-from corollary.data.news.article import NewsArticle
+from corollary.data.news.article import NewsArticle, NewsFeed
 from corollary.data.providers.interface import AssetDirectory
 from corollary.data.seeds import EQUITY_SYMBOL_RE, normalize_symbol
 from corollary.db.models import NewsArticle as ArticleRow
@@ -112,11 +128,17 @@ from corollary.wire import require_aware
 __all__ = [
     "HEADLINE_MATCH_WINDOW",
     "MARKET_TICKER",
+    "SYNDICATION_SKEWS",
     "URL_MATCH_WINDOW",
     "IngestResult",
+    "Relink",
+    "RelinkResult",
     "StoredArticle",
+    "SyndicationSide",
+    "SyndicationSkew",
     "filter_tags",
     "headline_key",
+    "relink_stored",
     "store_articles",
     "url_key",
 ]
@@ -129,6 +151,68 @@ MARKET_TICKER: Final = "MARKET"
 
 #: Decision 3: the headline fallback matches within +/-10 minutes, inclusive.
 HEADLINE_MATCH_WINDOW: Final = timedelta(minutes=10)
+
+
+@dataclass(frozen=True)
+class SyndicationSide:
+    """One side of a :class:`SyndicationSkew`: a feed and its exact publisher text."""
+
+    vendor: str
+    feed: str
+    publisher: str
+
+
+@dataclass(frozen=True)
+class SyndicationSkew:
+    """A measured, constant lag between two vendors' copies of one publisher's stories.
+
+    ``late`` stamps the story ``offset`` after ``early`` does. When an incoming
+    article is exactly one side, the headline fallback *also* matches the
+    other side within :data:`HEADLINE_MATCH_WINDOW` of the stamp shifted by
+    ``offset``, in the measured direction only. The ordinary window still
+    applies alongside it, so the pair keeps linking if the lag is ever fixed
+    upstream. Publisher text is compared exactly: variants that were never
+    observed are not guessed at.
+    """
+
+    late: SyndicationSide
+    early: SyndicationSide
+    offset: timedelta
+
+
+#: Measured 2026-09-25 -> 2026-10-09 (phase-3 step 5 re-measurement, two weeks
+#: of real news): 575 headline twins of Finnhub ``/company-news`` rows with
+#: ``source`` ``"Yahoo"`` and Massive rows with publisher ``"The Motley Fool"``
+#: sat **exactly 1200 s apart, Finnhub later**. Four more pairs were recycled
+#: generic headlines matched to a different day's article, so not
+#: counter-examples. On 12 of 12 sampled pairs, fool.com's own
+#: ``article:published_time`` and JSON-LD ``datePublished`` equal Massive's
+#: stamp to the second, and Finnhub's ``url`` redirects to that same fool.com
+#: page. So **Finnhub is 20 minutes late and Massive is right.**
+#:
+#: Why this is not a decoder correction like ``correct_publisher_clock``:
+#: Finnhub gives the Fool rows the same ``source`` as its Zacks (466 twins) and
+#: GlobeNewswire (28 twins) Yahoo rows, which match Massive at offset 0. The
+#: image is a generic Yahoo placeholder and the url an opaque redirect id, so
+#: nothing in the payload separates them. Shifting every ``"Yahoo"`` row would
+#: break those 494 correct pairs. Only the counterpart's publisher identifies
+#: the story, and that is known only here, at match time.
+#:
+#: Residuals, accepted: a Finnhub Fool row with no Massive twin keeps its late
+#: stamp, which is the no-look-ahead direction. And if the Finnhub copy is
+#: stored first it stays canonical (links are never re-rooted), so the group
+#: shows the stamp 20 minutes late.
+#:
+#: Scoped to ``finnhub_company``. The general feed was not measured.
+SYNDICATION_SKEWS: Final[tuple[SyndicationSkew, ...]] = (
+    SyndicationSkew(
+        late=SyndicationSide(vendor="finnhub", feed=NewsFeed.FINNHUB_COMPANY.value, publisher="Yahoo"),
+        early=SyndicationSide(
+            vendor="massive", feed=NewsFeed.MASSIVE_NEWS.value, publisher="The Motley Fool"
+        ),
+        offset=timedelta(minutes=20),
+    ),
+)
 
 #: An implementation bound on decision 3's "normalised URL": a URL match
 #: counts only between rows published within +/-48 hours of each other,
@@ -325,6 +409,46 @@ class IngestResult:
     stored: tuple[StoredArticle, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class Relink:
+    """One link :func:`relink_stored` made: ``article_id`` now names ``canonical_id``.
+
+    Carries both rows' vendor, publisher and ``published_at`` so a caller can
+    report the link without reading the rows again. No headline: it is vendor
+    text, and the scripts that print these never print headlines.
+    """
+
+    article_id: int
+    vendor: str
+    publisher: str | None
+    published_at: datetime
+    canonical_id: int
+    canonical_vendor: str
+    canonical_publisher: str | None
+    canonical_published_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RelinkResult:
+    """What one :func:`relink_stored` pass did, and what its ``since`` covered.
+
+    ``examined`` counts the unlinked rows published at or after ``since`` that
+    share a key with an earlier row -- the only rows that can match -- and
+    ``earliest_examined`` is the earliest ``published_at`` among them, ``None``
+    when there were none. ``before_since`` counts the rows that would have been
+    examined but were published before ``since``: zero means the bound left no
+    candidate out. A candidate is not a duplicate; a recycled headline is one too.
+    """
+
+    links: tuple[Relink, ...]
+    #: Matches not linked because other rows already name the row as their
+    #: canonical row; each is also logged as ``news_relink_skipped``.
+    skipped: int
+    examined: int
+    earliest_examined: datetime | None
+    before_since: int
+
+
 def _batch_order(article: NewsArticle) -> tuple[datetime, str, str, str, str, str, str, tuple[str, ...]]:
     """A total order, so one batch stores the same way whatever order it came in."""
     return (
@@ -441,12 +565,189 @@ def store_articles(
     )
 
 
+def relink_stored(session: Session, *, since: datetime) -> RelinkResult:
+    """Link stored duplicates that ingest missed (R2). Sets ``canonical_id`` only. Does not commit.
+
+    Runs decision 3's matcher, :func:`_find_canonical` itself and so
+    :data:`SYNDICATION_SKEWS` with it, over every stored row published at or
+    after ``since`` (inclusive, timezone-aware) whose ``canonical_id`` is NULL,
+    in ``id`` order. Each row is matched only against rows stored before it
+    (``before_id=row.id``), so the result is the link ingest would have made
+    had today's matcher been live when the row arrived. The earlier-stored
+    copy stays canonical, as at ingest; the reverse would make the copy
+    stored second canonical, and for the Fool pair stored Massive-first that
+    is the stamp Finnhub serves 20 minutes late. Each link is flushed before
+    the next row is matched, as ingest flushes each insert, so a row stored
+    later sees it.
+
+    ``since`` bounds the rows being linked, not their twins. A row published
+    after ``since`` can join a twin published before it.
+
+    What it never does: delete a row, change a row that is already linked,
+    re-point a group, or write any column but the one ``canonical_id``. A row
+    that other rows already name as their canonical row is not linked even
+    when it matches: linking it would chain its members, and re-pointing them
+    would change linked rows. That missed link is logged at WARNING as
+    ``news_relink_skipped``. A match whose group already holds a row of the
+    row's vendor is refused, as at ingest (:func:`_choose_canonical`), even
+    when that row was stored after this one.
+
+    Returns a :class:`RelinkResult`: the links made, the matches skipped, and
+    what ``since`` covered. Nothing is written for the last part; it is a count.
+
+    Idempotent: a second run makes no link.
+    Every row it linked is no longer NULL. Every row it left alone is matched
+    against the same earlier rows again, and in the meantime a group can only
+    have gained rows, which can refuse a link but never permit one.
+
+    Only rows sharing a ``url_key`` or ``headline_key`` with an earlier row
+    are handed to the matcher. That is not a second matcher: every path in
+    :func:`_find_canonical` matches on equality of one of those two keys with
+    a row stored before, so a row sharing neither cannot match. It is there
+    for the write lock. The pass holds SQLite's lock from its first link to
+    the caller's commit, and the matcher costs about 1.7 ms a row (52 s over
+    30,600 synthetic rows, 2026-11-09). A pass over every row would outlast
+    the 5 s that the live app's writers wait.
+    """
+    require_aware(since, "since")
+    bound = since.astimezone(timezone.utc)
+    earlier = aliased(ArticleRow)
+    shares_a_key = or_(
+        exists().where(earlier.id < ArticleRow.id, earlier.url_key == ArticleRow.url_key),
+        exists().where(earlier.id < ArticleRow.id, earlier.headline_key == ArticleRow.headline_key),
+    )
+    unlinked = session.scalars(
+        select(ArticleRow)
+        .where(
+            ArticleRow.canonical_id.is_(None),
+            ArticleRow.published_at >= bound,
+            shares_a_key,
+        )
+        .order_by(ArticleRow.id)
+    ).all()
+    # Read before the first link is flushed, so it costs the write lock nothing.
+    before_since = session.scalar(
+        select(func.count())
+        .select_from(ArticleRow)
+        .where(
+            ArticleRow.canonical_id.is_(None),
+            ArticleRow.published_at < bound,
+            shares_a_key,
+        )
+    )
+
+    links: list[Relink] = []
+    skipped = 0
+    for row in unlinked:
+        canonical_id = _find_canonical(
+            session,
+            vendor=row.vendor,
+            feed=row.feed,
+            publisher=row.publisher,
+            ukey=row.url_key,
+            hkey=row.headline_key,
+            published_at=row.published_at,
+            before_id=row.id,
+        )
+        if canonical_id is None:
+            continue
+        members = _member_count(session, row.id)
+        if members:
+            skipped += 1
+            logger.warning(
+                "news_article %d not re-linked to canonical row %d: %d other row(s) "
+                "already name it as their canonical row, and linking it would chain them",
+                row.id,
+                canonical_id,
+                members,
+                extra={
+                    "event": "news_relink_skipped",
+                    "rule": (
+                        "R2: a re-link sets canonical_id on an unlinked row only. A row "
+                        "other rows already point at is left alone: linking it would make "
+                        "a chain, and re-pointing its members would change linked rows"
+                    ),
+                    "article_id": row.id,
+                    "canonical_id": canonical_id,
+                    "members": members,
+                },
+            )
+            continue
+        row.canonical_id = canonical_id
+        # Flushed now, so the next row matched sees this link, as at ingest.
+        session.flush()
+        canonical = session.get_one(ArticleRow, canonical_id)
+        link = Relink(
+            article_id=row.id,
+            vendor=row.vendor,
+            publisher=row.publisher,
+            published_at=row.published_at,
+            canonical_id=canonical.id,
+            canonical_vendor=canonical.vendor,
+            canonical_publisher=canonical.publisher,
+            canonical_published_at=canonical.published_at,
+        )
+        links.append(link)
+        logger.info(
+            "news article %d re-linked to canonical row %d",
+            row.id,
+            canonical_id,
+            extra={
+                "event": "news_duplicate_relinked",
+                "rule": (
+                    "R2: decision 3's matcher, SYNDICATION_SKEWS included, run over a "
+                    "stored unlinked row against the rows stored before it"
+                ),
+                "article_id": row.id,
+                "canonical_id": canonical_id,
+            },
+        )
+
+    earliest = min((row.published_at for row in unlinked), default=None)
+    result = RelinkResult(
+        links=tuple(links),
+        skipped=skipped,
+        examined=len(unlinked),
+        earliest_examined=earliest,
+        before_since=int(before_since or 0),
+    )
+    logger.info(
+        "news re-link matched %d unlinked row(s) published since %s that share a key "
+        "with an earlier row: %d linked, %d skipped; %d such row(s) published before it",
+        result.examined,
+        bound.isoformat(),
+        len(result.links),
+        result.skipped,
+        result.before_since,
+        extra={
+            "event": "news_relink_done",
+            "since": bound.isoformat(),
+            "examined": result.examined,
+            "earliest_examined": None if earliest is None else earliest.isoformat(),
+            "before_since": result.before_since,
+            "linked": len(result.links),
+            "skipped": result.skipped,
+        },
+    )
+    return result
+
+
+def _member_count(session: Session, canonical_id: int) -> int:
+    """How many rows name ``canonical_id`` as their canonical row."""
+    count = session.scalar(
+        select(func.count()).select_from(ArticleRow).where(ArticleRow.canonical_id == canonical_id)
+    )
+    return int(count or 0)
+
+
 def _insert(session: Session, article: NewsArticle, stamp: datetime) -> ArticleRow:
     ukey = url_key(article.url)
     hkey = headline_key(article.headline)
     canonical_id = _find_canonical(
         session,
         vendor=article.vendor,
+        feed=article.feed.value,
+        publisher=article.publisher,
         ukey=ukey,
         hkey=hkey,
         published_at=article.published_at,
@@ -479,7 +780,9 @@ def _insert(session: Session, article: NewsArticle, stamp: datetime) -> ArticleR
                 "rule": (
                     "decision 3: a cross-vendor copy links to one canonical row by "
                     "normalised URL (a story-identifying URL, within +/-48 hours), "
-                    "else normalised headline within +/-10 minutes"
+                    "else normalised headline within +/-10 minutes (also around a "
+                    "measured syndication lag, for the publisher pairs in "
+                    "SYNDICATION_SKEWS)"
                 ),
                 "article_id": row.id,
                 "canonical_id": canonical_id,
@@ -559,7 +862,9 @@ def _is_generic_url_shape(ukey: str) -> bool:
     return _QUOTE_PAGE_PATH_RE.fullmatch(parts.path) is not None
 
 
-def _url_not_identifying(session: Session, ukey: str) -> str | None:
+def _url_not_identifying(
+    session: Session, ukey: str, *, before_id: int | None = None
+) -> str | None:
     """Why ``ukey`` cannot identify a story, or ``None`` when it can.
 
     Checked over *every* stored row on the URL, with no time bound: a URL that
@@ -571,12 +876,18 @@ def _url_not_identifying(session: Session, ukey: str) -> str | None:
     there are two groups. Likewise, while no group holds two rows of one
     vendor, one vendor's two ids on a URL are always two groups; the two-ids
     check is the guard for a group that already breaks that invariant.
+
+    ``before_id`` is :func:`_find_canonical`'s bound: only rows stored before
+    it are counted.
     """
     if _is_generic_url_shape(ukey):
         return "generic URL shape (bare host or /quote/<SYMBOL>)"
     on_url = session.execute(
-        select(ArticleRow.id, ArticleRow.canonical_id, ArticleRow.vendor).where(
-            ArticleRow.url_key == ukey
+        _stored_before(
+            select(ArticleRow.id, ArticleRow.canonical_id, ArticleRow.vendor).where(
+                ArticleRow.url_key == ukey
+            ),
+            before_id,
         )
     ).all()
     groups = {canonical_id if canonical_id is not None else row_id for row_id, canonical_id, _ in on_url}
@@ -588,13 +899,30 @@ def _url_not_identifying(session: Session, ukey: str) -> str | None:
     return None
 
 
+_Statement = TypeVar("_Statement", bound=Select[Any])
+
+
+def _stored_before(statement: _Statement, before_id: int | None) -> _Statement:
+    """``statement`` limited to rows with ``id < before_id``; unchanged when ``None``.
+
+    Unchanged means unchanged: no clause is added, so the matching queries
+    ingest runs are exactly what they were before :func:`relink_stored` existed.
+    """
+    if before_id is None:
+        return statement
+    return statement.where(ArticleRow.id < before_id)
+
+
 def _find_canonical(
     session: Session,
     *,
     vendor: str,
+    feed: str,
+    publisher: str | None,
     ukey: str,
     hkey: str,
     published_at: datetime,
+    before_id: int | None = None,
 ) -> int | None:
     """The canonical row a new article joins, or ``None`` if it starts its own group.
 
@@ -604,15 +932,34 @@ def _find_canonical(
     within :data:`URL_MATCH_WINDOW`. Only other vendors' rows match, and only
     groups holding no row of ``vendor`` are joined. The headline fallback is
     tried when the URL finds no joinable group, not only when it finds no row.
+    It also takes the rows :func:`_skewed_headline_matches` finds for a
+    publisher pair in :data:`SYNDICATION_SKEWS`.
+
+    ``before_id``, when given, limits every query that finds *matching* rows
+    to rows stored before it (``id < before_id``): the URL-identifying count,
+    the URL match, the headline match and the skewed match. That is the table
+    as the article stored as row ``before_id`` saw it on arrival, which is how
+    :func:`relink_stored` runs this matcher on a row already stored. Ingest
+    passes nothing: at insert, every stored row is already older. The bound
+    never limits what a group *holds*: :func:`_group_holds_vendor` and the
+    canonical lookup in :func:`_choose_canonical` read each group as it
+    stands, so a link can never put two rows of one vendor in one group.
+
+    Every path here matches on equality of ``url_key`` or ``headline_key``.
+    :func:`relink_stored` selects its rows on exactly that, so a new path
+    keyed on anything else must widen that selection too.
     """
-    reason = _url_not_identifying(session, ukey)
+    reason = _url_not_identifying(session, ukey, before_id=before_id)
     if reason is None:
         by_url = session.scalars(
-            select(ArticleRow).where(
-                ArticleRow.url_key == ukey,
-                ArticleRow.vendor != vendor,
-                ArticleRow.published_at >= published_at - URL_MATCH_WINDOW,
-                ArticleRow.published_at <= published_at + URL_MATCH_WINDOW,
+            _stored_before(
+                select(ArticleRow).where(
+                    ArticleRow.url_key == ukey,
+                    ArticleRow.vendor != vendor,
+                    ArticleRow.published_at >= published_at - URL_MATCH_WINDOW,
+                    ArticleRow.published_at <= published_at + URL_MATCH_WINDOW,
+                ),
+                before_id,
             )
         ).all()
         chosen = _choose_canonical(session, by_url, vendor)
@@ -630,15 +977,98 @@ def _find_canonical(
         )
     if not hkey:
         return None
-    by_headline = session.scalars(
-        select(ArticleRow).where(
-            ArticleRow.headline_key == hkey,
-            ArticleRow.vendor != vendor,
-            ArticleRow.published_at >= published_at - HEADLINE_MATCH_WINDOW,
-            ArticleRow.published_at <= published_at + HEADLINE_MATCH_WINDOW,
+    by_headline = list(
+        session.scalars(
+            _stored_before(
+                select(ArticleRow).where(
+                    ArticleRow.headline_key == hkey,
+                    ArticleRow.vendor != vendor,
+                    ArticleRow.published_at >= published_at - HEADLINE_MATCH_WINDOW,
+                    ArticleRow.published_at <= published_at + HEADLINE_MATCH_WINDOW,
+                ),
+                before_id,
+            )
+        ).all()
+    )
+    if publisher is not None:
+        by_headline.extend(
+            _skewed_headline_matches(
+                session,
+                incoming=SyndicationSide(vendor=vendor, feed=feed, publisher=publisher),
+                hkey=hkey,
+                published_at=published_at,
+                before_id=before_id,
+            )
         )
-    ).all()
     return _choose_canonical(session, by_headline, vendor)
+
+
+def _skewed_headline_matches(
+    session: Session,
+    *,
+    incoming: SyndicationSide,
+    hkey: str,
+    published_at: datetime,
+    before_id: int | None = None,
+) -> list[ArticleRow]:
+    """Rows on ``hkey`` that a :data:`SYNDICATION_SKEWS` entry puts in reach of ``incoming``.
+
+    The incoming article must be one side of a skew exactly (vendor, feed and
+    publisher text). If it is the late side, the early side is searched
+    around ``published_at - offset``. If it is the early side, the late side is
+    searched around ``published_at + offset``. Both use
+    :data:`HEADLINE_MATCH_WINDOW`, inclusive. Each skew that finds rows is
+    logged as ``news_syndication_skew_match``. ``before_id`` is
+    :func:`_find_canonical`'s bound.
+    """
+    found: list[ArticleRow] = []
+    for skew in SYNDICATION_SKEWS:
+        if incoming == skew.late:
+            other = skew.early
+            centre = published_at - skew.offset
+        elif incoming == skew.early:
+            other = skew.late
+            centre = published_at + skew.offset
+        else:
+            continue
+        rows = session.scalars(
+            _stored_before(
+                select(ArticleRow).where(
+                    ArticleRow.headline_key == hkey,
+                    ArticleRow.vendor == other.vendor,
+                    ArticleRow.feed == other.feed,
+                    ArticleRow.publisher == other.publisher,
+                    ArticleRow.published_at >= centre - HEADLINE_MATCH_WINDOW,
+                    ArticleRow.published_at <= centre + HEADLINE_MATCH_WINDOW,
+                ),
+                before_id,
+            )
+        ).all()
+        if not rows:
+            continue
+        logger.info(
+            "news headline matched %d %s/%s row(s) across a measured %ds syndication lag",
+            len(rows),
+            other.vendor,
+            other.publisher,
+            int(skew.offset.total_seconds()),
+            extra={
+                "event": "news_syndication_skew_match",
+                "rule": (
+                    "a publisher pair in SYNDICATION_SKEWS also matches by headline "
+                    "within +/-10 minutes of the stamp shifted by its measured lag"
+                ),
+                "vendor": incoming.vendor,
+                "feed": incoming.feed,
+                "publisher": incoming.publisher,
+                "counterpart_vendor": other.vendor,
+                "counterpart_publisher": other.publisher,
+                "offset_seconds": int(skew.offset.total_seconds()),
+                "matches": len(rows),
+            },
+        )
+        found.extend(rows)
+    return found
 
 
 def _choose_canonical(
@@ -679,11 +1109,20 @@ def _choose_canonical(
 
 
 def _group_holds_vendor(session: Session, canonical_id: int, vendor: str) -> bool:
-    """Whether the group rooted at ``canonical_id`` already has a row from ``vendor``."""
+    """Whether the group rooted at ``canonical_id`` already has a row from ``vendor``.
+
+    Two ``EXISTS``, the root and then its members, rather than one over an
+    ``OR``: the answer is the same, since ``EXISTS`` distributes over ``OR``,
+    but SQLite planned the single form as a search on ``vendor`` through the
+    ``(vendor, vendor_id)`` unique index. That reads every row of the vendor,
+    about 12 ms a call at 30,600 rows and growing with the table. Split, the
+    two use the primary key and ``ix_news_article_canonical_id`` (EXPLAIN
+    QUERY PLAN, 2026-11-09).
+    """
     statement = select(
-        exists().where(
-            or_(ArticleRow.id == canonical_id, ArticleRow.canonical_id == canonical_id),
-            ArticleRow.vendor == vendor,
+        or_(
+            exists().where(ArticleRow.id == canonical_id, ArticleRow.vendor == vendor),
+            exists().where(ArticleRow.canonical_id == canonical_id, ArticleRow.vendor == vendor),
         )
     )
     return bool(session.scalar(statement))

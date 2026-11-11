@@ -935,7 +935,8 @@ describe('sentiment accuracy', () => {
     expect(within(row(table, 'Corollary rules')).getByText('Never audited.')).toBeInTheDocument()
     expect(within(row(table, 'Massive')).getByText('Never audited.')).toBeInTheDocument()
     expect(within(table).queryByText(/Graded, but not yet/)).not.toBeInTheDocument()
-    expect(within(table).getAllByText('insufficient sample — 0 of 30')).toHaveLength(4)
+    expect(within(table).getAllByText('insufficient sample — 0 of 30 labels, 0 of 5 sessions'),
+    ).toHaveLength(4)
     expect(within(panel).getByText(/No audit has completed yet/)).toBeInTheDocument()
     expect(within(panel).getByText('No run has ever started.')).toBeInTheDocument()
     expect(within(panel).queryByRole('status')).not.toBeInTheDocument()
@@ -959,13 +960,15 @@ describe('sentiment accuracy', () => {
 
     expect(within(massive).getByText('Demoted')).toBeInTheDocument()
     expect(
-      within(massive).getByText('since demotion: 41 of 100 in the 1h window'),
+      within(massive).getByText('since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions'),
     ).toBeInTheDocument()
     expect(
-      within(massive).getByText('since demotion: 37 of 100 in the 1d window'),
+      within(massive).getByText('since demotion, 1d window: 37 of 100 labels, 4 of 5 sessions'),
     ).toBeInTheDocument()
     // Judged on since_demotion: 41 graded, below the 100 floor.
-    expect(within(massive).getByText('insufficient sample — 41 of 100')).toBeInTheDocument()
+    expect(
+      within(massive).getByText('insufficient sample — 41 of 100 labels, 4 of 5 sessions'),
+    ).toBeInTheDocument()
 
     const banner = within(panel).getByRole('status')
     expect(banner.textContent).toContain('Massive')
@@ -980,10 +983,12 @@ describe('sentiment accuracy', () => {
     render(<App />)
     const rules = row(await sentimentTable(), 'Corollary rules')
 
-    const short = within(rules).getByText('insufficient sample — 18 of 30')
+    const short = within(rules).getByText('insufficient sample — 18 of 30 labels, 3 of 5 sessions')
     expect(short.className).toContain('text-on-surface-variant')
     expect(short.className).not.toMatch(/caution|error|bearish|bullish/)
-    expect(within(rules).getByText('insufficient sample — 12 of 30')).toBeInTheDocument()
+    expect(
+      within(rules).getByText('insufficient sample — 12 of 30 labels, 2 of 5 sessions'),
+    ).toBeInTheDocument()
     expect(rules.textContent).not.toContain('%')
   })
 
@@ -996,7 +1001,9 @@ describe('sentiment accuracy', () => {
     const rules = row(await sentimentTable(), 'Corollary rules')
 
     expect(
-      within(rules).getByText('Graded, but not yet on enough labels to be given a status.'),
+      within(rules).getByText(
+        'Graded, but not yet on enough labels over enough sessions to be given a status.',
+      ),
     ).toBeInTheDocument()
     expect(within(rules).queryByText('Never audited.')).not.toBeInTheDocument()
   })
@@ -1009,7 +1016,7 @@ describe('sentiment accuracy', () => {
     const rules = row(await sentimentTable(), 'Corollary rules')
 
     const toggle = within(rules).getByRole('button', {
-      name: /^insufficient sample — 18 of 30\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+      name: /^insufficient sample — 18 of 30 labels, 3 of 5 sessions\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
     })
     fireEvent.click(toggle)
 
@@ -1042,8 +1049,18 @@ describe('sentiment accuracy', () => {
     expect(text).toMatch(/falls below\s*52%/)
     expect(text).toMatch(/reach\s*66%\s*or better/)
     expect(text).toMatch(
-      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels each over the trailing 28 days/,
+      /An unaudited source becomes active when both windows are at\s*52%\s*or better, with at least\s*30\s*graded labels over at least\s*5\s*sessions each in the trailing 28 days/,
     )
+    expect(text).toMatch(
+      /once each window has at least\s*30\s*graded labels over at least\s*5\s*sessions in the trailing 28 days\./,
+    )
+    // "over" once per clause: never "over at least 5 sessions over the …".
+    // The rule paragraph only: an audit's reason is the engine's sentence,
+    // quoted verbatim, and its wording is the engine's to change.
+    const paragraph =
+      within(section('Sentiment accuracy')).getByText(/Between/, { selector: 'p' }).textContent ??
+      ''
+    expect(paragraph).not.toMatch(/sessions(\s+each)?\s+over the trailing/)
     expect(text).toMatch(/Between\s*52%\s*and\s*66%\s*an active or demoted source stays where it is/)
     expect(text).not.toMatch(/Between\s*52%\s*and\s*66%\s*a source stays/)
   })
@@ -1060,7 +1077,8 @@ describe('sentiment accuracy', () => {
     const figures = Array.from(paragraph.querySelectorAll('span.text-data-sm')).map(
       (el) => el.textContent,
     )
-    expect(figures).toEqual(['52%', '30', '52%', '30', '66%', '100', '52%', '66%'])
+    // The session floor (5, the server's) after each label floor.
+    expect(figures).toEqual(['52%', '30', '5', '52%', '30', '5', '66%', '100', '5', '52%', '66%'])
   })
 
   it('expands a cell into its watch and discovery split, labelled display only', async () => {
@@ -1071,7 +1089,7 @@ describe('sentiment accuracy', () => {
     expect(within(rules).queryByText(/display only/)).not.toBeInTheDocument()
     // The figure is the name (WCAG 2.5.3); the action follows it, hidden.
     const toggle = within(rules).getByRole('button', {
-      name: /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
+      name: /^61\.7%\s*n 212, 5 sessions\s*— Corollary rules, 1 hour: show the watch and discovery split$/,
     })
     expect(toggle).not.toHaveAttribute('aria-label')
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -1079,7 +1097,7 @@ describe('sentiment accuracy', () => {
 
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(toggle).toHaveAccessibleName(
-      /^61\.7%\s*n 212\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
+      /^61\.7%\s*n 212, 5 sessions\s*— Corollary rules, 1 hour: hide the watch and discovery split$/,
     )
     expect(
       within(rules).getByText('display only — transitions act on the combined figure'),
@@ -1141,6 +1159,468 @@ describe('sentiment accuracy', () => {
       await within(section('Sentiment accuracy')).findByRole('alert', {}, { timeout: 4000 }),
     ).toHaveTextContent('boom')
   })
+
+  /* -------------------------------------------------------------------- *
+   * The five-session floor (spec R3, R9). Every session figure on screen
+   * is the server's, against the server's `sessionFloor`.
+   * -------------------------------------------------------------------- */
+
+  function ruleParagraph(): HTMLElement {
+    return within(section('Sentiment accuracy')).getByText(/Between/, { selector: 'p' })
+  }
+
+  /** R9: "2 of 5 sessions" beside "31 of 30 labels", as a sample-size fact
+   * exactly as the label shortfall is. The label floor is met, so the only
+   * thing withholding 20 of 31 = 64.5% is the session floor. */
+  it('states sessions beside labels when only the session floor is short', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.sessionsShort) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    const fact = within(rules).getByText('insufficient sample — 31 of 30 labels, 2 of 5 sessions')
+    expect(fact.className).toContain('text-on-surface-variant')
+    expect(fact.className).toContain('text-data-sm')
+    expect(fact.className).not.toMatch(/caution|error|bearish|bullish/)
+    expect(
+      within(rules).getByText('insufficient sample — 34 of 30 labels, 2 of 5 sessions'),
+    ).toBeInTheDocument()
+    expect(rules.textContent).not.toContain('64.5')
+    expect(rules.textContent).not.toContain('%')
+    expect(
+      within(rules).getByText(
+        'Graded, but not yet on enough labels over enough sessions to be given a status.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  /** The split one click down withholds the percentage too: watch alone is
+   * 15 of 22 = 68.1%. */
+  it('expands a session-short cell into counts only', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.sessionsShort) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    fireEvent.click(
+      within(rules).getByRole('button', {
+        name: /^insufficient sample — 31 of 30 labels, 2 of 5 sessions\s*— Corollary rules, 1 hour/,
+      }),
+    )
+    expect(rules.textContent).toContain('n 22')
+    expect(rules.textContent).not.toContain('68.1')
+    expect(rules.textContent).toContain('reaches both floors')
+  })
+
+  /** A row written before the floor carries no count: said in words, never
+   * a number, never "0 of 5", and never a percentage that would read as
+   * meeting the floor. Its lead is "not measured", not "insufficient": 212
+   * labels is not short of 30, and its sessions were never counted at all. */
+  it('says a pre-floor row has no session count, in words', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.preSessionFloor) })
+    render(<App />)
+    const table = await sentimentTable()
+    const rules = row(table, 'Corollary rules')
+
+    const facts = [212, 198].map((n) =>
+      within(rules).getByText(
+        `not measured — ${n} of 30 labels, sessions not counted: written before the session floor existed`,
+      ),
+    )
+    expect(table.textContent).not.toContain('insufficient sample')
+    // The same run wrote Massive's rows before the floor too (U3 C1).
+    const massive = row(table, 'Massive')
+    expect(
+      within(massive).getByText(
+        'not measured — 41 of 100 labels, sessions not counted: written before the session floor existed',
+      ),
+    ).toBeInTheDocument()
+    expect(massive.textContent).not.toMatch(/\d+ of \d+ sessions/)
+    for (const fact of facts) {
+      expect(fact.className).toContain('text-on-surface-variant')
+      expect(fact.className).not.toMatch(/caution|error|bearish|bullish/)
+    }
+    expect(rules.textContent).not.toMatch(/\d+ of \d+ sessions/)
+    expect(rules.textContent).not.toMatch(/\d+ sessions/)
+    // 131 of 212 would print 61.7% as though the row were a measurement.
+    expect(rules.textContent).not.toContain('61.7')
+    // Its status is the pre-floor run's, and its reason that run's wording.
+    expect(within(rules).getByText('Active')).toBeInTheDocument()
+  })
+
+  /** One click down, the split keeps the cell's lead. */
+  it('expands a pre-floor cell under the same "not measured" lead', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.preSessionFloor) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    fireEvent.click(
+      within(rules).getByRole('button', { name: /^not measured — 212 of 30 labels.*1 hour/ }),
+    )
+    expect(
+      within(rules).getByText(
+        'not measured — counts only until the combined cell reaches both floors; transitions act on the combined figure',
+      ),
+    ).toBeInTheDocument()
+    // No measured figure (watch alone is 94 of 150 = 62.6%). The reason's
+    // "52%" is the engine's threshold, not a measurement.
+    expect(rules.textContent).not.toMatch(/\d+\.\d%/)
+  })
+
+  /** At the session floor exactly (5 of 5) the source is eligible, and the
+   * cell is a measurement: the percentage, n, and the sessions it spans. */
+  it('renders the eligible state as a measurement with its sessions', async () => {
+    stubFetch()
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+
+    expect(SENTIMENT_AUDIT_STATES.populated.sources[0].eligibility.eligible).toBe(true)
+    expect(within(rules).getByText('n 212, 5 sessions')).toBeInTheDocument()
+    expect(within(rules).getByText('n 198, 12 sessions')).toBeInTheDocument()
+    expect(rules.textContent).toContain('61.7%')
+    expect(within(rules).queryByText(/insufficient sample/)).not.toBeInTheDocument()
+  })
+
+  /** `asOfRunId: null`: a real zero against the floor, not the pre-floor
+   * words. */
+  it('counts zero sessions when nothing has run', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.unaudited) })
+    render(<App />)
+    const table = await sentimentTable()
+
+    expect(table.textContent).not.toContain('sessions not counted')
+    expect(within(table).getAllByText(/0 of 5 sessions$/)).toHaveLength(4)
+  })
+
+  /** The floor is the server's `sessionFloor`, never a client 5: the rule
+   * sentence and every cell move with it. */
+  it('states and applies the session floor the server sends', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const floor = 7
+    const status: SentimentAuditStatus = {
+      ...populated,
+      sources: populated.sources.map((s) => ({
+        ...s,
+        eligibility: {
+          ...s.eligibility,
+          sessionFloor: floor,
+          eligible: false,
+          windows: s.eligibility.windows.map((w) => ({
+            ...w,
+            sessionsNeeded: w.sessions === null ? null : Math.max(floor - w.sessions, 0),
+          })),
+        },
+      })),
+    }
+    stubFetch({ sentiment: jsonResponse(200, status) })
+    render(<App />)
+    const rules = row(await sentimentTable(), 'Corollary rules')
+    // The rule paragraph only: the audit's reason is the engine's own
+    // sentence and states the floor its run applied.
+    const text = ruleParagraph().textContent ?? ''
+
+    expect(text.match(/over at least\s*7\s*sessions/g)).toHaveLength(3)
+    expect(text).not.toMatch(/over at least\s*5\s*sessions/)
+    // 1h spans 5 sessions, short of the server's 7; 1d spans 12, past it.
+    expect(
+      within(rules).getByText('insufficient sample — 212 of 30 labels, 5 of 7 sessions'),
+    ).toBeInTheDocument()
+    expect(within(rules).getByText('n 198, 12 sessions')).toBeInTheDocument()
+  })
+
+  it('says the session floor was not reported when the sources disagree', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const [rules, massive] = populated.sources
+    const status: SentimentAuditStatus = {
+      ...populated,
+      sources: [rules, { ...massive, eligibility: { ...massive.eligibility, sessionFloor: 6 } }],
+    }
+    stubFetch({ sentiment: jsonResponse(200, status) })
+    render(<App />)
+    await sentimentTable()
+    const text = ruleParagraph().textContent ?? ''
+
+    expect(text).toContain('over a minimum number of sessions the server did not report')
+    expect(text).not.toMatch(/over at least\s*\d+\s*sessions/)
+  })
+
+  it('states the engine’s re-promotion reason, sessions included', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.repromoted) })
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+
+    expect(within(massive).getByText('Active')).toBeInTheDocument()
+    expect(massive.textContent).toContain(
+      'at or above 66% in both windows, at least 100 graded directional labels over at least 5 sessions each since the demotion',
+    )
+  })
+
+  /** R4, R9: "there is still no control". Nothing on the panel voids a run,
+   * demotes or re-promotes a source, or overrides the session floor, in any
+   * state. The only buttons are the audit trigger and the cell toggles. */
+  it.each([
+    'populated',
+    'sessionsShort',
+    'preSessionFloor',
+    'repromoted',
+    'voided',
+    'voidedTwice',
+    'secondRunVoided',
+    'everyRunVoided',
+  ] as const)(
+    'offers no void, demote or re-promote control (%s)',
+    async (state) => {
+      stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES[state]) })
+      render(<App />)
+      await sentimentTable()
+      const panel = section('Sentiment accuracy')
+
+      for (const button of screen.getAllByRole('button')) {
+        const name = `${button.textContent ?? ''} ${button.getAttribute('aria-label') ?? ''}`
+        expect(name).not.toMatch(/\bvoid|re-?promot|reinstat|undemot|\bdemote\b/i)
+      }
+      for (const button of within(panel).getAllByRole('button')) {
+        const name = button.textContent ?? ''
+        expect(
+          name === 'Run audit now' || /show the watch and discovery split$/.test(name),
+        ).toBe(true)
+      }
+      for (const role of ['checkbox', 'switch', 'textbox', 'spinbutton', 'combobox'] as const) {
+        expect(within(panel).queryAllByRole(role)).toHaveLength(0)
+      }
+      // No link or menu item either: a void lives only in the script (R4).
+      for (const role of ['link', 'menuitem'] as const) {
+        expect(within(panel).queryAllByRole(role)).toHaveLength(0)
+      }
+    },
+  )
+
+  /* -------------------------------------------------------------------- *
+   * Voided runs (spec R9): one line each, a record and not a warning.
+   * -------------------------------------------------------------------- */
+
+  function voidedList(): HTMLElement {
+    return within(section('Sentiment accuracy')).getByRole('list', { name: 'Voided runs' })
+  }
+
+  it('states a voided run in one line: id, New York date, and the reason verbatim', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const lines = within(voidedList()).getAllByRole('listitem')
+
+    expect(lines).toHaveLength(1)
+    // 2026-11-09T16:42:10Z is 11:42 AM on Nov 9 in New York (EST). The
+    // server's reason has no full stop; the line adds exactly one.
+    expect(lines[0].textContent).toBe(
+      'Run 8 voided on Nov 9, 2026: graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09).',
+    )
+  })
+
+  /** A void at 01:30Z on Nov 10 is still the evening of Nov 9 in New York. */
+  it('dates the void in New York, not UTC', async () => {
+    const voided = SENTIMENT_AUDIT_STATES.voided
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...voided,
+        voidedRuns: [{ ...voided.voidedRuns[0], voidedAt: '2026-11-10T01:30:00Z' }],
+      }),
+    })
+    render(<App />)
+    await sentimentTable()
+
+    expect(voidedList().textContent).toMatch(/^Run 8 voided on Nov 9, 2026: /)
+  })
+
+  it('sets the run id in the data face and the line in secondary text, with no warning colour', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const list = voidedList()
+    const line = within(list).getByRole('listitem')
+
+    expect(line.className).toContain('text-on-surface-variant')
+    const id = within(line).getByText('8')
+    expect(id.tagName).toBe('SPAN')
+    // `text-data-sm` is JetBrains Mono with tabular-nums (index.css).
+    expect(id.className).toContain('text-data-sm')
+    for (const el of [list, line, id]) {
+      expect(el.className).not.toMatch(/error|caution|bearish|bullish|outline|neutral/)
+    }
+    expect(list.closest('[role="alert"]')).toBeNull()
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  /** Newest void first, as the server sends it. Here that is ascending by
+   * id (R4 lets only the latest run be voided), so a re-sort by id would
+   * show. A reason that already ends in "." gains no second one. */
+  it('lists voided runs in the server’s order, without doubling a full stop', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voidedTwice) })
+    render(<App />)
+    await sentimentTable()
+    const lines = within(voidedList()).getAllByRole('listitem')
+
+    expect(lines.map((l) => l.textContent?.match(/^Run (\d+)/)?.[1])).toEqual(['8', '9'])
+    expect(lines[1].textContent).toBe(
+      'Run 9 voided on Nov 2, 2026: Started by hand while the label backfill was still writing, so it graded a partial week.',
+    )
+    expect(voidedList().textContent).not.toContain('..')
+  })
+
+  /** `lastRun` is the newest non-voided run (R9): run 7, never run 8 — and
+   * named as the newest that **stands**, since run 8 ran after it. */
+  it('reports the last run that stands, not the voided one', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    await sentimentTable()
+    const text = section('Sentiment accuracy').textContent ?? ''
+
+    expect(text).toMatch(
+      /Last run\s*Run 7, Oct 10,? 10:00\sAM \(scheduled, succeeded, finished [^)]*\), the newest run that stands; every run after it was voided \(listed below\)\./,
+    )
+    expect(text).toContain('Figures fromrun 7, the newest standing run that succeeded')
+    expect(text).not.toContain('the last run that succeeded')
+  })
+
+  /* -------------------------------------------------------------------- *
+   * No run sentence may contradict the voided-run list (R9).
+   * -------------------------------------------------------------------- */
+
+  function runFacts(): HTMLElement {
+    // The dl under the table: Last run, Figures from, Next run.
+    return within(section('Sentiment accuracy')).getByText('Last run').closest('dl') as HTMLElement
+  }
+
+  /** The owner's state this week: run 2 voided, run 1 standing with every
+   * figure. Neither "Last run" nor "Figures from" may read as run 2's. */
+  it('names run 1 as the newest standing run, beside run 2 voided', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.secondRunVoided) })
+    render(<App />)
+    await sentimentTable()
+    const panel = section('Sentiment accuracy')
+    const facts = runFacts()
+
+    // Run 1 started Oct 17 14:00Z = 10:00 AM EDT.
+    expect(facts.textContent).toMatch(
+      /Last runRun 1, Oct 17,? 10:00\sAM \(scheduled, succeeded, finished [^)]*\), the newest run that stands; every run after it was voided \(listed below\)\./,
+    )
+    // Named, and not repeated: it is the run on the line above.
+    expect(facts.textContent).toMatch(
+      /Figures fromrun 1, the newest standing run that succeeded(?!,)Next run/,
+    )
+    expect(facts.textContent).not.toContain('the last run that succeeded')
+    expect(within(voidedList()).getByRole('listitem').textContent).toMatch(
+      /^Run 2 voided on Nov 10, 2026: graded under the reference rule/,
+    )
+    expect(panel.textContent).not.toMatch(/No audit has completed|No run has ever started/)
+    // Every run id beside the voided list is in the data face.
+    for (const id of within(facts).getAllByText('1')) {
+      expect(id.tagName).toBe('SPAN')
+      expect(id.className).toContain('text-data-sm')
+      expect(id.className).not.toMatch(/error|caution|bearish|bullish|outline|neutral/)
+    }
+  })
+
+  /** Voiding the only run (R4) serves both runs null beside a non-empty
+   * list. Every sentence that assumed "null means nothing ever ran" was
+   * false directly above "Run 1 voided on …". */
+  it('says no run stands when every run was voided, never that none ran', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.everyRunVoided) })
+    render(<App />)
+    const table = await sentimentTable()
+    const panel = section('Sentiment accuracy')
+    const text = panel.textContent ?? ''
+
+    expect(text).not.toMatch(
+      /No run has ever started|No audit has completed|first scheduled run|Never audited|the last run that succeeded/,
+    )
+    // Nov 14 15:00Z is 10:00 AM EST: the next run, not the first.
+    expect(text).toMatch(
+      /There is no standing audit: no run that stands has succeeded, and the voided runs are listed under the table\. Nothing below is a measurement\. The next scheduled run is Nov 14,? 10:00\sAM\./,
+    )
+    expect(runFacts().textContent).toContain(
+      'Last runNone standing; every run so far was voided (listed below).',
+    )
+    expect(runFacts().textContent).toContain(
+      'Figures fromnone — no run that stands has succeeded',
+    )
+    for (const source of ['Corollary rules', 'Massive']) {
+      expect(within(row(table, source)).getByText('Not graded by any run that stands.')).toBeInTheDocument()
+    }
+    expect(within(voidedList()).getByRole('listitem').textContent).toMatch(
+      /^Run 1 voided on Nov 10, 2026: /,
+    )
+  })
+
+  /** Run 9 failed, run 8 voided, run 7 the newest standing success: "the
+   * last run that succeeded" could be false, since run 8 may have. */
+  it('names the figures’ run when a newer voided run sits between it and the last run', async () => {
+    const voided = SENTIMENT_AUDIT_STATES.voided
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...voided,
+        lastRun: {
+          id: 9,
+          trigger: 'manual',
+          status: 'failed',
+          startedAt: '2026-11-10T15:00:00Z',
+          finishedAt: '2026-11-10T15:01:00Z',
+        },
+      }),
+    })
+    render(<App />)
+    await sentimentTable()
+    const facts = runFacts().textContent ?? ''
+
+    // Run 9 is newer than every void, so it is plainly the last run.
+    expect(facts).toMatch(
+      /Last runNov 10,? 10:00\sAM \(started by hand, failed, finished [^)]*\)Figures/,
+    )
+    expect(facts).toMatch(
+      /Figures fromrun 7, the newest standing run that succeeded, Oct 10,? 10:00\sAM \(scheduled, succeeded/,
+    )
+    expect(facts).not.toContain('the last run that succeeded')
+  })
+
+  it.each(['unaudited', 'populated', 'preSessionFloor', 'running'] as const)(
+    'renders no voided-run line when none is voided (%s)',
+    async (state) => {
+      stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES[state]) })
+      render(<App />)
+      await sentimentTable()
+      const panel = section('Sentiment accuracy')
+
+      expect(within(panel).queryByRole('list', { name: 'Voided runs' })).not.toBeInTheDocument()
+      expect(panel.textContent).not.toMatch(/voided on/)
+    },
+  )
+
+  /** The restorer's reason (R4) is quoted the same way: one full stop. */
+  it('states a restored source’s reason with one full stop', async () => {
+    stubFetch({ sentiment: jsonResponse(200, SENTIMENT_AUDIT_STATES.voided) })
+    render(<App />)
+    const massive = row(await sentimentTable(), 'Massive')
+
+    expect(within(massive).getByText('Demoted')).toBeInTheDocument()
+    expect(massive.textContent).toContain(
+      'Audit’s reason: restored when run 8 was voided: graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09); the original reason text is not retained.',
+    )
+  })
+
+  /** An engine reason that already ends in "." used to render "..". */
+  it('never doubles the full stop on an audit reason', async () => {
+    const populated = SENTIMENT_AUDIT_STATES.populated
+    const [rules, massive] = populated.sources
+    stubFetch({
+      sentiment: jsonResponse(200, {
+        ...populated,
+        sources: [rules, { ...massive, reason: 'below 52% in 1h.' }],
+      }),
+    })
+    render(<App />)
+    const massiveRow = row(await sentimentTable(), 'Massive')
+
+    expect(within(massiveRow).getByText('Audit’s reason: below 52% in 1h.')).toBeInTheDocument()
+    expect(massiveRow.textContent).not.toContain('..')
+  })
 })
 
 describe('running the audit by hand', () => {
@@ -1186,6 +1666,26 @@ describe('running the audit by hand', () => {
       expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
     })
     expect(panel.textContent).toMatch(/started by hand, succeeded, finished/)
+  })
+
+  /** A voided run is never `lastRun` again, so "run 8 is not the closed last
+   * run" stays true forever after a void — and the stale line came back on
+   * the next refetch, beside "Run 8 voided on …". */
+  it('clears the started line once the readout lists that run voided', async () => {
+    served.sentiment = SENTIMENT_AUDIT_STATES.running
+    const { panel } = await run()
+
+    expect(await within(panel).findByText(/Audit run 8 started at/)).toBeInTheDocument()
+
+    // Run 8 finished and was voided: run 7 is the last run again.
+    served.sentiment = SENTIMENT_AUDIT_STATES.voided
+    await act(() => queryClient.invalidateQueries())
+
+    await waitFor(() => {
+      expect(within(panel).getByRole('list', { name: 'Voided runs' })).toBeInTheDocument()
+    })
+    expect(within(panel).queryByText(/Audit run 8 started at/)).not.toBeInTheDocument()
+    expect(panel.textContent).not.toMatch(/its outcome appears here/)
   })
 
   it('says when it is available again on a 429, from Retry-After', async () => {

@@ -414,7 +414,7 @@ def test_the_scan_reads_the_whole_package_and_the_scripts() -> None:
     modules = {p.relative_to(ROOT).as_posix() for p in _modules()}
     assert WRITER.as_posix() in modules and DEFINER.as_posix() in modules
     assert "corollary/engine/scheduler.py" in modules
-    assert "corollary/db/migrations/versions/0017_econ_release_value.py" in modules
+    assert "corollary/db/migrations/versions/0019_econ_release_value.py" in modules
     assert "scripts/weekly_audit.py" in modules
     assert len(modules) > 50
 

@@ -78,7 +78,7 @@ def _insert(eng: Engine, *, field: str, previous: str, new: str) -> None:
 
 
 def test_0016_revises_0015() -> None:
-    # The head assertion lives in test_migrations.py; 0016 is no longer it.
+    """0016 is no longer the head; the head is pinned once, in ``test_migrations.py``."""
     cfg = Config(str(ALEMBIC_INI))
     revision = ScriptDirectory.from_config(cfg).get_revision("0016")
     assert revision is not None and revision.down_revision == "0015"

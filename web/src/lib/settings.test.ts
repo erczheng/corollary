@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { AUDIT_LOG, DATA_FEEDS, RISK_LIMITS, SENTIMENT_AUDIT_STATES } from './mockData'
-import { NOTIFICATION_EVENT_LABEL, type NotificationEvent, type RiskLimit } from './types'
+import {
+  NOTIFICATION_EVENT_LABEL,
+  type NotificationEvent,
+  type AuditRunSummary,
+  type RiskLimit,
+  type SentimentAuditStatus,
+  type SentimentSourceAudit,
+} from './types'
 import {
   ApiError,
   NETWORK_UNREACHABLE,
@@ -14,25 +21,34 @@ import {
   SENTIMENT_FLOOR,
   SENTIMENT_REPROMOTE,
   SENTIMENT_REPROMOTE_SAMPLE,
+  SESSIONS_NOT_COUNTED,
   accuracyTenths,
   actingCell,
+  auditEmptyState,
   auditEntry,
   auditFieldLabel,
   auditTriggerRefusal,
   cellCounts,
   demotedSources,
   feedOptionsFor,
+  figuresFromFact,
   feedWarning,
   isCriticalEvent,
   isInsufficientSample,
   isRaise,
-  nothingAuditedYet,
+  isShortOfSessions,
+  lastRunFact,
   notificationAuditField,
   repromotionProgress,
   riskDollars,
   riskLimitFor,
+  sessionsFact,
+  shortCellLead,
   sourceStatusKind,
+  startedRunPending,
+  statedSessionFloor,
   validateRiskLimit,
+  windowProgress,
 } from './settings'
 
 const limit = (key: string): RiskLimit => {
@@ -349,28 +365,28 @@ describe('the thresholds the page states', () => {
 
 describe('accuracyTenths', () => {
   it('is correct over graded, neutral in neither', () => {
-    expect(accuracyTenths({ graded: 200, correct: 123, neutral: 999 })).toBe(615)
+    expect(accuracyTenths({ graded: 200, correct: 123, neutral: 999, sessions: 9 })).toBe(615)
   })
 
   it('is null with nothing graded — 0 of 0 is not 0%', () => {
-    expect(accuracyTenths({ graded: 0, correct: 0, neutral: 12 })).toBeNull()
+    expect(accuracyTenths({ graded: 0, correct: 0, neutral: 12, sessions: 0 })).toBeNull()
   })
 
   /** The engine compares `correct * 100 < 52 * graded` in integers. A figure
    * that rounded would print 52.0% beside a source just demoted for being
    * under 52. */
   it('truncates, so a figure never rounds across a threshold', () => {
-    const tenths = accuracyTenths({ graded: 25_000, correct: 12_999, neutral: 0 })
+    const tenths = accuracyTenths({ graded: 25_000, correct: 12_999, neutral: 0, sessions: 20 })
     expect(tenths).toBe(519)
     expect(formatTenthsPct(tenths!)).toBe('51.9%')
-    expect(formatTenthsPct(accuracyTenths({ graded: 50, correct: 33, neutral: 0 })!)).toBe('66.0%')
+    expect(formatTenthsPct(accuracyTenths({ graded: 50, correct: 33, neutral: 0, sessions: 6 })!)).toBe('66.0%')
   })
 })
 
 describe('isInsufficientSample', () => {
   it('is below the floor, and the floor itself is enough', () => {
-    expect(isInsufficientSample({ graded: 29, correct: 20, neutral: 0 }, 30)).toBe(true)
-    expect(isInsufficientSample({ graded: 30, correct: 20, neutral: 0 }, 30)).toBe(false)
+    expect(isInsufficientSample({ graded: 29, correct: 20, neutral: 0, sessions: 5 }, 30)).toBe(true)
+    expect(isInsufficientSample({ graded: 30, correct: 20, neutral: 0, sessions: 5 }, 30)).toBe(false)
   })
 })
 
@@ -394,7 +410,7 @@ describe('actingCell', () => {
   it('is null, and counts as zero, with no row on the basis', () => {
     const rules = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
     expect(actingCell(rules, '1d')).toBeNull()
-    expect(cellCounts(null)).toEqual({ graded: 0, correct: 0, neutral: 0 })
+    expect(cellCounts(null)).toEqual({ graded: 0, correct: 0, neutral: 0, sessions: 0 })
   })
 })
 
@@ -414,7 +430,7 @@ describe('demotedSources', () => {
       ...rules,
       accuracy: rules.accuracy.map((a) => ({
         ...a,
-        combined: { graded: 300, correct: 30, neutral: 0 },
+        combined: { graded: 300, correct: 30, neutral: 0, sessions: 12 },
       })),
     }
     expect(demotedSources([low])).toEqual([])
@@ -441,20 +457,430 @@ describe('sourceStatusKind', () => {
 describe('repromotionProgress', () => {
   it('states each window against the re-promotion floor', () => {
     expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[1])).toEqual([
-      'since demotion: 41 of 100 in the 1h window',
-      'since demotion: 37 of 100 in the 1d window',
+      'since demotion, 1h window: 41 of 100 labels, 4 of 5 sessions',
+      'since demotion, 1d window: 37 of 100 labels, 4 of 5 sessions',
     ])
   })
 
   it('is empty for a source not counting toward re-promotion', () => {
     expect(repromotionProgress(SENTIMENT_AUDIT_STATES.populated.sources[0])).toEqual([])
   })
+
+  /** "100 of 100 labels" alone would promise a re-promotion the session floor
+   * is still holding back, so the sessions clause rides on every line. */
+  it('states the session floor beside the label floor, from the server', () => {
+    const massive = SENTIMENT_AUDIT_STATES.populated.sources[1]
+    const atLabels: SentimentSourceAudit = {
+      ...massive,
+      eligibility: {
+        ...massive.eligibility,
+        sessionFloor: 7,
+        windows: massive.eligibility.windows.map((w) => ({
+          ...w,
+          graded: 100,
+          needed: 0,
+          sessions: 3,
+          sessionsNeeded: 4,
+        })),
+      },
+    }
+    expect(repromotionProgress(atLabels)).toEqual([
+      'since demotion, 1h window: 100 of 100 labels, 3 of 7 sessions',
+      'since demotion, 1d window: 100 of 100 labels, 3 of 7 sessions',
+    ])
+  })
+
+  it('says in words that a pre-floor row has no session count', () => {
+    const massive = SENTIMENT_AUDIT_STATES.populated.sources[1]
+    const preFloor: SentimentSourceAudit = {
+      ...massive,
+      eligibility: {
+        ...massive.eligibility,
+        windows: massive.eligibility.windows.map((w) => ({
+          ...w,
+          sessions: null,
+          sessionsNeeded: null,
+        })),
+      },
+    }
+    const lines = repromotionProgress(preFloor)
+    expect(lines[0]).toBe(`since demotion, 1h window: 41 of 100 labels, ${SESSIONS_NOT_COUNTED}`)
+    for (const line of lines) expect(line).not.toMatch(/\d+ of \d+ sessions/)
+  })
 })
 
-describe('nothingAuditedYet', () => {
-  it('is true only with no succeeded run', () => {
-    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.unaudited)).toBe(true)
-    expect(nothingAuditedYet(SENTIMENT_AUDIT_STATES.populated)).toBe(false)
+/* ---------------------------------------------------------------------- *
+ * The five-session floor (spec R3, R9). These format what the server sent
+ * and decide nothing: none of them returns, or is, an eligibility.
+ * ---------------------------------------------------------------------- */
+
+describe('windowProgress', () => {
+  it('is the server’s entry for the window', () => {
+    const rules = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(windowProgress(rules, '1h')).toEqual({
+      window: '1h',
+      graded: 31,
+      needed: 0,
+      sessions: 2,
+      sessionsNeeded: 3,
+    })
+  })
+
+  it('is null for a window the server sent no entry for', () => {
+    const rules = SENTIMENT_AUDIT_STATES.populated.sources[0]
+    const oneWindow: SentimentSourceAudit = {
+      ...rules,
+      eligibility: {
+        ...rules.eligibility,
+        windows: rules.eligibility.windows.filter((w) => w.window === '1h'),
+      },
+    }
+    expect(windowProgress(oneWindow, '1d')).toBeNull()
+  })
+})
+
+describe('isShortOfSessions', () => {
+  const progress = (sessions: number | null, sessionsNeeded: number | null) => ({
+    window: '1h' as const,
+    graded: 40,
+    needed: 0,
+    sessions,
+    sessionsNeeded,
+  })
+
+  it('reads the server’s sessionsNeeded, and the floor itself is enough', () => {
+    expect(isShortOfSessions(progress(4, 1))).toBe(true)
+    expect(isShortOfSessions(progress(5, 0))).toBe(false)
+  })
+
+  /** It compares nothing to a constant: a server floor of 8 met at 8. */
+  it('follows the server, not a client-side 5', () => {
+    expect(isShortOfSessions(progress(8, 0))).toBe(false)
+    expect(isShortOfSessions(progress(6, 2))).toBe(true)
+  })
+
+  /** R3: no reader may treat NULL as eligible. */
+  it('is short for a pre-floor row, and for a window with no entry', () => {
+    expect(isShortOfSessions(progress(null, null))).toBe(true)
+    expect(isShortOfSessions(null)).toBe(true)
+  })
+})
+
+describe('sessionsFact', () => {
+  it('is the count against the server’s floor', () => {
+    const rules = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)).toBe(
+      '2 of 5 sessions',
+    )
+    expect(sessionsFact(windowProgress(rules, '1h'), 6)).toBe('2 of 6 sessions')
+  })
+
+  /** Nothing has run: a real zero, not the pre-floor null. */
+  it('says 0 of the floor when nothing has been graded', () => {
+    const rules = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
+    expect(rules.eligibility.asOfRunId).toBeNull()
+    expect(sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)).toBe(
+      '0 of 5 sessions',
+    )
+  })
+
+  it('says a pre-floor row was not counted, with no number at all', () => {
+    const rules = SENTIMENT_AUDIT_STATES.preSessionFloor.sources[0]
+    const fact = sessionsFact(windowProgress(rules, '1h'), rules.eligibility.sessionFloor)
+    expect(fact).toBe(SESSIONS_NOT_COUNTED)
+    expect(fact).not.toMatch(/\d/)
+  })
+
+  it('says a missing window was not reported', () => {
+    expect(sessionsFact(null, 5)).toBe('sessions not reported')
+  })
+})
+
+/** "insufficient" is a count found short; a pre-floor row was never
+ * counted, so its lead says that instead. */
+describe('shortCellLead', () => {
+  it('is "not measured" for a row written before the session floor', () => {
+    const rules = SENTIMENT_AUDIT_STATES.preSessionFloor.sources[0]
+    expect(shortCellLead(windowProgress(rules, '1h'))).toBe('not measured')
+    expect(shortCellLead(windowProgress(rules, '1d'))).toBe('not measured')
+  })
+
+  it('is "insufficient sample" for any counted row, and a missing one', () => {
+    const short = SENTIMENT_AUDIT_STATES.sessionsShort.sources[0]
+    expect(shortCellLead(windowProgress(short, '1h'))).toBe('insufficient sample')
+    const never = SENTIMENT_AUDIT_STATES.unaudited.sources[0]
+    expect(shortCellLead(windowProgress(never, '1h'))).toBe('insufficient sample')
+    expect(shortCellLead(null)).toBe('insufficient sample')
+  })
+})
+
+describe('statedSessionFloor', () => {
+  it('is the floor every source carries', () => {
+    expect(statedSessionFloor(SENTIMENT_AUDIT_STATES.populated.sources)).toBe(5)
+  })
+
+  it('is null with no sources, or with two that disagree', () => {
+    expect(statedSessionFloor([])).toBeNull()
+    const [rules, massive] = SENTIMENT_AUDIT_STATES.populated.sources
+    const other = { ...massive, eligibility: { ...massive.eligibility, sessionFloor: 6 } }
+    expect(statedSessionFloor([rules, other])).toBeNull()
+  })
+})
+
+/** The fixtures play the server, so they must hold what the server holds:
+ * `eligible` needs both floors in both windows, and a pre-floor row never
+ * is. Pinned here so a fixture edit cannot quietly draw an impossible state. */
+describe('the session-floor fixtures', () => {
+  it('cover every state, with eligible as the server would send it', () => {
+    const { unaudited, populated, sessionsShort, preSessionFloor } = SENTIMENT_AUDIT_STATES
+    // asOfRunId null: zero sessions, the whole floor still needed.
+    expect(unaudited.sources[0].eligibility.windows.map((w) => w.sessionsNeeded)).toEqual([5, 5])
+    // At the floor exactly, and eligible.
+    expect(populated.sources[0].eligibility.windows[0].sessions).toBe(5)
+    expect(populated.sources[0].eligibility.eligible).toBe(true)
+    // Label floor met, session floor not.
+    expect(sessionsShort.sources[0].eligibility.windows.every((w) => w.needed === 0)).toBe(true)
+    expect(sessionsShort.sources[0].eligibility.eligible).toBe(false)
+    // Pre-floor: null together, never eligible.
+    for (const w of preSessionFloor.sources[0].eligibility.windows) {
+      expect([w.sessions, w.sessionsNeeded]).toEqual([null, null])
+    }
+    expect(preSessionFloor.sources[0].eligibility.eligible).toBe(false)
+  })
+
+  it('keep sessions within the engine’s invariants on every cell', () => {
+    for (const state of Object.values(SENTIMENT_AUDIT_STATES)) {
+      for (const source of state.sources) {
+        for (const cell of source.accuracy) {
+          const { combined, watch, discovery } = cell
+          for (const c of [combined, watch, discovery]) {
+            if (c.sessions === null) continue
+            expect(c.sessions).toBeLessThanOrEqual(c.graded)
+            expect(c.sessions === 0).toBe(c.graded === 0)
+          }
+          // Sessions are a distinct union, never a sum.
+          if (combined.sessions !== null && watch.sessions !== null && discovery.sessions !== null) {
+            expect(combined.sessions).toBeGreaterThanOrEqual(Math.max(watch.sessions, discovery.sessions))
+            expect(combined.sessions).toBeLessThanOrEqual(watch.sessions + discovery.sessions)
+          }
+        }
+      }
+    }
+  })
+
+  /** A run writes `sessions` on every row or, before the floor existed, on
+   * none. One state mixing NULL and counted rows from the same run (U3 C1)
+   * draws something the engine cannot produce. */
+  it('never mix counted and uncounted rows from one run', () => {
+    for (const [name, state] of Object.entries(SENTIMENT_AUDIT_STATES)) {
+      const byRun = new Map<number, Set<boolean>>()
+      for (const source of state.sources) {
+        const run = source.eligibility.asOfRunId
+        if (run === null) continue
+        const seen = byRun.get(run) ?? new Set<boolean>()
+        for (const cell of source.accuracy) {
+          for (const c of [cell.combined, cell.watch, cell.discovery]) seen.add(c.sessions === null)
+        }
+        for (const w of source.eligibility.windows) seen.add(w.sessions === null)
+        byRun.set(run, seen)
+      }
+      for (const [run, seen] of byRun) {
+        expect({ state: name, run, mixed: seen.size > 1 }).toEqual({ state: name, run, mixed: false })
+      }
+    }
+  })
+})
+
+/** R9: `lastRun` and `accuracyRun` are the newest **non-voided** runs, and
+ * `voidedRuns` is newest void first. */
+describe('the voided-run fixtures', () => {
+  it('never report a voided run as the last run or the figures’ run', () => {
+    for (const [name, state] of Object.entries(SENTIMENT_AUDIT_STATES)) {
+      const voided = new Set(state.voidedRuns.map((v) => v.id))
+      expect({ state: name, last: voided.has(state.lastRun?.id ?? -1) }).toEqual({
+        state: name,
+        last: false,
+      })
+      expect({ state: name, figures: voided.has(state.accuracyRun?.id ?? -1) }).toEqual({
+        state: name,
+        figures: false,
+      })
+      for (const source of state.sources) {
+        expect(voided.has(source.eligibility.asOfRunId ?? -1)).toBe(false)
+      }
+    }
+  })
+
+  it('list voids newest first, and carry R5’s reason verbatim', () => {
+    const { voided, voidedTwice } = SENTIMENT_AUDIT_STATES
+    expect(voided.voidedRuns).toHaveLength(1)
+    expect(voided.voidedRuns[0].reason).toBe(
+      'graded under the reference rule the owner replaced on 2026-10-22, before that change merged (Q23a, 2026-11-09)',
+    )
+    const times = voidedTwice.voidedRuns.map((v) => Date.parse(v.voidedAt))
+    expect(times).toHaveLength(2)
+    expect(times[0]).toBeGreaterThan(times[1])
+    // Only the latest non-voided run can be voided (R4), so the newer void is
+    // the lower id here: server order, not id order.
+    expect(voidedTwice.voidedRuns.map((v) => v.id)).toEqual([8, 9])
+  })
+})
+
+/** R9: every run sentence is decided against `voidedRuns` as well as
+ * `lastRun`/`accuracyRun`, so none contradicts the voided-run list. Runs are
+ * built here rather than taken from fixtures so every combination is
+ * reachable, including ones no fixture draws. */
+describe('the run sentences against the voids', () => {
+  const run = (id: number, status: AuditRunSummary['status'] = 'succeeded'): AuditRunSummary => ({
+    id,
+    trigger: 'scheduled',
+    status,
+    startedAt: '2026-10-17T14:00:00Z',
+    finishedAt: status === 'running' ? null : '2026-10-17T14:06:00Z',
+  })
+  const voids = (...ids: number[]) =>
+    ids.map((id) => ({ id, voidedAt: '2026-11-10T15:00:00Z', reason: 'test' }))
+  const state = (
+    lastRun: AuditRunSummary | null,
+    accuracyRun: AuditRunSummary | null,
+    voidedRuns: ReturnType<typeof voids> = [],
+  ): SentimentAuditStatus => ({
+    ...SENTIMENT_AUDIT_STATES.populated,
+    lastRun,
+    accuracyRun,
+    voidedRuns,
+  })
+
+  describe('auditEmptyState', () => {
+    it('is null whenever a standing run has figures', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.populated)).toBeNull()
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.secondRunVoided)).toBeNull()
+      expect(auditEmptyState(state(run(9, 'failed'), run(7), voids(8)))).toBeNull()
+    })
+
+    it('calls the next run the first only when no run has ever started', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.unaudited)).toEqual({
+        lead: 'never_succeeded',
+        next: 'first',
+      })
+      // A failed or open run, nothing voided: no audit completed, but the
+      // scheduled slot is no longer the first.
+      for (const status of ['failed', 'running'] as const) {
+        expect(auditEmptyState(state(run(1, status), null))).toEqual({
+          lead: 'never_succeeded',
+          next: 'next',
+        })
+      }
+    })
+
+    /** Voiding the only run (R4) must not read as "no audit has completed". */
+    it('says no standing run has succeeded once runs were voided', () => {
+      expect(auditEmptyState(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({
+        lead: 'none_standing',
+        next: 'next',
+      })
+      expect(auditEmptyState(state(run(2, 'failed'), null, voids(1)))).toEqual({
+        lead: 'none_standing',
+        next: 'next',
+      })
+    })
+  })
+
+  describe('lastRunFact', () => {
+    it('says no run ever started only when there are truly none', () => {
+      expect(lastRunFact(SENTIMENT_AUDIT_STATES.unaudited)).toEqual({ kind: 'never' })
+      expect(lastRunFact(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({ kind: 'all_voided' })
+    })
+
+    it('marks the newest standing run when a later one was voided', () => {
+      const { secondRunVoided, voided, voidedTwice, populated } = SENTIMENT_AUDIT_STATES
+      expect(lastRunFact(secondRunVoided)).toEqual({
+        kind: 'run',
+        run: secondRunVoided.lastRun,
+        laterVoided: true,
+      })
+      expect(lastRunFact(voided)).toMatchObject({ kind: 'run', laterVoided: true })
+      expect(lastRunFact(voidedTwice)).toMatchObject({ kind: 'run', laterVoided: true })
+      expect(lastRunFact(populated)).toMatchObject({ kind: 'run', laterVoided: false })
+    })
+
+    /** A void older than the run that stands is history, not a later run. */
+    it('leaves a run alone when every void is older than it', () => {
+      expect(lastRunFact(state(run(10), run(10), voids(9)))).toEqual({
+        kind: 'run',
+        run: run(10),
+        laterVoided: false,
+      })
+    })
+  })
+
+  describe('figuresFromFact', () => {
+    it('is not needed when the figures are plainly the last run’s', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.populated)).toBeNull()
+      expect(figuresFromFact(state(run(10), run(10), voids(9)))).toBeNull()
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.unaudited)).toBeNull()
+    })
+
+    it('calls an older run the last that succeeded only with nothing voided after it', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.running)).toEqual({
+        kind: 'last_succeeded',
+        run: SENTIMENT_AUDIT_STATES.running.accuracyRun,
+      })
+      expect(figuresFromFact(state(run(9, 'failed'), run(7)))).toEqual({
+        kind: 'last_succeeded',
+        run: run(7),
+      })
+    })
+
+    /** Run 2 voided beside run 1: run 2 may have succeeded, so run 1 is the
+     * newest **standing** run that did — named even though it is also the
+     * last run. */
+    it('names the newest standing run when a newer one was voided', () => {
+      const { secondRunVoided } = SENTIMENT_AUDIT_STATES
+      expect(figuresFromFact(secondRunVoided)).toEqual({
+        kind: 'newest_standing',
+        run: secondRunVoided.accuracyRun,
+        sameAsLast: true,
+      })
+      expect(figuresFromFact(state(run(9, 'failed'), run(7), voids(8)))).toEqual({
+        kind: 'newest_standing',
+        run: run(7),
+        sameAsLast: false,
+      })
+    })
+
+    it('says no standing run has figures once runs were voided', () => {
+      expect(figuresFromFact(SENTIMENT_AUDIT_STATES.everyRunVoided)).toEqual({
+        kind: 'none_standing',
+      })
+      expect(figuresFromFact(state(run(2, 'failed'), null, voids(1)))).toEqual({
+        kind: 'none_standing',
+      })
+    })
+  })
+
+  describe('startedRunPending', () => {
+    it('holds while the readout has not caught up, or shows the run open', () => {
+      expect(startedRunPending(state(run(9), run(9)), 10)).toBe(true)
+      expect(startedRunPending(state(null, null), 1)).toBe(true)
+      expect(startedRunPending(state(run(10, 'running'), run(9)), 10)).toBe(true)
+    })
+
+    it('ends once the readout shows that run closed', () => {
+      expect(startedRunPending(state(run(10), run(10)), 10)).toBe(false)
+      expect(startedRunPending(state(run(10, 'failed'), run(9)), 10)).toBe(false)
+    })
+
+    /** A voided run is never `lastRun` again, so without this the stale line
+     * came back on the next refetch beside "Run 10 voided on …". */
+    it('ends once that run is listed as voided', () => {
+      expect(startedRunPending(state(run(9), run(9), voids(10)), 10)).toBe(false)
+      expect(startedRunPending(state(null, null, voids(10)), 10)).toBe(false)
+    })
+
+    it('ends once a newer run stands, which would never show this one’s outcome', () => {
+      expect(startedRunPending(state(run(11, 'running'), run(9)), 10)).toBe(false)
+    })
   })
 })
 

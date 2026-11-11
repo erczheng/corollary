@@ -26,9 +26,11 @@ Decisions this unit made, each pinned by ``tests/data/news/test_labelling.py``
   later label is **not written**: it is counted (``revised_ignored``) and
   logged (``news_label_revision_ignored``) with the kept and the revised
   direction, rule and reasoning, the article's inputs and the time -- never
-  silently. Q7: the first audit run grades nothing it did not see published
-  live, so no label in the audit is produced with knowledge of its own
-  outcome; overwriting in place would lose the label that was displayed.
+  silently. A label is written from the headline alone, never from price,
+  so keeping the first one keeps any later knowledge of the outcome out of
+  it; overwriting in place would also lose the label that was displayed.
+  (The audit grades from publication even for a late-fetched story -- owner
+  decision, 2026-10-22; see ``audit.reference_instant``.)
 * **A label is never deleted here.** If a re-label of an article produces no
   label where it once did (an edit, or a cycle whose name book was degraded),
   the earlier row stays: labels are kept indefinitely (decision 21) and the
@@ -119,7 +121,7 @@ _DROPPED_LISTED: Final = 20
 
 _IMMUTABLE_RULE: Final = (
     "the first-written label for (article_id, ticker, source) is immutable: "
-    "Q7 grades only labels seen published live"
+    "a later re-label never replaces the one first displayed"
 )
 _VENDOR_EQUITY_RULE: Final = (
     "decision 21: a vendor label is written only for a ticker ingest keeps as an active US equity tag"

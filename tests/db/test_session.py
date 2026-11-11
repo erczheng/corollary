@@ -31,6 +31,7 @@ from corollary.db.session import (
     database_url,
     session_scope,
     sqlite_url,
+    take_write_lock,
 )
 
 #: Passed to the probe connection and probe URL below, in seconds, to ask the
@@ -268,3 +269,54 @@ def test_two_writers_serialise_rather_than_one_raising(
 
     with Session(engine) as verify:
         assert verify.get(RiskLimit, "waiter") is not None
+
+
+# ------------------------------------------------------------ take_write_lock
+
+
+def _lock_is_free(db_path: Path) -> bool:
+    """Whether a second connection, waiting not at all, can take the write lock."""
+    probe = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        probe.execute("PRAGMA busy_timeout=0")
+        try:
+            probe.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            assert "locked" in str(exc)
+            return False
+        probe.execute("ROLLBACK")
+        return True
+    finally:
+        probe.close()
+
+
+def test_take_write_lock_holds_the_lock_before_any_write(db_path: Path, engine: Engine) -> None:
+    """``BEGIN IMMEDIATE`` takes SQLite's write lock at once: another writer is
+    shut out while the session has only read, and let back in by the rollback
+    that closing the session without a commit performs."""
+    assert _lock_is_free(db_path)
+    with Session(engine) as session:
+        take_write_lock(session)
+        session.execute(text("SELECT 1")).scalar_one()
+        assert not _lock_is_free(db_path)
+    assert _lock_is_free(db_path)
+
+
+def test_take_write_lock_commits_with_the_session(db_path: Path, engine: Engine) -> None:
+    with Session(engine) as session:
+        take_write_lock(session)
+        session.add(RiskLimit(key="locked", value=Decimal("7")))
+        session.commit()
+        assert _lock_is_free(db_path)
+    with Session(engine) as verify:
+        assert verify.get(RiskLimit, "locked") is not None
+
+
+def test_take_write_lock_refuses_a_transaction_already_open(engine: Engine) -> None:
+    """It must be the session's first statement: a write already made opened
+    a deferred transaction, and ``BEGIN`` inside it would fail obscurely."""
+    with Session(engine) as session:
+        session.add(RiskLimit(key="first", value=Decimal("7")))
+        session.flush()
+        with pytest.raises(RuntimeError, match="first statement"):
+            take_write_lock(session)

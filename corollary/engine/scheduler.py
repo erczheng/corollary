@@ -2850,22 +2850,32 @@ def _audit_runs_since_blocking(
 ) -> _AuditRunsSince:
     """Read ``audit_run`` newest first, stopping at the first row before ``slot``.
 
+    A **voided** run (R4, ``audit_run.voided_at``) never counts as the slot's:
+    it is skipped, so voiding the slot's only run makes the next start's
+    catch-up run the slot again. ``last_run_started`` still reports it -- that
+    field is the newest row in any state, for the decision log.
+
     Compared in Python, as aware UTC, rather than in SQL. A ``running`` row
     counts on the runner's own terms (``_open_run``): no more than
     :data:`ABANDONED_RUN_AFTER` old is another process's live run; older, the
     runner will close it as abandoned, so it is not this slot's run.
     """
-    stmt = select(AuditRun.started_at, AuditRun.status).order_by(
+    stmt = select(AuditRun.started_at, AuditRun.status, AuditRun.voided_at).order_by(
         AuditRun.started_at.desc(), AuditRun.id.desc()
     )
     last_run_started: datetime | None = None
     with session_factory() as session:
-        for started_at, status in session.execute(stmt):
+        for started_at, status, voided_at in session.execute(stmt):
             started = _require_utc(started_at)
             if last_run_started is None:
                 last_run_started = started
             if started < slot:
                 break
+            if voided_at is not None:
+                # R4: a voided run does not stand, so it is not this slot's
+                # run. The next scheduler start re-grades the slot itself --
+                # see ``_sentiment_audit_catch_up``.
+                continue
             if status in ("succeeded", "failed"):
                 return _AuditRunsSince(ran=True, last_run_started=last_run_started)
             if status == "running" and now - started <= ABANDONED_RUN_AFTER:

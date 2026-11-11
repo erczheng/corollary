@@ -1,26 +1,24 @@
 """econ_release_value and econ_release_fetch: economic first prints, kept apart from the calendar row
 
-**Provisional number.** This revision is numbered 0017 on the
-``phase3-rem-econ`` branch only. The other Phase 3 remainder branch already
-uses 0017 and 0018, so this one is renumbered at merge -- its ``revision``,
-``down_revision``, file name and the head assertions in ``tests/db/`` -- per
-the spec's Q22 rule (``2026-11-09-phase-3-steps-5-7-remainder.md``,
-*Database*: numbers are assigned at merge, after head ``0016``).
+**Revises 0018** (R4's void tool), which revises 0017 (R3's
+``sentiment_accuracy.sessions``). This revision was written on the
+``phase3-rem-econ`` branch as a provisional 0017 while the other Phase 3
+remainder branch held 0017 and 0018. Per the spec's Q22 rule
+(``2026-11-09-phase-3-steps-5-7-remainder.md``, *Database*: numbers are
+assigned at merge, after head ``0016``) it was numbered 0019 when that
+branch reached ``master``. The renumber is done:
 
-Renumber checklist, beyond this file's own ids and name:
-
+* this file's name, ``revision`` and ``down_revision``;
 * ``tests/db/test_migrations.py`` -- the head assertion
-  (``test_there_is_exactly_one_head``) and the ``0017`` comments and
-  ``_0017_TABLES`` beside it. ``tests/db/test_cash_session_migration.py``
-  holds no head assertion (it says the assertion lives in
-  ``test_migrations.py``) and needs no edit.
-* ``tests/db/test_econ_release_value.py`` -- finds this revision by its file
+  (``test_there_is_exactly_one_head``) and ``_0019_TABLES`` beside it.
+  ``tests/db/test_cash_session_migration.py`` holds no head assertion;
+* ``tests/db/test_econ_release_value.py`` finds this revision by its file
   name's ``_econ_release_value.py`` suffix, never a literal id, and asserts
-  it revises the revision numbered one before it. It follows the renumber
-  with no edit; run it after the merge to confirm it still finds exactly one
-  such file and the predecessor holds.
+  it revises the revision numbered one before it, so its pin followed the
+  renumber unaided (0019 revising 0018); the merge added only a comment and
+  an assertion that 0018's ``label_outcome_voided`` survives a downgrade;
 * ``EconReleaseValue`` / ``EconReleaseFetch`` in ``corollary/db/models.py``
-  name the migration by that suffix, not by number, so they need no edit.
+  name the migration by that suffix, not by number, and needed no edit.
 
 Spec R6 and unit U6d:
 
@@ -47,8 +45,8 @@ the refresh, so the join is by value, on read.
 Downgrade drops both tables. A first print is re-fetchable from FRED's
 vintage, so nothing is lost that cannot be recovered.
 
-Revision ID: 0017
-Revises: 0016
+Revision ID: 0019
+Revises: 0018
 Create Date: 2026-11-10
 
 """
@@ -58,8 +56,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017"
-down_revision: str | None = "0016"
+revision: str = "0019"
+down_revision: str | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
