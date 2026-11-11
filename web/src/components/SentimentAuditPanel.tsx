@@ -3,7 +3,13 @@ import { RequestFailed } from './RequestFailed'
 import { TableSkeleton } from './Skeleton'
 import { useSentimentAudit, useStartSentimentAudit } from '../lib/queries'
 import { NEWS_SOURCE_LABEL } from '../lib/news'
-import { formatDateTimeET, formatInteger, formatTenthsPct } from '../lib/format'
+import {
+  asSentence,
+  formatDateET,
+  formatDateTimeET,
+  formatInteger,
+  formatTenthsPct,
+} from '../lib/format'
 import {
   SENTIMENT_DEMOTE_SAMPLE,
   SENTIMENT_FLOOR,
@@ -13,13 +19,21 @@ import {
   SENTIMENT_WINDOW_LABEL,
   accuracyTenths,
   actingCell,
+  auditEmptyState,
   auditTriggerRefusal,
   cellCounts,
   demotedSources,
+  figuresFromFact,
   isInsufficientSample,
-  nothingAuditedYet,
+  isShortOfSessions,
+  lastRunFact,
   repromotionProgress,
+  sessionsFact,
+  shortCellLead,
   sourceStatusKind,
+  startedRunPending,
+  statedSessionFloor,
+  windowProgress,
   type AuditTriggerRefusal,
   type SourceStatusKind,
 } from '../lib/settings'
@@ -29,6 +43,7 @@ import type {
   SentimentCounts,
   SentimentSourceAudit,
   SentimentWindow,
+  SentimentWindowProgress,
 } from '../lib/types'
 
 const TH = 'whitespace-nowrap px-3 py-1 text-label-sm uppercase text-on-surface-variant'
@@ -62,7 +77,10 @@ const RUN_STATUS_LABEL: Record<AuditRunSummary['status'], string> = {
   failed: 'failed',
 }
 
-function StatusCell({ source }: { source: SentimentSourceAudit }) {
+/** `anyVoided`: whether the readout lists a voided run. A source restored to
+ * unaudited by a void has no figures from any run that stands, and "Never
+ * audited." beside "Run 1 voided on …" would deny the run that graded it. */
+function StatusCell({ source, anyVoided }: { source: SentimentSourceAudit; anyVoided: boolean }) {
   const kind = sourceStatusKind(source)
   const pill = STATUS_PILL[kind]
   const progress = repromotionProgress(source)
@@ -83,16 +101,20 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
                 // short of the floor keeps `changedAt` null. `asOfRunId` is
                 // what says whether its figures came from a run at all.
                 source.neverAudited && source.eligibility.asOfRunId !== null
-                ? 'Graded, but not yet on enough labels to be given a status.'
-                : 'Never audited.'
+                ? 'Graded, but not yet on enough labels over enough sessions to be given a status.'
+                : anyVoided
+                  ? 'Not graded by any run that stands.'
+                  : 'Never audited.'
               : `Unaudited since ${formatDateTimeET(source.changedAt)}.`
             : source.changedAt === null
               ? `${pill.label}; the change has no recorded time.`
               : `${pill.label} since ${formatDateTimeET(source.changedAt)}.`}
       </p>
       {kind !== 'missing' && source.reason ? (
+        // `asSentence`: an engine reason that already ends in "." must not
+        // render "..".
         <p className="mt-1 max-w-prose text-caption text-on-surface-variant">
-          Audit’s reason: {source.reason}.
+          Audit’s reason: {asSentence(source.reason)}
         </p>
       ) : null}
       {progress.length > 0 ? (
@@ -108,21 +130,56 @@ function StatusCell({ source }: { source: SentimentSourceAudit }) {
   )
 }
 
-function Figure({ counts, floor }: { counts: SentimentCounts; floor: number }) {
+/** Whether a cell is short of a floor it is judged against: labels from its
+ * counts, sessions from the server's `sessionsNeeded`. Display only. It
+ * decides whether a percentage is printed, never whether a source is
+ * eligible. That is `eligibility.eligible`. */
+function isShort(
+  counts: SentimentCounts,
+  floor: number,
+  progress: SentimentWindowProgress | null,
+): boolean {
+  return isInsufficientSample(counts, floor) || isShortOfSessions(progress)
+}
+
+function Figure({
+  counts,
+  floor,
+  progress,
+  sessionFloor,
+}: {
+  counts: SentimentCounts
+  floor: number
+  progress: SentimentWindowProgress | null
+  sessionFloor: number
+}) {
   const tenths = accuracyTenths(counts)
-  if (isInsufficientSample(counts, floor) || tenths === null) {
+  if (isShort(counts, floor, progress) || tenths === null) {
     // A sample-size fact, not a warning: `on-surface-variant`, never
-    // `caution`. Too few labels is where every source starts.
+    // `caution`. Too few labels, or too few sessions, is where every source
+    // starts. The session clause is the server's count against the server's
+    // floor ("2 of 5 sessions"), or, on a row written before the floor, the
+    // words saying no count exists. A row with no count is never shown as
+    // meeting the floor, so it never gets a percentage either. That row's
+    // lead is "not measured" rather than "insufficient": its sessions were
+    // never counted, which is not the same as counted and found short.
     return (
       <span className="text-data-sm text-on-surface-variant">
-        insufficient sample — {formatInteger(counts.graded)} of {formatInteger(floor)}
+        {shortCellLead(progress)} — {formatInteger(counts.graded)} of {formatInteger(floor)} labels,{' '}
+        {sessionsFact(progress, sessionFloor)}
       </span>
     )
   }
+  // Past both floors, so `progress.sessions` is a count. The guard is for
+  // the type, not a state the server sends.
+  const sessions = progress?.sessions ?? null
   return (
     <span className="text-data-md text-on-surface">
       {formatTenthsPct(tenths)}{' '}
-      <span className="text-data-sm text-on-surface-variant">n {formatInteger(counts.graded)}</span>
+      <span className="text-data-sm text-on-surface-variant">
+        n {formatInteger(counts.graded)}
+        {sessions === null ? '' : `, ${formatInteger(sessions)} sessions`}
+      </span>
     </span>
   )
 }
@@ -140,10 +197,14 @@ function Split({
   watch,
   discovery,
   short,
+  lead,
 }: {
   watch: SentimentCounts
   discovery: SentimentCounts
   short: boolean
+  /** The cell's own lead, so the split never says "insufficient" under a
+   * cell that says "not measured". */
+  lead: string
 }) {
   const line = (label: string, counts: SentimentCounts) => {
     const tenths = accuracyTenths(counts)
@@ -167,7 +228,7 @@ function Split({
       {line('Discovery', discovery)}
       <p className="text-caption text-on-surface-variant">
         {short
-          ? 'insufficient sample — counts only until the combined cell reaches the floor; transitions act on the combined figure'
+          ? `${lead} — counts only until the combined cell reaches both floors; transitions act on the combined figure`
           : 'display only — transitions act on the combined figure'}
       </p>
     </div>
@@ -188,11 +249,20 @@ function AccuracyCell({
   const cell = actingCell(source, window)
   const counts = cellCounts(cell)
   const floor = source.eligibility.floor
+  const progress = windowProgress(source, window)
+  const figure = (
+    <Figure
+      counts={counts}
+      floor={floor}
+      progress={progress}
+      sessionFloor={source.eligibility.sessionFloor}
+    />
+  )
   const label = `${NEWS_SOURCE_LABEL[source.source]}, ${SENTIMENT_WINDOW_LABEL[window]}`
   return (
     <td className={`${TD} text-right`}>
       {cell === null || counts.graded + counts.neutral === 0 ? (
-        <Figure counts={counts} floor={floor} />
+        figure
       ) : (
         // No `aria-label`: it would replace the visible figure as the
         // button's name, so "61.7% n 212" would never be announced (WCAG
@@ -203,7 +273,7 @@ function AccuracyCell({
           onClick={onToggle}
           className="rounded px-1 text-right hover:bg-surface-container"
         >
-          <Figure counts={counts} floor={floor} />
+          {figure}
           <span className="sr-only">
             {` — ${label}: ${expanded ? 'hide' : 'show'} the watch and discovery split`}
           </span>
@@ -216,7 +286,8 @@ function AccuracyCell({
         <Split
           watch={cell.watch}
           discovery={cell.discovery}
-          short={isInsufficientSample(counts, floor)}
+          short={isShort(counts, floor, progress)}
+          lead={shortCellLead(progress)}
         />
       ) : null}
     </td>
@@ -259,6 +330,12 @@ function RefusalLine({ refusal }: { refusal: AuditTriggerRefusal }) {
   }
 }
 
+/** A run id in the data face, matching the voided-run lines it is read
+ * against. */
+function RunId({ id }: { id: number }) {
+  return <span className="text-data-sm text-on-surface">{id}</span>
+}
+
 function runLine(run: AuditRunSummary): string {
   const finished = run.finishedAt ? `, finished ${formatDateTimeET(run.finishedAt)}` : ''
   return `${formatDateTimeET(run.startedAt)} (${TRIGGER_LABEL[run.trigger]}, ${RUN_STATUS_LABEL[run.status]}${finished})`
@@ -270,7 +347,17 @@ function runLine(run: AuditRunSummary): string {
  * written by the audit run and nothing else, so the page reads it and derives
  * only display from the counts. There is **no re-promote or reinstate
  * control** (Q6): a demoted source comes back when a run says so, and a
- * button that let a person override that would make the audit advisory. */
+ * button that let a person override that would make the audit advisory. Nor
+ * is there a void, demote, or session-floor override (spec R4, R9).
+ *
+ * A voided run is a **record**, one line each, in the server's order (newest
+ * void first): its id, the day it was voided in New York, and the operator's
+ * reason verbatim. Not a warning: no `error`, `caution` or `bearish`. Voiding
+ * happens only in `scripts/void_audit_run.py`, never here.
+ *
+ * The session floor is shown, not judged: each cell states the server's
+ * session count against the server's `sessionFloor`, and whether a source is
+ * eligible is `eligibility.eligible` alone. */
 export function SentimentAuditPanel() {
   const query = useSentimentAudit()
   const start = useStartSentimentAudit()
@@ -284,8 +371,27 @@ export function SentimentAuditPanel() {
   }
 
   const status = query.data
+  // The server's session floor (R3), never a constant here. If the sources
+  // disagree, or none were sent, the sentence says it was not reported
+  // rather than picking one.
+  const sessionFloor = statedSessionFloor(status.sources)
+  const overSessions =
+    sessionFloor === null ? (
+      <>over a minimum number of sessions the server did not report</>
+    ) : (
+      <>
+        over at least{' '}
+        <span className="text-data-sm text-on-surface">{formatInteger(sessionFloor)}</span>{' '}
+        sessions
+      </>
+    )
   const demoted = demotedSources(status.sources)
   const missing = status.sources.filter((s) => s.statusMissing)
+  // Each run sentence is decided against `voidedRuns` too (R9), so none of
+  // them can contradict the voided-run list printed beneath them.
+  const empty = auditEmptyState(status)
+  const last = lastRunFact(status)
+  const figures = figuresFromFact(status)
   const refusal = start.isError
     ? auditTriggerRefusal(start.error, {
         requestedAt: start.submittedAt || null,
@@ -309,15 +415,17 @@ export function SentimentAuditPanel() {
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span>, once each window
         has at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels over the trailing 28 days. An unaudited source becomes active when both windows are
-        at <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better,
+        labels {overSessions} in the trailing 28 days. An unaudited source becomes active when
+        both windows are at{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> or better, with
+        at least <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span>{' '}
+        graded labels {overSessions} each in the trailing 28 days. A demoted source is
+        re-promoted only when both windows reach{' '}
+        <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> or better,
         with at least{' '}
-        <span className="text-data-sm text-on-surface">{SENTIMENT_DEMOTE_SAMPLE}</span> graded
-        labels each over the trailing 28 days. A demoted source is re-promoted only when both
-        windows reach <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span>{' '}
-        or better, with at least{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE_SAMPLE}</span> graded
-        labels each since the demotion. Between{' '}
+        labels {overSessions} each since the demotion. A session is a regular trading session; a
+        story published after the close counts toward the next one. Between{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_FLOOR}%</span> and{' '}
         <span className="text-data-sm text-on-surface">{SENTIMENT_REPROMOTE}%</span> an active or
         demoted source stays where it is: an active one is not demoted and a demoted one is not
@@ -347,11 +455,13 @@ export function SentimentAuditPanel() {
         </p>
       ) : null}
 
-      {nothingAuditedYet(status) ? (
+      {empty ? (
         <p className="mb-4 max-w-prose text-caption text-on-surface-variant">
-          No audit has completed yet, so nothing below is a measurement.{' '}
+          {empty.lead === 'none_standing'
+            ? 'There is no standing audit: no run that stands has succeeded, and the voided runs are listed under the table. Nothing below is a measurement.'
+            : 'No audit has completed yet, so nothing below is a measurement.'}{' '}
           {status.nextRunAt
-            ? `The first scheduled run is ${formatDateTimeET(status.nextRunAt)}.`
+            ? `The ${empty.next} scheduled run is ${formatDateTimeET(status.nextRunAt)}.`
             : 'No scheduler is running, so no run is due.'}
         </p>
       ) : null}
@@ -379,7 +489,7 @@ export function SentimentAuditPanel() {
                 {NEWS_SOURCE_LABEL[source.source]}
               </th>
               <td className={TD}>
-                <StatusCell source={source} />
+                <StatusCell source={source} anyVoided={status.voidedRuns.length > 0} />
               </td>
               {SENTIMENT_WINDOWS.map((w) => {
                 const key = `${source.source}:${w}`
@@ -401,13 +511,33 @@ export function SentimentAuditPanel() {
       <dl className="mt-4 grid max-w-prose grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-caption">
         <dt className="text-on-surface-variant">Last run</dt>
         <dd className="text-on-surface">
-          {status.lastRun ? runLine(status.lastRun) : 'No run has ever started.'}
+          {last.kind === 'never' ? (
+            'No run has ever started.'
+          ) : last.kind === 'all_voided' ? (
+            'None standing; every run so far was voided (listed below).'
+          ) : last.laterVoided ? (
+            <>
+              Run <RunId id={last.run.id} />, {runLine(last.run)}, the newest run that stands;
+              every run after it was voided (listed below).
+            </>
+          ) : (
+            runLine(last.run)
+          )}
         </dd>
-        {status.accuracyRun && status.accuracyRun.id !== status.lastRun?.id ? (
+        {figures ? (
           <>
             <dt className="text-on-surface-variant">Figures from</dt>
             <dd className="text-on-surface">
-              the last run that succeeded, {runLine(status.accuracyRun)}
+              {figures.kind === 'none_standing' ? (
+                'none — no run that stands has succeeded'
+              ) : figures.kind === 'newest_standing' ? (
+                <>
+                  run <RunId id={figures.run.id} />, the newest standing run that succeeded
+                  {figures.sameAsLast ? '' : `, ${runLine(figures.run)}`}
+                </>
+              ) : (
+                <>the last run that succeeded, {runLine(figures.run)}</>
+              )}
             </dd>
           </>
         ) : null}
@@ -427,6 +557,17 @@ export function SentimentAuditPanel() {
         ) : null}
       </dl>
 
+      {status.voidedRuns.length > 0 ? (
+        <ul aria-label="Voided runs" className="mt-2 max-w-prose space-y-1">
+          {status.voidedRuns.map((run) => (
+            <li key={run.id} className="text-caption text-on-surface-variant">
+              Run <span className="text-data-sm text-on-surface">{run.id}</span> voided on{' '}
+              {formatDateET(run.voidedAt)}: {asSentence(run.reason)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
       <div className="mt-4">
         {/* Not destructive — a run reads labels and returns, and only the
             audit's own rules can move a status — so no confirm. The server
@@ -439,11 +580,10 @@ export function SentimentAuditPanel() {
         >
           {start.isPending ? 'Starting…' : 'Run audit now'}
         </button>
-        {/* Only while the run it names is open. Once the readout shows that
-            run closed, `Last run` states its outcome and "it takes a few
-            minutes" is no longer true. */}
-        {start.isSuccess &&
-        !(status.lastRun?.id === start.data.runId && status.lastRun.status !== 'running') ? (
+        {/* Only while the run it names may be open (`startedRunPending`).
+            Once the readout shows that run closed, or lists it voided,
+            "it takes a few minutes" is no longer true. */}
+        {start.isSuccess && startedRunPending(status, start.data.runId) ? (
           <p role="status" className="mt-2 max-w-prose text-caption text-on-surface-variant">
             Audit run {start.data.runId} started at {formatDateTimeET(start.data.requestedAt)}. It
             takes a few minutes; its outcome appears here when it finishes.

@@ -237,10 +237,15 @@ def test_the_tables_have_exactly_the_specs_columns(any_engine: Engine) -> None:
             "outcome_price", "benchmark_return", "excess_return", "correct",
             "skip_reason", "scope", "audit_run_id",
         },
-        "audit_run": {"id", "started_at", "finished_at", "trigger", "status", "detail"},
+        # ``voided_at`` / ``void_reason``: R4, migration 0018.
+        "audit_run": {
+            "id", "started_at", "finished_at", "trigger", "status", "detail",
+            "voided_at", "void_reason",
+        },
         "sentiment_accuracy": {
             "audit_run_id", "source", "window", "basis", "scope", "graded",
             "correct", "neutral",
+            "sessions",  # 0017 (R3, Q23b)
         },
         "sentiment_source_status": {
             "source", "status", "changed_at", "reason", "audit_run_id",
@@ -557,6 +562,10 @@ _ACCURACY_ACCEPTED: list[dict[str, object]] = [
     {"scope": "watch"},
     {"graded": 0, "correct": 0, "neutral": 0},
     {"graded": 30, "correct": 30},  # correct may equal graded
+    # 0017 (R3): NULL is a row from before Q23b; zero and up are counts.
+    {"sessions": None},
+    {"sessions": 0},
+    {"sessions": 5},
 ]
 
 _ACCURACY_REFUSED: list[tuple[dict[str, object], str]] = [
@@ -568,6 +577,7 @@ _ACCURACY_REFUSED: list[tuple[dict[str, object], str]] = [
     ({"correct": -1}, "ck_sentiment_accuracy_correct"),
     ({"correct": 32}, "ck_sentiment_accuracy_correct"),  # more correct than graded
     ({"neutral": -1}, "ck_sentiment_accuracy_neutral"),
+    ({"sessions": -1}, "ck_sentiment_accuracy_sessions"),
 ]
 
 
@@ -598,8 +608,18 @@ def test_a_fractional_count_is_refused(any_engine: Engine) -> None:
         with pytest.raises(IntegrityError, match="ck_sentiment_accuracy_graded"):
             sess.execute(
                 text(
-                    "INSERT INTO sentiment_accuracy VALUES "
-                    "(:r, 'rules', '1h', 'trailing_28d', 'all', 30.5, 1, 0)"
+                    "INSERT INTO sentiment_accuracy "
+                    '(audit_run_id, source, "window", basis, scope, graded, correct, neutral) '
+                    "VALUES (:r, 'rules', '1h', 'trailing_28d', 'all', 30.5, 1, 0)"
+                ),
+                {"r": run_id},
+            )
+        with pytest.raises(IntegrityError, match="ck_sentiment_accuracy_sessions"):
+            sess.execute(
+                text(
+                    "INSERT INTO sentiment_accuracy "
+                    '(audit_run_id, source, "window", basis, scope, graded, correct, neutral, '
+                    "sessions) VALUES (:r, 'rules', '1h', 'trailing_28d', 'all', 30, 1, 0, 4.5)"
                 ),
                 {"r": run_id},
             )
@@ -763,7 +783,9 @@ _SENTIMENT_AUDIT_REFUSED: list[tuple[str, str, str]] = [
     ("Rules", "active", "demoted"),
     ("rules", "", "active"),
     ("rules", "running", "active"),  # a run status, not a source status
-    ("rules", "active", "unaudited"),  # nothing transitions into unaudited
+    # ``active -> unaudited`` is no longer here: R4's void restores it, and
+    # migration 0018 admits exactly that shape
+    # (``test_audit_void_migration.test_the_restore_row_shape_is_admitted_and_nothing_wider``).
     ("rules", "active", "Demoted"),
     ("rules", "active", "active"),  # decision 13: unchanged writes no row
     ("massive", "demoted", "demoted"),
@@ -818,6 +840,9 @@ def test_the_sentiment_routes_are_seeded_bell_on_discord_on(any_engine: Engine) 
         ("sentiment_demoted", "discord"): True,
         ("sentiment_repromoted", "bell"): True,
         ("sentiment_repromoted", "discord"): True,
+        # R4 (migration 0018): a void, on ``sentiment_repromoted``'s channels.
+        ("sentiment_audit_voided", "bell"): True,
+        ("sentiment_audit_voided", "discord"): True,
         # 6.4b: a manual audit run started -- decision 20's operator-action
         # defaults, a record for Discord, not worth the bell.
         ("sentiment_audit_requested", "bell"): False,

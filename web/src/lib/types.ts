@@ -1285,7 +1285,9 @@ export interface AuditLogEntry {
  * SPDR sector seed — emitted by the `spdr_holdings` job, not by a human action),
  * and the self-audit's two transitions (`sentiment_demoted`,
  * `sentiment_repromoted`, Phase 3 decisions 13 and 14 — emitted by the weekly
- * audit run when a source's status changes). `sentiment_audit_requested` is
+ * audit run when a source's status changes). `sentiment_audit_voided` records
+ * a run voided by `scripts/void_audit_run.py` and the statuses it restored
+ * (remainder spec R4) -- never a re-promotion. `sentiment_audit_requested` is
  * the seventh operator event: an audit run started by hand from Settings.
  *
  * The owner's call: "any action i do should be put into the discord". So a
@@ -1320,6 +1322,7 @@ export type NotificationEvent =
   | 'spdr_seed_amended'
   | 'sentiment_demoted'
   | 'sentiment_repromoted'
+  | 'sentiment_audit_voided'
   | 'sentiment_audit_requested'
   | 'calendar_changed'
   | 'cash_session_confirmed'
@@ -1343,6 +1346,7 @@ export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
   spdr_seed_amended: 'SPDR seed amended',
   sentiment_demoted: 'Sentiment source demoted',
   sentiment_repromoted: 'Sentiment source re-promoted',
+  sentiment_audit_voided: 'Sentiment audit run voided',
   sentiment_audit_requested: 'Sentiment audit started by operator',
   calendar_changed: 'Calendar entry changed',
   cash_session_confirmed: 'Cash session confirmed',
@@ -1783,6 +1787,10 @@ export interface SentimentCounts {
   graded: number
   correct: number
   neutral: number
+  /** Distinct sessions the graded directional labels span (R3). `null` on a
+   * row written before the five-session floor existed: it carries no count,
+   * so say so in words, and never read it as meeting the floor. */
+  sessions: number | null
 }
 
 /** One window on one basis. `combined` is the figure transitions act on;
@@ -1795,11 +1803,16 @@ export interface SentimentWindowAccuracy {
   discovery: SentimentCounts
 }
 
-/** `needed` more graded labels to reach the floor; `0` once reached. */
+/** `needed` more graded labels to reach the floor; `0` once reached.
+ * `sessionsNeeded` more distinct sessions to reach `sessionFloor`; `0` once
+ * reached. Both session fields are `null` together, exactly when the row
+ * predates the session floor (R3). */
 export interface SentimentWindowProgress {
   window: SentimentWindow
   graded: number
   needed: number
+  sessions: number | null
+  sessionsNeeded: number | null
 }
 
 /** Eligibility as of the last run. `asOfRunId: null` means nothing has been
@@ -1808,6 +1821,9 @@ export interface SentimentEligibility {
   kind: SentimentEligibilityKind
   basis: SentimentAccuracyBasis
   floor: number
+  /** Distinct sessions each window needs (R3), from the server. Never
+   * hardcode 5. `eligible` is the server's and already includes it. */
+  sessionFloor: number
   eligible: boolean
   windows: SentimentWindowProgress[]
   asOfRunId: number | null
@@ -1838,12 +1854,26 @@ export interface AuditRunSummary {
   finishedAt: string | null
 }
 
-/** `GET /api/settings/sentiment`. `manualAvailableAt` is display only — the
- * server enforces the hourly limit (rule 4). */
+/** One audit run voided by `scripts/void_audit_run.py` (remainder spec R4).
+ * `reason` is the operator's, as given. Display only: there is no control
+ * that voids, demotes or re-promotes anywhere in the UI (R4, parent Q6). */
+export interface VoidedAuditRun {
+  id: number
+  voidedAt: string
+  reason: string
+}
+
+/** `GET /api/settings/sentiment`. `lastRun` is the newest **non-voided** run
+ * in any state, and `accuracyRun` the newest non-voided succeeded one, which
+ * every source's figures come from. A voided run never appears in either; it
+ * is listed in `voidedRuns`, newest void first, and is empty when nothing has
+ * been voided. `manualAvailableAt` is display only — the server enforces the
+ * hourly limit (rule 4), and a voided manual run still holds it. */
 export interface SentimentAuditStatus {
   sources: SentimentSourceAudit[]
   lastRun: AuditRunSummary | null
   accuracyRun: AuditRunSummary | null
+  voidedRuns: VoidedAuditRun[]
   nextRunAt: string | null
   manualAvailableAt: string | null
 }

@@ -100,6 +100,7 @@ __all__ = [
     "LABEL_OUTCOME_SCOPES",
     "LABEL_SKIP_REASONS",
     "LabelOutcome",
+    "LabelOutcomeVoided",
     "LimitRange",
     "MlegGroup",
     "MlegLeg",
@@ -161,10 +162,11 @@ CASH_SESSION_INACTIVE = "inactive"
 CASH_SESSION_ACTIVE_PREFIX = "active "
 
 #: Decision 13's per-source state. Every source starts ``unaudited``, and
-#: **nothing transitions into it** -- the transitions go ``unaudited ->
-#: active | demoted`` and between those two only -- which is what
-#: ``ck_sentiment_source_status_transition`` and ``ck_audit_log_sentiment_row``
-#: rely on. Defined here rather than with the audit tables below because
+#: **no audit run transitions into it** -- a run's transitions go
+#: ``unaudited -> active | demoted`` and between those two only. The one way
+#: back is voiding the run that moved it (R4, migration 0018), which restores
+#: the seed's NULLs; ``ck_sentiment_source_status_transition`` holds that
+#: shape and ``ck_audit_log_sentiment_row`` admits its record. Defined here rather than with the audit tables below because
 #: ``AuditLog``'s CHECK reads it.
 SENTIMENT_SOURCE_STATUSES: tuple[str, ...] = ("unaudited", "active", "demoted")
 
@@ -562,18 +564,26 @@ class NotificationRoute(Base):
 
 
 #: A ``sentiment`` audit row is a source transition (migration 0014): ``field``
-#: is the source, ``previous_value`` its old status, ``new_value`` its new one,
-#: and the new one is never ``unaudited``, because nothing transitions into it.
+#: is the source, ``previous_value`` its old status, ``new_value`` its new one.
 #: Scoped to that category -- every other category's values are unconstrained
 #: here. The sources are ``SENTIMENT_SOURCES``, restated from ``LabelSource``
 #: because that constant is defined with the label table, below this one.
+#:
+#: **``new_value`` may be ``unaudited`` since migration 0018, for one shape
+#: only: a void's restoration** (R4, ``corollary.data.news.audit_void``). No
+#: *run* transitions into ``unaudited``; voiding the run that moved a source
+#: out of it writes ``active|demoted -> unaudited``. ``previous_value <>
+#: new_value`` already confines that to exactly the restore shape. A restore
+#: row's ``at`` is the void instant, which lies inside no run's span, so the
+#: history join (:class:`SentimentSourceStatus`) never takes it for a run's
+#: transition.
 _AUDIT_LOG_SENTIMENT_ROW = (
     "category <> 'sentiment' OR ("
     + _in_list("field", tuple(s.value for s in LabelSource))
     + " AND "
     + _in_list("previous_value", SENTIMENT_SOURCE_STATUSES)
     + " AND "
-    + _in_list("new_value", tuple(s for s in SENTIMENT_SOURCE_STATUSES if s != "unaudited"))
+    + _in_list("new_value", SENTIMENT_SOURCE_STATUSES)
     # Decision 13: an unchanged source writes no row, so a no-op transition
     # (``active`` to ``active``) is refused rather than logged.
     + " AND previous_value <> new_value"
@@ -2037,6 +2047,17 @@ _AUDIT_RUN_DETAIL = (
     "(CASE WHEN json_valid(detail) THEN json_type(detail) = 'object' ELSE 0 END)"
 )
 
+#: ``ck_audit_run_voided`` (R4, migration 0018): a run stands -- both NULL --
+#: or was voided with a reason, both set. The reason is non-blank (SQLite's
+#: ``trim`` strips spaces only; the void tool strips all whitespace before it
+#: gets here), and only a finished run can be voided: a ``running`` row has
+#: decided nothing yet.
+_AUDIT_RUN_VOIDED = (
+    "(voided_at IS NULL AND void_reason IS NULL) "
+    "OR (voided_at IS NOT NULL AND void_reason IS NOT NULL "
+    "AND trim(void_reason) <> '' AND status <> 'running')"
+)
+
 #: A source is either untouched since its seed or carries the whole of the
 #: transition that moved it: when, why, and which run. Every state but
 #: ``unaudited`` is reached only by a run, so a row naming none was written by
@@ -2116,6 +2137,51 @@ class AuditRun(Base):
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: When the run was voided (R4, migration 0018), UTC; NULL while it
+    #: stands. ``status`` keeps recording what the run *did*; whether it
+    #: stands is this separate fact. Every reader of "the last run" excludes
+    #: a voided one.
+    voided_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    #: The owner's reason, given to ``scripts/void_audit_run.py``. Both or
+    #: neither with ``voided_at``, non-blank, and only on a finished run
+    #: (``ck_audit_run_voided``). **A column-level CHECK, deliberately**: it
+    #: is the one form SQLite's ``ALTER TABLE ADD COLUMN`` accepts, and a
+    #: batch rebuild of ``audit_run`` is impossible on a populated database
+    #: -- three tables reference it, ``PRAGMA foreign_keys=ON`` holds during
+    #: migrations, and the rebuild's ``DROP TABLE`` fails on their rows. See
+    #: migration 0018. Declared here at column level too, so ``create_all()``
+    #: writes the DDL the migration does.
+    void_reason: Mapped[str | None] = mapped_column(
+        Text, CheckConstraint(_AUDIT_RUN_VOIDED, name="ck_audit_run_voided"), nullable=True
+    )
+
+
+def _label_outcome_checks(prefix: str) -> tuple[CheckConstraint, ...]:
+    """``label_outcome``'s CHECKs, in its declared order, named for ``prefix``.
+
+    One definition for the live table and its archive
+    (:class:`LabelOutcomeVoided`), so an archived row is held to exactly the
+    shape it had when it was graded.
+    """
+    return (
+        CheckConstraint(_in_list('"window"', SENTIMENT_WINDOWS), name=f"ck_{prefix}_window"),
+        CheckConstraint(
+            _in_list_or_null("skip_reason", LABEL_SKIP_REASONS),
+            name=f"ck_{prefix}_skip_reason",
+        ),
+        CheckConstraint(_LABEL_OUTCOME_SHAPE, name=f"ck_{prefix}_shape"),
+        CheckConstraint(_LABEL_OUTCOME_SCOPE, name=f"ck_{prefix}_scope"),
+        CheckConstraint(_price_check("reference_price"), name=f"ck_{prefix}_reference_price"),
+        CheckConstraint(_price_check("outcome_price"), name=f"ck_{prefix}_outcome_price"),
+        CheckConstraint(
+            _money_shape("benchmark_return", nullable=True),
+            name=f"ck_{prefix}_benchmark_return",
+        ),
+        CheckConstraint(
+            _money_shape("excess_return", nullable=True),
+            name=f"ck_{prefix}_excess_return",
+        ),
+    )
 
 
 class LabelOutcome(Base):
@@ -2167,29 +2233,7 @@ class LabelOutcome(Base):
     """
 
     __tablename__ = "label_outcome"
-    __table_args__ = (
-        CheckConstraint(
-            _in_list('"window"', SENTIMENT_WINDOWS), name="ck_label_outcome_window"
-        ),
-        CheckConstraint(
-            _in_list_or_null("skip_reason", LABEL_SKIP_REASONS),
-            name="ck_label_outcome_skip_reason",
-        ),
-        CheckConstraint(_LABEL_OUTCOME_SHAPE, name="ck_label_outcome_shape"),
-        CheckConstraint(_LABEL_OUTCOME_SCOPE, name="ck_label_outcome_scope"),
-        CheckConstraint(
-            _price_check("reference_price"), name="ck_label_outcome_reference_price"
-        ),
-        CheckConstraint(_price_check("outcome_price"), name="ck_label_outcome_outcome_price"),
-        CheckConstraint(
-            _money_shape("benchmark_return", nullable=True),
-            name="ck_label_outcome_benchmark_return",
-        ),
-        CheckConstraint(
-            _money_shape("excess_return", nullable=True),
-            name="ck_label_outcome_excess_return",
-        ),
-    )
+    __table_args__ = _label_outcome_checks("label_outcome")
 
     label_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("sentiment_label.id"), primary_key=True
@@ -2219,6 +2263,43 @@ class LabelOutcome(Base):
     )
 
 
+class LabelOutcomeVoided(Base):
+    """A voided run's grade, archived (R4, migration 0018). Nothing is deleted.
+
+    Voiding run N moves every ``label_outcome`` row with ``audit_run_id = N``
+    here, in the void's one transaction. The move frees ``label_outcome``'s
+    ``(label_id, window)`` key, so the next run grades those labels afresh,
+    while the record of what a notified demotion rested on survives.
+
+    Exactly ``label_outcome``'s columns and CHECKs, plus ``voided_at``. The
+    key is ``(label_id, window, audit_run_id)``: one label and window can be
+    graded, voided, re-graded and voided again, and each voided grade is a
+    row. No reader of accuracy reads this table.
+    """
+
+    __tablename__ = "label_outcome_voided"
+    __table_args__ = _label_outcome_checks("label_outcome_voided")
+
+    label_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sentiment_label.id"), primary_key=True
+    )
+    window: Mapped[str] = mapped_column(String(4), primary_key=True)
+    reference_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    reference_price: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    outcome_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    outcome_price: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    benchmark_return: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    excess_return: Mapped[Decimal | None] = mapped_column(Money, nullable=True)
+    correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scope: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    audit_run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("audit_run.id"), primary_key=True
+    )
+    #: The void's instant, UTC -- the same reading as ``audit_run.voided_at``.
+    voided_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
 class SentimentAccuracy(Base):
     """One run's counts for one source, window, basis and scope (decisions 12, 13).
 
@@ -2237,6 +2318,16 @@ class SentimentAccuracy(Base):
       counted in neither of the others (Q5).
 
     Skipped outcomes are in none of the three.
+
+    ``sessions`` (migration 0017; R3, owner decision Q23b) is how many
+    distinct regular sessions the ``graded`` labels span --
+    ``corollary.data.news.audit.label_session``, counted over exactly the
+    labels ``graded`` counts. Decision 13's eligibility needs at least
+    ``MIN_ELIGIBLE_SESSIONS`` (5) in each window beside its 30 / 100 label
+    floor, so the figure a transition acted on is the figure stored here.
+    **NULL means the row was written before Q23b** and carries no session
+    count; no reader may treat NULL as eligible. The runner writes it on every
+    row it writes, zeros included.
     """
 
     __tablename__ = "sentiment_accuracy"
@@ -2255,6 +2346,10 @@ class SentimentAccuracy(Base):
             name="ck_sentiment_accuracy_correct",
         ),
         CheckConstraint(_non_negative_count("neutral"), name="ck_sentiment_accuracy_neutral"),
+        CheckConstraint(
+            f"sessions IS NULL OR ({_non_negative_count('sessions')})",
+            name="ck_sentiment_accuracy_sessions",
+        ),
     )
 
     audit_run_id: Mapped[int] = mapped_column(
@@ -2267,6 +2362,8 @@ class SentimentAccuracy(Base):
     graded: Mapped[int] = mapped_column(Integer, nullable=False)
     correct: Mapped[int] = mapped_column(Integer, nullable=False)
     neutral: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: NULL: written before Q23b, never eligible. See the class docstring.
+    sessions: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class SentimentSourceStatus(Base):

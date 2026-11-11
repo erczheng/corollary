@@ -175,6 +175,37 @@ async def test_bars_are_split_adjusted(make_provider) -> None:
     assert transport.params_for("/v2/stocks/bars")["adjustment"] == "split"
 
 
+@pytest.mark.parametrize("adjustment", ["raw", "split", "dividend", "spin-off", "all"])
+async def test_bars_send_the_requested_adjustment(make_provider, adjustment: str) -> None:
+    """The sentiment audit asks for ``all``: a return across an ex-date must
+    not read the dividend's price drop as a loss. Every documented value
+    passes through verbatim -- Alpaca's ``/v2/stocks/bars`` reference lists
+    ``raw``, ``split``, ``dividend``, ``spin-off`` and ``all``."""
+    provider, transport = make_provider(single("stock_bars_daily"))
+    await provider.stock_bars(
+        ["NVDA"],
+        start=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        adjustment=adjustment,
+    )
+    assert transport.params_for("/v2/stocks/bars")["adjustment"] == adjustment
+
+
+async def test_bars_refuse_an_undocumented_adjustment_before_any_request(
+    make_provider,
+) -> None:
+    """``Literal`` is a static check only; a value that reaches the provider
+    anyway is refused rather than sent, so it cannot surface as a vendor 400
+    -- or worse, as a vendor that quietly applies its own default (``raw``)."""
+    provider, transport = make_provider(single("stock_bars_daily"))
+    with pytest.raises(ValueError, match="adjustment"):
+        await provider.stock_bars(
+            ["NVDA"],
+            start=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            adjustment="dividends",  # not a documented value: the point
+        )
+    assert transport.requests == []
+
+
 async def test_latest_stock_quotes_parse(make_provider) -> None:
     provider, transport = make_provider(single("stock_quotes_latest"))
     quotes = await provider.latest_stock_quotes(["NVDA", "SPY"])

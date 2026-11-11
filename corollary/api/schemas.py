@@ -177,6 +177,7 @@ __all__ = [
     "SentimentWindow",
     "SentimentWindowAccuracy",
     "SentimentWindowProgress",
+    "VoidedAuditRun",
 ]
 
 logger = logging.getLogger(__name__)
@@ -369,6 +370,9 @@ NotificationEvent: TypeAlias = Literal[
     # transition unit lands.
     "sentiment_demoted",
     "sentiment_repromoted",
+    # A sentiment audit run voided by the owner (R4, migration 0018):
+    # ``info``, emitted by ``scripts/void_audit_run.py``.
+    "sentiment_audit_voided",
     # A manual sentiment audit run started (step 6, migration 0014): ``info``,
     # emitted by ``POST /api/settings/sentiment/audit`` (decision 20).
     "sentiment_audit_requested",
@@ -2569,17 +2573,25 @@ SentimentEligibilityKind: TypeAlias = Literal["demote", "repromote"]
 
 
 class SentimentCounts(ApiModel):
-    """One ``sentiment_accuracy`` row's three counts. **No percentage**: the
+    """One ``sentiment_accuracy`` row's counts. **No percentage**: the
     client derives one, so no rounded figure travels beside its numbers.
 
     ``graded`` is graded **directional** labels -- the accuracy denominator
     and what the 30 / 100 floors count; ``correct`` is at most ``graded``;
     ``neutral`` is graded neutral labels, in neither (Q5).
+
+    ``sessions`` is how many distinct sessions the ``graded`` labels span,
+    the count the five-session floor reads (R3). It is each scope's own
+    stored figure: the ``watch`` and ``discovery`` counts do **not** sum to
+    the combined one, since one session can hold a label of each. ``null``
+    means the row was written before that floor existed and carries no
+    count -- never read it as meeting the floor.
     """
 
     graded: int
     correct: int
     neutral: int
+    sessions: int | None
 
 
 class SentimentWindowAccuracy(ApiModel):
@@ -2598,12 +2610,26 @@ class SentimentWindowAccuracy(ApiModel):
 
 
 class SentimentWindowProgress(ApiModel):
-    """One window's progress toward its floor: ``needed`` more graded labels,
-    ``0`` once ``graded`` has reached it."""
+    """One window's progress toward its floors: ``needed`` more graded labels,
+    ``0`` once ``graded`` has reached it; ``sessionsNeeded`` more distinct
+    sessions, ``0`` once ``sessions`` has reached ``sessionFloor`` (R3).
+
+    ``sessions`` and ``sessionsNeeded`` are ``null`` together, exactly when
+    the row predates the session floor: a shortfall from a count nobody took
+    would be a number nobody counted.
+    """
 
     window: SentimentWindow
     graded: int
     needed: int
+    sessions: int | None
+    sessions_needed: int | None
+
+    @model_validator(mode="after")
+    def _sessions_needed_exactly_when_counted(self) -> "SentimentWindowProgress":
+        if (self.sessions is None) != (self.sessions_needed is None):
+            raise ValueError("sessions and sessions_needed are null together or not at all")
+        return self
 
 
 class SentimentEligibility(ApiModel):
@@ -2611,16 +2637,27 @@ class SentimentEligibility(ApiModel):
 
     ``kind`` follows the status: ``demote`` for ``unaudited`` / ``active``
     (floor 30, ``trailing_28d``), ``repromote`` for ``demoted`` (floor 100,
-    ``since_demotion``). ``eligible`` is every window at or over ``floor``.
-    ``asOfRunId`` is the run the counts come from; ``null`` when no run has
+    ``since_demotion``). ``sessionFloor`` is the distinct sessions each
+    window needs beside its label floor, on either kind --
+    ``audit.MIN_ELIGIBLE_SESSIONS``, served so no client restates it.
+    ``eligible`` is every window at or over ``floor`` **and** at or over
+    ``sessionFloor``, with a ``null`` session count never eligible; it is
+    the engine's own rule (``audit.window_is_eligible``), so Settings never
+    calls a source eligible that the engine would judge ineligible.
+    Eligible means the floors are met, which a transition needs and which
+    does not make one: an eligible source at 61% stays active, inside the
+    52-66% band. ``asOfRunId`` is the run the counts come from; ``null`` when no run has
     counted anything on this basis yet -- no run has succeeded, or the latest
     one is the run that demoted the source, so nothing is graded *since*.
-    Every window then reads ``graded: 0``, which is a count, not a guess.
+    Every window then reads ``graded: 0`` and ``sessions: 0``, with
+    ``sessionsNeeded`` the whole ``sessionFloor``, which are counts, not
+    guesses.
     """
 
     kind: SentimentEligibilityKind
     basis: SentimentAccuracyBasis
     floor: int
+    session_floor: int
     eligible: bool
     windows: list[SentimentWindowProgress]
     as_of_run_id: int | None
@@ -2636,9 +2673,10 @@ class SentimentSourceAudit(ApiModel):
     database, since both are seeded. ``status``, ``changedAt`` and
     ``neverAudited`` are then a display fallback (``unaudited``), not a
     record, and claim nothing. ``reason`` is the latest transition's, as
-    the run wrote it. ``accuracy`` is the latest **succeeded** run's rows for
-    this source, every basis that run computed, ordered by window then basis;
-    empty when no run has succeeded.
+    the run wrote it. ``accuracy`` is ``accuracyRun``'s rows for this
+    source -- the newest **succeeded, non-voided** run -- every basis that
+    run computed, ordered by window then basis; empty when no standing run
+    has succeeded.
     """
 
     source: NewsLabelSource
@@ -2661,20 +2699,50 @@ class AuditRunSummary(ApiModel):
     finished_at: datetime | None
 
 
+class VoidedAuditRun(ApiModel):
+    """One ``audit_run`` row voided by ``scripts/void_audit_run.py`` (remainder
+    spec R4, migration 0018).
+
+    ``voidedAt`` is when it was voided, aware UTC. ``reason`` is the stored
+    ``void_reason``, verbatim: the owner's words, as given to the script.
+    Display only -- no route voids, demotes or re-promotes (R4, parent Q6).
+    The run's ``status`` still records what it did; this records that it no
+    longer stands.
+    """
+
+    id: int
+    voided_at: datetime
+    reason: str
+
+
 class SentimentAuditStatus(ApiModel):
     """``GET /api/settings/sentiment``.
 
-    ``lastRun`` is the newest run in any state; ``accuracyRun`` the newest
-    **succeeded** one, which every source's figures come from. ``nextRunAt``
-    is the scheduled job's next slot, ``null`` with no scheduler running.
-    ``manualAvailableAt`` is when the once-an-hour manual limit next admits a
-    run, ``null`` when it admits one now. Display only: the ``POST`` enforces
+    **A voided run never appears in ``lastRun`` or ``accuracyRun``** (R4
+    step 3: every reader excludes voided runs). ``lastRun`` is the newest
+    **non-voided** run in any state; ``accuracyRun`` the newest
+    **non-voided succeeded** one. Every source's accuracy figures and its
+    eligibility come from ``accuracyRun``, so once the newest run is voided
+    they come from the standing run before it, or there are none -- both
+    ``null`` when no run stands. A voided run's ``sentiment_accuracy`` rows
+    stay stored and are never served.
+
+    ``voidedRuns`` lists every voided run, **newest void first** (by
+    ``voidedAt``, then ``id``), and is empty -- never ``null`` -- when
+    nothing has been voided.
+
+    ``nextRunAt`` is the scheduled job's next slot, ``null`` with no
+    scheduler running. ``manualAvailableAt`` is when the once-an-hour manual
+    limit next admits a run, ``null`` when it admits one now. A voided
+    manual run still counts toward it: the limit is on how often a run
+    starts, not on whether it stands. Display only: the ``POST`` enforces
     the limit itself (rule 4).
     """
 
     sources: list[SentimentSourceAudit]
     last_run: AuditRunSummary | None
     accuracy_run: AuditRunSummary | None
+    voided_runs: list[VoidedAuditRun]
     next_run_at: datetime | None
     manual_available_at: datetime | None
 

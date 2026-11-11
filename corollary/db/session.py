@@ -38,6 +38,7 @@ __all__ = [
     "get_engine",
     "session_scope",
     "sqlite_url",
+    "take_write_lock",
 ]
 
 #: Override for the database location. Absent, the repo-root file below is
@@ -224,3 +225,54 @@ def session_scope(engine: Engine | None = None) -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+def take_write_lock(session: Session) -> None:
+    """Begin ``session``'s transaction with ``BEGIN IMMEDIATE``: SQLite's write
+    lock, taken **before** any read.
+
+    Needed because of how the driver opens transactions. ``sqlite3``'s legacy
+    transaction control (``autocommit == LEGACY_TRANSACTION_CONTROL``, the
+    default, and what :func:`create_db_engine`'s engines get) issues an
+    implicit *deferred* ``BEGIN`` only before an INSERT, UPDATE or DELETE.
+    Every SELECT before a session's first write therefore runs outside any
+    transaction, each in its own autocommit snapshot, and another connection
+    may commit between those reads and the first write without anything
+    noticing.
+
+    ``BEGIN IMMEDIATE`` takes the RESERVED lock at once. Any other writer
+    then waits for this transaction's commit or rollback (up to
+    :data:`SQLITE_BUSY_TIMEOUT_MS`, then ``database is locked``); readers
+    carry on under WAL. Every later statement runs inside this one
+    transaction, and the driver, seeing a transaction already open, issues no
+    ``BEGIN`` of its own. ``session.commit()`` commits it, and closing the
+    session without a commit rolls it back. **Hold it briefly**: every other
+    writer in the process waits on it, the watchdog's write among them, and
+    that one runs on the API's event loop (the constant's comment above).
+
+    The two writers that must not interleave, the void
+    (``corollary.data.news.audit_void.void_audit_run``) and a run's open
+    (``corollary.data.news.audit_runner._open_run``), each call this first
+    and read their clock after it. Whichever takes the lock first therefore
+    has the earlier instant, and the other sees its committed result before
+    deciding anything.
+
+    No other ``BEGIN IMMEDIATE`` exists under ``corollary/``. This is the
+    only one, and it is explicit on the session's own connection rather than
+    an engine-wide ``begin`` hook, which would change every transaction in
+    the app. It must be the session's first statement. A transaction already
+    open on the connection would make ``BEGIN`` fail, so that raises here,
+    naming the cause.
+    """
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        raise NotImplementedError(
+            f"take_write_lock is written for SQLite, not {connection.dialect.name}"
+        )
+    driver = connection.connection.driver_connection
+    if getattr(driver, "in_transaction", False):
+        raise RuntimeError(
+            "a transaction is already open on this connection; the write lock must be "
+            "the session's first statement"
+        )
+    connection.exec_driver_sql("BEGIN IMMEDIATE")

@@ -8,8 +8,11 @@ The week used throughout: 30 ``rules`` labels on AAPL and 30 ``massive``
 labels on MSFT, published Monday 2026-11-16 from 10:00 ET a minute apart; the
 run is Saturday 2026-11-21 10:00 ET. SPY is flat at 100, and AAPL and MSFT
 rise a cent a minute, so a bullish label is correct and a bearish one is not:
-``rules`` (bullish) is 30/30 and goes ``unaudited -> active``, ``massive``
-(bearish) is 0/30 and goes ``unaudited -> demoted``.
+``rules`` (bullish) is 30/30 and ``massive`` (bearish) is 0/30. That week is
+one session, under R3's five-session floor, so on it neither source moves.
+:func:`_five_session_week` deals the same labels across five sessions, and on
+it ``rules`` goes ``unaudited -> active`` and ``massive`` goes
+``unaudited -> demoted``.
 """
 
 import ast
@@ -17,9 +20,10 @@ import asyncio
 import inspect
 import json
 import threading
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -44,7 +48,7 @@ from corollary.data.news.audit_runner import (
 )
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels
-from corollary.data.providers.interface import Bar, BarTimeframe, ProviderError
+from corollary.data.providers.interface import Bar, BarAdjustment, BarTimeframe, ProviderError
 from corollary.db.models import (
     AuditLog,
     AuditRun,
@@ -93,6 +97,9 @@ class FakeBars:
     calls: list[tuple[tuple[str, ...], BarTimeframe, datetime | None, datetime | None]] = field(
         default_factory=list
     )
+    #: Each call's ``adjustment``, in call order -- a list beside ``calls``
+    #: rather than a fifth tuple member, so no existing unpacking changes.
+    adjustments: list[BarAdjustment] = field(default_factory=list)
 
     async def stock_bars(
         self,
@@ -102,8 +109,10 @@ class FakeBars:
         start: datetime | None = None,
         end: datetime | None = None,
         limit: int | None = None,
+        adjustment: BarAdjustment = "split",
     ) -> dict[str, list[Bar]]:
         self.calls.append((tuple(symbols), timeframe, start, end))
+        self.adjustments.append(adjustment)
         assert start is not None and end is not None
         day = start.astimezone(_ET).date()
         if self.outage is not None:
@@ -274,6 +283,34 @@ def _the_week(engine: Engine) -> None:
         session.commit()
 
 
+#: R3's five-session floor needs labels across five sessions, and every 1d
+#: window must have matured by Saturday's run: the previous Friday, then
+#: Monday to Thursday. (Friday the 20th's 1d windows end the next Monday.)
+FLOOR_SESSIONS: tuple[date, ...] = (
+    date(2026, 11, 13),
+    MONDAY,
+    TUESDAY,
+    date(2026, 11, 18),
+    date(2026, 11, 19),
+)
+
+
+def _five_session_week(engine: Engine) -> None:
+    """:func:`_the_week`'s 30 labels per source -- ``rules`` right on AAPL,
+    ``massive`` wrong on MSFT -- dealt six to a session across
+    :data:`FLOOR_SESSIONS` at 10:00 ET, so both sources clear the session
+    floor (R3) and transition. ``_the_week`` stays one session: the fetch
+    tests pin its two-session request shape."""
+    with Session(engine) as session:
+        for i in range(LABELS_PER_SOURCE):
+            day = FLOOR_SESSIONS[i % len(FLOOR_SESSIONS)]
+            at = datetime.combine(day, time(10, i // len(FLOOR_SESSIONS)), tzinfo=_ET)
+            at = at.astimezone(UTC)
+            _label(session, ticker="AAPL", source="rules", direction="bullish", at=at)
+            _label(session, ticker="MSFT", source="massive", direction="bearish", at=at)
+        session.commit()
+
+
 def _deps(
     engine: Engine,
     *,
@@ -304,7 +341,7 @@ def _run(deps: SentimentAuditDeps, trigger: str = "scheduled") -> audit_runner.A
 
 
 def test_one_run_writes_outcomes_accuracy_and_transitions(db_engine: Engine) -> None:
-    _the_week(db_engine)
+    _five_session_week(db_engine)
     with Session(db_engine) as session:
         # Off-watch: one with no verdict (pending, reported), one failing.
         _label(session, ticker="ZZZZ", source="rules", direction="bullish", at=MONDAY_10)
@@ -364,6 +401,17 @@ def test_one_run_writes_outcomes_accuracy_and_transitions(db_engine: Engine) -> 
             assert accuracy[("rules", window, "trailing_28d", "watch")] == (30, 30, 0)
             assert accuracy[("rules", window, "trailing_28d", "discovery")] == (0, 0, 0)
             assert accuracy[("massive", window, "trailing_28d", "all")] == (30, 0, 0)
+        sessions = {
+            (a.source, a.window, a.scope): a.sessions
+            for a in session.scalars(
+                select(SentimentAccuracy).where(SentimentAccuracy.audit_run_id == result.run_id)
+            )
+        }
+        for source in ("rules", "massive"):
+            for window in ("1h", "1d"):
+                assert sessions[(source, window, "all")] == 5  # R3: the five sessions
+                assert sessions[(source, window, "watch")] == 5
+                assert sessions[(source, window, "discovery")] == 0
 
         statuses = {s.source: s for s in session.scalars(select(SentimentSourceStatus))}
         assert statuses["rules"].status == "active"
@@ -407,12 +455,12 @@ def test_one_run_writes_outcomes_accuracy_and_transitions(db_engine: Engine) -> 
 
 def test_the_history_join_finds_the_run_and_the_figures_acted_on(db_engine: Engine) -> None:
     """The join in ``models.SentimentSourceStatus``'s docstring, run as written."""
-    _the_week(db_engine)
+    _five_session_week(db_engine)
     result = _run(_deps(db_engine))
     join = text(
         """
         SELECT al.field, al.previous_value, al.new_value, ar.id AS run_id,
-               sa."window", sa.basis, sa.graded, sa.correct
+               sa."window", sa.basis, sa.graded, sa.correct, sa.sessions
         FROM audit_log AS al
         JOIN audit_run AS ar
           ON ar.started_at < al.at AND al.at <= ar.finished_at
@@ -430,22 +478,80 @@ def test_the_history_join_finds_the_run_and_the_figures_acted_on(db_engine: Engi
     with Session(db_engine) as session:
         rows = [tuple(r) for r in session.execute(join)]
     assert rows == [
-        ("massive", "unaudited", "demoted", result.run_id, "1d", "trailing_28d", 30, 0),
-        ("massive", "unaudited", "demoted", result.run_id, "1h", "trailing_28d", 30, 0),
-        ("rules", "unaudited", "active", result.run_id, "1d", "trailing_28d", 30, 30),
-        ("rules", "unaudited", "active", result.run_id, "1h", "trailing_28d", 30, 30),
+        ("massive", "unaudited", "demoted", result.run_id, "1d", "trailing_28d", 30, 0, 5),
+        ("massive", "unaudited", "demoted", result.run_id, "1h", "trailing_28d", 30, 0, 5),
+        ("rules", "unaudited", "active", result.run_id, "1d", "trailing_28d", 30, 30, 5),
+        ("rules", "unaudited", "active", result.run_id, "1h", "trailing_28d", 30, 30, 5),
     ]
-    # The figures acted on are the transition's own.
+    # The figures acted on are the transition's own -- the session count
+    # included (R3: "the figure a transition acted on is the figure stored").
     acted = {
-        (t.source, r.window): (r.graded, r.correct)
+        (t.source, r.window): (r.graded, r.correct, r.sessions)
         for t in result.transitions
         for r in t.acted_on
     }
-    assert acted == {(row[0], row[4]): (row[6], row[7]) for row in rows}
+    assert acted == {(row[0], row[4]): (row[6], row[7], row[8]) for row in rows}
+
+
+def test_one_session_of_labels_moves_nothing_and_stores_its_count(db_engine: Engine) -> None:
+    """R3 at the runner: ``_the_week`` clears both label floors -- 30 graded
+    in each window -- but in one session, so neither source moves, nothing
+    is logged or emitted, and the stored count says why."""
+    _the_week(db_engine)
+    sink = Sink()
+    result = _run(_deps(db_engine, sink=sink))
+    assert result.transitions == ()
+    assert sink.notices == []
+    with Session(db_engine) as session:
+        statuses = {s.source: s.status for s in session.scalars(select(SentimentSourceStatus))}
+        assert statuses == {"rules": "unaudited", "massive": "unaudited"}
+        assert session.scalars(select(AuditLog).where(AuditLog.category == "sentiment")).all() == []
+        stored = {
+            (a.source, a.window, a.scope): (a.graded, a.sessions)
+            for a in session.scalars(
+                select(SentimentAccuracy).where(SentimentAccuracy.audit_run_id == result.run_id)
+            )
+        }
+    for source in ("rules", "massive"):
+        for window in ("1h", "1d"):
+            assert stored[(source, window, "all")] == (30, 1)
+            assert stored[(source, window, "discovery")] == (0, 0)
+
+
+def test_every_row_the_runner_writes_carries_its_session_count(db_engine: Engine) -> None:
+    """Both bases and every scope, zeros included: a demoted source's
+    since-demotion rows, on the run after its demotion, are counts of zero --
+    never NULL, which would mean a row from before Q23b."""
+    _five_session_week(db_engine)
+    clock = TickingClock(SATURDAY_10)
+    first = _run(_deps(db_engine, clock=clock))
+    assert [(t.source, t.new.value) for t in first.transitions] == [
+        ("massive", "demoted"),
+        ("rules", "active"),
+    ]
+    second = _run(_deps(db_engine, clock=clock))
+    with Session(db_engine) as session:
+        rows = session.scalars(
+            select(SentimentAccuracy).where(SentimentAccuracy.audit_run_id == second.run_id)
+        ).all()
+    assert len(rows) == 2 * 3 + 2 * 2 * 3  # rules: trailing; massive: trailing and since
+    assert all(r.sessions is not None for r in rows)
+    since = {
+        (r.window, r.scope): (r.graded, r.sessions)
+        for r in rows
+        if (r.source, r.basis) == ("massive", "since_demotion")
+    }
+    assert since == {(w, s): (0, 0) for w in ("1h", "1d") for s in ("all", "watch", "discovery")}
+    trailing = {
+        (r.source, r.window): r.sessions
+        for r in rows
+        if (r.basis, r.scope) == ("trailing_28d", "all")
+    }
+    assert trailing == {(s, w): 5 for s in ("rules", "massive") for w in ("1h", "1d")}
 
 
 def test_re_running_is_a_no_op(db_engine: Engine) -> None:
-    _the_week(db_engine)
+    _five_session_week(db_engine)
     clock = TickingClock(SATURDAY_10)
     sink = Sink()
     first = _run(_deps(db_engine, clock=clock, sink=sink))
@@ -492,28 +598,39 @@ def test_a_stale_running_row_is_closed_as_failed_before_the_new_run(db_engine: E
 
 
 def test_a_provider_error_on_one_symbol_leaves_the_others_graded(db_engine: Engine) -> None:
-    """A NaN bar raises ``WireFormatError`` inside the provider (audit.py's note)."""
-    _the_week(db_engine)
+    """A NaN bar raises ``WireFormatError`` inside the provider (audit.py's note).
+
+    On the five-session week, so one source still moves while the faulted one
+    cannot: a runner that skipped every transition in any run with a bar fault
+    would otherwise pass this test, since ``()`` is exactly what it produces."""
+    _five_session_week(db_engine)
     bars = FakeBars(raises={("MSFT", TUESDAY): WireFormatError("not finite")})
     result = _run(_deps(db_engine, bars=bars))
+    per_session = LABELS_PER_SOURCE // len(FLOOR_SESSIONS)
     with Session(db_engine) as session:
-        written = {
+        written = Counter(
             (row.ticker, o.window)
             for o, row in session.execute(
                 select(LabelOutcome, SentimentLabelRow).join(
                     SentimentLabelRow, SentimentLabelRow.id == LabelOutcome.label_id
                 )
             )
+        )
+        # Tuesday's MSFT labels need Tuesday's MSFT bars in both windows, and
+        # Monday's MSFT 1d windows close on Tuesday: those wait (under a week old).
+        assert written == {
+            ("AAPL", "1h"): LABELS_PER_SOURCE,
+            ("AAPL", "1d"): LABELS_PER_SOURCE,
+            ("MSFT", "1h"): LABELS_PER_SOURCE - per_session,
+            ("MSFT", "1d"): LABELS_PER_SOURCE - 2 * per_session,
         }
-        # MSFT's 1d windows need Tuesday's MSFT bars: they wait (under a week old).
-        assert written == {("AAPL", "1h"), ("AAPL", "1d"), ("MSFT", "1h")}
-        assert _count(db_engine, LabelOutcome) == 3 * LABELS_PER_SOURCE
     assert result.detail["bar_faults"] == [
         {"symbol": "MSFT", "session_date": "2026-11-17", "reason": "vendor_data:WireFormatError"}
     ]
-    assert result.detail["awaiting_bars"] == LABELS_PER_SOURCE
-    # Massive's 1d has no grades, so it is ineligible and does not move.
-    assert [t.source for t in result.transitions] == ["rules"]
+    assert result.detail["awaiting_bars"] == 3 * per_session
+    # Massive is under the 30-label floor in both windows, so it cannot move;
+    # rules is 30/30 over five sessions and is promoted regardless.
+    assert [(t.source, t.new.value) for t in result.transitions] == [("rules", "active")]
 
 
 def _late_run(
@@ -571,7 +688,7 @@ def test_a_failed_run_is_marked_failed_and_the_halt_state_is_untouched(
         assert state is not None  # seeded
         state.halted, state.halted_reason, state.halted_at = halted, reason, halted_at
         session.commit()
-    _the_week(db_engine)
+    _five_session_week(db_engine)
 
     async def broken() -> tuple[str, ...]:
         raise RuntimeError("seed unreadable: s3cr3t-in-message")
@@ -625,6 +742,22 @@ def test_a_second_concurrent_run_is_refused_and_touches_nothing(db_engine: Engin
     finally:
         audit_runner._RUN_LOCK.release()
     assert _count(db_engine, AuditRun) == 0
+
+
+def test_bars_are_requested_dividend_and_split_adjusted(db_engine: Engine) -> None:
+    """Every audit fetch asks for ``all``, never the provider's ``split`` default.
+
+    A stock opens lower on its ex-date by about the dividend, so a
+    split-only 1d window spanning a ticker's ex-date reads a 0.2--1% loss
+    that is no loss to a holder, and SPY's quarterly ex-date shifts every
+    excess return that session. A correct bullish label would grade wrong.
+    """
+    _the_week(db_engine)
+    bars = FakeBars()
+    _run(_deps(db_engine, bars=bars))
+    assert bars.calls, "the week has labels, so the run fetches"
+    assert bars.adjustments == ["all"] * len(bars.calls)
+    assert audit_runner.AUDIT_BAR_ADJUSTMENT == "all"
 
 
 def test_bars_are_requested_only_through_the_provider_interface(db_engine: Engine) -> None:

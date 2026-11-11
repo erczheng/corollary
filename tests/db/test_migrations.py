@@ -22,7 +22,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Engine, inspect
+from sqlalchemy import CheckConstraint, Engine, inspect
 from sqlalchemy.orm import Session
 
 from corollary.db.models import Base, DataFeed, EngineState, NotificationRoute, RiskLimit
@@ -178,7 +178,7 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0016"]
+    assert script.get_heads() == ["0018"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -218,10 +218,10 @@ def test_0014_seeds_the_sentiment_audit_requested_routes_and_downgrades_to_0013(
     assert not {event for event, _channel in routes} & {
         "sentiment_audit_requested", "sentiment_demoted", "sentiment_repromoted"
     }
-    # 0014's six sentiment rows, and 0015's two ``calendar_changed`` rows
-    # and 0016's four Cash session rows with them, since each revises the
-    # one before.
-    assert len(routes) == at_head - 12
+    # 0014's six sentiment rows, and 0015's two ``calendar_changed`` rows,
+    # 0016's four Cash session rows and 0018's two ``sentiment_audit_voided``
+    # rows with them, since each revises the one before.
+    assert len(routes) == at_head - 14
 
     command.upgrade(cfg, "head")
     assert _route_rows(url)[("sentiment_audit_requested", "discord")] is True
@@ -493,8 +493,9 @@ def test_0006_seeds_the_operator_routes_and_downgrades_to_0005(
     # 0006's ten back, plus 0008's two ``watchlist_changed`` rows,
     # 0011's two ``spdr_seed_amended`` rows, 0014's four sentiment rows
     # plus its two ``sentiment_audit_requested`` rows, 0015's two
-    # ``calendar_changed`` rows, and 0016's four Cash session rows.
-    assert len(_route_rows(url)) == 42
+    # ``calendar_changed`` rows, 0016's four Cash session rows, and 0018's
+    # two ``sentiment_audit_voided`` rows.
+    assert len(_route_rows(url)) == 44
 
 
 def test_0006_leaves_rows_the_seed_already_wrote(db_path: Path) -> None:
@@ -548,10 +549,37 @@ def test_upgrade_head_matches_the_models(migrated: Engine) -> None:
     ) -> bool:
         return not (type_ == "table" and name == "alembic_version")
 
+    # Alembic compares CHECKs by name from ``Table.constraints`` only, so a
+    # CHECK the model declares on a *column* -- ``ck_audit_run_voided``, which
+    # 0018 can only add with its column (see its docstring) -- is invisible on
+    # the model side and reported as "remove" against any database, a
+    # ``create_all()`` one included. Exactly those names are left out here,
+    # computed from the models rather than listed;
+    # ``tests/db/test_audit_void_migration.py`` compares their tables' DDL
+    # with ``create_all()``'s text instead, which is the stronger check.
+    column_checks = {
+        constraint.name
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        for constraint in column.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    # Pinned, not merely computed: a new column-level CHECK -- named or not --
+    # must be a decision (a table-level CHECK Alembic can compare, or an entry
+    # here with its own DDL test), never a name this filter drops silently.
+    assert column_checks == {"ck_audit_run_voided"}
+
+    def _skip_column_checks(name: str | None, type_: str, parent_names: Any) -> bool:
+        return not (type_ == "check_constraint" and name in column_checks)
+
     with migrated.connect() as conn:
         ctx = MigrationContext.configure(
             conn,
-            opts={"compare_type": True, "include_object": _skip_alembic_version},
+            opts={
+                "compare_type": True,
+                "include_object": _skip_alembic_version,
+                "include_name": _skip_column_checks,
+            },
         )
         diff = compare_metadata(ctx, Base.metadata)
     assert diff == []
