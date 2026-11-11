@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   addDays,
+  AWAITING_TEXT,
   calendarWindow,
-  economicFigures,
+  economicReading,
   emptyReading,
   etClock,
   etInstant,
@@ -29,6 +30,8 @@ function event(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
     estimate: null,
     prior: null,
     actual: null,
+    valueState: null,
+    valueNote: null,
     consensus: null,
     unit: null,
     exchange: null,
@@ -70,7 +73,6 @@ function range(overrides: Partial<CalendarRange['notices']> = {}): CalendarRange
     notices: {
       seedGaps: [],
       jobs: [job()],
-      releaseFigures: { state: 'pending_owner_decision', reason: 'pending' },
       ...overrides,
     },
   }
@@ -123,14 +125,95 @@ describe('figures', () => {
     expect(formatPriceRange(null, null)).toBeNull()
   })
 
-  it('reports pending economic figures while the owner decision is open', () => {
-    const e = event({ type: 'economic', consensus: 'unavailable' })
-    expect(economicFigures(e, range())).toEqual({ kind: 'pending' })
-    expect(economicFigures({ ...e, prior: '3.1', unit: '%' }, range())).toEqual({
-      kind: 'figures',
-      prior: '3.1',
-      actual: null,
-      unit: '%',
+  /** Spec R7's unit labels, which are not all a bare `%`: the label follows
+   * the number after a space, commas and all, and a sign is the server's. */
+  it('formats every economic unit label after the figure, verbatim', () => {
+    expect(formatDecimalFigure('0.6', '% m/m')).toBe('0.6 % m/m')
+    expect(formatDecimalFigure('0.3', '% m/m, NSA')).toBe('0.3 % m/m, NSA')
+    expect(formatDecimalFigure('0.2', '% m/m, core PCE')).toBe('0.2 % m/m, core PCE')
+    expect(formatDecimalFigure('2.8', '% q/q SAAR')).toBe('2.8 % q/q SAAR')
+    expect(formatDecimalFigure('-105.0', '$B')).toBe('-105.0 $B')
+    expect(formatDecimalFigure('1,310', 'K SAAR')).toBe('1,310 K SAAR')
+    expect(formatDecimalFigure('4.06', 'M SAAR')).toBe('4.06 M SAAR')
+  })
+})
+
+describe('economicReading', () => {
+  const economic = (overrides: Partial<CalendarEvent> = {}) =>
+    event({
+      type: 'economic',
+      source: 'fred',
+      editable: false,
+      title: 'Consumer Price Index',
+      at: '2026-10-14T12:30:00Z',
+      consensus: 'unavailable',
+      unit: '% m/m',
+      ...overrides,
+    })
+
+  /** The server already rounded; parsing would turn "-105.0" into -105. */
+  it('passes a filled print through as served strings, with the note', () => {
+    expect(
+      economicReading(
+        economic({
+          valueState: 'filled',
+          actual: '0.6',
+          prior: '0.4',
+          valueNote: "computed from FRED's levels: CPIAUCSL",
+        }),
+      ),
+    ).toEqual({
+      kind: 'filled',
+      actual: '0.6',
+      prior: '0.4',
+      unit: '% m/m',
+      note: "computed from FRED's levels: CPIAUCSL",
+    })
+    expect(
+      economicReading(economic({ valueState: 'filled', actual: '-105.0', prior: '-98.70', unit: '$B' })),
+    ).toMatchObject({ actual: '-105.0', prior: '-98.70' })
+  })
+
+  it('says awaiting in words, not a blank', () => {
+    expect(economicReading(economic({ valueState: 'awaiting' }))).toEqual({
+      kind: 'awaiting',
+      text: AWAITING_TEXT,
+    })
+  })
+
+  it("gives an unavailable release the server's reason, verbatim", () => {
+    const lapse = economicReading(
+      economic({ valueState: 'unavailable', valueNote: 'not published on FRED within 7 days' }),
+    )
+    expect(lapse).toEqual({
+      kind: 'unavailable',
+      reason: 'not published on FRED within 7 days',
+      text: 'First print unavailable: not published on FRED within 7 days',
+    })
+    const refused = 'FRED refused EXHOSLUSM495S: the series is licensed by NAR and not served.'
+    expect(economicReading(economic({ valueState: 'unavailable', valueNote: refused }))).toMatchObject(
+      { kind: 'unavailable', reason: refused },
+    )
+  })
+
+  it('reads upcoming at the time the row already shows, and invents no number', () => {
+    expect(economicReading(economic({ valueState: 'upcoming' }))).toEqual({
+      kind: 'upcoming',
+      text: 'Upcoming at 8:30 AM ET — no figure until it is released',
+    })
+    expect(economicReading(economic({ valueState: 'upcoming', at: null }))).toEqual({
+      kind: 'upcoming',
+      text: 'Upcoming — no figure until it is released',
+    })
+  })
+
+  /** Contract breaches read as words, never as an empty "Actual". */
+  it('says what is missing when the server breaks the contract', () => {
+    expect(economicReading(economic({ valueState: 'filled', actual: null })).kind).toBe('unavailable')
+    expect(economicReading(economic({ valueState: null })).kind).toBe('unavailable')
+    expect(economicReading(economic({ valueState: 'unavailable', valueNote: null }))).toMatchObject({
+      kind: 'unavailable',
+      reason: 'the server gave no reason.',
     })
   })
 })

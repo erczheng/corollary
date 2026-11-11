@@ -100,6 +100,8 @@ const CALENDAR: CalendarRange = {
           estimate: null,
           prior: null,
           actual: null,
+          valueState: null,
+          valueNote: null,
           consensus: null,
           unit: null,
           exchange: null,
@@ -115,7 +117,6 @@ const CALENDAR: CalendarRange = {
   notices: {
     seedGaps: [],
     jobs: [],
-    releaseFigures: { state: 'pending_owner_decision', reason: 'Pending an owner decision.' },
   },
 }
 

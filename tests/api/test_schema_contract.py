@@ -33,6 +33,9 @@ MIRRORED: Mapping[str, type[ApiModel]] = {
     "AttachedExit": schemas.AttachedExit,
     "AuditLogEntry": schemas.AuditLogEntry,
     "CalendarEvent": schemas.CalendarEventItem,
+    # U6f: ``releaseFigures`` is gone from both sides (spec *API*: the blanket
+    # "not filled yet" reason is removed), and this pins that it stays gone.
+    "CalendarNotices": schemas.CalendarNotices,
     "ChainSpec": schemas.ChainSpec,
     "DataFeed": schemas.DataFeed,
     "DataSourceStatus": schemas.DataSourceStatus,
@@ -119,6 +122,8 @@ MIRRORED_UNIONS: Mapping[str, object] = {
     "AuditRunTrigger": schemas.AuditRunTrigger,
     "AuditRunStatus": schemas.AuditRunStatus,
     "SentimentEligibilityKind": schemas.SentimentEligibilityKind,
+    # U6f: an economic row's R8 display state.
+    "CalendarValueState": schemas.CalendarValueState,
 }
 
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)

@@ -17,7 +17,8 @@ Three tables are involved, and only two are written here:
   through ``corollary.data.calendar._apply``, which is why the figure has a
   table of its own (R6).
 
-:func:`read_economic_releases` joins the three for a date window by
+:func:`read_economic_releases` joins the three for a date window
+(:func:`economic_releases_of`, over calendar rows a caller already read) by
 ``calendar_event.vendor_id = "<release_id>:<release_date>"`` and adds the
 seed's ``unit_label`` and ``decimals``. The display state is derived from the
 result by :meth:`EconomicRelease.display` (pure, ``econ_values.value_display``)
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -62,6 +64,7 @@ __all__ = [
     "EconomicRelease",
     "StoredEconValue",
     "StoredFetchAttempt",
+    "economic_releases_of",
     "parse_release_vendor_id",
     "read_attempt",
     "read_economic_releases",
@@ -367,16 +370,37 @@ def read_economic_releases(
 
     In :func:`~corollary.data.calendar.read_range`'s order and by its rules
     (the Eastern ``date``, soft-deleted rows excluded). ``seeds`` defaults to
-    the committed econ seeds.
+    the committed econ seeds. :func:`economic_releases_of` over that range;
+    see it for what raises.
+    """
+    return economic_releases_of(session, read_range(session, start, end), seeds=seeds)
+
+
+def economic_releases_of(
+    session: Session,
+    events: Sequence[StoredCalendarEvent],
+    *,
+    seeds: EconReleaseSeeds | None = None,
+) -> tuple[EconomicRelease, ...]:
+    """The economic rows among ``events``, in their order, each with its value and attempt.
+
+    For a caller that has already read the rows -- ``GET /api/calendar``
+    serves every kind from one :func:`~corollary.data.calendar.read_range`
+    and joins against *that* read, so a refresh landing between two reads
+    cannot leave an economic row with no join (U6f). Rows of other kinds are
+    skipped. ``seeds`` defaults to the committed econ seeds, loaded only if
+    an economic row is present.
 
     Raises ``ValueError`` for a row that cannot be joined honestly: a
     malformed ``vendor_id``, one naming a different date from the row's own,
     or a row with no release instant. Each is a corrupted calendar row, and
     guessing its release would show another release's figure beside it.
     """
+    events = [e for e in events if e.kind is CalendarKind.ECONOMIC]
+    if not events:
+        return ()
     if seeds is None:
         seeds = load_econ_release_seeds()
-    events = [e for e in read_range(session, start, end) if e.kind is CalendarKind.ECONOMIC]
 
     keyed: list[tuple[StoredCalendarEvent, int, date, datetime]] = []
     for event in events:

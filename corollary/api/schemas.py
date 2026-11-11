@@ -102,9 +102,9 @@ __all__ = [
     "CalendarJobState",
     "CalendarNotices",
     "CalendarRange",
-    "CalendarReleaseFiguresNotice",
     "CalendarSeedGapKind",
     "CalendarSeedGapNotice",
+    "CalendarValueState",
     "DecimalString",
     "ManualCalendarEventRequest",
     "ChainSpec",
@@ -2038,6 +2038,20 @@ CalendarJobState: TypeAlias = Literal[
 
 CalendarSeedGapKind: TypeAlias = Literal["no_file", "unpublished", "partial", "unreadable"]
 
+CalendarValueState: TypeAlias = Literal["upcoming", "awaiting", "filled", "unavailable"]
+"""An economic row's first-print state (spec R8), derived on every read, never stored.
+
+``econ_values.VALUE_STATES``, member for member -- written out rather than
+imported so this module keeps its one data-layer import, and
+``tests/api/test_calendar_routes.py`` pins the two equal.
+
+* ``upcoming`` -- before the release instant.
+* ``awaiting`` -- released, no value stored yet, within seven calendar days.
+* ``filled`` -- a first print is stored; ``prior``/``actual`` carry it.
+* ``unavailable`` -- no value seven days on, or at once when FRED refuses the
+  series' vintages; ``valueNote`` says which.
+"""
+
 
 class CalendarEventItem(ApiModel):
     """One live ``calendar_event`` row.
@@ -2052,6 +2066,17 @@ class CalendarEventItem(ApiModel):
     row and ``None`` on every other kind (Q3: no free source sells a release
     consensus, and the panel renders the string as *"not available"*). On an
     earnings row the consensus *is* ``estimate``, Finnhub's figure.
+
+    **An economic row's figures** (U6f; spec R6, R7, R8) are the release's
+    stored first print, never ``calendar_event.prior``/``.actual``, which
+    the daily release-dates refresh nulls. ``prior`` and ``actual`` are
+    rounded server-side in ``Decimal`` to the seed's ``decimals``
+    (``ROUND_HALF_UP``, a negative zero written as zero), and are ``None``
+    unless ``value_state`` is ``filled``. ``unit`` is the seed's
+    ``unit_label`` (R6's "unitLabel" -- reused because the panel already
+    renders ``prior``/``actual`` beside ``unit``). ``value_state`` and
+    ``value_note`` are derived at the request's instant; both are ``None``
+    on every other kind.
     """
 
     #: The integer row id, as a string -- ``types.ts`` keys rows by string.
@@ -2071,6 +2096,12 @@ class CalendarEventItem(ApiModel):
     estimate: DecimalString | None
     prior: DecimalString | None
     actual: DecimalString | None
+    #: Economic rows only (R8); ``None`` on every other kind.
+    value_state: CalendarValueState | None
+    #: Economic rows: ``computed from FRED's levels: <SERIES>`` when
+    #: ``filled``, the reason when ``unavailable``, ``None`` while
+    #: ``upcoming`` or ``awaiting``. ``None`` on every other kind.
+    value_note: str | None
     consensus: Literal["unavailable"] | None
     unit: str | None
     #: IPO only (Q15). Each may be ``None`` -- Finnhub leaves most of them
@@ -2141,25 +2172,15 @@ class CalendarJobNotice(ApiModel):
     message: str
 
 
-class CalendarReleaseFiguresNotice(ApiModel):
-    """Why an economic row's ``prior`` and ``actual`` are null (unit 7.2b-R).
-
-    Q3 says they come from FRED after release, but not *which* series and
-    transform is a release's headline figure; that is an open owner
-    question, and until it is answered both are ``None`` on every economic
-    row. Stated here so the null is a reason, not a silence.
-    """
-
-    state: Literal["pending_owner_decision"]
-    reason: str
-
-
 class CalendarNotices(ApiModel):
-    """Everything the panel must say aloud beside the rows."""
+    """Everything the panel must say aloud beside the rows.
+
+    An economic row's missing figure is said on the row itself
+    (``valueState``/``valueNote``), so there is no range-wide notice for it.
+    """
 
     seed_gaps: list[CalendarSeedGapNotice]
     jobs: list[CalendarJobNotice]
-    release_figures: CalendarReleaseFiguresNotice
 
 
 class CalendarRange(ApiModel):

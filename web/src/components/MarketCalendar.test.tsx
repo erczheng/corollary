@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, within, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, within, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MarketCalendar } from './MarketCalendar'
 import type {
@@ -40,6 +40,8 @@ function event(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
     estimate: null,
     prior: null,
     actual: null,
+    valueState: null,
+    valueNote: null,
     consensus: null,
     unit: null,
     exchange: null,
@@ -71,8 +73,83 @@ function job(overrides: Partial<CalendarJobNotice> = {}): CalendarJobNotice {
   }
 }
 
-const PENDING_REASON =
-  'Prior and actual for economic releases are not filled yet: which FRED series is the headline figure is an open owner decision.'
+const CPI_NOTE = "computed from FRED's levels: CPIAUCSL"
+const LAPSE_NOTE = 'not published on FRED within 7 days'
+const NAR_REFUSAL =
+  'FRED refused EXHOSLUSM495S: the series is licensed by NAR and not served through the API.'
+
+/** One economic row per `valueState`, plus a refused series, a negative
+ * figure with a trailing zero, a comma'd unit label, and a non-economic row
+ * whose value fields are all null — every state the row can render. */
+function economicRow(overrides: Partial<CalendarEvent>): CalendarEvent {
+  return event({
+    type: 'economic',
+    source: 'fred',
+    editable: false,
+    at: '2026-10-14T12:30:00Z',
+    consensus: 'unavailable',
+    ...overrides,
+  })
+}
+
+const ECONOMIC_ROWS: CalendarEvent[] = [
+  economicRow({
+    id: 'cpi',
+    title: 'Consumer Price Index',
+    unit: '% m/m',
+    valueState: 'filled',
+    actual: '0.6',
+    prior: '0.4',
+    valueNote: CPI_NOTE,
+  }),
+  economicRow({
+    id: 'trade',
+    title: 'Trade balance',
+    unit: '$B',
+    valueState: 'filled',
+    actual: '-105.0',
+    prior: '-98.7',
+    valueNote: "computed from FRED's levels: BOPGSTB",
+  }),
+  economicRow({
+    id: 'ppi',
+    title: 'Producer Price Index',
+    unit: '% m/m, NSA',
+    valueState: 'filled',
+    actual: '0.3',
+    prior: '-0.1',
+    valueNote: "computed from FRED's levels: PPIFIS",
+  }),
+  economicRow({ id: 'retail', title: 'Retail sales', unit: '% m/m', valueState: 'awaiting' }),
+  economicRow({
+    id: 'claims',
+    title: 'Initial jobless claims',
+    unit: 'K',
+    valueState: 'unavailable',
+    valueNote: LAPSE_NOTE,
+  }),
+  economicRow({
+    id: 'homes',
+    title: 'Existing home sales',
+    unit: 'M SAAR',
+    valueState: 'unavailable',
+    valueNote: NAR_REFUSAL,
+  }),
+  economicRow({
+    id: 'payrolls',
+    date: '2026-10-16',
+    at: '2026-10-16T12:30:00Z',
+    title: 'Nonfarm payrolls',
+    unit: 'K',
+    valueState: 'upcoming',
+  }),
+  event({ id: 'g20', date: '2026-10-16', title: 'G20 summit' }),
+]
+
+/** The `<li>` of the row titled `title`. */
+function rowOf(scope: HTMLElement, title: string): HTMLElement {
+  return within(scope).getByText(title).closest('li')!
+}
 
 function rangeOf(
   events: CalendarEvent[],
@@ -91,7 +168,6 @@ function rangeOf(
     notices: {
       seedGaps: notices.seedGaps ?? [],
       jobs: notices.jobs ?? [job()],
-      releaseFigures: { state: 'pending_owner_decision', reason: PENDING_REASON },
     },
   }
 }
@@ -263,6 +339,7 @@ describe('rows', () => {
             date: '2026-10-14',
             at: '2026-10-15T00:30:00Z',
             consensus: 'unavailable',
+            valueState: 'upcoming',
           }),
         ]),
       )
@@ -307,56 +384,6 @@ describe('rows', () => {
     // The estimate's digits verbatim, trailing zero included, in mono.
     const estimate = within(wed).getByText('1.2350')
     expect(estimate).toHaveClass('font-mono', 'tabular-nums')
-  })
-
-  it('shows economic consensus as unavailable and prior/actual as pending in words', async () => {
-    served = () =>
-      jsonResponse(
-        200,
-        rangeOf([
-          event({
-            id: '4',
-            type: 'economic',
-            source: 'fred',
-            editable: false,
-            title: 'Consumer Price Index',
-            at: '2026-10-14T12:30:00Z',
-            consensus: 'unavailable',
-            unit: '%',
-          }),
-        ]),
-      )
-    renderPanel()
-    const wed = await day('Wed, Oct 14')
-    expect(within(wed).getByText(/Consensus not available/)).toBeInTheDocument()
-    expect(within(wed).getByText('Prior and actual pending an owner decision')).toBeInTheDocument()
-    expect(within(panel()).getByText(PENDING_REASON, { exact: false })).toBeInTheDocument()
-  })
-
-  it('renders served prior and actual verbatim with their unit', async () => {
-    served = () =>
-      jsonResponse(
-        200,
-        rangeOf([
-          event({
-            id: '5',
-            type: 'economic',
-            source: 'fred',
-            editable: false,
-            title: 'Consumer Price Index',
-            at: '2026-10-14T12:30:00Z',
-            consensus: 'unavailable',
-            prior: '3.10',
-            actual: '3.20',
-            unit: '%',
-          }),
-        ]),
-      )
-    renderPanel()
-    const wed = await day('Wed, Oct 14')
-    expect(within(wed).getByText('3.10%')).toBeInTheDocument()
-    expect(within(wed).getByText('3.20%')).toBeInTheDocument()
-    expect(within(wed).getByText(/Consensus not available/)).toBeInTheDocument()
   })
 
   it('shows an IPO’s exchange, price range, shares and status', async () => {
@@ -408,6 +435,113 @@ describe('rows', () => {
     expect(label.getAttribute('title')).toMatch(/publishes no announcement time/)
     expect(within(wed).getByText(/publishes no announcement time/)).toHaveClass('sr-only')
     expect(within(wed).queryByText('All day')).not.toBeInTheDocument()
+  })
+})
+
+describe('economic first prints', () => {
+  beforeEach(() => {
+    served = () => jsonResponse(200, rangeOf(ECONOMIC_ROWS))
+  })
+
+  it('shows a filled release as Actual and Prior with the unit, verbatim', async () => {
+    renderPanel()
+    const wed = await day('Wed, Oct 14')
+    const row = rowOf(wed, 'Consumer Price Index')
+    expect(within(row).getByText('0.6 % m/m').closest('[tabindex]')).toHaveTextContent(
+      /^Actual 0\.6 % m\/m · Prior 0\.4 % m\/m$/,
+    )
+    expect(row).toHaveTextContent(/Consensus not available$/)
+    // Served strings, never through a float: "0.6" is not "0.60", and
+    // "-105.0" keeps the zero a Number would drop.
+    expect(within(wed).getByText('0.6 % m/m')).toBeInTheDocument()
+    expect(within(wed).queryByText(/0\.60/)).not.toBeInTheDocument()
+    expect(within(wed).getByText('-105.0 $B')).toBeInTheDocument()
+    expect(within(wed).getByText('-98.7 $B')).toBeInTheDocument()
+    expect(within(wed).getByText('0.3 % m/m, NSA')).toBeInTheDocument()
+  })
+
+  /** A print is not P&L: mono figures in on-surface, never bullish/bearish —
+   * a negative trade balance is not a losing position. */
+  it('renders figures in on-surface mono, never bullish or bearish', async () => {
+    renderPanel()
+    const wed = await day('Wed, Oct 14')
+    for (const text of ['0.6 % m/m', '0.4 % m/m', '-105.0 $B', '-0.1 % m/m, NSA']) {
+      const figure = within(wed).getByText(text)
+      expect(figure).toHaveClass('font-mono', 'tabular-nums', 'text-on-surface')
+      expect(figure.className).not.toMatch(/bullish|bearish|error|outline|neutral/)
+    }
+  })
+
+  it('reaches the note on keyboard focus, as the figures’ description', async () => {
+    renderPanel()
+    const wed = await day('Wed, Oct 14')
+    const row = rowOf(wed, 'Consumer Price Index')
+    const stop = within(row).getByText('0.6 % m/m').closest('[tabindex]') as HTMLElement
+    expect(stop).toHaveAttribute('tabindex', '0')
+    expect(stop).toHaveAccessibleDescription(CPI_NOTE)
+    act(() => stop.focus())
+    expect(stop).toHaveFocus()
+    // Shown on hover and on focus, hidden otherwise — so it is read once,
+    // as the description, not again in the reading order.
+    const tip = within(row).getByRole('tooltip', { hidden: true })
+    expect(tip).toHaveTextContent(CPI_NOTE)
+    expect(tip).toHaveClass('hidden', 'group-hover:block', 'group-focus-within:block')
+    // The ring is the global `:focus-visible` rule, gated by data-modality;
+    // a local outline-none would delete it on the keyboard path.
+    expect(stop.className).not.toMatch(/outline-none|ring-0/)
+  })
+
+  it('says awaiting in words, in on-surface-variant', async () => {
+    renderPanel()
+    const wed = await day('Wed, Oct 14')
+    const row = rowOf(wed, 'Retail sales')
+    expect(row).toHaveTextContent("Released, awaiting FRED's first print · Consensus not available")
+    const words = within(row).getByText("Released, awaiting FRED's first print").closest('p')!
+    expect(words).toHaveClass('text-on-surface-variant')
+    expect(words.className).not.toMatch(/error|caution/)
+    expect(row).not.toHaveTextContent(/Actual|Prior/)
+  })
+
+  it("says unavailable in the server's words, verbatim — a lapse and a refusal", async () => {
+    renderPanel()
+    const wed = await day('Wed, Oct 14')
+    const lapse = rowOf(wed, 'Initial jobless claims')
+    expect(within(lapse).getByText(LAPSE_NOTE)).toBeInTheDocument()
+    expect(lapse).toHaveTextContent(`First print unavailable: ${LAPSE_NOTE}`)
+    const refused = rowOf(wed, 'Existing home sales')
+    const reason = within(refused).getByText(NAR_REFUSAL).closest('p')!
+    expect(reason).toHaveClass('text-on-surface-variant')
+    expect(reason.className).not.toMatch(/error|caution/)
+    expect(refused).not.toHaveTextContent(/Actual|Prior/)
+  })
+
+  it('says upcoming at the release time on the row, with no number', async () => {
+    renderPanel()
+    const fri = await day('Fri, Oct 16')
+    const row = rowOf(fri, 'Nonfarm payrolls')
+    expect(within(row).getByText('8:30 AM')).toBeInTheDocument()
+    expect(row).toHaveTextContent('Upcoming at 8:30 AM ET — no figure until it is released')
+    expect(row).not.toHaveTextContent(/Actual|Prior|\bK\b/)
+  })
+
+  it('reads consensus as not available on every economic row, and no other', async () => {
+    renderPanel()
+    const fri = await day('Fri, Oct 16')
+    expect(within(panel()).getAllByText(/Consensus not available/)).toHaveLength(7)
+    expect(rowOf(fri, 'G20 summit')).not.toHaveTextContent(
+      /Consensus|First print|Actual|Prior|Upcoming/,
+    )
+  })
+
+  /** The owner-decision notice went with `releaseFigures`. */
+  it('carries no blanket pending notice', async () => {
+    renderPanel()
+    await day('Wed, Oct 14')
+    expect(within(panel()).queryByText(/owner decision/i)).not.toBeInTheDocument()
+    expect(within(panel()).queryByText(/not filled yet|are pending/i)).not.toBeInTheDocument()
+    expect(
+      within(panel()).getByText(/Consensus is not available on any economic release/),
+    ).toBeInTheDocument()
   })
 })
 

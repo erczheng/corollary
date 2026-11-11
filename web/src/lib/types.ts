@@ -756,12 +756,24 @@ export interface CalendarEvent {
    * fact, so they render verbatim and are never parsed to float for
    * display. `estimate` is the earnings consensus (Finnhub's). */
   estimate: string | null
+  /** On an **economic** row: the release's first print (spec R6/R7),
+   * already rounded by the server to the series' display decimals — render
+   * the string verbatim, never parse it. `null` unless `valueState` is
+   * `'filled'`. */
   prior: string | null
   actual: string | null
+  /** Economic rows only, `null` on every other kind (spec R8). */
+  valueState: CalendarValueState | null
+  /** Economic rows: `'computed from FRED's levels: <SERIES>'` when filled,
+   * the reason when unavailable, `null` while upcoming or awaiting. Shown
+   * on hover/focus beside the figure. */
+  valueNote: string | null
   /** `'unavailable'` on every economic row and `null` on every other kind
    * (Q3): no free source sells a release consensus, and the panel says so
    * in words rather than leaving a blank. */
   consensus: 'unavailable' | null
+  /** On an economic row, the series' unit label from the seed — e.g.
+   * `'% m/m'`, `'K'`, `'$B'`, `'K SAAR'` (spec R7; R6's "unitLabel"). */
   unit: string | null
   /** IPO only (Q15). Each may be null — a `filed` row is mostly empty. */
   exchange: string | null
@@ -837,17 +849,17 @@ export interface CalendarJobNotice {
   message: string
 }
 
-/** Why an economic row's `prior` and `actual` are null (unit 7.2b-R). */
-export interface CalendarReleaseFigures {
-  state: 'pending_owner_decision'
-  reason: string
-}
-
 export interface CalendarNotices {
   seedGaps: CalendarSeedGap[]
   jobs: CalendarJobNotice[]
-  releaseFigures: CalendarReleaseFigures
 }
+
+/** An economic release's first print, derived on read by the server (spec
+ * R8), never stored: `upcoming` before the release time, `awaiting` once
+ * released with no value yet (within 7 days), `filled` once a value is
+ * stored, `unavailable` after 7 days without one — or at once when FRED
+ * refuses the series. */
+export type CalendarValueState = 'upcoming' | 'awaiting' | 'filled' | 'unavailable'
 
 /** `GET /api/calendar?from&to`: the live rows of an Eastern date range. */
 export interface CalendarRange {
