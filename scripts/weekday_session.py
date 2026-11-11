@@ -1,9 +1,15 @@
 """The unattended weekday session: run Corollary headless through a trading day.
 
 News labels are collected only while the backend runs, and the sentiment audit
-needs a month of them. Windows Task Scheduler runs this from the repo root at
-**09:00 local on weekdays** ("wake the computer to run this task") and again
-**at logon** (the machine is on Eastern time)::
+needs a month of them. The ``econ_first_prints`` job (R8, in
+``docs/superpowers/specs/2026-11-09-phase-3-steps-5-7-remainder.md``) also
+runs only while the backend does: each economic release is first tried at its
+ET release time plus 10 minutes -- 08:40, 09:25 and 10:10 for the 08:30,
+09:15 and 10:00 releases -- then every 30 minutes until 18:00 ET, with a daily
+10:00 ET catch-up. So, per owner decision Q24d, Windows Task Scheduler runs
+this from the repo root at **08:30 local on weekdays** ("wake the computer to
+run this task") and again **at logon** (the machine is on Eastern time, and
+the trigger must carry no UTC offset -- *Task Scheduler settings*, below)::
 
     uv run python scripts/weekday_session.py
 
@@ -11,11 +17,22 @@ It never places, cancels or reads an order, never sends anything but
 ``GET /api/health``, and never halts or resumes the engine: rule 9 never
 auto-resumes, and an auto-start must not become one. What it does, in order:
 
-1. **No session today, or past today's close: launch nothing** (exit 0).
-   "Session" and "close" are the market calendar's
+1. **No session today, or less than an hour before today's stop: launch
+   nothing** (exit 0). "Session" and "close" are the market calendar's
    (:func:`corollary.calendars.nyse_session_close`), never a hardcoded 16:00:
    weekends and market holidays have none, and the half-day after
-   Thanksgiving closes at 13:00 ET. A weekday with no session because the
+   Thanksgiving closes at 13:00 ET. "Stop" is step 5's, not the close, so a
+   start after the close -- a 17:00 logon -- still launches and runs to
+   18:05 ET. But a launch needs a **runway** of :data:`MIN_RUNWAY` (60
+   minutes) before that stop, so that the server's start-up catch-ups -- the
+   Saturday audit's among them, when that was missed -- can finish before
+   this runner stops it: 17:05 ET exactly is the last start that launches,
+   a later one launches nothing (``too_late``), and one at or after 18:05 ET
+   nothing either (``after_stop``). A day with no session
+   launches nothing even when an economic release lands on it (the jobs
+   report can land on Good Friday): the next trading day's run picks those
+   releases up, by R8's daily 10:00 ET catch-up at the latest. A weekday
+   with no session because the
    calendar's published range has ended is logged at ERROR
    (``calendar_exhausted``) rather than read as a holiday, since from then on
    nothing would be collected and every line would say why not wrongly.
@@ -31,9 +48,16 @@ auto-resumes, and an auto-start must not become one. What it does, in order:
    with ``--env-file <repo>/.env``: the launcher loads the keys (rule 6).
    ``sys.executable -m uvicorn``, because the uvicorn console shim is blocked
    on this machine. Wait, bounded, for health (exit 3 if it never comes).
-5. Run until **the calendar's close plus** :data:`POST_CLOSE`, so the
-   post-close news cycle is captured. Every :data:`SESSION_POLL` it checks the
-   process and health. A server that exits, or stops answering health for
+5. Run until **the later of the calendar's close plus** :data:`POST_CLOSE`
+   **and** :data:`EARLIEST_STOP_ET` **(18:05 ET)** -- :func:`stop_at` -- on
+   every trading day, half-days included. The first captures the post-close
+   news cycle; the second is R8's: release-day retries run until 18:00 ET
+   whatever the market's close, so 18:05 covers R8's last possible retry, at
+   18:00 (the seeded 08:30, 09:15 and 10:00 releases' last retries fall at
+   17:40, 17:55 and 17:40). On every real NYSE session 18:05 ET is the
+   later, so a 13:00 ET half-day still runs to 18:05 ET, not 13:30. Every
+   :data:`SESSION_POLL` it checks the process and health. A server that
+   exits, or stops answering health for
    :data:`HEALTH_LOSS_AFTER`, ends the run with exit 5 -- **logged, never
    relaunched**: a crash that repeats would otherwise loop all day, and a
    restart is the owner's call.
@@ -52,9 +76,9 @@ a thread's execution state when the thread ends, so a killed runner cannot
 leave the machine awake. Off Windows it does nothing. Both are logged, with
 ``applied``.
 
-**Stopping it, to run the full terminal.** While this runs it holds port
-8000, so ``uvicorn corollary.api:app`` (the one with sockets) cannot bind.
-Either:
+**Stopping it, to run the full terminal.** While this runs -- from 08:30 ET,
+or from an earlier logon, to 18:05 ET on a trading day -- it holds port 8000, so
+``uvicorn corollary.api:app`` (the one with sockets) cannot bind. Either:
 
 * **kill the server it launched** -- the process listening on 8000; the
   ``healthy`` log line carries its ``pid``, or
@@ -66,20 +90,46 @@ Either:
   graceful stop can reach it); if 8000 still answers afterwards, kill that
   process too, as above.
 
-The next 09:00 or logon trigger starts a fresh run as usual; a run that finds
+The next 08:30 or logon trigger starts a fresh run as usual; a run that finds
 the owner's app up exits ``already_running``.
 
-**Task Scheduler settings this assumes:** "If the task is already running:
-Do not start a new instance" (the 09:00 and at-logon triggers can coincide);
+**Task Scheduler settings this assumes:** the weekday trigger at **08:30**,
+so the server is up for the 08:40 first attempts rather than reaching them
+late through the job's start-up catch-up; that trigger's ``StartBoundary`` a
+local time with **no UTC offset** -- ``YYYY-MM-DDT08:30:00``, which is
+"Synchronize across time zones" cleared -- because
+``New-ScheduledTaskTrigger -At`` writes an offset on registration, and with
+one the trigger fires at a fixed UTC instant, an hour late under EDT if it
+was registered under EST; set it with ``$task = Get-ScheduledTask -TaskName
+<name>``, that trigger's ``StartBoundary = 'YYYY-MM-DDT08:30:00'``, then
+``Set-ScheduledTask -InputObject $task``, or untick "Synchronize across time
+zones" on the trigger in the GUI; "If the task is already running:
+Do not start a new instance" (the 08:30 and at-logon triggers can coincide);
 "Start the task only if the computer is on AC power" *cleared*, or a laptop
 on battery collects nothing; "Stop if the computer switches to battery
 power" *cleared* too (``New-ScheduledTaskSettingsSet`` defaults it on, and a
-stop there can orphan the server on 8000); and a time limit above the longest run -- a
-logon just after midnight runs until the close plus 30 minutes, so the
-default of three days is fine and anything under a day is not.
+stop there can orphan the server on 8000); and a time limit above the
+longest run -- a logon just after midnight runs until 18:05 ET, about
+eighteen hours, so the default of three days is fine and anything under a
+day is not.
 
-**Two things the owner should know while it runs.** From 09:00 to the close
-plus 30 minutes on a trading day, a browser on the Vite dev server reaches
+**The two runners overlap after the close.** ``scripts/weekly_audit.py``
+launches only at or after a trading day's close, and this runner's window
+runs on to 18:05 ET, so both can fire in between: a machine off from
+Saturday to a Monday logon at 17:50 ET fires the missed Saturday audit task
+and this at-logon trigger together. The runway divides the cases. Up to
+17:05 ET this runner launches with at least an hour before its stop, so its
+server's start-up audit catch-up can finish; ``weekly_audit`` finding that
+server up logs ``already_running`` and leaves the audit to it. After
+17:05 ET this runner launches nothing (``too_late``), and ``weekly_audit``
+launches its own server and waits for the run under its own two-hour
+deadline, which no 18:05 stop cuts short. If ``weekly_audit``'s server is
+up first, this runner logs ``already_running`` and, once that server stops,
+collects nothing more that day (*Known limits*, below).
+
+**Two things the owner should know while it runs.** From 08:30 ET, or an
+earlier logon, to 18:05 ET on a trading day, a browser on the Vite dev
+server reaches
 *this* app, which has no live vendor stream and nothing feeding rule 9's
 connection checks, and nothing on screen says so yet. No order path exists
 today, so nothing is at risk; before ``BrokerExecution`` lands (Phase 6) the
@@ -101,6 +151,14 @@ httpx transport error can name a URL with a key in its query string.
 
 **Known limits, accepted:**
 
+* **Port 8000 is held from 08:30 ET, or from an earlier logon, to 18:05 ET
+  on every trading day**, half-days included -- some nine and a half hours
+  from the 08:30 trigger and longer after an earlier logon, two of them
+  after a normal close and five after a half-day's -- so the owner's own
+  ``uvicorn corollary.api:app`` cannot bind meanwhile. Stop this runner
+  first (*Stopping it*, above). The evening hours are for R8's release-day
+  retries, not for news: a day with no release pending holds the port just
+  as long.
 * The already-running check looks at port 8000 only. A Corollary on another
   port is not seen, and both would run against the one database.
 * A run that found the owner's app up does not take over when that app is
@@ -124,7 +182,7 @@ import sys
 import time as wall
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -145,6 +203,25 @@ HEALTH_PATH = "/api/health"
 #: How long past the calendar's close the server keeps running, so the
 #: post-close news cycle is captured.
 POST_CLOSE = timedelta(minutes=30)
+#: The server is never stopped before this New York wall time on a trading
+#: day, half-days included (owner decision Q24d). R8, in
+#: ``docs/superpowers/specs/2026-11-09-phase-3-steps-5-7-remainder.md``:
+#: ``econ_first_prints`` retries each release every 30 minutes until 18:00 ET
+#: on its release day, whatever the market's close
+#: (``corollary.data.econ_first_prints.RELEASE_DAY_UNTIL``), so 18:05 covers
+#: R8's last possible retry, at 18:00 ET. With the seeded 08:30, 09:15 and
+#: 10:00 releases the last retries actually fall at 17:40, 17:55 and 17:40.
+#: A wall time, not an offset: 23:05 UTC in winter, 22:05 UTC in summer.
+EARLIEST_STOP_ET = time(18, 5)
+#: The least time a launch must have before its stop (:func:`stop_at`), or
+#: nothing launches (:attr:`Decision.TOO_LATE`). The server's start-up
+#: catch-ups -- the Saturday sentiment audit's among them, when that slot was
+#: missed -- must be able to finish before this runner stops it: a stop that
+#: cancels the audit closes its run ``failed``, and a failed run counts as the
+#: week's. Later boots are left to ``scripts/weekly_audit.py``, which waits
+#: for the run under its own two-hour deadline and no 18:05 stop. In practice
+#: a start after 17:05 ET launches nothing.
+MIN_RUNWAY = timedelta(minutes=60)
 #: How long the server may take to answer health after launch.
 HEALTH_TIMEOUT = timedelta(minutes=3)
 HEALTH_POLL = timedelta(seconds=2)
@@ -172,7 +249,8 @@ class Exit(enum.IntEnum):
     """The process exit codes. Non-zero is what Task Scheduler reports as failure."""
 
     #: The window closed with the server still up, or there was nothing to do:
-    #: no session today, past the close, or a Corollary already running.
+    #: no session today, past today's stop or too near it, or a Corollary
+    #: already running.
     OK = 0
     #: ``.env`` is missing, or the server never came up.
     SERVER_FAILED = 3
@@ -194,12 +272,15 @@ def _require_utc(moment: datetime) -> datetime:
 
 
 class Decision(enum.Enum):
-    #: A session today still ahead of its close: launch.
+    #: A session today, and at least :data:`MIN_RUNWAY` before today's stop --
+    #: even if the market has closed: launch.
     RUN = "run"
     #: Weekend or market holiday.
     NO_SESSION = "no_session"
-    #: Today's session has closed.
-    AFTER_CLOSE = "after_close"
+    #: Today's stop (:func:`stop_at`) has passed.
+    AFTER_STOP = "after_stop"
+    #: Today's stop is still ahead, but less than :data:`MIN_RUNWAY` away.
+    TOO_LATE = "too_late"
     #: No session today, and none in the calendar's look-ahead either: the
     #: published schedule has ended, not the market.
     CALENDAR_EXHAUSTED = "calendar_exhausted"
@@ -213,16 +294,33 @@ class Plan:
     #: Today's New York date -- the session's, not UTC's.
     trading_day: date
     session_close: datetime | None = None
-    #: When the server is stopped: ``session_close`` + :data:`POST_CLOSE`.
+    #: When the server is stopped, :func:`stop_at`. On :attr:`Decision.AFTER_STOP`
+    #: the stop that has already passed, and on :attr:`Decision.TOO_LATE` the
+    #: one too near to launch before, for the log line.
     window_end: datetime | None = None
+
+
+def stop_at(trading_day: date, session_close: datetime) -> datetime:
+    """When the server is stopped on ``trading_day``, as a UTC instant.
+
+    The later of ``session_close`` + :data:`POST_CLOSE` and
+    :data:`EARLIEST_STOP_ET` in New York -- on every real NYSE session,
+    half-days included, that is 18:05 ET. The wall time is resolved on the day
+    itself, so a DST change moves its UTC instant and not its wall time.
+    """
+    floor = datetime.combine(trading_day, EARLIEST_STOP_ET, tzinfo=NYSE_TZ)
+    return max(_require_utc(session_close) + POST_CLOSE, _require_utc(floor))
 
 
 def decide(now: datetime) -> Plan:
     """Whether to run today and until when, from the market calendar.
 
     "Today" is New York's date, so 22:00 ET Monday -- 03:00 UTC Tuesday -- is
-    Monday, closed. At the close exactly the session is over: a launch inside
-    the post-close half hour starts nothing.
+    Monday, stopped. A start after the close launches if at least
+    :data:`MIN_RUNWAY` remains before the stop: a 17:00 ET logon runs to
+    18:05 ET, and 17:05 ET exactly is the last start that launches. Inside the
+    last :data:`MIN_RUNWAY` nothing launches (:attr:`Decision.TOO_LATE`), and
+    at the stop or after it nothing does either (:attr:`Decision.AFTER_STOP`).
     """
     moment = _require_utc(now)
     today = moment.astimezone(NYSE_TZ).date()
@@ -233,9 +331,12 @@ def decide(now: datetime) -> Plan:
         except ValueError:
             return Plan(Decision.CALENDAR_EXHAUSTED, today)
         return Plan(Decision.NO_SESSION, today)
-    if moment >= closes:
-        return Plan(Decision.AFTER_CLOSE, today, session_close=closes)
-    return Plan(Decision.RUN, today, session_close=closes, window_end=closes + POST_CLOSE)
+    window_end = stop_at(today, closes)
+    if moment >= window_end:
+        return Plan(Decision.AFTER_STOP, today, session_close=closes, window_end=window_end)
+    if window_end - moment < MIN_RUNWAY:
+        return Plan(Decision.TOO_LATE, today, session_close=closes, window_end=window_end)
+    return Plan(Decision.RUN, today, session_close=closes, window_end=window_end)
 
 
 class HealthWatch:
@@ -320,10 +421,18 @@ def run_weekday_session(effects: Effects) -> Exit:
         _log("not_a_trading_day", "the market calendar has no session today",
              trading_day=plan.trading_day.isoformat(), at=now)
         return Exit.OK
-    if plan.kind is Decision.AFTER_CLOSE:
-        _log("after_close", "today's session has already closed",
+    if plan.kind is Decision.AFTER_STOP:
+        _log("after_stop", "today's stop time has already passed",
              trading_day=plan.trading_day.isoformat(), session_close=plan.session_close,
-             at=now)
+             window_end=plan.window_end, at=now)
+        return Exit.OK
+    if plan.kind is Decision.TOO_LATE:
+        _log("too_late",
+             "today's stop is too near to launch: the server's start-up catch-ups "
+             "could not be relied on to finish before it",
+             trading_day=plan.trading_day.isoformat(), session_close=plan.session_close,
+             window_end=plan.window_end,
+             min_runway_seconds=int(MIN_RUNWAY.total_seconds()), at=now)
         return Exit.OK
     assert plan.session_close is not None and plan.window_end is not None
 
