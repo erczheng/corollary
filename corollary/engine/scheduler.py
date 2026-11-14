@@ -199,6 +199,7 @@ from corollary.data.news.audit_runner import (
     NoticeSink,
     OnOpened,
     SentimentAuditDeps,
+    VerdictBackfill,
     WatchUniverseUnavailable,
     run_sentiment_audit,
 )
@@ -225,6 +226,7 @@ from corollary.data.news.pollers import (
 from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
 from corollary.data.news.watchlist import watch_universe as watch_universe_of
 from corollary.data.providers.finnhub import CalendarAccessDenied
+from corollary.data.providers.interface import AssetDirectory
 from corollary.data.seeds import SpdrSeed
 from corollary.data.seeds.calendar_seeds import load_econ_release_times
 from corollary.data.seeds.isin import IsinMappingSource, OpenFigiIsinResolver
@@ -2616,6 +2618,12 @@ def sentiment_audit_deps(
     the universe the rest of the app shows. Notices go to
     :attr:`ContextServices.notices`, which the lifespan drains into the one
     notification path: emission never awaits Discord (decision 14).
+
+    A missing tradeability verdict is backfilled (owner decision Q24a) from
+    the daily refresh's own inputs: the Alpaca provider -- daily bars and the
+    standard-root check, metered by the shared rate limiter -- the held
+    asset directory, and Finnhub for a partial window's IPO date. A stale
+    directory is used, as the refresh uses one, and logged when it is.
     """
     if services.alpaca is None:
         return None
@@ -2655,12 +2663,34 @@ def sentiment_audit_deps(
             raise WatchUniverseUnavailable(_SENTIMENT_AUDIT_SEED_MISSING)
         return frozenset(built.universe.symbols)
 
+    holder = services.assets
+
+    def backfill_assets() -> AssetDirectory | None:
+        directory = holder.current()
+        if directory is not None and holder.is_stale():
+            age = holder.age()
+            logger.warning(
+                "sentiment audit verdict backfill is using an asset directory %s old",
+                age,
+                extra={
+                    "event": "asset_directory_stale_used",
+                    "age_seconds": None if age is None else int(age.total_seconds()),
+                    "fetched_at": None if holder.fetched_at is None else holder.fetched_at.isoformat(),
+                    "rule": "decision 21: a stale directory may be used for tradeability, and says so",
+                    "user": "sentiment_audit_backfill",
+                },
+            )
+        return directory
+
     return SentimentAuditDeps(
         session_factory=services.session_factory,
         bars=services.alpaca,
         watch_universe=watch_universe,
         emit=_audit_notice_sink(services.notices),
         clock=clock,
+        backfill=VerdictBackfill(
+            inputs=services.alpaca, assets=backfill_assets, ipo_dates=services.finnhub
+        ),
     )
 
 
@@ -2967,12 +2997,19 @@ def _sentiment_audit_job(
             "the sentiment self-audit (decisions 12-13): grades matured labels on "
             "SIP minute bars, stores each source's accuracy and applies the "
             "52/66 transitions; when this fails the run is recorded failed, no "
-            "source's status changes, and every ungraded window is retried next run"
+            "source's status changes, and every ungraded window is retried next run. "
+            "A missing tradeability verdict is backfilled for the label's own session "
+            "first (Q24a); a backfill that fails leaves the label pending, never untradeable"
         ),
         inputs={
             "host": ALPACA_DATA_HOST,
             "endpoint": "/v2/stocks/bars",
             "timeframe": "1Min",
+            "also": (
+                f"{ALPACA_DATA_HOST} /v2/stocks/bars 1Day, "
+                f"{ALPACA_PAPER_TRADING_HOST} /v2/options/contracts, "
+                f"{FINNHUB_HOST} /stock/profile2 (the Q24a verdict backfill)"
+            ),
         },
     )
 

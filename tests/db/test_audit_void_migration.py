@@ -25,6 +25,17 @@ from tests.db.test_migrations import _config, _route_rows
 from tests.db.test_news_watchlist_tradeability import _normalised
 
 _SEED_SQL = (
+    # Label 7 exists: 0019 rebuilds label_outcome, and the rebuild's copy is
+    # checked against sentiment_label like any insert (the live database can
+    # hold no dangling outcome, since 0014's foreign keys are enforced).
+    "INSERT INTO news_article (id, vendor, vendor_id, feed, canonical_id, url, url_key, "
+    "headline, headline_key, summary, publisher, published_at, ingested_at) VALUES "
+    "(1, 'alpaca', 'synthetic-1', 'alpaca_news', NULL, 'https://example.com/synthetic/1', "
+    "'https://example.com/synthetic/1', 'SYNTHETIC headline 1', 'synthetic headline 1', NULL, "
+    "'Synthetic', '2026-11-07 14:00:00.000000', '2026-11-07 14:00:00.000000')",
+    "INSERT INTO sentiment_label (id, article_id, ticker, source, tier, direction, reasoning, "
+    "rule_id, labeled_at) VALUES (7, 1, 'AAPL', 'rules', 'rules', 'bullish', 'synthetic', "
+    "'synthetic_rule', '2026-11-07 14:00:00.000000')",
     "INSERT INTO audit_run (id, started_at, finished_at, \"trigger\", status, detail) VALUES "
     "(1, '2026-11-07 15:00:00.000000', '2026-11-07 15:05:00.000000', 'scheduled', 'succeeded', NULL)",
     "INSERT INTO label_outcome (label_id, \"window\", skip_reason, scope, audit_run_id) "
@@ -85,12 +96,10 @@ def at_0017(tmp_path: Path) -> Path:
 def test_upgrade_and_downgrade_keep_every_row_of_a_referenced_audit_run(at_0017: Path) -> None:
     url = sqlite_url(at_0017)
     before = _rows(at_0017)
-    # The synthetic label 7 dangles at 0017 already: compared against the
-    # 0017 state rather than a literal, because the last column is SQLite's
-    # ``fkid``, an index into ``PRAGMA foreign_key_list`` that depends on
-    # 0014's FK declaration order, not on anything 0018 does.
+    # Nothing dangles at 0017 (label 7 and run 1 both exist), and nothing
+    # may dangle after either direction.
     dangling = _foreign_key_check(at_0017)
-    assert [row[2] for row in dangling] == ["sentiment_label"]
+    assert dangling == []
     command.upgrade(_config(url), "0018")
     assert _rows(at_0017) == before
     conn = sqlite3.connect(at_0017)

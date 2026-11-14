@@ -203,11 +203,14 @@ def test_the_vocabularies_are_the_specs() -> None:
         "price_unavailable",
         # Unit 6.4a's audit fix: one grade per (group, ticker, source).
         "duplicate_copy",
+        # Owner decision Q24a (0019): no verdict could be had, never "untradeable".
+        "off_watch_unverdicted",
     )
     assert LABEL_MEMBERSHIP_SKIP_REASONS == (
         "off_watch_untradeable",
         "discovery_cap",
         "duplicate_copy",
+        "off_watch_unverdicted",
     )
     assert AUDIT_RUN_TRIGGERS == ("scheduled", "manual")
     assert AUDIT_RUN_STATUSES == ("running", "succeeded", "failed")

@@ -239,20 +239,30 @@ def signalled_tickers(
 # --------------------------------------------------------------------------
 
 
+def _cached_verdict(row: TickerTradeability) -> CachedVerdict:
+    """A cache row as a :class:`CachedVerdict`; ``ValueError`` if it cannot be read."""
+    return CachedVerdict(
+        ticker=row.ticker,
+        session_date=row.session_date,
+        passes=row.passes,
+        avg_volume_20d=row.avg_volume_20d,
+        last_close=row.last_close,
+        sessions_available=row.sessions_available,
+        failures=tuple(token for token in row.failures.split(",") if token),
+        checked_at=row.checked_at,
+    )
+
+
 def _verdict(row: TickerTradeability, correlation_id: str) -> CachedVerdict:
-    """A cache row as the read path needs it. An unreadable row fails closed, logged."""
-    failures = tuple(token for token in row.failures.split(",") if token)
+    """A cache row as Movers' read path needs it. An unreadable row fails closed, logged.
+
+    Failing closed is right for Movers -- decision 21 admits a candidate only
+    on a verdict that passes -- and wrong for the sentiment audit, where a
+    failing verdict is what ``off_watch_untradeable`` asserts; that path reads
+    through :func:`verdict_histories`, which reports the row as no verdict.
+    """
     try:
-        return CachedVerdict(
-            ticker=row.ticker,
-            session_date=row.session_date,
-            passes=row.passes,
-            avg_volume_20d=row.avg_volume_20d,
-            last_close=row.last_close,
-            sessions_available=row.sessions_available,
-            failures=failures,
-            checked_at=row.checked_at,
-        )
+        return _cached_verdict(row)
     except ValueError as exc:
         logger.error(
             "a tradeability cache row cannot be read; the ticker is treated as failing",
@@ -310,15 +320,24 @@ def verdict_histories(
     since: date,
     until: date,
     correlation_id: str,
-) -> dict[str, list[CachedVerdict]]:
+) -> dict[str, list[tuple[date, CachedVerdict | None]]]:
     """Each ticker's cached verdicts that can be "newest on or before" a session in ``[since, until]``.
 
     For the sentiment audit, whose labels each read the newest verdict on or
     before their own reference session (``audit.py``'s decision 25): every
     row dated ``(since, until]``, plus the newest dated on or before
     ``since`` -- older rows can never be the answer for a session at or after
-    ``since``. Ascending by ``session_date``. An unreadable row fails closed
-    as in :func:`latest_verdicts`; a ticker with no row is absent.
+    ``since``. ``(session_date, verdict)`` pairs, ascending by session; a
+    ticker with no row is absent.
+
+    **An unreadable row is ``None`` -- no verdict -- never a failing one**
+    (``audit.py``'s decision 27, owner decision Q24a). Unlike
+    :func:`latest_verdicts`, which fails closed for Movers, the audit would
+    turn a failing verdict into ``off_watch_untradeable``, a claim about the
+    ticker that a damaged row cannot support. The row keeps its place, so a
+    label whose newest verdict it is has none, rather than falling back to an
+    older verdict the unreadable one superseded. Logged at error, once per
+    row read.
     """
     wanted = sorted(set(tickers))
     rows_by_ticker: dict[str, list[TickerTradeability]] = {}
@@ -331,10 +350,35 @@ def verdict_histories(
         )
         for row in rows:
             rows_by_ticker.setdefault(row.ticker, []).append(row)
-    histories: dict[str, list[CachedVerdict]] = {}
+    histories: dict[str, list[tuple[date, CachedVerdict | None]]] = {}
     for ticker, held in rows_by_ticker.items():
         ordered = sorted(held, key=lambda row: row.session_date)
         at_or_before = [i for i, row in enumerate(ordered) if row.session_date <= since]
         first = at_or_before[-1] if at_or_before else 0
-        histories[ticker] = [_verdict(row, correlation_id) for row in ordered[first:]]
+        histories[ticker] = [
+            (row.session_date, _audit_verdict(row, correlation_id)) for row in ordered[first:]
+        ]
     return histories
+
+
+def _audit_verdict(row: TickerTradeability, correlation_id: str) -> CachedVerdict | None:
+    """A cache row as the sentiment audit reads it: ``None`` if it cannot be read."""
+    try:
+        return _cached_verdict(row)
+    except ValueError as exc:
+        logger.error(
+            "a tradeability cache row cannot be read; the sentiment audit treats it as "
+            "no verdict",
+            extra={
+                "event": "sentiment_audit_verdict_unreadable",
+                "rule": (
+                    "decision 27 (Q24a): a failure never mislabels -- an unreadable verdict "
+                    "is no verdict, backfilled if it can be, never off_watch_untradeable"
+                ),
+                "ticker": row.ticker,
+                "session_date": row.session_date.isoformat(),
+                "error": str(exc),
+                "correlation_id": correlation_id,
+            },
+        )
+        return None

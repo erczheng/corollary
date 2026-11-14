@@ -174,10 +174,12 @@ orchestrator in the audit fix pass):
     its label count in :attr:`AuditPlan.unverdicted_label_counts`, for the
     runner to surface. It waits until the run is more than
     :data:`PRICE_UNAVAILABLE_AFTER` past the end of its last unwritten
-    window, and then every unwritten window is written
-    ``off_watch_untradeable``: failing closed, since it was never shown to
-    pass the design's decision 21 filter, and a label left pending forever is reloaded
-    by every run.
+    window, and then every unwritten window is written -- amended by
+    decision 27 -- ``off_watch_unverdicted``, not ``off_watch_untradeable``:
+    still out of every graded set, since it was never shown to pass the
+    design's decision 21 filter, and a label left pending forever is
+    reloaded by every run; but named for what is known, since nothing said
+    it failed the filter either.
 15. **``MARKET`` is always watch**, whatever universe is passed: the spec
     lists it as a member, and it can never pass a tradeability filter, so a
     universe that omitted it would skip every market label as untradeable.
@@ -239,13 +241,74 @@ after 23, below, so no earlier number moves):
     read Friday's verdict, whose 20-day ADV includes the news's own volume
     spike, and which labels are graded would depend on their aftermath. No
     verdict on or before that session is decision 14's unverdicted path:
-    wait, then fail closed. The history is a mapping, ticker to
+    wait, then fail closed -- out of every graded set, as decision 27's
+    backfill-or-``off_watch_unverdicted``. The history is a mapping, ticker to
     :data:`VerdictHistory`, rather than a callable, so the plan stays a pure
     function of inspectable data; it is read in any order, and two verdicts
     for one (ticker, session) raise. A verdict *for* the reference session
     counts, as "on or before" says, and reads nothing after the label:
     ``tradeability.py`` judges a ``session_date`` on the sessions strictly
     before it.
+26. **A twin group is graded from its earliest stamp (owner decision Q24b,
+    2026-11-11).** :attr:`AuditLabel.published_at` is the earliest
+    ``published_at`` in the label's duplicate group, the canonical row and
+    every member, so decision 1's reference instant is the story's, not the
+    copy's. Finnhub stamps its Yahoo copy of a Motley Fool story exactly 20
+    minutes late, and in 66 of the 92 pairs relinked on 2026-11-10 that late
+    copy is the canonical one, so a per-copy stamp measured the 1h window
+    from minute 20 to minute 80. The runner sets the value where it builds
+    the label (``audit_runner._load_labels``), so everything derived from the
+    reference instant -- both windows, ``reference_at``, decision 25's
+    session and R3's :func:`label_session` -- follows from one place, and
+    decision 1's future-stamp guard applies to the earliest stamp. Linking
+    and ``canonical_id`` are unchanged. **Known transition, recorded rather
+    than patched:** a label with one window already written under its
+    copy's stamp has its other window graded from the group's earliest, and
+    a twin linked after a window was written moves the reference for the
+    windows still pending. Decision 7 makes the two windows independent
+    records, so each is graded on the best stamp known when it is graded.
+27. **A missing verdict is backfilled, never assumed (owner decision Q24a,
+    2026-11-11).** Verdicts are written only by the daily refresh, for its
+    own date, and only for tickers with a qualifying signal, so many
+    off-watch labels had no verdict on or before their session and were
+    written ``off_watch_untradeable`` after decision 14's wait -- even when
+    the ticker was tradeable. Now :attr:`AuditPlan.verdicts_needed` lists the
+    ``(ticker, S)`` of every such label, and the runner computes each with
+    ``tradeability.refresh_tradeability(session_date=S)`` -- which judges
+    only the sessions strictly before S, so it reads no session on or after
+    S (the residual this leaves is stated below) -- stores it, and plans
+    again; decision 25 then grades on it. **Only where
+    no verdict on or before S exists:** a stale but existing verdict is
+    decision 25's to use and is never replaced. The need is read once, from
+    the verdicts stored before the run's backfill, at most
+    :data:`VERDICT_BACKFILL_CAP` pairs, oldest session first. **Known
+    limit:** a pair the cap or a failure left unfilled, whose ticker got an
+    earlier session backfilled, is graded on that earlier verdict -- a
+    verdict on or before its session, exactly as decision 25 reads any
+    sparse history. **A failure never mislabels.** A pair with no verdict
+    reached (a vendor error, no asset directory, a deferral) is passed back
+    as ``verdict_held``; its label stays pending, past the week's wait for up
+    to :data:`TRAILING_WINDOW` (decision 3's bound, in the runner), and is
+    then written ``off_watch_unverdicted``. ``off_watch_untradeable`` is
+    written only on a verdict that fails. **An unreadable cached row is no
+    verdict either** (``signals.verdict_histories``): it reads as ``None``
+    in the :data:`VerdictHistory`, so a label whose newest verdict it is
+    has none -- backfilled if it can be, the upsert replacing the damaged
+    row, else held -- and never reads as failing, which is Movers'
+    fail-closed reading (decision 21) and not this audit's.
+    **Known residual: corporate actions between S and the run.** "No
+    look-ahead" is true of *which sessions* are read, not of every value
+    read for them. A backfilled verdict for S can differ from the one a
+    refresh on S would have made when a corporate action fell between S and
+    the run: ``adv_daily_bars`` reads split-adjusted bars
+    (``adjustment="split"``), so a later split rescales S's close and volume
+    -- a reverse split can make a failing name pass, a forward split a
+    passing one fail; ``has_options`` and the standard-root check are the
+    vendor's **current** answers, so a delisting, an adjusted root or a
+    later options listing changes them; and the ticker is resolved by
+    **today's** symbol. No point-in-time source exists for any of these,
+    and the daily refresh reads them the same way for its own date. Rare,
+    accepted, and named here rather than patched.
 
 A note for unit 6.4 (the runner)
 --------------------------------
@@ -399,6 +462,7 @@ __all__ = [
     "SENTIMENT_AUDIT_CATEGORY",
     "TRAILING_WINDOW",
     "VENDOR_STAMP_TOLERANCE",
+    "VERDICT_BACKFILL_CAP",
     "WINDOW_SESSION_MINUTES",
     "AccuracyBasis",
     "AccuracyRow",
@@ -441,6 +505,16 @@ BENCHMARK_SYMBOL: Final = "SPY"
 #: Decision 12: at most this many off-watch tickers graded per run.
 #: *(Parent-session assumption the owner can override.)*
 DISCOVERY_TICKER_CAP: Final = 250
+
+#: At most this many ``(ticker, session)`` tradeability verdicts are backfilled
+#: in one run (decision 27, owner decision Q24a), the oldest session first; the
+#: rest stay pending and are logged. 100 is the daily refresh's own per-run
+#: bound (``tradeability.MAX_TICKERS_PER_RUN``): each pair costs at most one
+#: standard-root request on the shared ``paper-api.`` bucket, the one the order
+#: path also draws on, so the audit spends no more of it in a run than the
+#: refresh already does in a day. Bars are one request per session per 200
+#: tickers on the ``data.`` bucket.
+VERDICT_BACKFILL_CAP: Final = 100
 
 #: Decision 12's windows, in regular-session minutes from the reference.
 #: Keys in ``SENTIMENT_WINDOWS`` order; a test pins the two together.
@@ -508,6 +582,9 @@ class SkipReason(StrEnum):
     DISCOVERY_CAP = "discovery_cap"
     PRICE_UNAVAILABLE = "price_unavailable"
     DUPLICATE_COPY = "duplicate_copy"
+    #: No verdict on or before the reference session could be had (decision
+    #: 27): never ``off_watch_untradeable``, which only a verdict may say.
+    OFF_WATCH_UNVERDICTED = "off_watch_unverdicted"
 
 
 #: ``(group_id, ticker, source)`` -- the unit one label per story is kept in
@@ -516,16 +593,21 @@ GroupKey = tuple[int, str, str]
 
 #: One ticker's tradeability verdicts: ``(session_date, passes)`` per cached
 #: ``ticker_tradeability`` row, in any order, at most one per session
-#: (decision 25 below).
-VerdictHistory = Sequence[tuple[date, bool]]
+#: (decision 25 below). ``passes`` is ``None`` for a row that exists but could
+#: not be read: no verdict for that session -- a label whose newest verdict it
+#: is has none, and does not fall back to an older one (decision 27).
+VerdictHistory = Sequence[tuple[date, bool | None]]
 
 
 @dataclass(frozen=True, slots=True)
 class AuditLabel:
-    """The ``sentiment_label`` columns grading reads, plus the article's publication.
+    """The ``sentiment_label`` columns grading reads, plus the story's publication.
 
-    ``published_at`` is the article's; ``labeled_at`` the label's. Both must
-    be timezone-aware.
+    ``published_at`` is the **story's**: the earliest ``published_at`` among
+    every article in the label's duplicate group -- its canonical row and all
+    members -- which the runner computes (decision 26 below); for an
+    ungrouped article that is the article's own. ``labeled_at`` is the
+    label's. Both must be timezone-aware.
 
     ``group_id`` is the label's article's duplicate group,
     ``coalesce(canonical_id, id)`` (the design's decision 3), and
@@ -593,8 +675,9 @@ class LabelOutcomeRecord:
     in place by unit 6.3): this run's classification, kept so the
     watch/discovery splits recomputed from past rows every run read the
     membership the label was graded under, never today's watch universe.
-    ``None`` exactly on the two membership skips (``off_watch_untradeable``,
-    ``discovery_cap``), which belong to neither graded set; set on every
+    ``None`` exactly on the four membership skips (``off_watch_untradeable``,
+    ``discovery_cap``, ``duplicate_copy``, ``off_watch_unverdicted``), which
+    belong to neither graded set; set on every
     graded row and on ``price_unavailable``, whose label was in a graded set
     and only lacked a bar (``ck_label_outcome_scope``).
     """
@@ -628,8 +711,12 @@ class AuditPlan:
       verdict among this run's considered labels (decision 14 above).
     * ``unverdicted_label_counts`` -- ``(ticker, count)`` for the same
       tickers, sorted by ticker: every considered label with no verdict,
-      including any written ``off_watch_untradeable`` this run because its
+      including any written ``off_watch_unverdicted`` this run because its
       wait ran out.
+    * ``verdicts_needed`` -- the ``(ticker, reference session)`` of every
+      considered off-watch label with no verdict on or before that session,
+      once each, sorted by ``(session, ticker)``: what the runner may
+      backfill (decision 27).
     * ``unschedulable_label_ids`` -- sorted ids of labels with an unwritten
       window whose reference or window end is past the calendar's published
       schedule (decision 18). No record is written for them.
@@ -643,6 +730,7 @@ class AuditPlan:
     unverdicted_tickers: tuple[str, ...]
     unverdicted_label_counts: tuple[tuple[str, int], ...]
     unschedulable_label_ids: tuple[int, ...]
+    verdicts_needed: tuple[tuple[str, date], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -876,14 +964,14 @@ def _duplicates(
 
 def _verdict_index(
     tradeable: Mapping[str, VerdictHistory],
-) -> dict[str, tuple[tuple[date, ...], tuple[bool, ...]]]:
+) -> dict[str, tuple[tuple[date, ...], tuple[bool | None, ...]]]:
     """Each ticker's history sorted by session, for :func:`_verdict_on`.
 
     Two verdicts for one (ticker, session) are refused: the cache's primary
     key is ``(ticker, session_date)``, so a second is a defect, and picking
     one would make the result depend on input order.
     """
-    index: dict[str, tuple[tuple[date, ...], tuple[bool, ...]]] = {}
+    index: dict[str, tuple[tuple[date, ...], tuple[bool | None, ...]]] = {}
     for ticker, history in tradeable.items():
         ordered = sorted(history, key=lambda entry: entry[0])
         days = tuple(day for day, _ in ordered)
@@ -895,9 +983,15 @@ def _verdict_index(
 
 
 def _verdict_on(
-    index: Mapping[str, tuple[tuple[date, ...], tuple[bool, ...]]], ticker: str, session: date
+    index: Mapping[str, tuple[tuple[date, ...], tuple[bool | None, ...]]],
+    ticker: str,
+    session: date,
 ) -> bool | None:
-    """Decision 25: the newest verdict on or before ``session``, or ``None``."""
+    """Decision 25: the newest verdict on or before ``session``, or ``None``.
+
+    ``None`` too when that newest row is unreadable (:data:`VerdictHistory`):
+    it is no verdict, and the older rows it superseded are not consulted.
+    """
     entry = index.get(ticker)
     if entry is None:
         return None
@@ -914,6 +1008,7 @@ def plan_audit(
     written: Collection[tuple[int, str]],
     claimed_groups: Collection[GroupKey],
     run_at: datetime,
+    verdict_held: Collection[tuple[str, date]] = (),
 ) -> AuditPlan:
     """Classify the labels, apply the discovery cap, and list the bars needed.
 
@@ -926,8 +1021,11 @@ def plan_audit(
     ``claimed_groups`` names every ``(group_id, ticker, source)`` in which
     some label already holds a ``label_outcome`` row other than
     ``duplicate_copy`` -- its kept label, which is usually fully written and
-    so not in ``labels`` (decision 24 below). The result is independent of
-    the order of every input.
+    so not in ``labels`` (decision 24 below). ``verdict_held`` names the
+    ``(ticker, reference session)`` pairs whose verdict this run sought and
+    could not get (decision 27): a label there with still no verdict is held
+    past :data:`PRICE_UNAVAILABLE_AFTER`, for up to :data:`TRAILING_WINDOW`.
+    The result is independent of the order of every input.
     """
     _require_aware(run_at, "run_at")
     run_at = run_at.astimezone(timezone.utc)
@@ -935,6 +1033,7 @@ def plan_audit(
     done = frozenset(written)
     claimed = frozenset(claimed_groups)
     verdicts = _verdict_index(tradeable)
+    held_pairs = frozenset(verdict_held)
 
     by_id: dict[int, AuditLabel] = {}
     for item in labels:
@@ -985,31 +1084,34 @@ def plan_audit(
 
     to_grade: list[GradingWindow] = []
     unverdicted: dict[str, int] = {}
+    needed: set[tuple[str, date]] = set()
     candidates: dict[str, list[_Considered]] = defaultdict(list)
 
-    def untradeable(entry: _Considered) -> None:
-        skipped.extend(
-            _skip(entry.label.label_id, w, SkipReason.OFF_WATCH_UNTRADEABLE, None)
-            for w, _ in entry.unwritten
-        )
+    def membership_skip(entry: _Considered, reason: SkipReason) -> None:
+        skipped.extend(_skip(entry.label.label_id, w, reason, None) for w, _ in entry.unwritten)
 
     for entry in considered:
         ticker = entry.label.ticker
         if ticker in universe:
             to_grade.extend(_grading_windows(entry, Scope.WATCH))
             continue
-        verdict = _verdict_on(verdicts, ticker, _reference_session(entry.reference_at))
+        session = _reference_session(entry.reference_at)
+        verdict = _verdict_on(verdicts, ticker, session)
         if verdict is None:
-            # Decision 14: pending while a verdict could still arrive, then
-            # fail closed once even its last window is past retrying.
+            # Decisions 14 and 27: pending while a verdict could still
+            # arrive -- the runner backfills it -- then, once even the last
+            # window is past retrying, written as what it is: unverdicted.
+            # Never untradeable, which only a verdict may say.
             unverdicted[ticker] = unverdicted.get(ticker, 0) + 1
-            last_end = max(end for _, end in entry.unwritten)
-            if run_at - last_end > PRICE_UNAVAILABLE_AFTER:
-                untradeable(entry)
+            needed.add((ticker, session))
+            waited = run_at - max(end for _, end in entry.unwritten)
+            held = (ticker, session) in held_pairs and waited <= TRAILING_WINDOW
+            if waited > PRICE_UNAVAILABLE_AFTER and not held:
+                membership_skip(entry, SkipReason.OFF_WATCH_UNVERDICTED)
         elif verdict:
             candidates[ticker].append(entry)
         else:
-            untradeable(entry)
+            membership_skip(entry, SkipReason.OFF_WATCH_UNTRADEABLE)
 
     def directional_count(ticker: str) -> int:
         return sum(1 for e in candidates[ticker] if e.label.direction in _DIRECTIONAL)
@@ -1037,6 +1139,7 @@ def plan_audit(
         unverdicted_tickers=tuple(sorted(unverdicted)),
         unverdicted_label_counts=tuple(sorted(unverdicted.items())),
         unschedulable_label_ids=tuple(sorted(unschedulable)),
+        verdicts_needed=tuple(sorted(needed, key=lambda pair: (pair[1], pair[0]))),
     )
 
 

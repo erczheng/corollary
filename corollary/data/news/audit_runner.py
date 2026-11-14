@@ -24,13 +24,25 @@ a. **Open.** Close any ``running`` row older than
 b. **Plan.** The labels with an unwritten window, the keys already written,
    the duplicate groups already claimed, step 0's watch universe, and each
    off-watch ticker's cached tradeability verdict history
-   (:func:`~corollary.data.news.signals.verdict_histories`, through the same
-   fail-closed row read Movers uses) go to :func:`~audit.plan_audit`. Each
+   (:func:`~corollary.data.news.signals.verdict_histories`, which reads an
+   unreadable row as no verdict -- not Movers' fail-closed read, since a
+   failing verdict here would write ``off_watch_untradeable``; decision 27)
+   go to :func:`~audit.plan_audit`. Each
    label's ``group_pick`` is :func:`~corollary.data.news.signals.group_labels`'
-   own pick (``audit.py``'s decision 24), and the history reaches back to the
-   newest verdict on or before the earliest label's ET date -- never later
-   than its reference session, so each label's own verdict is loaded
-   (decision 25).
+   own pick (``audit.py``'s decision 24), and its ``published_at`` is the
+   earliest stamp in its duplicate group (owner decision Q24b,
+   :func:`_load_labels`). The history reaches back to the newest verdict on
+   or before the earliest label's ET date -- never later than its reference
+   session, so each label's own verdict is loaded (decision 25).
+b'. **Backfill** (owner decision Q24a; ``audit.py``'s decision 27). When
+   the plan names ``(ticker, session)`` pairs with no verdict on or before
+   the session, and :attr:`SentimentAuditDeps.backfill` is set, each is
+   computed with ``refresh_tradeability(session_date=session)`` -- sessions
+   strictly before it only -- at most :data:`~audit.VERDICT_BACKFILL_CAP`
+   pairs, oldest session first, and stored; the verdicts are re-read and the
+   plan is made again, with every pair left unfilled passed as
+   ``verdict_held``. A failure is a fault in ``detail.verdict_backfill``,
+   never a verdict (:func:`_backfill_verdicts`).
 c. **Fetch.** One ``stock_bars`` call per session per
    :data:`BAR_BATCH_MAX_SYMBOLS` symbols (decision 6), adjusted for splits,
    dividends and spin-offs (:data:`AUDIT_BAR_ADJUSTMENT`), through
@@ -152,6 +164,7 @@ from corollary.calendars import NYSE_TZ, nyse_session_containing
 from corollary.data.news.audit import (
     BENCHMARK_SYMBOL,
     TRAILING_WINDOW,
+    VERDICT_BACKFILL_CAP,
     WINDOW_SESSION_MINUTES,
     AuditLabel,
     AuditPlan,
@@ -176,8 +189,14 @@ from corollary.data.news.audit import (
 )
 from corollary.data.news.labels import Direction
 from corollary.data.news.signals import group_labels, verdict_histories
+from corollary.data.news.tradeability import (
+    MAX_IPO_LOOKUPS_PER_RUN,
+    IpoDateSource,
+    TradeabilityInputs,
+    refresh_tradeability,
+)
 from corollary.data.news.watchlist import MARKET_TICKER
-from corollary.data.providers.interface import Bar, BarAdjustment, BarTimeframe
+from corollary.data.providers.interface import AssetDirectory, Bar, BarAdjustment, BarTimeframe
 from corollary.db.models import (
     AuditLog,
     AuditRun,
@@ -202,6 +221,7 @@ __all__ = [
     "NoticeSink",
     "OnOpened",
     "SentimentAuditDeps",
+    "VerdictBackfill",
     "WatchUniverseSource",
     "WatchUniverseUnavailable",
     "run_sentiment_audit",
@@ -310,14 +330,37 @@ class WatchUniverseUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class VerdictBackfill:
+    """What a run needs to backfill a missing tradeability verdict (Q24a).
+
+    The daily refresh's own three inputs (``pollers.refresh_tradeability_cache``):
+    ``inputs`` is the provider's daily-bars and standard-root requests,
+    metered inside the provider by the shared rate limiter (``data.`` and
+    ``paper-api.`` buckets); ``assets`` returns the asset directory held now,
+    ``None`` before the first fetch -- read once per run, at the backfill;
+    ``ipo_dates`` settles a partial ADV window (Q12), and ``None`` fails such
+    a ticker closed, as it does for the refresh.
+    """
+
+    inputs: TradeabilityInputs
+    assets: Callable[[], AssetDirectory | None]
+    ipo_dates: IpoDateSource | None
+
+
+@dataclass(frozen=True, slots=True)
 class SentimentAuditDeps:
-    """Everything a run reads from or writes to. No runtime, no broker."""
+    """Everything a run reads from or writes to. No runtime, no broker.
+
+    ``backfill`` ``None`` backfills no verdict: a label with none on or
+    before its session waits, then is written ``off_watch_unverdicted``.
+    """
 
     session_factory: Callable[[], Session]
     bars: MinuteBarSource
     watch_universe: WatchUniverseSource
     emit: NoticeSink
     clock: Callable[[], datetime]
+    backfill: VerdictBackfill | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,6 +577,36 @@ def _set_terminal(
     return result.rowcount == 1
 
 
+def _earliest_published(session: Session, gids: Sequence[int]) -> dict[int, datetime]:
+    """Each duplicate group's earliest ``published_at``, as aware UTC (owner decision Q24b).
+
+    A group is ``coalesce(canonical_id, id)``, exactly as
+    :func:`~corollary.data.news.signals.group_labels` partitions it: the
+    canonical row (``id = gid``) and every member naming it
+    (``canonical_id = gid``). A row fetched by ``id`` that turns out to name
+    a canonical of its own belongs to that other group, not this one, so it
+    is left out -- the same membership the CTE gives it.
+    """
+    wanted = set(gids)
+    earliest: dict[int, datetime] = {}
+    for start in range(0, len(gids), _KEY_CHUNK):
+        chunk = gids[start : start + _KEY_CHUNK]
+        rows = session.execute(
+            select(NewsArticle.id, NewsArticle.canonical_id, NewsArticle.published_at).where(
+                or_(NewsArticle.id.in_(chunk), NewsArticle.canonical_id.in_(chunk))
+            )
+        )
+        for row in rows:
+            gid = row.id if row.canonical_id is None else row.canonical_id
+            if gid not in wanted:
+                continue
+            published = _aware_utc(row.published_at, "published_at")
+            current = earliest.get(gid)
+            if current is None or published < current:
+                earliest[gid] = published
+    return earliest
+
+
 def _load_labels(
     session_factory: Callable[[], Session],
 ) -> tuple[list[AuditLabel], set[tuple[int, str]], set[tuple[int, str, str]]]:
@@ -545,6 +618,20 @@ def _load_labels(
     group is claimed when some label in it holds an outcome row other than
     ``duplicate_copy`` -- usually a fully written one, which is not loaded
     (``audit.py``'s decision 24).
+
+    **Each label's ``published_at`` is its group's earliest** (owner decision
+    Q24b, 2026-11-11; ``audit.py``'s decision 26): the minimum over the
+    canonical row and every member, not the stamp of the copy the label sits
+    on. Finnhub stamps its Yahoo copy of a Motley Fool story 20 minutes late,
+    and the late copy is often the canonical one (stored first after
+    downtime), so grading from it measured the 1h window from minute 20.
+    Applied here, where :class:`AuditLabel` is built, so everything derived
+    from the reference instant follows from this one value: both windows,
+    the stored ``reference_at``, decision 25's verdict session and R3's
+    ``label_session``. :func:`~audit.reference_instant`'s future-stamp guard
+    then applies to this earliest stamp. An ungrouped article's group is
+    itself, so its label is unchanged. Linking and ``canonical_id`` are not
+    touched: this is grading, not linking.
     """
     windows = len(WINDOW_SESSION_MINUTES)
     picked = group_labels()
@@ -561,29 +648,35 @@ def _load_labels(
             SentimentLabelRow.source,
             SentimentLabelRow.direction,
             SentimentLabelRow.labeled_at,
-            NewsArticle.published_at,
             picked.c.gid,
             picked.c.pick,
         )
-        .join(NewsArticle, NewsArticle.id == SentimentLabelRow.article_id)
         .join(picked, picked.c.label_id == SentimentLabelRow.id)
         .where(written_count < windows)
         .order_by(SentimentLabelRow.id)
     )
     with session_factory() as session:
-        labels = [
-            AuditLabel(
-                label_id=row.id,
-                ticker=row.ticker,
-                source=row.source,
-                direction=Direction(row.direction),
-                published_at=row.published_at,
-                labeled_at=row.labeled_at,
-                group_id=row.gid,
-                group_pick=row.pick == 1,
+        rows = list(session.execute(stmt))
+        earliest = _earliest_published(session, sorted({row.gid for row in rows}))
+        labels: list[AuditLabel] = []
+        for row in rows:
+            group_published = earliest.get(row.gid)
+            if group_published is None:
+                # The label's own article is in its own group, so this is a
+                # defect in the read above, never a story with no stamp.
+                raise AssertionError(f"label {row.id}'s group {row.gid} has no stored article")
+            labels.append(
+                AuditLabel(
+                    label_id=row.id,
+                    ticker=row.ticker,
+                    source=row.source,
+                    direction=Direction(row.direction),
+                    published_at=group_published,
+                    labeled_at=row.labeled_at,
+                    group_id=row.gid,
+                    group_pick=row.pick == 1,
+                )
             )
-            for row in session.execute(stmt)
-        ]
         ids = [label.label_id for label in labels]
         written: set[tuple[int, str]] = set()
         for start in range(0, len(ids), _KEY_CHUNK):
@@ -624,12 +717,14 @@ def _load_verdicts(
     off_watch: Collection[str],
     today: date,
     correlation_id: str,
-) -> dict[str, list[tuple[date, bool]]]:
+) -> dict[str, list[tuple[date, bool | None]]]:
     """Each off-watch ticker's verdict history, for each label's own session.
 
     The lower bound is the earliest off-watch label's reference-instant ET
     date: a reference session is that date or later, so the newest verdict on
-    or before every label's session is loaded.
+    or before every label's session is loaded. A row that cannot be read is
+    ``None`` -- no verdict, which the plan backfills or holds -- never a
+    failing one (decision 27; :func:`~corollary.data.news.signals.verdict_histories`).
     """
     days = [
         reference_instant(label).astimezone(NYSE_TZ).date()
@@ -641,7 +736,7 @@ def _load_verdicts(
     with session_factory() as session:
         found = verdict_histories(session, off_watch, min(days), today, correlation_id)
     return {
-        ticker: [(verdict.session_date, verdict.passes) for verdict in history]
+        ticker: [(day, None if verdict is None else verdict.passes) for day, verdict in history]
         for ticker, history in found.items()
     }
 
@@ -966,6 +1061,191 @@ async def _fetch(bars: MinuteBarSource, plan: AuditPlan, correlation_id: str) ->
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _VerdictFault:
+    """One ``(ticker, session)`` whose backfill reached no verdict, and why."""
+
+    ticker: str
+    session_date: date
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Backfilled:
+    """What the backfill stage did; ``held`` is what the plan gets as ``verdict_held``."""
+
+    configured: bool
+    needed: int
+    attempted: int
+    stored: tuple[tuple[str, date], ...]
+    capped: tuple[tuple[str, date], ...]
+    held: frozenset[tuple[str, date]]
+    faults: tuple[_VerdictFault, ...]
+
+
+def _no_backfill(needed: Sequence[tuple[str, date]], *, configured: bool) -> _Backfilled:
+    return _Backfilled(
+        configured=configured,
+        needed=len(needed),
+        attempted=0,
+        stored=(),
+        capped=(),
+        held=frozenset(),
+        faults=(),
+    )
+
+
+def _error_type(error: str) -> str:
+    """The type out of ``tradeability``'s ``"Type: message"`` -- never the vendor text."""
+    return error.partition(":")[0]
+
+
+async def _backfill_verdicts(
+    backfill: VerdictBackfill,
+    needed: Sequence[tuple[str, date]],
+    session_factory: Callable[[], Session],
+    clock: Callable[[], datetime],
+    run_id: int,
+    correlation_id: str,
+) -> _Backfilled:
+    """Step b': a verdict for each ``(ticker, session)`` in ``needed`` that has none.
+
+    ``needed`` is :attr:`AuditPlan.verdicts_needed` -- sorted by session,
+    then ticker, and only pairs with **no** verdict on or before the session,
+    so a stale but existing one is never replaced (decision 27). The first
+    :data:`~audit.VERDICT_BACKFILL_CAP` are attempted, the rest logged and
+    held. One :func:`~corollary.data.news.tradeability.refresh_tradeability`
+    call per session, for exactly that session's tickers: it judges only the
+    sessions strictly before ``session_date``, asks the provider for bars
+    ending before it, and **stores** every verdict it reaches. IPO lookups
+    share one budget across the run, :data:`MAX_IPO_LOOKUPS_PER_RUN`, so
+    several sessions cannot multiply the refresh's bound.
+
+    Nothing reached is a verdict: a provider error, a skipped refresh (no
+    usable asset directory), a deferral, or any exception from one session's
+    call is a :class:`_VerdictFault`, and its pair is held. Every attempted
+    pair not stored, and every capped one, is in ``held``. A cancellation
+    propagates. Nothing here touches ``engine_state`` or the watchdog: a
+    context job is never a rule-9 producer.
+    """
+    cap = VERDICT_BACKFILL_CAP
+    attempt = list(needed[:cap])
+    capped = tuple(needed[cap:])
+    if capped:
+        logger.warning(
+            "sentiment audit verdict backfill capped: %d of %d (ticker, session) pairs "
+            "left pending",
+            len(capped),
+            len(needed),
+            extra={
+                "event": "sentiment_audit_verdict_backfill_capped",
+                "rule": (
+                    "Q24a: at most VERDICT_BACKFILL_CAP verdicts are backfilled a run, "
+                    "the oldest session first; the rest stay pending, never untradeable"
+                ),
+                "cap": cap,
+                "needed": len(needed),
+                "capped": len(capped),
+                "first_capped_session": capped[0][1].isoformat(),
+                "audit_run_id": run_id,
+                "correlation_id": correlation_id,
+            },
+        )
+    by_session: dict[date, list[str]] = {}
+    for ticker, day in attempt:
+        by_session.setdefault(day, []).append(ticker)
+
+    assets = backfill.assets()
+    ipo_budget = MAX_IPO_LOOKUPS_PER_RUN
+    stored: list[tuple[str, date]] = []
+    faults: list[_VerdictFault] = []
+    for day in sorted(by_session):
+        tickers = sorted(by_session[day])
+        try:
+            result = await refresh_tradeability(
+                provider=backfill.inputs,
+                assets=assets,
+                tickers=tickers,
+                session_date=day,
+                session_factory=session_factory,
+                now=clock,
+                max_tickers=len(tickers),
+                ipo_dates=backfill.ipo_dates,
+                max_ipo_lookups=ipo_budget,
+            )
+        except Exception as exc:
+            logger.error(
+                "sentiment audit verdict backfill raised for %s; its labels stay pending",
+                day.isoformat(),
+                extra={
+                    "event": "sentiment_audit_verdict_backfill_failed",
+                    "rule": "Q24a: a backfill that reached no verdict is a fault, never a verdict",
+                    "session_date": day.isoformat(),
+                    "tickers": tickers,
+                    "error_type": type(exc).__name__,
+                    "audit_run_id": run_id,
+                    "correlation_id": correlation_id,
+                },
+            )
+            faults.extend(
+                _VerdictFault(t, day, f"backfill_raised:{type(exc).__name__}") for t in tickers
+            )
+            continue
+        ipo_budget = max(0, ipo_budget - result.ipo_requests)
+        if result.skipped is not None:
+            faults.extend(_VerdictFault(t, day, "refresh_skipped") for t in tickers)
+            continue
+        reached = {verdict.ticker for verdict in result.results}
+        stored.extend((t, day) for t in tickers if t in reached)
+        faults.extend(
+            _VerdictFault(e.ticker, day, f"{e.stage.value}:{_error_type(e.error)}")
+            for e in result.errors
+        )
+        faults.extend(_VerdictFault(t, day, "deferred") for t in result.deferred)
+        accounted = reached | {e.ticker for e in result.errors} | set(result.deferred)
+        faults.extend(_VerdictFault(t, day, "not_checked") for t in tickers if t not in accounted)
+
+    stored_pairs = frozenset(stored)
+    held = frozenset(capped) | frozenset(pair for pair in attempt if pair not in stored_pairs)
+    ordered_faults = tuple(sorted(faults, key=lambda f: (f.session_date, f.ticker, f.reason)))
+    logger.log(
+        logging.WARNING if ordered_faults or capped else logging.INFO,
+        "sentiment audit verdict backfill: %d needed, %d attempted, %d stored, %d faults",
+        len(needed),
+        len(attempt),
+        len(stored),
+        len(ordered_faults),
+        extra={
+            "event": "sentiment_audit_verdict_backfill",
+            "needed": len(needed),
+            "attempted": len(attempt),
+            "stored": len(stored),
+            "capped": len(capped),
+            "held": len(held),
+            "faults": [_verdict_fault_json(f) for f in ordered_faults],
+            "audit_run_id": run_id,
+            "correlation_id": correlation_id,
+        },
+    )
+    return _Backfilled(
+        configured=True,
+        needed=len(needed),
+        attempted=len(attempt),
+        stored=tuple(stored),
+        capped=capped,
+        held=held,
+        faults=ordered_faults,
+    )
+
+
+def _verdict_fault_json(fault: _VerdictFault) -> dict[str, str]:
+    return {
+        "ticker": fault.ticker,
+        "session_date": fault.session_date.isoformat(),
+        "reason": fault.reason,
+    }
+
+
 def _to_write(
     plan: AuditPlan,
     result: GradeResult,
@@ -1023,6 +1303,7 @@ def _detail(
     released: Sequence[tuple[int, str]],
     fetched: _Fetched,
     audits: Sequence[SourceAudit],
+    backfilled: _Backfilled,
 ) -> dict[str, object]:
     """``audit_run.detail``: counts, symbols and ids only -- no vendor text, no secret."""
     capped_labels = {
@@ -1061,6 +1342,16 @@ def _detail(
         "bar_faults": [_fault_json(f) for f in faults],
         "unschedulable_label_ids": list(plan.unschedulable_label_ids),
         "unverdicted_label_counts": dict(plan.unverdicted_label_counts),
+        "verdict_backfill": {
+            "configured": backfilled.configured,
+            "cap": VERDICT_BACKFILL_CAP,
+            "needed": backfilled.needed,
+            "attempted": backfilled.attempted,
+            "stored": len(backfilled.stored),
+            "capped": len(backfilled.capped),
+            "held": len(backfilled.held),
+            "faults": [_verdict_fault_json(f) for f in backfilled.faults],
+        },
         "future_referenced": {
             a.source: {
                 "count": len(a.future_referenced),
@@ -1305,6 +1596,38 @@ async def _run_locked(
             claimed_groups=claimed,
             run_at=started_at,
         )
+        backfilled = _no_backfill(plan.verdicts_needed, configured=deps.backfill is not None)
+        if deps.backfill is not None and plan.verdicts_needed:
+            stage = "backfill"
+            backfilled = await _backfill_verdicts(
+                deps.backfill,
+                plan.verdicts_needed,
+                deps.session_factory,
+                deps.clock,
+                run_id,
+                correlation_id,
+            )
+            stage = "plan"
+            if backfilled.stored:
+                tradeable = await _on_worker(
+                    _load_verdicts,
+                    deps.session_factory,
+                    labels,
+                    off_watch,
+                    started_at.astimezone(NYSE_TZ).date(),
+                    correlation_id,
+                )
+            # Planned again on the stored verdicts, with every pair the
+            # backfill could not fill held rather than written (decision 27).
+            plan = plan_audit(
+                labels,
+                watch_universe=universe,
+                tradeable=tradeable,
+                written=written_keys,
+                claimed_groups=claimed,
+                run_at=started_at,
+                verdict_held=backfilled.held,
+            )
 
         stage = "fetch"
         fetched = await _fetch(deps.bars, plan, correlation_id)
@@ -1347,6 +1670,7 @@ async def _run_locked(
             released=released,
             fetched=fetched,
             audits=audits,
+            backfilled=backfilled,
         )
         finished_at = _finishing_reading(deps.clock, started_at)
         await _on_worker(

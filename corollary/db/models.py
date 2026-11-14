@@ -1920,11 +1920,18 @@ SENTIMENT_WINDOWS: tuple[str, ...] = ("1h", "1d")
 #:   (:func:`corollary.data.news.signals.group_labels`), and the audit grades
 #:   that same one; every other copy gets this row, so it is recorded, never
 #:   counted toward a floor or an accuracy, and never reloaded.
+#: * ``off_watch_unverdicted`` -- **owner decision Q24a** (migration 0019). An
+#:   off-watch label with no tradeability verdict on or before its reference
+#:   session, none of which the audit could backfill before decision 14's
+#:   wait ran out. It was written ``off_watch_untradeable`` before 0019,
+#:   which claimed a verdict nobody had reached; this reason says what is
+#:   known. A membership skip, like the untradeable one.
 LABEL_SKIP_REASONS: tuple[str, ...] = (
     "off_watch_untradeable",
     "discovery_cap",
     "price_unavailable",
     "duplicate_copy",
+    "off_watch_unverdicted",
 )
 
 #: The skips that are decided by **membership** -- the label is in neither
@@ -1935,6 +1942,7 @@ LABEL_MEMBERSHIP_SKIP_REASONS: tuple[str, ...] = (
     "off_watch_untradeable",
     "discovery_cap",
     "duplicate_copy",
+    "off_watch_unverdicted",
 )
 
 #: Which graded set one outcome's label was in, **as classified by the run

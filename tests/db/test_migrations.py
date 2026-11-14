@@ -12,6 +12,8 @@ is safe only because ``test_migration_seed_matches_the_seed_module`` fails
 the moment the two disagree.
 """
 
+import ast
+import shutil
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -178,7 +180,102 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0018"]
+    assert script.get_heads() == ["0019"]
+
+
+VERSIONS_DIR = REPO_ROOT / "corollary" / "db" / "migrations" / "versions"
+
+
+def _declared(path: Path, name: str) -> object:
+    """The literal a revision file assigns to module-level ``name``, read by
+    parsing -- never by importing, and never through Alembic, whose scan is
+    exactly what hides a duplicate."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets, value = [node.target.id], node.value
+        elif isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        else:
+            continue
+        if name in targets:
+            if not isinstance(value, ast.Constant):
+                raise AssertionError(f"{path.name}: {name} is not a literal")
+            return value.value
+    raise AssertionError(f"{path.name}: declares no {name}")
+
+
+def _revision_chain_problems(versions: Path) -> list[str]:
+    """Every way the files in ``versions`` fail to be one linear chain.
+
+    Each file must declare a ``revision`` no other file declares, and walking
+    ``down_revision`` from the head to ``None`` must visit every file exactly
+    once. A merge revision (a tuple ``down_revision``) is reported too: the
+    history is linear, and a merge would be a deliberate change to this test.
+    """
+    files = sorted(p for p in versions.glob("*.py") if p.name != "__init__.py")
+    problems: list[str] = []
+    by_revision: dict[object, list[str]] = {}
+    down: dict[object, object] = {}
+    for path in files:
+        revision = _declared(path, "revision")
+        by_revision.setdefault(revision, []).append(path.name)
+        down[revision] = _declared(path, "down_revision")
+    for revision, names in sorted(by_revision.items(), key=lambda item: str(item[0])):
+        if len(names) > 1:
+            problems.append(f"revision {revision!r} is declared by {len(names)} files: {names}")
+    for revision, parent in sorted(down.items(), key=lambda item: str(item[0])):
+        if parent is not None and not isinstance(parent, str):
+            problems.append(f"revision {revision!r} has a non-linear down_revision {parent!r}")
+    parents = set(down.values())
+    heads = sorted(str(r) for r in down if r not in parents)
+    if len(heads) != 1:
+        return problems + [f"expected one head, found {heads}"]
+    walked: list[object] = []
+    at: object = heads[0]
+    while at is not None and at in down and at not in walked:
+        walked.append(at)
+        at = down[at]
+    if at is not None:
+        problems.append(f"the chain from {heads[0]!r} breaks at {at!r}")
+    if len(walked) != len(files):
+        unreached = sorted(
+            name for r, names in by_revision.items() if r not in walked for name in names
+        )
+        problems.append(
+            f"the chain from {heads[0]!r} visits {len(walked)} revision(s) for "
+            f"{len(files)} file(s); unreached: {unreached or 'none (a duplicate)'}"
+        )
+    return problems
+
+
+def test_every_revision_file_is_one_link_in_one_chain() -> None:
+    """Two branches each adding ``0019`` under different file names merge
+    cleanly in git, and Alembic then only *warns* "Revision 0019 is present
+    more than once" and keeps one of the two -- so the other's DDL never runs,
+    and ``test_there_is_exactly_one_head`` still passes. This reads the files
+    themselves rather than Alembic's deduplicated map."""
+    assert _revision_chain_problems(VERSIONS_DIR) == []
+
+
+def test_the_chain_guard_catches_a_second_file_declaring_a_revision(tmp_path: Path) -> None:
+    """The guard above, proven to bite: a scratch copy of the directory with a
+    second ``0019`` beside the real one -- the shape the merge would produce."""
+    scratch = tmp_path / "versions"
+    shutil.copytree(VERSIONS_DIR, scratch, ignore=shutil.ignore_patterns("__pycache__"))
+    (scratch / "0019_another_branch.py").write_text(
+        'revision: str = "0019"\ndown_revision: str | None = "0018"\n', encoding="utf-8"
+    )
+    problems = _revision_chain_problems(scratch)
+    assert any("revision '0019' is declared by 2 files" in p for p in problems)
+    assert any("visits" in p for p in problems)
+
+    # And one dangling off the chain, which no head reaches, is caught too.
+    (scratch / "0019_another_branch.py").unlink()
+    (scratch / "0099_dangling.py").write_text(
+        'revision = "0099"\ndown_revision = "0007"\n', encoding="utf-8"
+    )
+    assert any("expected one head" in p for p in _revision_chain_problems(scratch))
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
