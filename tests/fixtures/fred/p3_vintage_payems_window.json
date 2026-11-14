@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-11-10T00:04:28+00:00",
+  "path": "/series/observations",
+  "params": {
+    "series_id": "PAYEMS",
+    "file_type": "json",
+    "realtime_start": "2026-11-05",
+    "realtime_end": "2026-11-06",
+    "observation_start": "2026-05-01"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"2026-11-05","realtime_end":"2026-11-06","observation_start":"2026-05-01","observation_end":"9999-12-31","units":"lin","output_type":1,"file_type":"json","order_by":"observation_date","sort_order":"asc","count":8,"offset":0,"limit":100000,"observations":[{"realtime_start":"2026-11-05","realtime_end":"2026-11-06","date":"2026-05-01","value":"158861"},{"realtime_start":"2026-11-05","realtime_end":"2026-11-06","date":"2026-06-01","value":"158892"},{"realtime_start":"2026-11-05","realtime_end":"2026-11-06","date":"2026-07-01","value":"158882"},{"realtime_start":"2026-11-05","realtime_end":"2026-11-05","date":"2026-08-01","value":"159015"},{"realtime_start":"2026-11-06","realtime_end":"2026-11-06","date":"2026-08-01","value":"159068"},{"realtime_start":"2026-11-05","realtime_end":"2026-11-05","date":"2026-09-01","value":"159044"},{"realtime_start":"2026-11-06","realtime_end":"2026-11-06","date":"2026-09-01","value":"159128"},{"realtime_start":"2026-11-06","realtime_end":"2026-11-06","date":"2026-10-01","value":"159293"}]}
+}

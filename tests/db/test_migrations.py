@@ -76,13 +76,28 @@ EXPECTED_TABLES = {
     "sentiment_source_status",
     # 0015 -- step 7: the News calendar (Q22: merged second, renumbered from 0014).
     "calendar_event",
+    # 0017 (R3's ``sentiment_accuracy.sessions``) adds a column, no table.
+    # 0018 -- R4: the void tool's copy of a voided run's grades
+    "label_outcome_voided",
+    # 0019 -- U6d: economic first prints (Q22: numbered at merge, after 0018)
+    "econ_release_value",
+    "econ_release_fetch",
 }
 
-#: Everything 0015 created.
-_0015_TABLES = {"calendar_event"}
+#: Everything 0019 created.
+_0019_TABLES = {"econ_release_value", "econ_release_fetch"}
 
-#: Everything 0014 created -- and 0015's table with it, which revises it, so
-#: every downgrade below 0014 that subtracts this subtracts both.
+#: Everything 0018 created -- and 0019's tables with it, which revise it.
+_0018_TABLES = {"label_outcome_voided"} | _0019_TABLES
+
+#: Everything 0015 created -- and, since 0016, 0017, 0018 and 0019 each
+#: revise the one before, 0018's and 0019's tables with it, so every
+#: downgrade below 0015 that subtracts this subtracts all of them.
+_0015_TABLES = {"calendar_event"} | _0018_TABLES
+
+#: Everything 0014 created -- and every later revision's tables with it
+#: (``_0015_TABLES``: 0015 through 0019), so every downgrade below 0014 that
+#: subtracts this subtracts them all.
 _0014_TABLES = {
     "audit_run",
     "label_outcome",
@@ -178,7 +193,9 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    assert script.get_heads() == ["0018"]
+    # 0019 (U6d's econ tables) revises 0018 (R4's void tool), which revises
+    # 0017 (R3's session count): Q22 numbered the econ revision at merge.
+    assert script.get_heads() == ["0019"]
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
@@ -327,7 +344,8 @@ def test_0015_leaves_calendar_routes_the_seed_already_wrote(db_path: Path) -> No
 
 
 def test_0015_downgrades_to_0014_and_back(db_path: Path) -> None:
-    """``calendar_event`` comes and goes alone; 0014's audit tables, 0013's
+    """``calendar_event`` comes and goes with the later revisions' tables
+    (0018's and 0019's, in ``_0015_TABLES``); 0014's audit tables, 0013's
     labels and 0012's cache stay."""
     url = sqlite_url(db_path)
     cfg = _config(url)

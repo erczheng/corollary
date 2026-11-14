@@ -1,0 +1,16 @@
+release_id,series_id,transform,scale,unit_label,decimals,frequency
+10,CPIAUCSL,pct_change,1,% m/m,1,monthly
+50,PAYEMS,change,1,K,0,monthly
+46,PPIFIS,pct_change,1,% m/m,1,monthly
+192,JTSJOL,level,1,K,0,monthly
+11,ECIALLCIV,pct_change,1,% q/q,1,quarterly
+188,IR,pct_change,1,"% m/m, NSA",1,monthly
+53,A191RL1Q225SBEA,level,1,% q/q SAAR,1,quarterly
+54,PCEPILFE,pct_change,1,"% m/m, core PCE",1,monthly
+51,BOPGSTB,level,0.001,$B,1,monthly
+9,RSAFS,pct_change,1,% m/m,1,monthly
+27,HOUST,level,1,K SAAR,0,monthly
+97,HSN1F,level,1,K SAAR,0,monthly
+229,TTLCONS,pct_change,1,% m/m,1,monthly
+13,INDPRO,pct_change,1,% m/m,1,monthly
+291,EXHOSLUSM495S,level,0.000001,M SAAR,2,monthly

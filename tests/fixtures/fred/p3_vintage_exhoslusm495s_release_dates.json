@@ -1,0 +1,13 @@
+{
+  "recorded_at": "2026-11-10T00:08:46+00:00",
+  "path": "/release/dates",
+  "params": {
+    "release_id": "291",
+    "file_type": "json",
+    "sort_order": "desc",
+    "limit": "12"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"1776-07-04","realtime_end":"9999-12-31","order_by":"release_date","sort_order":"desc","count":0,"offset":0,"limit":12,"release_dates":[]}
+}

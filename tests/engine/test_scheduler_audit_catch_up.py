@@ -539,7 +539,7 @@ async def test_the_audit_catch_up_never_moves_the_halt_state(
     jobs = [j for j in context_jobs(services, clock=clock, sleep=clock.sleep)]
     audit = [j for j in jobs if j.name == SENTIMENT_AUDIT_JOB]
     scheduler = Scheduler(audit, secrets=no_secrets, clock=clock, sleep=clock.sleep)
-    await run_until_parked(scheduler, clock, timeout=30)
+    await run_until_parked(scheduler, clock)
 
     status = scheduler.status()[SENTIMENT_AUDIT_JOB]
     assert status.failures == 0, status

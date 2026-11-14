@@ -73,7 +73,7 @@ from corollary.engine.scheduler import (
 )
 from corollary.data.macro.risk_free import store_observations
 from corollary.data.calendar_dividends import CashDividendRead
-from corollary.db.models import CalendarEvent
+from corollary.db.models import CalendarEvent, EconReleaseFetch
 from sqlalchemy import select
 from tests.engine.test_calendar_jobs import (
     FakeDividends,
@@ -108,6 +108,7 @@ from corollary.data.providers.fred import (
 from corollary.pricing.rates import RateProvenance, RiskFreeRateSource
 from corollary.ratelimit import FRED_HOST, HostRateLimiter
 from tests.data.providers.test_fred_provider import FAKE_KEY, fixture_body_text
+from tests.data.test_econ_first_prints import FakeVintages, not_posted
 from tests.engine.test_runtime import read_state, resume_engine
 from tests.data.seeds.test_nport_snapshot import FakeResolver, FakeSec, sec_provider
 from corollary.data.seeds import SpdrSeed, nport
@@ -137,6 +138,40 @@ SATURDAY_AUDIT = datetime(2026, 11, 28, 15, 0, tzinfo=UTC)
 # --------------------------------------------------------------------------
 
 
+#: The wall-clock hang guard for every bounded wait the driver makes, in
+#: seconds. **A hang guard, never a timing budget.** It bounds one unit of
+#: work at a time: the calendar build behind ``Scheduler.ready()`` (~1.8 s
+#: measured, once per process), or one step of :meth:`FakeClock.drive`, which
+#: is a single instant's job bodies running to their next sleep (0.2 s at the
+#: most, measured over the 8,536 steps of the shipped-jobs isolation run).
+#: Exceeding it means a job is stuck, not that the machine is slow: it is a
+#: 600x slowdown of the slowest step. The run as a whole has **no** wall-clock
+#: budget. Its wall time is the step count times the machine's per-step
+#: latency, so any total budget fails a correct run at some load -- which is
+#: exactly how the isolation test flaked (U6e, 2026-11-10: 2 of 6 cases
+#: timed out at 60 s on a 658 s ``-m risk``; reproduced by adding 15 ms to
+#: each of its ~3,000 worker-thread hops, with no job stuck anywhere).
+HANG_GUARD_SECONDS = 120.0
+#: The driver's step ceiling: deterministic, the same on every machine at
+#: every load. What a whole-run budget also caught, a run that never parks --
+#: a zero sleep in a loop, a schedule answering its own instant -- this
+#: catches without a clock. The longest run here is ~8,500 steps.
+MAX_DRIVER_STEPS = 100_000
+
+
+def _suspended_at(task: asyncio.Task[object]) -> str:
+    """Where ``task`` is suspended: its coroutine chain, outermost first. For a hang report."""
+    frames: list[str] = []
+    awaited: object = task.get_coro()
+    while awaited is not None:
+        frame = getattr(awaited, "cr_frame", None)
+        if frame is not None:
+            code = frame.f_code
+            frames.append(f"{code.co_name} ({Path(code.co_filename).name}:{frame.f_lineno})")
+        awaited = getattr(awaited, "cr_await", None)
+    return " -> ".join(frames) or "not started"
+
+
 class FakeClock:
     """A UTC clock driven as a discrete-event simulation.
 
@@ -155,16 +190,32 @@ class FakeClock:
     neither runnable on the loop nor asleep on this clock while the thread
     runs, so fifty ``sleep(0)`` yields do not settle it and the driver could
     park, or advance time, under it. With the flag set, the driver also waits
-    (in real time, bounded) until every live ``context-job:`` task is asleep
-    here before it moves the clock.
+    (in real time) until every live ``context-job:`` task is asleep here
+    before it moves the clock.
+
+    **Progress is what is bounded, never the run.** ``hang_guard`` bounds one
+    step's wait for threads (:data:`HANG_GUARD_SECONDS`) and ``max_steps``
+    the number of steps (:data:`MAX_DRIVER_STEPS`). Either one failing raises
+    an ``AssertionError`` out of :meth:`drive` naming the instant -- and, for
+    a hang, every live job and where it is suspended -- so await the driver
+    rather than racing :attr:`parked` against a timeout, which would report
+    a stuck job as an anonymous ``TimeoutError`` and swallow that message.
     """
 
     def __init__(
-        self, start: datetime, *, stop_at: datetime, wait_for_threads: bool = False
+        self,
+        start: datetime,
+        *,
+        stop_at: datetime,
+        wait_for_threads: bool = False,
+        hang_guard: float = HANG_GUARD_SECONDS,
+        max_steps: int = MAX_DRIVER_STEPS,
     ) -> None:
         self.now = start
         self.stop_at = stop_at
         self.parked = asyncio.Event()
+        self.hang_guard = hang_guard
+        self.max_steps = max_steps
         self._waiting: list[tuple[datetime, int, asyncio.Future[None]]] = []
         self._sequence = 0
         self._wait_for_threads = wait_for_threads
@@ -181,28 +232,58 @@ class FakeClock:
         )
         await wake
 
+    @staticmethod
+    def _live_jobs() -> list[asyncio.Task[object]]:
+        return sorted(
+            (
+                task
+                for task in asyncio.all_tasks()
+                if task.get_name().startswith("context-job:") and not task.done()
+            ),
+            key=lambda task: task.get_name(),
+        )
+
     def _every_job_is_asleep(self) -> bool:
-        live = [
-            task
-            for task in asyncio.all_tasks()
-            if task.get_name().startswith("context-job:") and not task.done()
-        ]
         # A cancelled sleep (a woken job's racing sleeper) leaves a done
         # future behind; it is nobody asleep.
-        return sum(1 for _, _, wake in self._waiting if not wake.done()) >= len(live)
+        asleep = sum(1 for _, _, wake in self._waiting if not wake.done())
+        return asleep >= len(self._live_jobs())
+
+    async def _settle_threads(self) -> None:
+        """Wait until every live job is asleep here. Longer than the hang guard is a hang."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.hang_guard
+        while not self._every_job_is_asleep():
+            if loop.time() >= deadline:
+                suspended = "\n".join(
+                    f"  {task.get_name()}: {_suspended_at(task)}" for task in self._live_jobs()
+                )
+                raise AssertionError(
+                    f"hang at {self.now.isoformat()}: a context job neither finished "
+                    f"nor slept on the fake clock within {self.hang_guard:g} s of wall "
+                    "time. One step is one instant's job bodies running to their "
+                    "next sleep, so this is a stuck job, not a slow machine. Live "
+                    f"context jobs, and where each is suspended:\n{suspended}"
+                )
+            await asyncio.sleep(0.001)
 
     async def drive(self) -> None:
+        steps = 0
         while True:
+            steps += 1
+            if steps > self.max_steps:
+                next_wake = self._waiting[0][0].isoformat() if self._waiting else None
+                raise AssertionError(
+                    f"no park after {self.max_steps} driver steps: the fake clock is "
+                    f"at {self.now.isoformat()}, stop_at is {self.stop_at.isoformat()}, "
+                    f"the next wake is at {next_wake}. A sleeper is not moving the "
+                    "clock -- a zero sleep in a loop, a schedule answering its own "
+                    "instant -- or this window needs more steps than the ceiling."
+                )
             for _ in range(50):
                 await asyncio.sleep(0)
             if self._wait_for_threads:
-                deadline = asyncio.get_running_loop().time() + 10.0
-                while not self._every_job_is_asleep():
-                    assert asyncio.get_running_loop().time() < deadline, (
-                        "a context job neither finished nor slept on the clock "
-                        "within 10s"
-                    )
-                    await asyncio.sleep(0.001)
+                await self._settle_threads()
             if not self._waiting or self._waiting[0][0] > self.stop_at:
                 self.now = max(self.now, self.stop_at)
                 self.parked.set()
@@ -233,20 +314,172 @@ def no_secrets() -> tuple[str, ...]:
     return ()
 
 
-async def run_until_parked(
-    scheduler: Scheduler, clock: FakeClock, *, timeout: float = 10
-) -> None:
+async def run_until_parked(scheduler: Scheduler, clock: FakeClock) -> None:
+    """Start ``scheduler``, drive ``clock`` until it parks, then close the scheduler.
+
+    No wall-clock budget on the run as a whole: every wait is bounded by the
+    clock's hang guard and step ceiling (see :class:`FakeClock`). The driver
+    is awaited directly, so a hang fails with the driver's own message --
+    which job, at which instant, suspended where -- rather than as a timeout.
+    """
     scheduler.start()
     # The calendar is built on a worker thread before any job asks a
     # schedule anything. The driver parks when nothing is sleeping on the
-    # fake clock, so it must not start until that build has finished.
-    await asyncio.wait_for(scheduler.ready(), timeout=10)
-    driver = asyncio.get_running_loop().create_task(clock.drive())
+    # fake clock, so it must not start until that build has finished. One
+    # bounded build, bounded by the default HANG_GUARD_SECONDS, never by a
+    # test's own tighter ``clock.hang_guard``: the calendar is built once per
+    # process (an lru_cache), so the first test to drive pays ~1-2 s for it,
+    # and a 0.5 s guard meant for one driver step would fail that test only
+    # when it ran alone -- the very flake this driver exists to remove.
     try:
-        await asyncio.wait_for(clock.parked.wait(), timeout=timeout)
+        await asyncio.wait_for(scheduler.ready(), timeout=HANG_GUARD_SECONDS)
+    except TimeoutError:
+        raise AssertionError(
+            f"the scheduler's calendar build did not finish within "
+            f"{HANG_GUARD_SECONDS:.0f}s of wall-clock time (scheduler.ready())"
+        ) from None
+    try:
+        await clock.drive()
     finally:
-        driver.cancel()
         await scheduler.aclose()
+
+
+# -- the driver's guards: a hang fails loudly, a slow run does not fail ------
+#
+# The rule 9 isolation tests below run on this driver, so its guards are
+# ``risk`` tests too: a harness that fails a correct run under load trains
+# people to ignore the one suite that must never be ignored, and one that
+# hangs instead of failing hides which job is stuck.
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_the_drivers_hang_guard_bounds_one_step_not_the_whole_run() -> None:
+    """A slow run that keeps making progress parks, however long it takes in total.
+
+    The shipped-jobs isolation test drives ~8,500 steps and ~3,000 worker-thread
+    hops, and the driver waits out every hop before it moves the clock, so the
+    run's wall time is the hop count times the machine's per-hop latency. A
+    wall-clock budget on the *whole run* failed it under load (U6e,
+    2026-11-10: 2 of 6 cases on a 658 s ``-m risk``) with no job stuck
+    anywhere. Here each step spends 50 ms of real time on a worker thread,
+    ~60 steps run well past a 2 s guard in total, and the run must still park.
+    """
+    clock = FakeClock(
+        WED_1500_ET,
+        stop_at=WED_1500_ET + timedelta(minutes=61),
+        wait_for_threads=True,
+        hang_guard=2.0,
+    )
+    ran: list[datetime] = []
+
+    async def slow() -> None:
+        await asyncio.to_thread(threading.Event().wait, 0.05)
+        ran.append(clock())
+
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="slow",
+                schedule=EveryWhileOpen(timedelta(minutes=1)),
+                run=slow,
+                rule="test",
+            )
+        ],
+        secrets=no_secrets,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await run_until_parked(scheduler, clock)
+    # The premise: the run as a whole outlasted the guard.
+    assert loop.time() - began > clock.hang_guard
+    assert len(ran) >= 59, ran
+    assert scheduler.status()["slow"].failures == 0
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_job_stuck_in_a_worker_thread_fails_loudly_naming_itself_and_the_instant() -> None:
+    """A real hang is an ``AssertionError`` saying which job, at which instant, where.
+
+    Not an anonymous ``TimeoutError`` from the outer wait: the driver's own
+    guard used to raise inside its task, which nothing awaited, so the one
+    message that named the problem was never seen.
+    """
+    clock = FakeClock(
+        WED_1500_ET,
+        stop_at=WED_1500_ET + timedelta(minutes=30),
+        wait_for_threads=True,
+        hang_guard=0.5,
+    )
+    release = threading.Event()
+
+    async def stuck() -> None:
+        await asyncio.to_thread(release.wait, 30)
+
+    healthy = Recorder(clock)
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="stuck",
+                schedule=EveryWhileOpen(timedelta(minutes=15)),
+                run=stuck,
+                rule="test",
+            ),
+            ScheduledJob(
+                name="healthy",
+                schedule=EveryWhileOpen(timedelta(minutes=5)),
+                run=healthy,
+                rule="test",
+            ),
+        ],
+        secrets=no_secrets,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    try:
+        with pytest.raises(AssertionError) as raised:
+            await run_until_parked(scheduler, clock)
+    finally:
+        release.set()
+    message = str(raised.value)
+    assert "context-job:stuck" in message, message
+    assert "stuck (test_scheduler.py:" in message, message
+    # 15:15 ET, the stuck job's first slot: the instant the clock stopped at.
+    assert "2026-11-25T20:15:00+00:00" in message, message
+    assert "0.5 s" in message, message
+
+
+@pytest.mark.risk
+@pytest.mark.asyncio
+async def test_a_sleeper_that_never_moves_the_clock_fails_at_the_step_ceiling() -> None:
+    """A livelock fails deterministically, after the same number of steps on any machine.
+
+    With no budget on the whole run, a job that sleeps zero seconds forever --
+    or a schedule that answers its own instant -- would never park. The
+    ceiling counts steps, not seconds, so load cannot move it. The test's own
+    ``wait_for`` is a backstop for a broken ceiling, never the expected path.
+    """
+    clock = FakeClock(
+        WED_1500_ET,
+        stop_at=WED_1500_ET + timedelta(hours=1),
+        hang_guard=2.0,
+        max_steps=200,
+    )
+
+    async def spin() -> None:
+        while True:
+            await clock.sleep(0)
+
+    spinner = asyncio.get_running_loop().create_task(spin(), name="context-job:spin")
+    try:
+        with pytest.raises(AssertionError, match="no park after 200 driver steps"):
+            await asyncio.wait_for(clock.drive(), timeout=clock.hang_guard)
+    finally:
+        spinner.cancel()
+        await asyncio.gather(spinner, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------
@@ -780,6 +1013,7 @@ _SHIPPED_NAMES = [
     "calendar_dividends",
     "calendar_releases",
     "calendar_central_banks",
+    "econ_first_prints",
 ]
 
 
@@ -870,6 +1104,8 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
             # (``test_scheduler_audit_catch_up.py``).
             "sentiment_audit",
             *_CALENDAR_JOBS,
+            # Decides from the stored attempts what is due (spec R8, U6e).
+            "econ_first_prints",
         ):
             assert by_name[name].catch_up is None, name
     # The SPDR sector seed (unit 4SEC-B2): weekly, Monday 09:00 ET, plus a
@@ -899,6 +1135,7 @@ def test_the_shipped_job_set_is_the_probe_fred_and_the_news_jobs() -> None:
         "calendar_dividends": ALPACA_DATA_HOST,
         "calendar_releases": FRED_HOST,
         "calendar_central_banks": "local",
+        "econ_first_prints": FRED_HOST,
     }
     for job in jobs:
         assert job.rule.strip(), job.name
@@ -1543,9 +1780,10 @@ def db_engine(tmp_path: Path) -> Iterator[Engine]:
 
     # Test-only durability trade. The shipped news jobs commit once per poll
     # -- the isolation run below drives ~1,000 of them across a holiday
-    # weekend -- and a WAL fsync per commit on Windows put each run at ~7 s,
-    # inside ``run_until_parked``'s 10 s timeout. A throwaway database needs
-    # no fsync; nothing asserted here depends on one.
+    # weekend -- and a WAL fsync per commit on Windows made each run several
+    # times slower. That is cost, not correctness: ``run_until_parked`` puts
+    # no budget on a run as a whole (see ``HANG_GUARD_SECONDS``). A throwaway
+    # database needs no fsync; nothing asserted here depends on one.
     @event.listens_for(engine, "connect")
     def _no_fsync(dbapi_connection: object, _record: object) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
@@ -1802,6 +2040,7 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         # earnings and dividends take the upsert-only path; IPO, releases and
         # central banks write through ``replace_window`` / the seed import.
         calendar_finnhub, dividends, releases = _calendar_fakes()
+        vintages = _econ_vintages()
         services = _news_services(
             db_engine,
             # A built seed: the audit skips on a missing one (fix B), and this
@@ -1818,6 +2057,7 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
             finnhub_calendar=calendar_finnhub,
             dividends=dividends,
             fred_releases=releases,
+            fred_vintages=vintages,
         )
         assert isinstance(services.position_underlyings, HeldPositionUnderlyings)
         # The scheduler's own sleeper: the SPDR catch-up waits on the fake
@@ -1860,7 +2100,7 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         # would: each woken body runs once on its job's own task, here too.
         assert scheduler.waker(CASH_SESSION_WAKE_JOBS)() == CASH_SESSION_WAKE_JOBS
         try:
-            await run_until_parked(scheduler, clock, timeout=60)
+            await run_until_parked(scheduler, clock)
         finally:
             await openfigi.aclose()
 
@@ -1904,6 +2144,12 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     with Session(db_engine) as session:
         kinds = set(session.scalars(select(CalendarEvent.kind).distinct()))
     assert kinds == {"earnings", "ipo", "dividend", "economic", "central-bank"}
+    # The econ first-prints body really ran (spec R8): it fetched the
+    # half-day's CPI and recorded the attempt through the writable session.
+    assert ("CPIAUCSL", date(2026, 11, 27), "monthly") in vintages.calls
+    with Session(db_engine) as session:
+        fetched = session.get(EconReleaseFetch, (10, date(2026, 11, 27)))
+    assert fetched is not None and fetched.outcome == "not_posted"
     # The sentiment audit body really ran twice, both scheduled-kind and
     # closed -- never left ``running`` -- and never a skip for want of bars:
     # the start-up catch-up for Saturday 21 Nov's missed slot (the window
@@ -1929,8 +2175,16 @@ def _calendar_fakes() -> tuple[FakeFinnhubCalendar, FakeDividends, FakeReleases]
     dividends = FakeDividends(
         CashDividendRead(dividends=(_dividend(ex_date=date(2026, 12, 15)),), skipped=())
     )
-    releases = FakeReleases([_cpi(date(2026, 12, 10))])
+    # A CPI on the half-day too, so ``econ_first_prints`` has a released row
+    # in the window: its real body fetches and records attempts, at its
+    # 10:00 catch-up at least, rather than finding nothing due.
+    releases = FakeReleases([_cpi(date(2026, 11, 27)), _cpi(date(2026, 12, 10))])
     return finnhub, dividends, releases
+
+
+def _econ_vintages() -> FakeVintages:
+    """FRED's vintages for ``econ_first_prints``: CPI, never posted -- every slot fetches."""
+    return FakeVintages({"CPIAUCSL": [not_posted]})
 
 
 #: How often the stand-in risk manager heartbeats in the hang test: well
@@ -2003,9 +2257,11 @@ async def test_shipped_context_jobs_hanging_past_the_watchdog_window_never_halt_
         finnhub_calendar=calendar_finnhub,
         dividends=dividends,
         fred_releases=releases,
+        fred_vintages=_econ_vintages(),
     )
     shipped = context_jobs(services, clock=clock, sleep=clock.sleep)
     assert set(_CALENDAR_JOBS) <= {job.name for job in shipped}
+    assert "econ_first_prints" in {job.name for job in shipped}
 
     entered: list[str] = []
     never = asyncio.Event()
@@ -2059,7 +2315,7 @@ async def test_shipped_context_jobs_hanging_past_the_watchdog_window_never_halt_
     heart = loop.create_task(risk_manager(), name="risk-manager-stand-in")
     monitor = loop.create_task(loop_monitor(), name="loop-monitor")
     try:
-        await run_until_parked(scheduler, clock, timeout=60)
+        await run_until_parked(scheduler, clock)
     finally:
         release.set()
         heart.cancel()
@@ -2528,7 +2784,7 @@ async def test_an_aborted_build_is_a_failure_under_the_scheduler_not_a_retry_sto
         clock = FakeClock(SPDR_NOW, stop_at=SPDR_NOW + timedelta(days=2))
         job = _jobs_by_name(services, clock)["spdr_holdings"]
         scheduler = Scheduler([job], secrets=no_secrets, clock=clock, sleep=clock.sleep)
-        await run_until_parked(scheduler, clock, timeout=30)
+        await run_until_parked(scheduler, clock)
     status = scheduler.status()["spdr_holdings"]
     assert status.failures == 1  # the catch-up; Monday's slot is outside the window
     assert status.runs == 0

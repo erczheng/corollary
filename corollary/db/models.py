@@ -86,6 +86,10 @@ __all__ = [
     "CASH_SESSION_INACTIVE",
     "Base",
     "EARNINGS_SESSIONS",
+    "ECON_FETCH_DETAIL_MAX",
+    "ECON_FETCH_OUTCOMES",
+    "EconReleaseFetch",
+    "EconReleaseValue",
     "IPO_STATUSES",
     "CLOSE_KINDS",
     "DataFeed",
@@ -2638,3 +2642,106 @@ class CalendarEvent(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     #: Set when the row was removed; a removed row is never read.
     deleted_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+#: ``econ_release_fetch.outcome``. A copy of
+#: ``corollary.data.econ_values.FETCH_OUTCOMES`` rather than an import, so the
+#: models do not load the FRED provider; ``tests/db/test_econ_release_value.py``
+#: fails if the two drift.
+ECON_FETCH_OUTCOMES: tuple[str, ...] = ("figure", "not_posted", "no_value", "refused", "error")
+
+#: The outcomes that carry a ``detail``; the other two carry none.
+_ECON_DETAILED_OUTCOMES: tuple[str, ...] = ("no_value", "refused", "error")
+
+#: ``econ_release_fetch.detail``'s bound: ``STORED_DETAIL_MAX`` (1024) of
+#: content plus ``vendor_detail``'s truncation notice, the
+#: ``ledger_rejection.detail`` precedent. ``econ_values.ATTEMPT_DETAIL_MAX``.
+ECON_FETCH_DETAIL_MAX = 1280
+
+
+class EconReleaseValue(Base):
+    """An economic release's first print (spec R6, unit U6d; migration ``*_econ_release_value``).
+
+    **Keyed to the calendar row, not stored on it.** ``(release_id,
+    release_date)`` joins to ``calendar_event.vendor_id =
+    "<release_id>:<release_date>"``. ``calendar_event.prior``/``.actual``
+    stay NULL on economic rows: the daily release-dates refresh rewrites
+    them through ``corollary.data.calendar._apply``, and a figure stored
+    there would be nulled by the next refresh.
+
+    **Written once, never updated** (Q23c keeps the first print).
+    ``corollary.data.econ_store.store_first_print`` is insert-only: a second
+    write for the same key keeps the first row. FRED's revisions never reach
+    it, because the figure is read from the release day's vintage.
+
+    ``actual`` and ``prior`` are ``Money`` (TEXT, exact ``Decimal``; SQL
+    comparison refused), in ``unit_label`` units, four places. ``period`` is
+    the observation date the figure describes (``2026-09-01`` for
+    September's CPI). ``vintage_date`` is the vintage it was read from, which
+    is the release day -- CHECK-enforced.
+    """
+
+    __tablename__ = "econ_release_value"
+    __table_args__ = (
+        CheckConstraint("release_id > 0", name="ck_econ_release_value_release_id"),
+        CheckConstraint("trim(series_id) <> ''", name="ck_econ_release_value_series_id"),
+        CheckConstraint("trim(unit_label) <> ''", name="ck_econ_release_value_unit_label"),
+        CheckConstraint(_money_shape("actual"), name="ck_econ_release_value_actual"),
+        CheckConstraint(_money_shape("prior"), name="ck_econ_release_value_prior"),
+        CheckConstraint(
+            "vintage_date = release_date", name="ck_econ_release_value_vintage_date"
+        ),
+    )
+
+    release_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    #: The release day: the Eastern session FRED lists the release on.
+    release_date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    series_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The observation date the figure describes. A date, not an instant.
+    period: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    actual: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    prior: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    #: The seed's unit at the time of writing (``% m/m``, ``K``), kept with the
+    #: figure so a later seed change cannot relabel a stored number.
+    unit_label: Mapped[str] = mapped_column(String(32), nullable=False)
+    vintage_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    #: When the figure was fetched, UTC.
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class EconReleaseFetch(Base):
+    """The **last** fetch attempt for one release (U6d; migration ``*_econ_release_value``).
+
+    A fact about attempts, upserted on every one, so the value table can stay
+    write-once. The display state is **not** stored here or anywhere (R8): it
+    is derived on read from this row, the value row and the clock.
+
+    ``outcome`` is one of :data:`ECON_FETCH_OUTCOMES`. ``detail`` is NULL on
+    ``figure`` and ``not_posted`` and required on the other three -- the
+    vendor's message for ``refused`` (scrubbed by the provider), the computed
+    reason for ``no_value``, the error type and a short scrubbed message for
+    ``error`` -- all CHECK-enforced, so ``unavailable`` never shows a blank
+    reason.
+    """
+
+    __tablename__ = "econ_release_fetch"
+    __table_args__ = (
+        CheckConstraint("release_id > 0", name="ck_econ_release_fetch_release_id"),
+        CheckConstraint(
+            _in_list("outcome", ECON_FETCH_OUTCOMES), name="ck_econ_release_fetch_outcome"
+        ),
+        CheckConstraint(
+            f"({_in_list('outcome', _ECON_DETAILED_OUTCOMES)} "
+            f"AND detail IS NOT NULL AND trim(detail) <> '' "
+            f"AND length(detail) <= {ECON_FETCH_DETAIL_MAX}) "
+            f"OR (NOT {_in_list('outcome', _ECON_DETAILED_OUTCOMES)} AND detail IS NULL)",
+            name="ck_econ_release_fetch_detail",
+        ),
+    )
+
+    release_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    release_date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    #: When the attempt ran, UTC.
+    attempted_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)

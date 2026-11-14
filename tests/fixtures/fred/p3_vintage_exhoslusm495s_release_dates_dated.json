@@ -1,0 +1,16 @@
+{
+  "recorded_at": "2026-11-10T00:08:48+00:00",
+  "path": "/release/dates",
+  "params": {
+    "release_id": "291",
+    "file_type": "json",
+    "include_release_dates_with_no_data": "true",
+    "realtime_start": "2026-07-12",
+    "realtime_end": "2026-11-09",
+    "sort_order": "desc",
+    "limit": "12"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"2026-07-12","realtime_end":"2026-11-09","order_by":"release_date","sort_order":"desc","count":0,"offset":0,"limit":12,"release_dates":[]}
+}

@@ -31,6 +31,7 @@ async def test_the_calendar_jobs_share_the_news_and_fred_jobs_vendor_instances(
         assert services.finnhub_calendar is services.finnhub
         assert services.dividends is services.alpaca
         assert services.fred_releases is services.fred
+        assert services.fred_vintages is services.fred
     await registry.aclose()
 
 
@@ -46,4 +47,5 @@ async def test_with_no_vendor_key_every_calendar_vendor_is_absent(db_engine: Eng
             None,
             None,
         )
+        assert services.fred_vintages is None
     await registry.aclose()

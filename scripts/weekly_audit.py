@@ -5,6 +5,16 @@ Windows Task Scheduler runs this from the repo root, Saturday 09:45 local
 
     uv run python scripts/weekly_audit.py
 
+The trigger's ``StartBoundary`` must be a local time with **no UTC offset**
+-- ``YYYY-MM-DDT09:45:00``, which is "Synchronize across time zones"
+cleared -- because ``New-ScheduledTaskTrigger -At`` writes an offset on
+registration, and with one the trigger fires at a fixed UTC instant: an hour
+late under EDT if it was registered under EST, after the 10:00 ET slot. Set
+it with ``$task = Get-ScheduledTask -TaskName <name>``, the trigger's
+``StartBoundary = 'YYYY-MM-DDT09:45:00'``, then ``Set-ScheduledTask
+-InputObject $task``, or untick "Synchronize across time zones" on the
+trigger in the GUI.
+
 It never places, cancels or reads an order, never POSTs anything, and never
 halts or resumes the engine. What it does, in order:
 
@@ -47,6 +57,18 @@ halts or resumes the engine. What it does, in order:
    recoverable from this script; exposing a skip code on the API is a follow-up.
 8. Stop the server -- a graceful signal first, so the lifespan's ``aclose()``
    runs, then a kill after a grace period -- and log which one it took.
+
+**The two runners overlap after the close.** ``scripts/weekday_session.py``
+runs a trading day's server until 18:05 ET, and this script launches from
+the close onwards, so both can fire in between: a machine off from Saturday
+to a Monday logon at 17:50 ET fires this missed task and the weekday
+runner's at-logon trigger together. The weekday runner's runway divides the
+cases: it launches only with at least an hour before its 18:05 ET stop (its
+``MIN_RUNWAY``), so a server it started has time for its start-up audit
+catch-up, and this script finding that server up logs ``already_running``
+(step 1) and leaves the audit to it. After 17:05 ET the weekday runner
+launches nothing (``too_late``), so this script launches its own server and
+waits under its own :data:`RUN_DEADLINE`, which no 18:05 stop cuts short.
 
 Logs go to ``logs/weekly-audit.log``, appended (one JSON object per line,
 UTC). They carry what this script decided and the ``audit_run`` fields it read
