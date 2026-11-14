@@ -235,6 +235,7 @@ def test_a_missing_fred_key_does_not_stop_the_shipped_scheduler_app_booting(
         assert client.get("/api/health").status_code == 200
         assert app.state.scheduler is not None
         assert "fred_dgs3mo" in app.state.scheduler.status()
+        assert "econ_first_prints" in app.state.scheduler.status()
     assert registry.rates.current() == FALLBACK_RISK_FREE_RATE
 
 

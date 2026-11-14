@@ -1,4 +1,4 @@
-"""Migration 0019: ``off_watch_unverdicted`` (owner decision Q24a).
+"""Migration 0020: ``off_watch_unverdicted`` (owner decision Q24a).
 
 The reason joins ``label_outcome``'s and ``label_outcome_voided``'s
 ``ck_*_skip_reason`` list and their membership list in ``ck_*_scope``: a
@@ -132,23 +132,23 @@ def _ddl(engine: Engine, name: str) -> tuple[str, list[str]]:
 
 
 @pytest.fixture
-def at_0018(tmp_path: Path) -> tuple[Config, str, tuple[int, int, int]]:
+def at_0019(tmp_path: Path) -> tuple[Config, str, tuple[int, int, int]]:
     url = sqlite_url(tmp_path / "unverdicted.db")
     cfg = _config(url)
-    command.upgrade(cfg, "0018")
+    command.upgrade(cfg, "0019")
     return cfg, url, _seed(url)
 
 
-def test_0019_revises_0018() -> None:
+def test_0020_revises_0019() -> None:
     script = ScriptDirectory.from_config(_config("sqlite://"))
-    revision = script.get_revision("0019")
-    assert revision is not None and revision.down_revision == "0018"
+    revision = script.get_revision("0020")
+    assert revision is not None and revision.down_revision == "0019"
 
 
 def test_upgrade_keeps_every_row_and_constraint_and_admits_the_reason(
-    at_0018: tuple[Config, str, tuple[int, int, int]],
+    at_0019: tuple[Config, str, tuple[int, int, int]],
 ) -> None:
-    cfg, url, (first, second, run_id) = at_0018
+    cfg, url, (first, second, run_id) = at_0019
     _execute(url, _outcome(first, run_id, "off_watch_untradeable"))
     _execute(url, _archived(first, run_id, "discovery_cap"))
     assert "ck_label_outcome_skip_reason" in _refused(
@@ -157,7 +157,7 @@ def test_upgrade_keeps_every_row_and_constraint_and_admits_the_reason(
     before = _rows(url)
     shapes = {table: _shape(url, table) for table in _TABLES}
 
-    command.upgrade(cfg, "0019")
+    command.upgrade(cfg, "0020")
 
     assert _rows(url) == before
     assert {table: _shape(url, table) for table in _TABLES} == shapes
@@ -217,13 +217,13 @@ def test_upgrade_refuses_an_orphan_row_before_touching_anything(
     tmp_path: Path, table: str
 ) -> None:
     """The rebuild's copy is checked against both foreign keys, and a failure
-    there used to strand ``_alembic_tmp_<table>`` at 0018, failing every retry
+    there used to strand ``_alembic_tmp_<table>`` at 0019, failing every retry
     on the leftover. Now the upgrade refuses first, naming the table and the
     row, and the database is exactly as it was; repaired, it upgrades."""
     path = tmp_path / "orphan.db"
     url = sqlite_url(path)
     cfg = _config(url)
-    command.upgrade(cfg, "0018")
+    command.upgrade(cfg, "0019")
     first, _second, run_id = _seed(url)
     _execute(url, _outcome(first, run_id, "discovery_cap"))  # a sound row beside it
     missing = first + 1000
@@ -232,58 +232,58 @@ def test_upgrade_refuses_an_orphan_row_before_touching_anything(
     before = _rows(url)
     _, tables_before = _version_and_tables(url)
 
-    with pytest.raises(RuntimeError, match="refusing to upgrade 0019") as caught:
-        command.upgrade(cfg, "0019")
+    with pytest.raises(RuntimeError, match="refusing to upgrade 0020") as caught:
+        command.upgrade(cfg, "0020")
 
     message = str(caught.value)
     assert f"{table} holds 1 row(s)" in message
     assert f"label_id={missing}" in message and "sentiment_label" in message
     version, tables = _version_and_tables(url)
-    assert version == "0018"
+    assert version == "0019"
     assert tables == tables_before
     assert not any(name.startswith("_alembic_tmp") for name in tables)
     assert _rows(url) == before
 
     _orphan(path, f"DELETE FROM {table} WHERE label_id = {missing}")
-    command.upgrade(cfg, "0019")
-    assert _version_and_tables(url)[0] == "0019"
+    command.upgrade(cfg, "0020")
+    assert _version_and_tables(url)[0] == "0020"
 
 
 def test_downgrade_refuses_an_orphan_row_before_touching_anything(
-    at_0018: tuple[Config, str, tuple[int, int, int]], tmp_path: Path
+    at_0019: tuple[Config, str, tuple[int, int, int]], tmp_path: Path
 ) -> None:
     """The reverse rebuild copies the same way, so it refuses the same way."""
-    cfg, url, (first, _second, run_id) = at_0018
-    command.upgrade(cfg, "0019")
+    cfg, url, (first, _second, run_id) = at_0019
+    command.upgrade(cfg, "0020")
     _orphan(tmp_path / "unverdicted.db", _outcome(first, run_id + 1000, "discovery_cap"))
 
-    with pytest.raises(RuntimeError, match="refusing to downgrade 0019") as caught:
-        command.downgrade(cfg, "0018")
+    with pytest.raises(RuntimeError, match="refusing to downgrade 0020") as caught:
+        command.downgrade(cfg, "0019")
 
     assert "label_outcome holds 1 row(s)" in str(caught.value)
     assert "audit_run" in str(caught.value)
     version, tables = _version_and_tables(url)
-    assert version == "0019"
+    assert version == "0020"
     assert not any(name.startswith("_alembic_tmp") for name in tables)
 
 
 def test_downgrade_refuses_while_an_unverdicted_row_exists_and_otherwise_reverses(
-    at_0018: tuple[Config, str, tuple[int, int, int]],
+    at_0019: tuple[Config, str, tuple[int, int, int]],
 ) -> None:
-    cfg, url, (first, second, run_id) = at_0018
-    command.upgrade(cfg, "0019")
+    cfg, url, (first, second, run_id) = at_0019
+    command.upgrade(cfg, "0020")
     _execute(url, _outcome(first, run_id, "discovery_cap"))
     _execute(url, _archived(second, run_id, "off_watch_unverdicted"))
-    with pytest.raises(RuntimeError, match="refusing to downgrade 0019"):
-        command.downgrade(cfg, "0018")
+    with pytest.raises(RuntimeError, match="refusing to downgrade 0020"):
+        command.downgrade(cfg, "0019")
     assert len(_rows(url)["label_outcome_voided"]) == 1  # the record stands
 
     _execute(url, f"DELETE FROM label_outcome_voided WHERE label_id = {second}")
     before = _rows(url)
-    command.downgrade(cfg, "0018")
+    command.downgrade(cfg, "0019")
     assert _rows(url) == before
     assert "ck_label_outcome_skip_reason" in _refused(
         url, _outcome(second, run_id, "off_watch_unverdicted")
     )
-    command.upgrade(cfg, "0019")
+    command.upgrade(cfg, "0020")
     _execute(url, _outcome(second, run_id, "off_watch_unverdicted"))

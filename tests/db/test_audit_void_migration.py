@@ -25,7 +25,7 @@ from tests.db.test_migrations import _config, _route_rows
 from tests.db.test_news_watchlist_tradeability import _normalised
 
 _SEED_SQL = (
-    # Label 7 exists: 0019 rebuilds label_outcome, and the rebuild's copy is
+    # Label 7 exists: 0020 rebuilds label_outcome, and the rebuild's copy is
     # checked against sentiment_label like any insert (the live database can
     # hold no dangling outcome, since 0014's foreign keys are enforced).
     "INSERT INTO news_article (id, vendor, vendor_id, feed, canonical_id, url, url_key, "

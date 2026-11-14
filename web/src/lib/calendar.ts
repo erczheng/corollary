@@ -13,7 +13,7 @@
  * float it prints `1.235`, and a CPI print loses its trailing zero.
  */
 
-import { formatSessionDay } from './format'
+import { formatSessionDay, formatTimeET } from './format'
 import type {
   CalendarEvent,
   CalendarEventType,
@@ -131,24 +131,74 @@ export function timeSlot(event: CalendarEvent): TimeSlot {
  * Figures
  * ---------------------------------------------------------------------- */
 
-/** An economic row's prior/actual, said in words when they are absent.
+/** What an economic row says about its first print (spec R8), by the
+ * server's `valueState`. Every branch is words or figures — none is a blank:
  *
- * `pending` is the owner-decision state (unit 7.2b-R): which FRED series is
- * a release's headline figure is unanswered, so both are null on every
- * economic row and the panel says *why* rather than leaving blanks. */
-export type EconomicFigures =
-  | { kind: 'pending' }
-  | { kind: 'figures'; prior: string | null; actual: string | null; unit: string | null }
+ * - `filled` — `actual` and `prior` **as served**, already rounded by the
+ *   server to the series' display decimals, so they are never parsed here
+ *   (`"0.6"` stays `"0.6"`, `"-105.0"` keeps its zero). `note` is the
+ *   derivation ("computed from FRED's levels: CPIAUCSL"), shown on hover
+ *   and keyboard focus;
+ * - `awaiting` — released, FRED has not printed it yet;
+ * - `unavailable` — the server's own reason, verbatim (a 7-day lapse, or a
+ *   vendor refusal such as NAR licensing);
+ * - `upcoming` — before the release, at the time the row's slot already
+ *   shows. No number is invented for any of these.
+ *
+ * Two contract breaches read as `unavailable` in words rather than as a
+ * blank: a `filled` row with no `actual`, and an economic row with no
+ * `valueState`. Neither should happen; if one does, the panel says what is
+ * missing instead of drawing an empty "Actual". */
+export type EconomicReading =
+  | {
+      kind: 'filled'
+      actual: string
+      prior: string | null
+      unit: string | null
+      note: string | null
+    }
+  | { kind: 'awaiting'; text: string }
+  | { kind: 'unavailable'; text: string; reason: string }
+  | { kind: 'upcoming'; text: string }
 
-export function economicFigures(
-  event: CalendarEvent,
-  range: Pick<CalendarRange, 'notices'>,
-): EconomicFigures {
-  const none = event.prior === null && event.actual === null
-  if (none && range.notices.releaseFigures.state === 'pending_owner_decision') {
-    return { kind: 'pending' }
+export const AWAITING_TEXT = "Released, awaiting FRED's first print"
+export const UNAVAILABLE_LEAD = 'First print unavailable:'
+
+export function economicReading(
+  event: Pick<CalendarEvent, 'valueState' | 'valueNote' | 'prior' | 'actual' | 'unit' | 'at'>,
+): EconomicReading {
+  const unavailable = (reason: string): EconomicReading => ({
+    kind: 'unavailable',
+    text: `${UNAVAILABLE_LEAD} ${reason}`,
+    reason,
+  })
+  switch (event.valueState) {
+    case 'filled':
+      if (event.actual === null) {
+        return unavailable('the server marked this release filled but sent no figure.')
+      }
+      return {
+        kind: 'filled',
+        actual: event.actual,
+        prior: event.prior,
+        unit: event.unit,
+        note: event.valueNote,
+      }
+    case 'awaiting':
+      return { kind: 'awaiting', text: AWAITING_TEXT }
+    case 'unavailable':
+      return unavailable(event.valueNote ?? 'the server gave no reason.')
+    case 'upcoming':
+      return {
+        kind: 'upcoming',
+        text:
+          event.at !== null
+            ? `Upcoming at ${formatTimeET(event.at)} ET — no figure until it is released`
+            : 'Upcoming — no figure until it is released',
+      }
+    default:
+      return unavailable('the server sent no state for this release.')
   }
-  return { kind: 'figures', prior: event.prior, actual: event.actual, unit: event.unit }
 }
 
 /* ---------------------------------------------------------------------- *

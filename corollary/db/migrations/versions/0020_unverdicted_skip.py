@@ -45,8 +45,8 @@ table carries ``off_watch_unverdicted``: deleting or re-labelling an audit
 record to make a downgrade fit is not this migration's call (0016's and
 0018's rule). With none, it is the exact reverse and keeps every row.
 
-Revision ID: 0019
-Revises: 0018
+Revision ID: 0020
+Revises: 0019
 Create Date: 2026-11-11
 
 """
@@ -58,8 +58,8 @@ import sqlalchemy as sa
 from alembic import op
 from alembic.operations import BatchOperations
 
-revision: str = "0019"
-down_revision: str | None = "0018"
+revision: str = "0020"
+down_revision: str | None = "0019"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -249,7 +249,7 @@ def _refuse_orphans(direction: str) -> None:
                 f"label_id={label_id} window={window!r} audit_run_id={run_id} (missing: {missing})"
             )
         raise RuntimeError(
-            f"refusing to {direction} 0019: {table} holds {len(parents)} row(s) whose foreign "
+            f"refusing to {direction} 0020: {table} holds {len(parents)} row(s) whose foreign "
             f"key names no row, first {'; '.join(named)}. The rebuild copies every row "
             "under both foreign keys, so it would fail half-way and leave its temporary "
             "table behind. Deleting or re-pointing audit records to make a migration fit "
@@ -275,7 +275,7 @@ def downgrade() -> None:
         ).scalar_one()
         if count:
             raise RuntimeError(
-                f"refusing to downgrade 0019: {table} holds {count} row(s) with skip_reason "
+                f"refusing to downgrade 0020: {table} holds {count} row(s) with skip_reason "
                 f"'{_UNVERDICTED}', the record of a label no verdict could be had for. "
                 "Deleting or re-labelling audit records to make a downgrade fit is not "
                 "this migration's call."

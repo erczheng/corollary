@@ -8,8 +8,9 @@ import {
   JOB_LABEL,
   JOB_STATE_LABEL,
   SOURCE_PHRASE,
+  UNAVAILABLE_LEAD,
   calendarWindow,
-  economicFigures,
+  economicReading,
   emptyReading,
   etClock,
   etInstant,
@@ -18,6 +19,7 @@ import {
   removeConsequence,
   timeSlot,
   uncoveredAfter,
+  type EconomicReading,
   type JobTone,
 } from '../lib/calendar'
 import {
@@ -68,8 +70,12 @@ const PRIMARY_BUTTON =
   'rounded bg-primary px-3 py-1 text-label-sm text-on-primary disabled:opacity-50'
 
 /** Figures are monospaced with tabular digits, like every number here. */
-function Num({ children }: { children: string }) {
-  return <span className="font-mono tabular-nums">{children}</span>
+function Num({ children, className }: { children: string; className?: string }) {
+  return (
+    <span className={className ? `font-mono tabular-nums ${className}` : 'font-mono tabular-nums'}>
+      {children}
+    </span>
+  )
 }
 
 function rangePhrase(range: Pick<CalendarRange, 'start' | 'end'>): string {
@@ -164,7 +170,6 @@ export function MarketCalendar({ today }: { today?: string }) {
                               <EventRow
                                 key={e.id}
                                 event={e}
-                                range={data}
                                 onEdit={() => setEditing(e.id)}
                                 onRemove={() => setRemoving(e)}
                               />
@@ -217,12 +222,10 @@ export function MarketCalendar({ today }: { today?: string }) {
 
 function EventRow({
   event: e,
-  range,
   onEdit,
   onRemove,
 }: {
   event: CalendarEvent
-  range: CalendarRange
   onEdit: () => void
   onRemove: () => void
 }) {
@@ -232,7 +235,7 @@ function EventRow({
         <TimeSlotView event={e} />{' '}
         {e.ticker ? <span className="font-semibold">{e.ticker}</span> : null} {e.title}
       </p>
-      <EventDetail event={e} range={range} />
+      <EventDetail event={e} />
       {e.editable ? (
         <span className="mt-0.5 flex gap-1">
           <button
@@ -278,7 +281,64 @@ function TimeSlotView({ event }: { event: CalendarEvent }) {
   }
 }
 
-function EventDetail({ event: e, range }: { event: CalendarEvent; range: CalendarRange }) {
+/** A filled economic row: "Actual 0.6 % m/m · Prior 0.4 % m/m", the served
+ * strings verbatim through `formatDecimalFigure` (never parsed — the server
+ * already rounded them). Figures are `on-surface` and never `bullish` or
+ * `bearish`: a release print is not P&L, and a negative trade balance is
+ * not a loss.
+ *
+ * **The note is reachable by keyboard, not by hover alone.** `title` on a
+ * span — the `TimeSlotView` and `FixtureMarker` precedent — is pointer-only,
+ * and a sighted keyboard user would never see where the figure came from.
+ * So the figures are one focusable span (`tabIndex={0}`; it activates
+ * nothing, so it is a stop rather than a control) whose accessible
+ * description is the note, shown as a tooltip on hover and on focus. The
+ * focus ring is the global `:focus-visible` rule in `index.css` — `primary`,
+ * offset — which `useFocusModality`'s `html[data-modality='pointer']`
+ * suppresses on click; no local ring, so the gate cannot be bypassed. The
+ * tooltip is `display: none` until shown, so a screen reader hears it once,
+ * as the description, rather than twice in the reading order. */
+function FirstPrint({
+  reading,
+  noteId,
+}: {
+  reading: Extract<EconomicReading, { kind: 'filled' }>
+  noteId: string
+}) {
+  const figures = (
+    <>
+      Actual{' '}
+      <Num className="text-on-surface">{formatDecimalFigure(reading.actual, reading.unit)}</Num>
+      {' · '}Prior{' '}
+      {reading.prior !== null ? (
+        <Num className="text-on-surface">{formatDecimalFigure(reading.prior, reading.unit)}</Num>
+      ) : (
+        'not available'
+      )}
+    </>
+  )
+  if (reading.note === null) return <span>{figures}</span>
+  return (
+    <span className="group relative">
+      <span
+        tabIndex={0}
+        aria-describedby={noteId}
+        className="rounded-sm underline decoration-dotted underline-offset-2"
+      >
+        {figures}
+      </span>
+      <span
+        role="tooltip"
+        id={noteId}
+        className="absolute left-0 top-full z-10 mt-1 hidden w-max max-w-64 rounded-lg border border-outline-warm bg-surface-container-highest px-2 py-1 text-caption text-on-surface group-focus-within:block group-hover:block"
+      >
+        {reading.note}
+      </span>
+    </span>
+  )
+}
+
+function EventDetail({ event: e }: { event: CalendarEvent }) {
   if (e.type === 'earnings') {
     if (e.estimate === null && e.actual === null) return null
     return (
@@ -299,28 +359,19 @@ function EventDetail({ event: e, range }: { event: CalendarEvent; range: Calenda
   }
 
   if (e.type === 'economic') {
-    const figures = economicFigures(e, range)
+    const reading = economicReading(e)
     return (
       <p className="text-on-surface-variant">
-        {figures.kind === 'pending' ? (
-          <span title={range.notices.releaseFigures.reason}>
-            Prior and actual pending an owner decision
+        {reading.kind === 'filled' ? (
+          <FirstPrint reading={reading} noteId={`calendar-note-${e.id}`} />
+        ) : reading.kind === 'unavailable' ? (
+          // The server's reason, verbatim, in its own span so it is the
+          // sentence on screen rather than a paraphrase of it.
+          <span>
+            {UNAVAILABLE_LEAD} <span>{reading.reason}</span>
           </span>
         ) : (
-          <>
-            Prior{' '}
-            {figures.prior !== null ? (
-              <Num>{formatDecimalFigure(figures.prior, figures.unit)}</Num>
-            ) : (
-              'not available'
-            )}
-            {' · '}Actual{' '}
-            {figures.actual !== null ? (
-              <Num>{formatDecimalFigure(figures.actual, figures.unit)}</Num>
-            ) : (
-              'after release'
-            )}
-          </>
+          <span>{reading.text}</span>
         )}
         {e.consensus === 'unavailable' ? ' · Consensus not available' : null}
       </p>
@@ -426,10 +477,12 @@ const TONE_TEXT: Record<JobTone, string> = {
 }
 
 /** Everything the panel has to say aloud: each job's state and sentence,
- * where its coverage stops, each central-bank seed gap, and why economic
- * figures are blank. */
+ * where its coverage stops, each central-bank seed gap, and — once, rather
+ * than on every row — why no economic release carries a consensus. Each
+ * release's own first-print state is said on its row (`economicReading`). */
 function Notices({ range }: { range: CalendarRange }) {
-  const { jobs, seedGaps, releaseFigures } = range.notices
+  const { jobs, seedGaps } = range.notices
+  const hasEconomic = range.days.some((d) => d.events.some((e) => e.type === 'economic'))
   return (
     <div className="mt-4 space-y-3">
       <div>
@@ -466,11 +519,9 @@ function Notices({ range }: { range: CalendarRange }) {
         </div>
       ) : null}
 
-      {releaseFigures.state === 'pending_owner_decision' ? (
+      {hasEconomic ? (
         <p className="text-caption text-on-surface-variant">
-          <span className="text-on-surface">Economic prior and actual are pending.</span>{' '}
-          {releaseFigures.reason} Consensus is not available on any release — no free source sells
-          it.
+          Consensus is not available on any economic release — no free source sells it.
         </p>
       ) : null}
     </div>

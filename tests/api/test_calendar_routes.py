@@ -9,9 +9,15 @@ and Q15:
 * events group by ``date``, never by ``at``'s UTC day;
 * Decimal figures are exact JSON strings; earnings carry a session, IPOs
   their five fields, economic rows ``consensus: "unavailable"``;
+* an economic row's first print (U6f; spec R6, R7, R8): ``prior``/``actual``
+  from the stored first print, never from ``calendar_event``, rounded
+  ``ROUND_HALF_UP`` to the seed's ``decimals``; the seed's unit; and all four
+  display states with their notes, derived at the request's ``now``. Every
+  other kind carries ``valueState``/``valueNote`` null;
 * every notice: central-bank seed gaps (no file, unpublished, partial,
-  unreadable), each job's state including a premium ``CalendarAccessDenied``
-  told apart from an outage, and the release figures' pending owner decision;
+  unreadable), and each job's state including a premium
+  ``CalendarAccessDenied`` told apart from an outage. The release-figures
+  notice is gone;
 * manual rows round-trip; vendor and seed rows are refused with a 409, an
   unknown id with a 404; nothing reaches ``audit_log`` (decision 9);
 * one ``calendar_changed`` notice per change, Discord only, none for a
@@ -26,7 +32,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import FastAPI
@@ -43,11 +50,15 @@ from corollary.api.deps import (
 from corollary.api.routes.calendar import (
     CALENDAR_JOBS,
     CALENDAR_MAX_SPAN_DAYS,
+    EconomicFields,
     central_bank_seed_dir,
+    display_figure,
+    event_item,
     request_now,
 )
 from corollary.api.routes.calendar import router as calendar_router
-from corollary.data.calendar import create_manual, upsert_events
+from corollary.api.schemas import CalendarValueState
+from corollary.data.calendar import create_manual, read_range, replace_window, upsert_events
 from corollary.data.calendar_event import (
     TITLE_MAX,
     CalendarEventInput,
@@ -55,6 +66,24 @@ from corollary.data.calendar_event import (
     CalendarSource,
     EarningsSession,
     IpoStatus,
+)
+from corollary.data.calendar_releases import release_events, release_vendor_id
+from corollary.data.econ_store import record_attempt, store_first_print
+from corollary.data.econ_values import (
+    VALUE_STATES,
+    Attempt,
+    Figure,
+    NoValue,
+    NotPosted,
+    Refused,
+    attempt_of,
+    attempt_of_error,
+)
+from corollary.data.providers.fred import FredReleaseDate
+from corollary.data.seeds.calendar_seeds import (
+    MAX_DISPLAY_DECIMALS,
+    EconReleaseSeries,
+    load_econ_release_seeds,
 )
 from corollary.db.models import (
     AuditLog,
@@ -69,6 +98,7 @@ from corollary.engine.scheduler import EveryInterval, JobStatus, _calendar_jobs
 APP_LOGGER = "corollary.api.app"
 
 UTC = timezone.utc
+EASTERN = ZoneInfo("America/New_York")
 #: Wednesday 2026-10-14, 11:00 EDT.
 NOW = datetime(2026, 10, 14, 15, 0, tzinfo=UTC)
 FAKE_WEBHOOK = "https://discord.com/api/webhooks/1234/not-a-real-webhook-token"
@@ -147,15 +177,26 @@ def earnings(**overrides: Any) -> CalendarEventInput:
     return CalendarEventInput(**fields)
 
 
-def release(at: datetime, day: date, vendor_id: str = "10:2026-10-13") -> CalendarEventInput:
-    return CalendarEventInput(
-        kind=CalendarKind.ECONOMIC,
-        source=CalendarSource.FRED,
-        vendor_id=vendor_id,
-        title="Consumer Price Index",
-        date=day,
-        at=at,
-    )
+def release(
+    at: datetime, day: date, vendor_id: str | None = None, **overrides: Any
+) -> CalendarEventInput:
+    """An economic row. ``vendor_id`` defaults to CPI's (release 10) on ``day``.
+
+    It used to default to ``10:2026-10-13`` whatever ``day`` was. The read
+    now joins on it (``econ_store.read_economic_releases``), which refuses a
+    ``vendor_id`` naming another date than its row -- and
+    ``calendar_releases.release_vendor_id`` never writes one.
+    """
+    fields: dict[str, Any] = {
+        "kind": CalendarKind.ECONOMIC,
+        "source": CalendarSource.FRED,
+        "vendor_id": f"10:{day.isoformat()}" if vendor_id is None else vendor_id,
+        "title": "Consumer Price Index",
+        "date": day,
+        "at": at,
+    }
+    fields.update(overrides)
+    return CalendarEventInput(**fields)
 
 
 def fomc() -> CalendarEventInput:
@@ -345,6 +386,8 @@ def test_an_earnings_row_carries_its_session_and_no_time(
         "estimate": "1.2350",
         "prior": None,
         "actual": "-0.10",
+        "valueState": None,
+        "valueNote": None,
         "consensus": None,
         "unit": "USD/share",
         "exchange": None,
@@ -400,13 +443,370 @@ def test_a_central_bank_row_carries_its_time(calendar: TestClient, db_engine: En
 # --------------------------------------------------------------------------
 
 
-def test_the_release_figures_are_stated_as_pending_an_owner_decision(
-    calendar: TestClient,
-) -> None:
-    notice = read(calendar, "2026-10-14", "2026-10-14")["notices"]["releaseFigures"]
+def test_no_release_figures_notice_is_served(calendar: TestClient) -> None:
+    """Spec *API*: the blanket "not filled yet" reason string is removed (U6f)."""
+    response = calendar.get("/api/calendar", params={"from": "2026-10-14", "to": "2026-10-14"})
 
-    assert notice["state"] == "pending_owner_decision"
-    assert "owner decision" in notice["reason"]
+    assert set(response.json()["notices"]) == {"seedGaps", "jobs"}
+    assert "not filled yet" not in response.text
+    assert "owner decision" not in response.text
+
+
+# --------------------------------------------------------------------------
+# Economic first prints (U6f; spec R6, R7, R8)
+# --------------------------------------------------------------------------
+
+ECON_SEEDS = load_econ_release_seeds()
+
+#: 08:30 EDT on Wednesday 14 Oct: CPI's release instant, before ``NOW``.
+CPI_AT = datetime(2026, 10, 14, 12, 30, tzinfo=UTC)
+CPI_DAY = date(2026, 10, 14)
+#: When the job stored a figure: ten minutes after the release.
+FETCHED = CPI_AT + timedelta(minutes=10)
+
+#: FRED's refusal of ``EXHOSLUSM495S``'s vintages, verbatim from
+#: ``tests/fixtures/fred/p3_vintage_exhoslusm495s_release_day.json``.
+REFUSAL = (
+    "Bad Request.  The series does not exist in ALFRED but may exist in FRED.  "
+    "Try setting realtime_start and realtime_end to today's date or removing the "
+    "realtime_start and realtime_end variables."
+)
+
+
+def _series(release_id: int) -> EconReleaseSeries:
+    row = ECON_SEEDS.series.by_id(release_id)
+    assert row is not None, release_id
+    return row
+
+
+def econ_row(release_id: int, at: datetime, **overrides: Any) -> CalendarEventInput:
+    """An economic calendar row for ``release_id``, dated ``at``'s Eastern date."""
+    day = at.astimezone(EASTERN).date()
+    return release(at, day, release_vendor_id(release_id, day), **overrides)
+
+
+def store_value(
+    engine: Engine,
+    release_id: int,
+    day: date,
+    *,
+    actual: str,
+    prior: str,
+) -> None:
+    """Store a first print through the one writer, ``econ_store.store_first_print``."""
+    series = _series(release_id)
+    figure = Figure(series.series_id, date(2026, 9, 1), Decimal(actual), Decimal(prior), day)
+    with Session(engine) as session:
+        store_first_print(session, release_id, day, series, figure, fetched_at=FETCHED)
+        session.commit()
+
+
+def store_attempt(engine: Engine, release_id: int, day: date, attempt: Attempt) -> None:
+    with Session(engine) as session:
+        record_attempt(session, release_id, day, attempt, at=FETCHED)
+        session.commit()
+
+
+def read_one(client: TestClient, day: date) -> dict[str, Any]:
+    (event,) = all_events(read(client, day.isoformat(), day.isoformat()))
+    return event
+
+
+def at_now(app: FastAPI, moment: datetime) -> None:
+    """Serve the next request at ``moment`` -- the route's own ``request_now`` seam."""
+    app.dependency_overrides[request_now] = lambda: moment
+
+
+def test_the_value_states_are_the_stores_own() -> None:
+    """The wire's union is exactly ``econ_values``' four states, in order."""
+    assert get_args(CalendarValueState) == VALUE_STATES
+
+
+def test_an_upcoming_release_has_no_figure_and_no_note(
+    calendar: TestClient, db_engine: Engine
+) -> None:
+    # 08:30 EDT tomorrow: after NOW.
+    add_events(db_engine, econ_row(10, CPI_AT + timedelta(days=1)))
+
+    event = read_one(calendar, CPI_DAY + timedelta(days=1))
+
+    assert {key: event[key] for key in ("valueState", "valueNote", "prior", "actual")} == {
+        "valueState": "upcoming",
+        "valueNote": None,
+        "prior": None,
+        "actual": None,
+    }
+    assert event["unit"] == "% m/m"
+    assert event["consensus"] == "unavailable"
+
+
+def test_a_released_row_with_no_value_is_awaiting(
+    calendar: TestClient, db_engine: Engine
+) -> None:
+    add_events(db_engine, econ_row(10, CPI_AT))  # 08:30 EDT today, before NOW
+
+    event = read_one(calendar, CPI_DAY)
+
+    assert (event["valueState"], event["valueNote"], event["prior"], event["actual"]) == (
+        "awaiting",
+        None,
+        None,
+        None,
+    )
+    assert event["unit"] == "% m/m"
+
+
+def test_a_stored_value_is_filled_rounded_and_labelled(
+    calendar: TestClient, db_engine: Engine
+) -> None:
+    add_events(db_engine, econ_row(10, CPI_AT))
+    store_value(db_engine, 10, CPI_DAY, actual="0.6485", prior="0.3960")
+
+    response = calendar.get("/api/calendar", params={"from": "2026-10-14", "to": "2026-10-14"})
+    (event,) = all_events(response.json())
+
+    assert {
+        key: event[key] for key in ("valueState", "valueNote", "actual", "prior", "unit")
+    } == {
+        "valueState": "filled",
+        "valueNote": "computed from FRED's levels: CPIAUCSL",
+        "actual": "0.6",
+        "prior": "0.4",
+        "unit": "% m/m",
+    }
+    assert event["consensus"] == "unavailable"
+    assert event["estimate"] is None
+    # Strings on the wire, never JSON numbers.
+    assert '"actual":"0.6"' in response.text
+
+
+@pytest.mark.parametrize(
+    ("release_id", "stored", "shown"),
+    [
+        (10, "0.6485", "0.6"),  # below the half
+        (10, "0.6500", "0.7"),  # the half rounds up, not to even (0.6)
+        (10, "0.0500", "0.1"),  # the half rounds up, not to even (0.0)
+        (50, "165.0000", "165"),  # PAYEMS: 0 places, no trailing point
+        (51, "-105.0470", "-105.0"),  # BOPGSTB: a negative keeps its sign
+        (10, "-0.0400", "0.0"),  # a negative that rounds to zero is not "-0.0"
+        (291, "4.0650", "4.07"),  # EXHOSLUSM495S: 2 places, half up (even gives 4.06)
+    ],
+)
+def test_a_figure_is_rounded_half_up_to_its_seed_decimals(
+    calendar: TestClient,
+    db_engine: Engine,
+    release_id: int,
+    stored: str,
+    shown: str,
+) -> None:
+    add_events(db_engine, econ_row(release_id, CPI_AT))
+    store_value(db_engine, release_id, CPI_DAY, actual=stored, prior=stored)
+
+    event = read_one(calendar, CPI_DAY)
+
+    assert (event["actual"], event["prior"]) == (shown, shown)
+    assert event["unit"] == _series(release_id).unit_label
+    assert event["valueNote"] == f"computed from FRED's levels: {_series(release_id).series_id}"
+
+
+def test_exactly_seven_days_after_the_release_an_unfilled_row_is_unavailable(
+    app: FastAPI, calendar: TestClient, db_engine: Engine
+) -> None:
+    add_events(db_engine, econ_row(10, CPI_AT))
+
+    at_now(app, CPI_AT + timedelta(days=7) - timedelta(microseconds=1))
+    assert read_one(calendar, CPI_DAY)["valueState"] == "awaiting"
+
+    at_now(app, CPI_AT + timedelta(days=7))
+    event = read_one(calendar, CPI_DAY)
+    assert (event["valueState"], event["valueNote"]) == (
+        "unavailable",
+        "not published on FRED within 7 days",
+    )
+    assert (event["prior"], event["actual"]) == (None, None)
+
+
+def test_a_refused_series_is_unavailable_at_once_with_the_vendors_message(
+    app: FastAPI, calendar: TestClient, db_engine: Engine
+) -> None:
+    # Existing home sales: 10:00 EDT, and FRED refuses its vintages (NAR licensing).
+    released = datetime(2026, 10, 14, 14, 0, tzinfo=UTC)
+    add_events(db_engine, econ_row(291, released))
+    store_attempt(
+        db_engine, 291, CPI_DAY, attempt_of(Refused("EXHOSLUSM495S", CPI_DAY, REFUSAL))
+    )
+
+    at_now(app, released + timedelta(minutes=11))  # minutes after, not days
+    event = read_one(calendar, CPI_DAY)
+
+    assert (event["valueState"], event["valueNote"]) == (
+        "unavailable",
+        f"not available from FRED: {REFUSAL}",
+    )
+    assert (event["prior"], event["actual"], event["unit"]) == (None, None, "M SAAR")
+
+
+@pytest.mark.parametrize(
+    ("attempt", "note"),
+    [
+        (
+            attempt_of_error(TimeoutError("read timed out"), secrets=()),
+            "could not be fetched from FRED: TimeoutError",
+        ),
+        (
+            attempt_of(NoValue("CPIAUCSL", CPI_DAY, "x(t-1) is '.' on 2026-08-01")),
+            "x(t-1) is '.' on 2026-08-01",
+        ),
+        (attempt_of(NotPosted("CPIAUCSL", CPI_DAY)), "not published on FRED within 7 days"),
+    ],
+    ids=["error", "no_value", "not_posted"],
+)
+def test_after_seven_days_the_last_attempt_says_why(
+    app: FastAPI, calendar: TestClient, db_engine: Engine, attempt: Attempt, note: str
+) -> None:
+    add_events(db_engine, econ_row(10, CPI_AT))
+    store_attempt(db_engine, 10, CPI_DAY, attempt)
+
+    # Inside the week, a failed attempt is still awaiting: the next may succeed.
+    at_now(app, CPI_AT + timedelta(days=6))
+    inside = read_one(calendar, CPI_DAY)
+    assert (inside["valueState"], inside["valueNote"]) == ("awaiting", None)
+
+    at_now(app, CPI_AT + timedelta(days=8))
+    event = read_one(calendar, CPI_DAY)
+    assert (event["valueState"], event["valueNote"]) == ("unavailable", note)
+
+
+def test_the_calendar_rows_own_prior_and_actual_are_never_read(
+    calendar: TestClient, db_engine: Engine
+) -> None:
+    """R6: an economic row's figures come from the first-print table alone."""
+    add_events(
+        db_engine,
+        econ_row(10, CPI_AT, prior=Decimal("9.9"), actual=Decimal("8.8")),
+        econ_row(
+            50,
+            CPI_AT,
+            title="Employment Situation",
+            prior=Decimal("7.7"),
+            actual=Decimal("6.6"),
+        ),
+    )
+    store_value(db_engine, 50, CPI_DAY, actual="254.0000", prior="78.0000")
+
+    events = {e["title"]: e for e in all_events(read(calendar, "2026-10-14", "2026-10-14"))}
+    cpi, jobs = events["Consumer Price Index"], events["Employment Situation"]
+
+    # No stored value: null, never the calendar row's 9.9 / 8.8.
+    assert (cpi["valueState"], cpi["prior"], cpi["actual"]) == ("awaiting", None, None)
+    # A stored value: that one, never the calendar row's 7.7 / 6.6.
+    assert (jobs["valueState"], jobs["prior"], jobs["actual"]) == ("filled", "78", "254")
+
+
+def test_after_the_release_dates_refresh_the_stored_value_is_still_served(
+    app: FastAPI, calendar: TestClient, db_engine: Engine
+) -> None:
+    """R6's reason for the table: the refresh nulls ``calendar_event``'s figures.
+
+    Driven through the real refresh path -- ``calendar_releases.release_events``
+    into ``calendar.replace_window``, whose ``_apply`` does the nulling -- as
+    ``tests/data/test_econ_store.py`` does at the store's level.
+    """
+    window = (date(2026, 10, 1), date(2026, 10, 31))
+
+    def refresh(now: datetime) -> None:
+        times = ECON_SEEDS.times.by_id(10)
+        assert times is not None
+        rows = [FredReleaseDate(10, times.release_name, CPI_DAY)]
+        events = release_events(rows, ECON_SEEDS.times, start=window[0], end=window[1]).events
+        with Session(db_engine) as session:
+            replace_window(
+                session,
+                events,
+                source=CalendarSource.FRED,
+                kinds=frozenset({CalendarKind.ECONOMIC}),
+                window_start=window[0],
+                window_end=window[1],
+                tickers=None,
+                now=now,
+            )
+            session.commit()
+
+    refresh(datetime(2026, 10, 1, 11, 0, tzinfo=UTC))
+    store_value(db_engine, 10, CPI_DAY, actual="0.6485", prior="0.3960")
+    # A figure written onto the calendar row -- the design R6 rejected -- so
+    # the refresh has something to null.
+    with Session(db_engine) as session:
+        row = session.scalars(
+            select(CalendarEvent).where(CalendarEvent.vendor_id == release_vendor_id(10, CPI_DAY))
+        ).one()
+        row.prior, row.actual = Decimal("1.1"), Decimal("2.2")
+        session.commit()
+
+    refresh(datetime(2026, 10, 15, 11, 0, tzinfo=UTC))
+    with Session(db_engine) as session:
+        row = session.scalars(
+            select(CalendarEvent).where(CalendarEvent.vendor_id == release_vendor_id(10, CPI_DAY))
+        ).one()
+        assert (row.prior, row.actual) == (None, None)  # nulled, as R6 says it would be
+
+    at_now(app, CPI_AT + timedelta(days=30))
+    event = read_one(calendar, CPI_DAY)
+    assert (event["valueState"], event["actual"], event["prior"]) == ("filled", "0.6", "0.4")
+
+
+def test_every_other_kind_carries_no_value_state_or_note(
+    calendar: TestClient, db_engine: Engine
+) -> None:
+    add_events(db_engine, earnings(), ipo(), fomc())
+    with Session(db_engine) as session:
+        create_manual(session, title="G20 summit", date=date(2026, 10, 16), at=None, now=NOW)
+        session.commit()
+
+    events = all_events(read(calendar, "2026-10-14", "2026-10-31"))
+
+    assert {event["type"] for event in events} == {"earnings", "ipo", "central-bank", "geopolitical"}
+    for event in events:
+        assert (event["valueState"], event["valueNote"]) == (None, None), event["type"]
+    # The earnings row keeps its own figures: only economic rows are redirected.
+    (nvda,) = (event for event in events if event["type"] == "earnings")
+    assert (nvda["estimate"], nvda["actual"], nvda["unit"]) == ("1.2350", "-0.10", "USD/share")
+
+
+def test_a_release_that_left_the_seed_serves_its_figure_exactly_as_stored() -> None:
+    """No seed row means no ``decimals``: the stored four places, never a guessed precision."""
+    assert format(display_figure(Decimal("0.6485"), None), "f") == "0.6485"
+    assert format(display_figure(Decimal("-0.0000"), None), "f") == "0.0000"
+
+
+@pytest.mark.parametrize("decimals", [-1, MAX_DISPLAY_DECIMALS + 1])
+def test_display_places_outside_the_stored_ones_are_refused(decimals: int) -> None:
+    with pytest.raises(ValueError, match="display decimals"):
+        display_figure(Decimal("1.0000"), decimals)
+
+
+def test_an_economic_row_is_never_served_without_its_first_print(db_engine: Engine) -> None:
+    """``event_item`` refuses the shape that would fall back to ``calendar_event``'s figures."""
+    add_events(db_engine, econ_row(10, CPI_AT, prior=Decimal("9.9"), actual=Decimal("8.8")))
+    add_events(db_engine, earnings())
+    with Session(db_engine) as session:
+        economic, other = sorted(
+            read_range(session, CPI_DAY, CPI_DAY + timedelta(days=1)),
+            key=lambda event: event.kind is not CalendarKind.ECONOMIC,
+        )
+
+    with pytest.raises(ValueError, match="first-print fields"):
+        event_item(economic)
+    fields = EconomicFields(None, None, "% m/m", "awaiting", None)
+    with pytest.raises(ValueError, match="not economic"):
+        event_item(other, fields)
+
+
+def test_a_manual_entrys_response_carries_no_value_state(calendar: TestClient) -> None:
+    created = calendar.post("/api/calendar/manual", json={"title": "G20", "date": "2026-10-16"})
+
+    assert created.status_code == 201, created.text
+    assert (created.json()["valueState"], created.json()["valueNote"]) == (None, None)
 
 
 def test_a_partial_central_bank_seed_is_stated_with_its_first_date(

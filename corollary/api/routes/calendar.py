@@ -23,14 +23,22 @@ dependency tree to keep it so.
   never JSON numbers.
 * **Consensus is stated, not null.** Every ``economic`` row carries
   ``consensus: "unavailable"`` (Q3); every other kind carries ``null``.
+* **An economic row's figures are its stored first print** (U6f; spec R6,
+  R7, R8), joined by :func:`~corollary.data.econ_store.economic_releases_of`
+  against the same rows the range read returned. ``prior``/``actual`` are
+  never ``calendar_event``'s own -- the daily release-dates refresh nulls
+  those -- and are rounded here, in ``Decimal``, to the seed's ``decimals``
+  with ``ROUND_HALF_UP`` (:func:`display_figure`). ``unit`` is the seed's
+  ``unit_label``. ``valueState``/``valueNote`` are R8's display state,
+  derived at the request's ``now`` (:func:`request_now`) and never stored.
+  Every other kind carries both as ``null``.
 * **Notices** say aloud what the rows cannot: central-bank seed gaps for each
   year the range touches (decision 8 -- no file, unpublished, partial, or a
-  seed file that fails validation); each calendar job's last success,
+  seed file that fails validation); and each calendar job's last success,
   failure and skip with its reason, a Finnhub premium refusal
   (``CalendarAccessDenied``, Q15) distinguished from an outage, and a
   start-up catch-up that found the rows fresh (``fresh_at_start``) kept
-  apart from a real skip; and that an economic row's ``prior``/``actual``
-  are pending an owner decision. Every instant in a notice's ``message``
+  apart from a real skip. Every instant in a notice's ``message``
   is in ``America/New_York`` and every span is in words.
 * **"None in this range" is said only of dates a fetch asked about.** Each
   job fetches a window from the Eastern date it ran on (:data:`CALENDAR_JOBS`,
@@ -77,6 +85,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
 from pathlib import Path as FilePath
 from typing import Annotated, Final, Literal
 from zoneinfo import ZoneInfo
@@ -94,8 +103,8 @@ from corollary.api.schemas import (
     CalendarJobState,
     CalendarNotices,
     CalendarRange,
-    CalendarReleaseFiguresNotice,
     CalendarSeedGapNotice,
+    CalendarValueState,
     ManualCalendarEventRequest,
 )
 from corollary.data.calendar import (
@@ -113,7 +122,9 @@ from corollary.data.calendar_dividends import DIVIDEND_EX_DATE_HORIZON
 from corollary.data.calendar_event import CalendarKind
 from corollary.data.calendar_finnhub import EARNINGS_WINDOW, IPO_WINDOW
 from corollary.data.calendar_releases import FRED_RELEASES_HORIZON_DAYS
+from corollary.data.econ_store import EconomicRelease, economic_releases_of
 from corollary.data.seeds import SeedError
+from corollary.data.seeds.calendar_seeds import MAX_DISPLAY_DECIMALS
 from corollary.db.models import CalendarEvent
 from corollary.engine.scheduler import (
     CALENDAR_CENTRAL_BANK_YEARS_AHEAD,
@@ -220,13 +231,10 @@ CALENDAR_JOBS: Final[Mapping[CalendarJobName, CalendarJobSpec]] = {
 #: The error type the scheduler records for Q15's premium refusal.
 ACCESS_DENIED_ERROR: Final = "CalendarAccessDenied"
 
-#: Unit 7.2b-R's open question, stated on every read.
-RELEASE_FIGURES_PENDING: Final = (
-    "Prior and actual for economic releases are not filled yet: Q3 says they "
-    "come from FRED after release, but which FRED series and transform is each "
-    "release's headline figure (CPI's index level, or its monthly or yearly "
-    "change) is an open owner decision, and no number is guessed in the meantime."
-)
+#: Display rounding for an economic figure (spec R7: ``ROUND_HALF_UP`` to the
+#: seed's ``decimals``). Its own context, so no caller's global context can
+#: change a figure; ``Inexact`` is not trapped because rounding is the point.
+_DISPLAY_ROUNDING: Final = Context(prec=80, rounding=ROUND_HALF_UP, traps=[InvalidOperation])
 
 _RANGE_RULE: Final = (
     "GET /api/calendar: from and to are YYYY-MM-DD Eastern dates, from <= to, "
@@ -274,8 +282,98 @@ def _eastern_date(moment: datetime) -> date:
     return moment.astimezone(EASTERN).date()
 
 
-def event_item(event: StoredCalendarEvent) -> CalendarEventItem:
-    """One stored row on the wire. ``consensus`` is stated on economic rows (Q3)."""
+def display_figure(value: Decimal, decimals: int | None) -> Decimal:
+    """A stored first print as served: ``ROUND_HALF_UP`` to ``decimals`` places (spec R7).
+
+    ``0.6500`` at 1 place is ``0.7`` (half up, never to even), ``165.0000``
+    at 0 is ``165``, and a negative that rounds to zero is ``0.0``, never
+    ``-0.0`` -- a sign on a zero claims a direction the figure does not have.
+    ``decimals`` is the seed's, at most :data:`MAX_DISPLAY_DECIMALS` because
+    the figure is stored to that many places, so display never invents a
+    digit. ``None`` -- a release that has since left the seed -- serves the
+    figure as stored, exactly, rather than guessing a precision.
+    """
+    if decimals is None:
+        shown = value
+    else:
+        if not 0 <= decimals <= MAX_DISPLAY_DECIMALS:
+            raise ValueError(
+                f"display decimals must be 0..{MAX_DISPLAY_DECIMALS} (the stored places), "
+                f"got {decimals}"
+            )
+        # Built from its tuple, so no context or string parse is involved.
+        exponent = Decimal((0, (1,), -decimals))
+        shown = value.quantize(exponent, rounding=ROUND_HALF_UP, context=_DISPLAY_ROUNDING)
+    if shown.is_zero() and shown.is_signed():
+        shown = shown.copy_abs()
+    return shown
+
+
+@dataclass(frozen=True, slots=True)
+class EconomicFields:
+    """What an economic row serves in place of ``calendar_event``'s own figures."""
+
+    prior: Decimal | None
+    actual: Decimal | None
+    unit: str | None
+    value_state: CalendarValueState
+    value_note: str | None
+
+
+def economic_fields(release: EconomicRelease, now: datetime) -> EconomicFields:
+    """One economic row's first print and R8 display state at ``now``. Pure.
+
+    ``prior``/``actual`` come from the stored first print alone, rounded by
+    :func:`display_figure`, and are ``None`` unless the state is ``filled``.
+    ``unit`` is :attr:`EconomicRelease.unit_label`: the unit the stored figure
+    was computed in, else the seed's -- the same seed column, kept with the
+    figure so a later seed edit cannot relabel a number already stored.
+    """
+    shown = release.display(now)
+    prior: Decimal | None = None
+    actual: Decimal | None = None
+    if shown.state == "filled":
+        value = release.value
+        if value is None:  # pragma: no cover - value_display fills only from a stored value
+            raise AssertionError(
+                f"release {release.release_id} on {release.release_date} reads filled "
+                "with no stored value"
+            )
+        prior = display_figure(value.prior, release.decimals)
+        actual = display_figure(value.actual, release.decimals)
+    return EconomicFields(
+        prior=prior,
+        actual=actual,
+        unit=release.unit_label,
+        value_state=shown.state,
+        value_note=shown.note,
+    )
+
+
+def event_item(
+    event: StoredCalendarEvent, economic: EconomicFields | None = None
+) -> CalendarEventItem:
+    """One stored row on the wire. ``consensus`` is stated on economic rows (Q3).
+
+    An economic row must come with its :class:`EconomicFields` and any other
+    kind must not: ``ValueError`` otherwise, so no path can serve an economic
+    row's ``calendar_event.prior``/``.actual`` by forgetting the join (R6).
+    """
+    is_economic = event.kind is CalendarKind.ECONOMIC
+    if is_economic and economic is None:
+        raise ValueError(
+            f"economic calendar row {event.id} must be served with its first-print fields"
+        )
+    if not is_economic and economic is not None:
+        raise ValueError(
+            f"calendar row {event.id} is {event.kind.value}, not economic; it has no first print"
+        )
+    prior, actual, unit = event.prior, event.actual, event.unit
+    value_state: CalendarValueState | None = None
+    value_note: str | None = None
+    if economic is not None:
+        prior, actual, unit = economic.prior, economic.actual, economic.unit
+        value_state, value_note = economic.value_state, economic.value_note
     return CalendarEventItem(
         id=str(event.id),
         date=event.date,
@@ -287,10 +385,12 @@ def event_item(event: StoredCalendarEvent) -> CalendarEventItem:
         editable=event.editable,
         session=None if event.session is None else event.session.value,
         estimate=event.estimate,
-        prior=event.prior,
-        actual=event.actual,
-        consensus="unavailable" if event.kind is CalendarKind.ECONOMIC else None,
-        unit=event.unit,
+        prior=prior,
+        actual=actual,
+        value_state=value_state,
+        value_note=value_note,
+        consensus="unavailable" if is_economic else None,
+        unit=unit,
         exchange=event.exchange,
         shares=event.shares,
         price_low=event.price_low,
@@ -895,8 +995,19 @@ def read_calendar(
             correlation_id=correlation_id,
         )
     events = read_range(session, start, end)
+    # Joined against this one read, not a second one (U6f): a refresh landing
+    # between two reads could otherwise leave an economic row with no join.
+    releases = {release.event.id: release for release in economic_releases_of(session, events)}
     days = [
-        CalendarDay(date=day, events=[event_item(event) for event in day_events])
+        CalendarDay(
+            date=day,
+            events=[
+                event_item(event)
+                if event.kind is not CalendarKind.ECONOMIC
+                else event_item(event, economic_fields(releases[event.id], now))
+                for event in day_events
+            ],
+        )
         for day, day_events in group_by_date(events).items()
     ]
     return CalendarRange(
@@ -908,9 +1019,6 @@ def read_calendar(
         notices=CalendarNotices(
             seed_gaps=seed_gap_notices(start, end, seed_dir, correlation_id),
             jobs=job_notices(_scheduler_statuses(request), events, start, end),
-            release_figures=CalendarReleaseFiguresNotice(
-                state="pending_owner_decision", reason=RELEASE_FIGURES_PENDING
-            ),
         ),
     )
 

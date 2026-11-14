@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-11-10T00:04:21+00:00",
+  "path": "/series/observations",
+  "params": {
+    "series_id": "CPIAUCSL",
+    "file_type": "json",
+    "realtime_start": "2026-10-14",
+    "realtime_end": "2026-10-14",
+    "observation_start": "2026-04-01"
+  },
+  "status_code": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"realtime_start":"2026-10-14","realtime_end":"2026-10-14","observation_start":"2026-04-01","observation_end":"9999-12-31","units":"lin","output_type":1,"file_type":"json","order_by":"observation_date","sort_order":"asc","count":6,"offset":0,"limit":100000,"observations":[{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-04-01","value":"332.407"},{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-05-01","value":"333.979"},{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-06-01","value":"332.568"},{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-07-01","value":"332.813"},{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-08-01","value":"334.131"},{"realtime_start":"2026-10-14","realtime_end":"2026-10-14","date":"2026-09-01","value":"336.298"}]}
+}

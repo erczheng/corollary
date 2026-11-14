@@ -1,0 +1,13 @@
+{
+  "recorded_at": "2026-11-10T00:08:49+00:00",
+  "path": "/series/vintagedates",
+  "params": {
+    "series_id": "EXHOSLUSM495S",
+    "file_type": "json",
+    "sort_order": "desc",
+    "limit": "12"
+  },
+  "status_code": 400,
+  "content_type": "application/json; charset=UTF-8",
+  "body": {"error_code":400,"error_message":"Bad Request.  The series does not exist in ALFRED but may exist in FRED.  Try setting realtime_start and realtime_end to today's date or removing the realtime_start and realtime_end variables."}
+}
