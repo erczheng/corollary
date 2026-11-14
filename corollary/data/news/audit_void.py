@@ -17,11 +17,15 @@ What :func:`void_audit_run` does, in **one transaction**:
    exclude voided runs);
 4. restores each source run N moved, from run N's own ``audit_log`` row for
    it (``previous_value``): to ``unaudited`` with NULLs, or to ``active`` /
-   ``demoted`` with ``changed_at`` = the ``at`` of that source's previous
-   transition row in a **non-voided** run, ``audit_run_id`` = that run, and
-   ``reason`` = :func:`restored_reason` (``audit_log`` never stored the
-   original reason, and this does not invent one). A source run N did not
-   move is not touched;
+   ``demoted`` exactly as it stood before run N (owner decision Q24c,
+   amending R4): ``changed_at`` = the ``started_at`` of the **non-voided**
+   run whose ``audit_log`` row made that earlier transition -- the value
+   the runner wrote then -- ``audit_run_id`` = that run, and ``reason`` =
+   :func:`restored_reason` (``audit_log`` never stored the original reason,
+   and this does not invent one). **Never** that row's ``at``: the runner
+   writes it at the run's ``finished_at``, later than ``changed_at``, and
+   a demoted source's ``since_demotion`` basis counts from ``changed_at``
+   (:func:`_restoration_to`). A source run N did not move is not touched;
 5. writes one ``audit_log`` row per restored source, ``at`` = the void
    instant: ``previous_value`` run N's status, ``new_value`` the restored one.
 
@@ -354,8 +358,8 @@ def _previous_transition(
     standing: Collection[int],
 ) -> SentimentLogRow | None:
     """The source's newest ``audit_log`` row before ``move`` in a ``standing``
-    run other than the one voided: where a restore to ``active`` /
-    ``demoted`` takes its ``changed_at`` and run from. ``None`` if there is
+    run other than the one voided: the transition a restore to ``active`` /
+    ``demoted`` puts back, via :func:`_restoration_to`. ``None`` if there is
     none. Shared by :func:`plan_restorations` and :func:`read_back_void`, so
     the two cannot disagree about it."""
     earlier = [
@@ -372,6 +376,52 @@ def _previous_transition(
     return max(earlier, key=lambda row: (row.at, row.id))
 
 
+def _restoration_to(
+    source: str,
+    from_status: str,
+    previous: SentimentLogRow,
+    runs: Sequence[RunFacts],
+    voided_run_id: int,
+    reason: str,
+) -> Restoration:
+    """A restore to ``active`` / ``demoted``: exactly the status row
+    ``previous``'s transition left, the reason aside.
+
+    Owner decision Q24c (2026-11-11), amending R4 step 4. The runner writes a
+    transition's ``changed_at`` as its run's ``started_at`` -- the run
+    instant, ``audit.Transition.changed_at`` -- and that transition's
+    ``audit_log`` row at the run's ``finished_at`` (``audit_runner._close_run``).
+    So ``previous.at`` is the run's *finish*, not the ``changed_at`` that
+    stood. The restored ``changed_at`` is the ``started_at`` of the run the
+    history join puts ``previous`` in, which is also the restored
+    ``audit_run_id``. Restoring ``previous.at`` instead would start a
+    demoted source's ``since_demotion`` basis later by the run's length, and
+    drop every label referenced inside that span from the re-promotion count.
+
+    ``to_status`` is ``previous.new_value``; both callers have checked it
+    equals the status being restored. ``reason`` is :func:`restored_reason`,
+    because ``audit_log`` never stored the original. Shared by
+    :func:`plan_restorations` and :func:`read_back_void`, so the two cannot
+    disagree about it.
+    """
+    run = next((r for r in runs if r.id == previous.run_id), None)
+    if run is None:
+        # :func:`_previous_transition` returns only a row :func:`run_of`
+        # placed in one of these very runs, so this is a corrupt input.
+        raise ValueError(
+            f"audit_log row {previous.id} names run {previous.run_id}, which is not "
+            "among the runs read"
+        )
+    return Restoration(
+        source=source,
+        from_status=from_status,
+        to_status=previous.new_value,
+        changed_at=run.started_at,
+        reason=restored_reason(voided_run_id, reason),
+        audit_run_id=run.id,
+    )
+
+
 def plan_restorations(
     run: RunFacts,
     reason: str,
@@ -384,7 +434,8 @@ def plan_restorations(
     Only ``audit_log`` rows of run N and of earlier **non-voided** runs are
     read (ruling 5). Run N's row gives the status to restore; for ``active``
     / ``demoted``, the source's newest earlier row in a standing run must
-    have produced that very status, and supplies ``changed_at`` and the run.
+    have produced that very status, and names the run whose ``started_at``
+    and id are restored (Q24c, :func:`_restoration_to`).
     """
     moves: dict[str, SentimentLogRow] = {}
     for row in logs:
@@ -455,16 +506,7 @@ def plan_restorations(
                 source=source,
                 audit_log_id=previous.id,
             )
-        plan.append(
-            Restoration(
-                source=source,
-                from_status=move.new_value,
-                to_status=move.previous_value,
-                changed_at=previous.at,
-                reason=restored_reason(run.id, reason),
-                audit_run_id=previous.run_id,
-            )
-        )
+        plan.append(_restoration_to(source, move.new_value, previous, runs, run.id, reason))
     return tuple(plan)
 
 
@@ -825,9 +867,10 @@ def read_back_void(
     Reads only, and takes no lock. ``archived`` counts run ``run_id``'s rows
     in ``label_outcome_voided``; a run is voided at most once. The
     restorations are the void's own ``audit_log`` rows (``at`` =
-    ``voided_at``). Each one not to ``unaudited`` takes its ``changed_at``
-    and run from :func:`_previous_transition`, as the planner did, over the
-    runs that stood at ``voided_at``. ``audit_log`` is only ever appended to,
+    ``voided_at``). Each one not to ``unaudited`` is rebuilt from
+    :func:`_previous_transition` and :func:`_restoration_to`, as the planner
+    did, over the runs that stood at ``voided_at``: ``changed_at`` is that
+    transition's run's ``started_at`` (Q24c), never its ``audit_log.at``. ``audit_log`` is only ever appended to,
     so that answer cannot have changed since. A history that no longer
     yields it raises rather than reporting a guess.
     """
@@ -885,14 +928,7 @@ def read_back_void(
                 f"{restore.new_value} cannot be read back from audit_log"
             )
         restorations.append(
-            Restoration(
-                source=restore.source,
-                from_status=restore.previous_value,
-                to_status=restore.new_value,
-                changed_at=previous.at,
-                reason=restored_reason(run_id, clean),
-                audit_run_id=previous.run_id,
-            )
+            _restoration_to(restore.source, restore.previous_value, previous, runs, run_id, clean)
         )
     return VoidResult(
         run_id=run_id,
