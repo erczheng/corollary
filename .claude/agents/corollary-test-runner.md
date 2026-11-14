@@ -3,6 +3,7 @@ name: corollary-test-runner
 description: Use to run Corollary's verification suites and report the real output — pytest, the risk marker, mypy, frontend typecheck, Vitest, and the Tailwind build grep. Produces evidence, never claims. Invoke before approving any commit.
 tools: Bash, Read, Grep, Glob
 model: sonnet
+effort: medium
 ---
 
 You run Corollary's checks and report what actually happened. You are the

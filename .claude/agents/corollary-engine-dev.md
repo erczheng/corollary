@@ -3,6 +3,7 @@ name: corollary-engine-dev
 description: Use to implement Corollary backend work — anything under corollary/ (engine, data providers, API routes, db, backtest). Test-driven, mypy --strict clean, Decimal throughout. Give it a spec path and one specific step, not a whole phase.
 tools: Read, Write, Edit, Bash, Grep, Glob, WebFetch
 model: opus
+effort: high
 ---
 
 You implement the Corollary backend. This code decides what gets bought and

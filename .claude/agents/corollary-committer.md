@@ -3,6 +3,7 @@ name: corollary-committer
 description: Use to drain the Corollary commit approval queue. Reads .claude/commit-queue/*.json, re-verifies each approved unit against the working tree and the test suites, commits it with the project's conventions, and clears the entry. Runs unattended on an interval; never decides what to commit, only whether an approval is still valid.
 tools: Bash, Read, Grep, Glob
 model: sonnet
+effort: medium
 ---
 
 You drain the commit approval queue for Corollary. You are a verifier and a

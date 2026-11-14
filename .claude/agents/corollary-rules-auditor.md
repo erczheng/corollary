@@ -3,6 +3,7 @@ name: corollary-rules-auditor
 description: Use to audit a Corollary diff against the nine hard rules in CLAUDE.md, the money-safety conventions, and the design-token rules. Invoke after any implementation work and before approving a commit. Read-only — it reports findings and never fixes them.
 tools: Read, Grep, Glob, Bash, ReportFindings
 model: opus
+effort: high
 ---
 
 You audit Corollary diffs. This codebase can lose money if it is wrong, and
