@@ -293,17 +293,24 @@ after 23, below, so no earlier number moves):
     written only on a verdict that fails. **An unreadable cached row is no
     verdict either** (``signals.verdict_histories``): it reads as ``None``
     in the :data:`VerdictHistory`, so a label whose newest verdict it is
-    has none -- backfilled if it can be, the upsert replacing the damaged
-    row, else held -- and never reads as failing, which is Movers'
-    fail-closed reading (decision 21) and not this audit's.
+    has none -- backfilled if it can be, else held -- and never reads as
+    failing. The backfill writes S's verdict, keyed ``(ticker, S)``, so its
+    upsert replaces the damaged row only when that row is dated exactly S;
+    a damaged row dated earlier stays where it is, beside the new row for
+    S, which then supersedes it as the newest on or before S. Reading it as
+    failing is Movers' fail-closed reading (decision 21), not this audit's.
     **Known residual: corporate actions between S and the run.** "No
     look-ahead" is true of *which sessions* are read, not of every value
     read for them. A backfilled verdict for S can differ from the one a
     refresh on S would have made when a corporate action fell between S and
     the run: ``adv_daily_bars`` reads split-adjusted bars
-    (``adjustment="split"``), so a later split rescales S's close and volume
-    -- a reverse split can make a failing name pass, a forward split a
-    passing one fail; ``has_options`` and the standard-root check are the
+    (``adjustment="split"``), so a later split rescales S's close and its
+    share volume in opposite directions -- a forward split lowers the close
+    and raises the volume, a reverse split the reverse. The close floor and
+    the volume floor are separate tests, so either kind of split can turn a
+    verdict either way: a forward split can fail a passing name on its close
+    or pass a failing one on its volume, and a reverse split the converse;
+    ``has_options`` and the standard-root check are the
     vendor's **current** answers, so a delisting, an adjusted root or a
     later options listing changes them; and the ticker is resolved by
     **today's** symbol. No point-in-time source exists for any of these,

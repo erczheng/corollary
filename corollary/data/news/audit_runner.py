@@ -4,7 +4,15 @@
 decision 13's transitions. This module drives it end to end against the
 database, the market-data provider and a clock, and is the **only writer** of
 ``audit_run``, ``label_outcome``, ``sentiment_accuracy``,
-``sentiment_source_status`` and the ``sentiment`` category of ``audit_log``.
+``sentiment_source_status`` and the ``sentiment`` category of ``audit_log``,
+with two exceptions. The seed (``corollary/db/seed.py``) inserts a missing
+source's ``unaudited`` row and never changes an existing one. And R4's void
+(:mod:`corollary.data.news.audit_void`, run only from
+``scripts/void_audit_run.py``) marks a run voided on
+``audit_run``, moves that run's ``label_outcome`` rows into
+``label_outcome_voided``, restores ``sentiment_source_status``, and records
+each restoration in the ``sentiment`` category of ``audit_log``. It never
+writes ``sentiment_accuracy``.
 
 One run, in order (:func:`run_sentiment_audit`):
 

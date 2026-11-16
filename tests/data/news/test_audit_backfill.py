@@ -402,7 +402,10 @@ def test_an_unreadable_verdict_is_backfilled_never_graded_untradeable(
 ) -> None:
     """Monday's row is unreadable and Friday's, older, fails. The label reads
     neither: the newest verdict on or before its session is unknown, so it has
-    none, and the backfill's upsert replaces the damaged row with Monday's."""
+    none, and the backfill stores Monday's. Its upsert, keyed (ticker,
+    session), replaces the damaged row here only because that row is dated
+    exactly Monday, the label's session; one dated earlier would stay, beside
+    the new row for Monday."""
     label_id = _monday_label(db_engine)
     with Session(db_engine) as session:
         _verdict(session, "XBACK", FRIDAY, False)

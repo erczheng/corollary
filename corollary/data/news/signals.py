@@ -30,10 +30,13 @@ Decisions this module makes
   (:data:`~corollary.data.news.tradeability.MAX_TICKERS_PER_RUN`) then checks
   the freshest news first, and the same rows always give the same order.
 
-**The tradeability cache's read** (:func:`latest_verdicts`) lives here too,
-for the same reason: Movers and the sentiment audit's runner both ask "what
-is this off-watch ticker's newest verdict", and the runner -- a context job --
-may not import ``corollary.api``, where the read used to live.
+**The tradeability cache's reads** live here too, for the same reason: Movers
+and the sentiment audit's runner both ask "what is this off-watch ticker's
+newest verdict", and the runner -- a context job -- may not import
+``corollary.api``, where the read used to live. They are two readers, not
+one: Movers reads :func:`latest_verdicts`, which fails closed on an
+unreadable row; the audit reads :func:`verdict_histories`, which reports it
+as no verdict (``audit.py``'s decision 27).
 
 Reads only; writes nothing, calls no vendor.
 """
@@ -295,8 +298,13 @@ def latest_verdicts(
     Read from ``ticker_tradeability`` only -- never a vendor. The newest row
     is chosen in Python, by ``session_date``, which is a real ``Date``
     column; nothing here compares ``Money``. A ticker with no row is absent
-    (no verdict), never a failing one. Movers and the sentiment audit's
-    runner both read through here.
+    (no verdict), never a failing one.
+
+    **This is Movers' reader, and it fails closed**: an unreadable row is a
+    failing verdict (:func:`_verdict`, decision 21). The sentiment audit
+    must **not** read through here -- it reads :func:`verdict_histories`,
+    where an unreadable row is ``None``, no verdict (``audit.py``'s decision
+    27), because a failing verdict is what ``off_watch_untradeable`` asserts.
     """
     wanted = sorted(set(tickers))
     newest: dict[str, TickerTradeability] = {}
