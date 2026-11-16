@@ -7,24 +7,29 @@ selector, canonical row first, else lowest member id, applied *before* the
 directional filter.
 """
 
+import logging
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
+from corollary.data.news.discovery import CachedVerdict
 from corollary.data.news.labels import LabelSource
 from corollary.data.news.signals import (
     LOOKBACK_DAYS,
     SIGNAL_WINDOW_DAYS,
+    latest_verdicts,
     lookback_start,
     signal_window_start,
     signalled_tickers,
     stored_signals,
+    verdict_histories,
 )
-from corollary.db.models import Base
+from corollary.db.models import Base, TickerTradeability
 from corollary.db.session import create_db_engine, sqlite_url
 from tests.api.news_support import add_article, add_label
 
@@ -150,3 +155,54 @@ def test_two_member_copies_give_one_signal_the_lowest_member_ids(engine: Engine)
     assert only.source is LabelSource.RULES
     # The lowest member id's, not the shorter text (Movers' old tie-break).
     assert only.reasoning == "a longer reasoning text"
+
+
+# --------------------------------------------------------------------------
+# The tradeability cache's two readers (decision 21; audit.py's decision 27)
+# --------------------------------------------------------------------------
+
+THURSDAY = date(2026, 10, 8)
+FRIDAY = date(2026, 10, 9)
+
+
+def _cached_row(ticker: str, day: date, *, passes: bool, avg_volume: int | None,
+                last_close: Decimal | None) -> TickerTradeability:
+    return TickerTradeability(
+        ticker=ticker, session_date=day, has_options=True, standard_root=True,
+        avg_volume_20d=avg_volume, last_close=last_close, sessions_available=20,
+        passes=passes, failures="", checked_at=NOW,
+    )
+
+
+def test_movers_reads_an_unreadable_cached_verdict_as_failing(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Movers' reader fails closed, and this pins it as it stands -- Q24a left
+    it byte-identical. Friday's row, the newest, is damaged: a pass with no
+    ADV or close, which every CHECK admits and ``CachedVerdict`` refuses
+    (SYNTHETIC). ``latest_verdicts`` reads it as a *failing* verdict -- never
+    absent, and never Thursday's older pass, which it superseded -- and logs
+    the rule. The audit's reader, on the same rows, reports no verdict."""
+    with Session(engine) as session:
+        session.add(_cached_row("XDMG", THURSDAY, passes=True, avg_volume=2_000_000,
+                                last_close=Decimal("50")))
+        session.add(_cached_row("XDMG", FRIDAY, passes=True, avg_volume=None, last_close=None))
+        session.commit()
+
+    with caplog.at_level(logging.ERROR), Session(engine) as session:
+        movers = latest_verdicts(session, ["XDMG"], FRIDAY, "corr-movers")
+        audit = verdict_histories(session, ["XDMG"], FRIDAY, FRIDAY, "corr-audit")
+
+    (verdict,) = movers.values()
+    assert isinstance(verdict, CachedVerdict)
+    assert (verdict.ticker, verdict.session_date, verdict.passes) == ("XDMG", FRIDAY, False)
+    assert verdict.failures == ("unreadable_cache_row",)
+    assert (verdict.avg_volume_20d, verdict.last_close, verdict.sessions_available) == (None, None, 20)
+    (logged,) = [r for r in caplog.records if getattr(r, "event", None) == "discovery_verdict_unreadable"]
+    assert getattr(logged, "rule") == (
+        "decision 21: a ticker is a candidate only on a verdict that passes"
+    )
+    assert (getattr(logged, "ticker"), getattr(logged, "session_date")) == ("XDMG", "2026-10-09")
+    assert getattr(logged, "correlation_id") == "corr-movers"
+    # The other reader, for contrast: the same row is no verdict at all.
+    assert audit == {"XDMG": [(FRIDAY, None)]}

@@ -100,6 +100,22 @@ def test_the_audit_runs_saturday_at_1000_eastern(db_engine: Engine) -> None:
     assert schedule.describe().startswith("at 10:00 ET")
 
 
+def test_the_audit_backfills_verdicts_from_the_daily_refreshs_own_inputs(
+    db_engine: Engine,
+) -> None:
+    """Q24a: the same provider, asset directory and IPO source the refresh reads."""
+    alpaca, finnhub = object(), object()
+    services = _services(db_engine, alpaca, finnhub=finnhub)
+    deps = scheduler.sentiment_audit_deps(services)
+    assert deps is not None and deps.backfill is not None
+    assert deps.backfill.inputs is alpaca
+    assert deps.backfill.ipo_dates is finnhub
+    assert services.assets.current() is None
+    assert deps.backfill.assets() is None  # nothing fetched yet: the refresh skips, a fault
+    also = _audit_job(services).inputs["also"]
+    assert "/v2/options/contracts" in also and "/stock/profile2" in also
+
+
 def test_without_a_market_data_provider_the_audit_skips(db_engine: Engine) -> None:
     services = _services(db_engine, None)
     outcome = asyncio.run(_audit_job(services).run())

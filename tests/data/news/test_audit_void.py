@@ -21,6 +21,14 @@ from sqlalchemy.orm import Session
 
 from corollary.calendars import NYSE_TZ
 from corollary.data.news import audit_runner, audit_void
+from corollary.data.news.audit import (
+    AccuracyBasis,
+    AccuracyScope,
+    GradedOutcome,
+    Scope,
+    SourceStatus,
+    compute_accuracy,
+)
 from corollary.data.news.audit_runner import run_sentiment_audit
 from corollary.data.news.audit_void import (
     Refusal,
@@ -274,38 +282,60 @@ def test_it_restores_unaudited_with_nulls(db_engine: Engine) -> None:
     _run1, run2 = _history(db_engine, (("rules", "unaudited", "active"),))
     result = _void(db_engine, run2)
     assert _status(db_engine, "rules") == ("unaudited", None, None, None)
-    assert [(r.source, r.from_status, r.to_status) for r in result.restorations] == [
-        ("rules", "active", "unaudited")
-    ]
+    assert [
+        (r.source, r.from_status, r.to_status, r.changed_at, r.reason, r.audit_run_id)
+        for r in result.restorations
+    ] == [("rules", "active", "unaudited", None, None, None)]
 
 
 def test_it_restores_active_from_the_earlier_transition(db_engine: Engine) -> None:
-    run1, run2 = _history(db_engine, (("massive", "active", "demoted"),))
+    """Q24c: ``changed_at`` goes back to exactly what run 1 wrote -- its
+    ``started_at`` -- never run 1's audit_log ``at``, which is its finish."""
+    with Session(db_engine) as session:
+        run1 = _run(session, T1)
+        _move(session, run1, T1, "massive", "unaudited", "active")
+        session.commit()
+    before = _status(db_engine, "massive")
+    with Session(db_engine) as session:
+        run2 = _run(session, T2)
+        _move(session, run2, T2, "massive", "active", "demoted")
+        session.commit()
     _void(db_engine, run2)
-    # changed_at is the earlier transition's audit_log ``at`` (R4).
-    assert _status(db_engine, "massive") == (
+    # The fixture's start and finish differ, so the old ``at`` rule fails here.
+    assert T1 != T1 + RUN_LENGTH
+    after = _status(db_engine, "massive")
+    assert after == (
         "active",
-        T1 + RUN_LENGTH,
+        T1,
         f"restored when run {run2} was voided: {REASON}; "
         "the original reason text is not retained",
         run1,
     )
+    # changed_at and audit_run_id are what stood before run 2; only the
+    # reason differs, because audit_log never stored the original.
+    assert (after[0], after[1], after[3]) == (before[0], before[1], before[3])
 
 
 def test_it_restores_demoted_from_the_earlier_transition(db_engine: Engine) -> None:
     with Session(db_engine) as session:
         run1 = _run(session, T1)
         _move(session, run1, T1, "massive", "unaudited", "demoted")
+        session.commit()
+    before = _status(db_engine, "massive")
+    with Session(db_engine) as session:
         run2 = _run(session, T2)
         _move(session, run2, T2, "massive", "demoted", "active")
         session.commit()
     _void(db_engine, run2, reason="  a bad grade  ")
-    assert _status(db_engine, "massive") == (
+    after = _status(db_engine, "massive")
+    # Q24c: run 1's started_at, not its finish (T1 + RUN_LENGTH).
+    assert after == (
         "demoted",
-        T1 + RUN_LENGTH,
+        T1,
         restored_reason(run2, "a bad grade"),
         run1,
     )
+    assert (after[0], after[1], after[3]) == (before[0], before[1], before[3])
     assert restored_reason(run2, "a bad grade") == (
         f"restored when run {run2} was voided: a bad grade; "
         "the original reason text is not retained"
@@ -354,7 +384,8 @@ def test_the_notice_names_the_run_the_reason_and_each_restoration(db_engine: Eng
     title, body = void_notice_text(_void(db_engine, run2))
     assert title == f"Sentiment audit run {run2} voided"
     assert REASON in body
-    assert "massive: demoted -> active (run 1's transition at 2026-10-31 10:05 EDT)" in body
+    # Run 1's started_at (14:00 UTC), the instant its transition carries (Q24c).
+    assert "massive: demoted -> active (run 1's transition at 2026-10-31 10:00 EDT)" in body
     assert "rules: active -> unaudited (never audited)" in body
     assert "2 label outcome(s) archived" in body
     assert body.isascii()
@@ -596,6 +627,27 @@ def test_a_malformed_previous_value_is_refused_by_the_planner() -> None:
     assert isinstance(planned, Refusal) and planned.rule is VoidRule.RESTORE_UNPROVABLE
 
 
+def test_the_planner_restores_the_earlier_runs_started_at() -> None:
+    """Q24c, pure: the restored ``changed_at`` is run 1's ``started_at``,
+    read through the join that names run 1 -- not its audit_log ``at``."""
+    run1 = RunFacts(1, "scheduled", "succeeded", T1, T1 + RUN_LENGTH, None)
+    run2 = RunFacts(2, "scheduled", "succeeded", T2, T2 + RUN_LENGTH, None)
+    planned = plan_restorations(
+        run2,
+        REASON,
+        [
+            SentimentLogRow(1, T1 + RUN_LENGTH, "massive", "unaudited", "demoted", 1),
+            SentimentLogRow(2, T2 + RUN_LENGTH, "massive", "demoted", "active", 2),
+        ],
+        [SourceRow("massive", "active", T2, "r", 2)],
+        [run1, run2],
+    )
+    assert not isinstance(planned, Refusal)
+    assert [(r.to_status, r.changed_at, r.audit_run_id) for r in planned] == [
+        ("demoted", T1, 1)
+    ]
+
+
 # ---------------------------------------------------- the real runner after it
 
 
@@ -668,7 +720,92 @@ def test_voiding_a_repromotion_restores_the_since_demotion_basis(db_engine: Engi
         session.commit()
     _void(db_engine, run2)
     status = _status(db_engine, "massive")
-    assert status[0] == "demoted" and status[1] == T1 + RUN_LENGTH and status[3] == run1
+    assert status[0] == "demoted" and status[1] == T1 and status[3] == run1
+
+
+def test_a_label_referenced_during_the_demoting_run_counts_after_the_restore(
+    db_engine: Engine,
+) -> None:
+    """Q24c's reason: a label whose reference instant lies after run 1's start
+    and before its finish counted toward re-promotion before run 2 moved the
+    source, so it still counts once run 2 is voided. Under the old rule
+    (``changed_at`` = run 1's audit_log ``at``, its finish) the strict ``>``
+    of ``since_demotion`` would drop it. Read through the runner's own
+    status loader and :func:`compute_accuracy`."""
+    with Session(db_engine) as session:
+        run1 = _run(session, T1)
+        _move(session, run1, T1, "massive", "unaudited", "demoted")
+        session.commit()
+    with Session(db_engine) as session:
+        row = session.get(SentimentSourceStatus, "massive")
+        assert row is not None
+        before = audit_runner._current_status(row)
+        run2 = _run(session, T2)
+        _move(session, run2, T2, "massive", "demoted", "active")
+        session.commit()
+    _void(db_engine, run2)
+    with Session(db_engine) as session:
+        row = session.get(SentimentSourceStatus, "massive")
+        assert row is not None
+        restored = audit_runner._current_status(row)
+    assert restored.status is SourceStatus.DEMOTED
+    inside = GradedOutcome(
+        source="massive",
+        window="1h",
+        scope=Scope.WATCH,
+        reference_at=T1 + RUN_LENGTH / 2,
+        correct=True,
+        neutral=False,
+    )
+    assert T1 < inside.reference_at < T1 + RUN_LENGTH
+    rows = compute_accuracy(restored, [inside], NOW)
+    since = next(
+        r
+        for r in rows
+        if (r.window, r.basis, r.scope)
+        == ("1h", AccuracyBasis.SINCE_DEMOTION, AccuracyScope.ALL)
+    )
+    assert (since.graded, since.correct) == (1, 1)
+    # It counted before run 2, too: the void restored that very basis.
+    assert restored == before
+
+
+def test_a_void_restores_exactly_the_status_the_real_runner_wrote(db_engine: Engine) -> None:
+    """Q24c against the real runner, not the synthetic ``_move``: the runner
+    writes a transition's ``changed_at`` as its run's ``started_at`` and the
+    audit_log row at ``finished_at``, two different instants. A later run that
+    moves the source, voided, leaves the status row as the runner left it,
+    the reason aside (audit_log never stored it)."""
+    _five_session_week(db_engine)
+    first = asyncio.run(run_sentiment_audit(_deps(db_engine), trigger="scheduled"))
+    before = _status(db_engine, "massive")
+    with Session(db_engine) as session:
+        run = session.get(AuditRun, first.run_id)
+        assert run is not None and run.finished_at is not None
+        started, finished = run.started_at, run.finished_at
+        logged = session.scalar(
+            select(AuditLog.at).where(
+                AuditLog.category == "sentiment", AuditLog.field == "massive"
+            )
+        )
+    assert before[0] == "demoted" and before[3] == first.run_id
+    # The premise Q24c rests on.
+    assert before[1] == started
+    assert logged == finished != started
+
+    later = SATURDAY_10 + timedelta(hours=1)
+    assert later > finished
+    with Session(db_engine) as session:
+        run2 = _run(session, later)
+        _move(session, run2, later, "massive", "demoted", "active")
+        session.commit()
+    _void(db_engine, run2, now=later + timedelta(hours=1))
+    assert _status(db_engine, "massive") == (
+        before[0],
+        before[1],
+        restored_reason(run2, REASON),
+        before[3],
+    )
 
 
 def test_a_run_cannot_open_with_its_span_over_a_void(db_engine: Engine) -> None:
@@ -869,6 +1006,11 @@ def test_read_back_rebuilds_exactly_the_result_the_void_returned(db_engine: Engi
     )
     result = _void(db_engine, run2)
     assert {r.audit_run_id for r in result.restorations} == {run1, None}
+    # Q24c: run 1's started_at, so the read-back must derive the same instant.
+    assert {(r.source, r.changed_at) for r in result.restorations} == {
+        ("massive", T1),
+        ("rules", None),
+    }
     assert read_back_void(
         _sessions(db_engine), run_id=run2, reason=f"  {REASON} ", voided_at=NOW,
         correlation_id="c0ffee",

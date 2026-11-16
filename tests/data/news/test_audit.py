@@ -1081,7 +1081,8 @@ def test_an_off_watch_ticker_with_no_verdict_stays_pending_and_is_named() -> Non
 
 
 def test_an_unverdicted_label_is_pending_until_seven_days_past_its_last_window() -> None:
-    """Then ``off_watch_untradeable``: it was never shown to pass decision 21's filter."""
+    """Then ``off_watch_unverdicted`` (decision 27, Q24a): it was never shown to
+    pass decision 21's filter, and nothing showed it failing one either."""
     labels = [label(1, "UNSEEN", BULL, _TUESDAY_1015)]
     last_end = window_end(_TUESDAY_1015, "1d")
     plan, result = run(labels, [], run_at=last_end + PRICE_UNAVAILABLE_AFTER)
@@ -1091,7 +1092,7 @@ def test_an_unverdicted_label_is_pending_until_seven_days_past_its_last_window()
     plan, result = run(labels, [], run_at=after)
     records = by_key(result)
     assert set(records) == {(1, "1h"), (1, "1d")}
-    assert all(r.skip_reason is SkipReason.OFF_WATCH_UNTRADEABLE for r in records.values())
+    assert all(r.skip_reason is SkipReason.OFF_WATCH_UNVERDICTED for r in records.values())
     assert all(r.scope is None and r.reference_at is None for r in records.values())
     assert plan.unverdicted_tickers == ("UNSEEN",)
     assert plan.bar_requests == ()
@@ -2171,7 +2172,7 @@ def test_the_reference_session_not_the_publication_date_picks_the_verdict() -> N
 
 
 def test_verdicts_only_after_the_label_leave_it_unverdicted() -> None:
-    """No verdict on or before its session: the wait-then-fail-closed path."""
+    """No verdict on or before its session: the wait-then-unverdicted path (Q24a)."""
     labels = [label(1, "XYZ", BULL, _TUESDAY_1015)]
     plan, result = run(labels, [], tradeable={"XYZ": [(_FRIDAY, True)]})
     assert result.records == ()
@@ -2179,7 +2180,8 @@ def test_verdicts_only_after_the_label_leave_it_unverdicted() -> None:
     last_end = window_end(_TUESDAY_1015, "1d")
     after = last_end + PRICE_UNAVAILABLE_AFTER + timedelta(seconds=1)
     _, result = run(labels, [], tradeable={"XYZ": [(_FRIDAY, True)]}, run_at=after)
-    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == {1}
+    assert _skips(result, SkipReason.OFF_WATCH_UNVERDICTED) == {1}
+    assert _skips(result, SkipReason.OFF_WATCH_UNTRADEABLE) == set()
 
 
 def test_two_labels_on_one_ticker_each_read_their_own_session() -> None:
