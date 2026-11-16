@@ -39,6 +39,12 @@ directions therefore run ``PRAGMA foreign_key_check`` on both tables first
 and **refuse before any DDL**, naming the table and the first offending
 rows (``_refuse_orphans``). The live database cannot hold one, since both
 foreign keys have been enforced since 0014; one written with them off can.
+For the same reason both directions refuse, before any DDL, while either
+``_alembic_tmp_label_outcome`` or ``_alembic_tmp_label_outcome_voided``
+already exists -- the leftover of an earlier failed rebuild, on which batch
+mode would die with an opaque "table already exists" -- naming each with
+its row count (``_refuse_stray_temporary_tables``). It refuses rather than
+drops: the stray may hold copied rows.
 
 **Downgrade** refuses, before touching anything, while any row in either
 table carries ``off_watch_unverdicted``: deleting or re-labelling an audit
@@ -257,7 +263,56 @@ def _refuse_orphans(direction: str) -> None:
         )
 
 
+def _temporary_table(table: str) -> str:
+    """The name batch mode gives ``table``'s copy: Alembic's
+    ``ApplyBatchImpl._calc_temp_name``, ``"_alembic_tmp_%s"`` cut to 50
+    characters -- both of ours are well inside it."""
+    return f"_alembic_tmp_{table}"[:50]
+
+
+def _refuse_stray_temporary_tables(direction: str) -> None:
+    """Refuse, before any DDL, while either rebuild's temporary table already
+    exists.
+
+    An earlier batch rebuild of either table that failed part-way -- no
+    earlier revision rebuilds them, so in practice an interrupted run of this
+    one, in either direction -- leaves ``_alembic_tmp_<table>`` behind, and
+    the next rebuild of that table dies on ``CREATE TABLE`` with an opaque
+    "table already exists"; for the archive, only after ``label_outcome`` has
+    already been rebuilt. The stray is **never dropped here**: it may hold rows copied out
+    of the table, perhaps the only copy if the failure came after the
+    original was dropped, and deciding that it is disposable is not this
+    migration's call (0008's rule). Every stray present is named with its
+    row count.
+    """
+    bind = op.get_bind()
+    strays: list[str] = []
+    for table in _TABLES:
+        stray = _temporary_table(table)
+        present = bind.execute(
+            sa.text("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = :n"),
+            {"n": stray},
+        ).scalar_one()
+        if not present:
+            continue
+        # The name is one of two constants above, never input.
+        rows = bind.execute(sa.text(f'SELECT COUNT(*) FROM "{stray}"')).scalar_one()
+        strays.append(
+            f"{stray} exists and holds {rows} row(s), the leftover of an earlier batch "
+            f"rebuild of {table} that failed part-way"
+        )
+    if strays:
+        raise RuntimeError(
+            f"refusing to {direction} 0020: {'; '.join(strays)}. The rebuild creates that "
+            "table first, so it would fail on it with \"table already exists\". It may hold "
+            "rows copied out of the table, so this migration will not drop it: compare it "
+            "with the table it copies, recover any row only it holds, drop it, then retry."
+        )
+
+
 def upgrade() -> None:
+    # Both refusals read only, and run before any DDL.
+    _refuse_stray_temporary_tables("upgrade")
     _refuse_orphans("upgrade")
     for table in _TABLES:
         _rebuild(table, before=False, after=True)
@@ -266,6 +321,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Refuse before touching anything (0008's rule): each such row is an
     # audit record, and nothing below may delete or re-label one.
+    _refuse_stray_temporary_tables("downgrade")
     _refuse_orphans("downgrade")
     bind = op.get_bind()
     for table in _TABLES:

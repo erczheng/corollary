@@ -287,3 +287,99 @@ def test_downgrade_refuses_while_an_unverdicted_row_exists_and_otherwise_reverse
     )
     command.upgrade(cfg, "0020")
     _execute(url, _outcome(second, run_id, "off_watch_unverdicted"))
+
+
+def _schema(url: str) -> list[tuple[object, ...]]:
+    """Every object ``sqlite_master`` holds, with its DDL -- what "nothing
+    else changed" means for the schema."""
+    eng = create_db_engine(url)
+    try:
+        with eng.connect() as conn:
+            return [
+                tuple(r)
+                for r in conn.execute(
+                    text("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+                )
+            ]
+    finally:
+        eng.dispose()
+
+
+def _table_rows(url: str, table: str) -> list[tuple[object, ...]]:
+    eng = create_db_engine(url)
+    try:
+        with eng.connect() as conn:
+            return [tuple(r) for r in conn.execute(text(f"SELECT * FROM {table} ORDER BY label_id"))]
+    finally:
+        eng.dispose()
+
+
+def _stray(url: str, table: str) -> tuple[str, int]:
+    """The leftover a batch rebuild of ``table`` strands when it fails
+    part-way: ``_alembic_tmp_<table>``, holding the rows it had copied."""
+    stray = f"_alembic_tmp_{table}"
+    _execute(url, f"CREATE TABLE {stray} AS SELECT * FROM {table}")
+    return stray, len(_table_rows(url, stray))
+
+
+def _two_outcomes_and_an_archive(url: str, first: int, second: int, run_id: int) -> None:
+    _execute(url, _outcome(first, run_id, "discovery_cap"))
+    _execute(url, _outcome(second, run_id, "off_watch_untradeable"))
+    _execute(url, _archived(first, run_id, "discovery_cap"))
+
+
+@pytest.mark.parametrize("table", _TABLES)
+def test_upgrade_refuses_a_stray_batch_table_before_touching_anything(
+    at_0019: tuple[Config, str, tuple[int, int, int]], table: str
+) -> None:
+    """A stray ``_alembic_tmp_<table>`` used to fail the rebuild with an
+    opaque "table already exists" -- for the archive, after ``label_outcome``
+    had already been rebuilt. Now the upgrade refuses first, naming the table
+    and its row count, and never drops it: it may hold copied rows."""
+    cfg, url, (first, second, run_id) = at_0019
+    _two_outcomes_and_an_archive(url, first, second, run_id)
+    stray, copied = _stray(url, table)
+    assert copied >= 1
+    rows, schema, stray_rows = _rows(url), _schema(url), _table_rows(url, stray)
+
+    with pytest.raises(RuntimeError, match="refusing to upgrade 0020") as caught:
+        command.upgrade(cfg, "0020")
+
+    assert f"{stray} exists and holds {copied} row(s)" in str(caught.value)
+    assert _version_and_tables(url)[0] == "0019"
+    assert _schema(url) == schema
+    assert _rows(url) == rows
+    assert _table_rows(url, stray) == stray_rows  # refused, never dropped
+
+    _execute(url, f"DROP TABLE {stray}")
+    command.upgrade(cfg, "0020")
+    assert _version_and_tables(url)[0] == "0020"
+    assert _rows(url) == rows
+
+
+@pytest.mark.parametrize("table", _TABLES)
+def test_downgrade_refuses_a_stray_batch_table_before_touching_anything(
+    at_0019: tuple[Config, str, tuple[int, int, int]], table: str
+) -> None:
+    """The reverse rebuild names the same temporary tables, so it refuses the
+    same way."""
+    cfg, url, (first, second, run_id) = at_0019
+    command.upgrade(cfg, "0020")
+    _two_outcomes_and_an_archive(url, first, second, run_id)
+    stray, copied = _stray(url, table)
+    assert copied >= 1
+    rows, schema, stray_rows = _rows(url), _schema(url), _table_rows(url, stray)
+
+    with pytest.raises(RuntimeError, match="refusing to downgrade 0020") as caught:
+        command.downgrade(cfg, "0019")
+
+    assert f"{stray} exists and holds {copied} row(s)" in str(caught.value)
+    assert _version_and_tables(url)[0] == "0020"
+    assert _schema(url) == schema
+    assert _rows(url) == rows
+    assert _table_rows(url, stray) == stray_rows  # refused, never dropped
+
+    _execute(url, f"DROP TABLE {stray}")
+    command.downgrade(cfg, "0019")
+    assert _version_and_tables(url)[0] == "0019"
+    assert _rows(url) == rows
