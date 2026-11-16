@@ -339,6 +339,7 @@ Scoped to the account whose keys are in use. Paper and Cash are separate books, 
 - **Social Attention** (replaces "Trending Signals"): StockTwits ticker mention velocity against a 30-day baseline. Displays sample size. Sentiment is aggregated only over messages carrying a user label (roughly 30–50% of messages) and the labeled count is shown. Treated as context, never as a trade trigger.
 - **Top rated by sector:** consensus buy/hold/sell distribution from Finnhub, rolled up by sector via each sector's largest constituents. Displays an as-of date; refreshes monthly.
 - **Market Calendar:** earnings, economic releases, central bank decisions, dividends, and manually entered geopolitical events, with exact scheduled times. Forward-looking only.
+  - **An economic release shows its first print.** Amended 2026-11-16 (Phase 3 remainder spec, Q23c): `actual` and `prior` are the release's headline figure as first printed, computed in `Decimal` from **FRED's release-day vintage** of one fixed series per release (CPI as the monthly change, the jobs report as the `PAYEMS` change), with the prior taken from that same vintage. They are kept as printed and never revised afterwards, and each is labelled *computed from FRED's levels* with its series ID, so a 0.1 difference from the agency's printed figure has an explanation on screen. Until the figure lands the row says so in words: awaiting it, or unavailable with the reason, such as Existing Home Sales, which FRED's vintage store refuses under NAR's copyright. Consensus is not available. This supersedes §7's *"Finnhub: consensus, prior, actual"* for economic releases; §7's row is amended by the Phase 3 spec's own doc pass.
 
 ### 8.4 Markets
 
@@ -456,8 +457,11 @@ No article is ever manually reviewed. The system grades itself and reports when 
 | Strategy promotion eligible | ✓ | — |
 | Sentiment source demoted | ✓ | ✓ |
 | Sentiment source re-promoted | ✓ | ✓ |
+| Sentiment audit run voided | ✓ | ✓ |
 
 The two sentiment rows are the self-audit's transitions (Phase 3 decisions 13 and 14): the weekly audit run withdrawing a labelling source from what the scanner may read, or restoring it. A demotion is a **warning**, not critical — the audit working as designed is a degradation report, the same reasoning that makes a stop loss `caution` — and a re-promotion is `info`. Both route to both channels, so a withdrawal and its restoration arrive the same way.
+
+**Sentiment audit run voided** (`sentiment_audit_voided`, `info`, belonging to no book) was added 2026-11-16 by the Phase 3 remainder spec (R4). It fires when an audit run is voided by `scripts/void_audit_run.py`: for example, a run graded under a rule the owner had already replaced. It names the run, the reason, and the status each source was restored to. It routes to both channels, like the transitions, because it changes what the scanner may read. It is not sent as a re-promotion, because a void is not one.
 
 **The bell is a panel anchored to the header icon, not a page.** A notification you have to navigate to is one you miss while watching a position, and there is no `/notifications` route among the app's screens. It carries an unread badge scoped to the account on screen, and opening it marks nothing read — clearing is an explicit action, because glancing at a badge is not reading the feed. Each notification belongs to the book it happened in; an engine fault belongs to neither and appears in both.
 

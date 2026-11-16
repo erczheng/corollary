@@ -17,6 +17,11 @@ labelled a parent-session assumption.
 on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
 **Resumed 2026-10-10 (Q22) for steps 5, 6 and 7.** Steps 8 and 9 stay paused
 under Q20.
+**Amended 2026-11-09 (Q23) and 2026-11-11 (Q24)** by
+`2026-11-09-phase-3-steps-5-7-remainder.md`, which carries what was left of
+steps 5–7. It amends decision 13 (a five-session eligibility floor) and Q6
+(a voided run's status changes may be restored by a script). Statuses of
+steps 5–7 were brought up to date on 2026-11-16 (the remainder's U7).
 **Branch:** the work branches from, and its pull requests target, **`master`**
 (fast-forwarded to `d658602` on 2026-09-23; now the GitHub default and PR base).
 **Scope:** The backend's context pipeline (`corollary/data/news/`,
@@ -591,6 +596,18 @@ direction for a scanner input, and it is what the owner chose; it is written
 down so that a sentiment source sitting demoted for months is read as the rule
 working, not as a bug.
 
+**Amended 2026-11-09 by Q23 (remainder spec, R3 and R4):**
+- **Every eligibility check also needs ≥5 distinct sessions in each window**
+  (owner decision Q23b), beside the 30 / 100 label floors above. Decision 13
+  carries it.
+- **The audit is no longer the only writer of the status.** It remains the
+  only thing that *decides* one. A run graded under a superseded rule can be
+  voided by `scripts/void_audit_run.py` (owner decision Q23a). The void
+  restores each source that run moved to the status an earlier, non-voided
+  run decided, or to the initial `unaudited`; it can set no status a run did
+  not compute. It is a script, never a route or a Settings button, so this
+  answer's refusal of a human reinstate control stands.
+
 **Q7 — No backfill.** The audit starts empty. How long that takes to become a
 figure that can act is in *Done when*.
 
@@ -1133,6 +1150,9 @@ parallel. Neither is an owner decision.
   (an empty revision whose only job is to hide that two branches raced), and
   pre-assigning `0013` to step 5 and `0014` to step 7 (step 7 would then wait
   on step 5's merge for no reason).
+  *Amended 2026-11-16 — final numbers:* step 5 `0013_sentiment_label`, step 6
+  `0014_sentiment_audit`, step 7 `0015_calendar_event`. The remainder spec's
+  units took `0017`–`0020` by the same rule.
 - **Until step 6 exists, a label's source reports `unaudited`, never "not
   demoted".** The API section's *"whether that source is demoted"* on
   `GET /api/news` is carried as the source's status, `unaudited | active |
@@ -1154,6 +1174,22 @@ re-graded. Economic-release actuals take FRED's release-day vintage through a
 fixed series map (Q23c). Central-bank seed verification is deferred (Q23d).
 The engine was resumed on the owner's instruction (Q23e). Step 5's
 mean-versus-median question is closed on evidence (planner resolution P1).
+
+**Q24 — Four owner decisions taken while the remainder ran (2026-11-11).**
+Recorded in full, with the owner's words, under *Owner decisions — 2026-11-11
+(Q24)* in `2026-11-09-phase-3-steps-5-7-remainder.md`. In short:
+- **Q24a:** an off-watch label with no tradeability verdict on or before its
+  session gets one backfilled by the audit, computed only from sessions
+  before it (`audit.py` decision 27). A label no verdict reaches is written
+  `off_watch_unverdicted`, never `off_watch_untradeable`. This backfills
+  *verdicts*, not labels or grades: Q7's "no backfill" of the audit stands.
+- **Q24b:** a twin group is graded from its earliest `published_at`
+  (`audit.py` decision 26).
+- **Q24c:** a void restores `changed_at` to the earlier run's `started_at`,
+  exactly as that run wrote it (amends the remainder's R4).
+- **Q24d:** the weekday runner runs from 08:30 ET to the later of the close +
+  30 minutes and 18:05 ET, so economic first prints are fetched on their
+  release day.
 
 ---
 
@@ -1502,6 +1538,10 @@ each marked.
 audit_run_id)`, one row per source — `rules` and `massive` — with `status` ∈
 `unaudited | active | demoted`. Every source starts `unaudited`. The weekly
 audit run is the **only** writer; there is no human route to change it.
+*Amended 2026-11-09 by Q23 (remainder spec R4):* the audit is the only thing
+that **decides** a status. Voiding a run, through a script only, may restore
+the status an earlier non-voided run decided, or `unaudited`, and nothing
+else. There is still no route and no button.
 
 **The transitions**, evaluated per source, per run, after grading:
 
@@ -1528,6 +1568,20 @@ impossible for any source producing fewer than ~5 directional labels a session
 owner's automatic re-promotion into a permanent demotion for exactly the
 low-volume source, without anyone deciding that. Counting from the demotion also
 keeps the labels that caused it out of the evidence for undoing it.
+
+**Amended 2026-11-09 by Q23b (remainder spec R3): both eligibilities also
+need ≥5 distinct sessions in each window.**
+- **A label's session** is the regular session containing its reference
+  instant. An after-close story counts toward the next open, and a half-day
+  is a session.
+- **What is counted:** sessions per source, window and basis, over exactly
+  the labels the label floor counts.
+- **Where it lives:** `MIN_ELIGIBLE_SESSIONS = 5` in `audit.py`.
+  `sentiment_accuracy.sessions` (migration 0017) stores the figure a
+  transition acted on. A NULL row, written before Q23b, is never eligible.
+
+The reason: in run 2 both sources cleared the 30-label floor on one news
+cycle, so one day's market could have set the flag.
 
 **The dead band.** Between 52% and 66% a source stays in whatever state it is
 in. That is the point of two thresholds: one threshold would flap a source
@@ -2309,6 +2363,10 @@ in `tests/api/test_account_mode.py` apply unchanged.
   eligible to demote or re-promote and how many more labels it needs, last and
   next run. `POST /api/settings/sentiment/audit` (hourly limit). **No
   reinstate route** — the audit is the only writer of the status (Q6).
+  *Amended 2026-11-09 by Q23:* the audit is the only thing that decides the
+  status. A void restores an earlier run's status through
+  `scripts/void_audit_run.py` only, never a route. The readout adds sessions
+  and `voidedRuns`, and its last run is the latest non-voided one.
 - `GET /api/notifications`, `POST /api/notifications/{id}/read`,
   `POST /api/notifications/{id}/dismiss`.
 - `GET /api/settings/sources` — each Phase 3 source moves from *"nothing reads
@@ -2815,7 +2873,7 @@ discovery panel.**
   with the owner.** Commits: 80775f6 and 65e5512 `SentimentTier`
   `rules|vendor`, c03b4d2 and 67a1c0a the Massive labeller, 400aff1 the rules
   labeller, 9ae662d `sentiment_label` (migration 0013, provisional under
-  Q22) with labels at ingest, 5f14d6c the earnings single-tag exclusion,
+  Q22; *final, amended 2026-11-16*) with labels at ingest, 5f14d6c the earnings single-tag exclusion,
   27df165 discovery, `GET /api/news/movers` and feed labels, 9194e6e the feed
   labels and the panel, 07e27fa Finnhub's Benzinga clock, and the
   re-measurement script in the commit before this status. Every source is
@@ -2838,7 +2896,15 @@ discovery panel.**
   constant offset remains: Finnhub "Yahoo" against Massive "The Motley Fool"
   twins sit exactly 20 minutes apart (575 pairs a fortnight, no third vendor
   to say which is right), outside the +/-10 minute window. It does not move
-  the watch figure. *Depends on:* 4.
+  the watch figure.
+  *Amended 2026-11-16:* **the mean-versus-median question is closed**
+  (remainder spec, planner resolution P1). Transitions act on the combined
+  figure, which gave rules 39 graded labels from one session in run 2, and
+  eligibility is now bounded by sessions (Q23b), not by a watch-universe rate
+  per session. The 20-minute Motley Fool twins are linked by
+  `SYNDICATION_SKEWS` at ingest (`phase3-fixes`, merged in PR #13) and in the
+  store by the remainder's re-link (92 links, 2026-11-10), and since Q24b a
+  twin group is graded from its earliest stamp. *Depends on:* 4.
 - *Files:* `corollary/data/news/{rules,vendor,discovery}.py`,
   `corollary/data/providers/massive.py` (insights), migration for
   `sentiment_label`, `GET /api/news/movers`, the *Movers in the news* panel,
@@ -2862,7 +2928,8 @@ discovery panel.**
 **6. The self-audit and the demotion state.**
 - *Status:* **code landed 2026-10-15; "the run" waits on the first real
   Saturday (2026-10-17 at the earliest).** Commits: 4ee9925 the schema
-  (migration 0014, provisional under Q22: `label_outcome`, `audit_run`,
+  (migration 0014, provisional under Q22, *final, amended 2026-11-16*:
+  `label_outcome`, `audit_run`,
   `sentiment_accuracy`, `sentiment_source_status`, the `sentiment` category,
   the two transition routes and `sentiment_audit_requested`), 8bf9fb1
   session-minute arithmetic, 0df3f8f the pure grader, fde658f accuracy and
@@ -2891,8 +2958,24 @@ discovery panel.**
   transient fetch failure) before `price_unavailable`; a degraded watch
   universe (positions never or not recently read, seed missing or
   malformed) skips the run; a manual run answers 202 and notifies Discord
-  (decision 20), limited to one an hour from the database. *Depends on:*
-  1 (for the two alerts), 5.
+  (decision 20), limited to one an hour from the database.
+  *Amended 2026-11-16 — the run happened, was voided, and was re-graded:*
+  - **Run 2** (2026-11-09 23:02Z, the catch-up for Saturday Nov 7) was the
+    first real run. It graded under the reference rule the owner replaced on
+    2026-10-22, before that change had merged, and moved rules to `active`
+    and Massive to `demoted`. It was **voided** under Q23a on 2026-11-11
+    00:59:52Z, with both sources restored to `unaudited`.
+  - **"The run" is met by run 3,** the re-grade (2026-11-11, the start-up
+    catch-up of the voided slot, trigger `scheduled`). It wrote its run row
+    and graded both scopes (watch 1,012, discovery 970, in a live read-only
+    count on 2026-11-11), recording the rest
+    with their `skip_reason` (138 `discovery_cap`). Both sources stayed
+    `unaudited`, below the new five-session floor. *Not checked here:* the
+    run's bar-request count against the data bucket.
+  - **Run 4** (2026-11-15 03:52Z, a start-up catch-up) moved rules to
+    `active` and Massive to `demoted`, under the pre-Q24 rules. A void of runs
+    4 and 3 and a re-grade under Q24 is planned (remainder spec, U5).
+  *Depends on:* 1 (for the two alerts), 5.
 - *Carries:* Q5 (excess-return scoring, neutral excluded), Q6 (per source,
   52/66 hysteresis, automatic re-promotion, ≥30 / ≥100 floors), Q7 (no
   backfill) — all decided. Q9 widens what is graded (decision 12: discovery
@@ -2919,7 +3002,8 @@ discovery panel.**
 geopolitical.**
 - *Status:* **code landed 2026-10-10; one done-criterion waits on the owner.**
   Commits: df39145 probes, e910173 seeds, 17a602e seed-test baselines,
-  2298e11 `calendar_event` (migration 0013, provisional under Q22), 67afd97
+  2298e11 `calendar_event` (migration 0013, provisional under Q22; *amended
+  2026-11-16:* final number **0015**, renumbered at merge), 67afd97
   Finnhub earnings and IPOs, 3fe10c1 Alpaca dividends, 48b507c FRED release
   dates, 0eb299f and 2bdbb21 window replacement and row hygiene, e739926 the
   five scheduler jobs, c3aa8eb `GET /api/calendar` and manual CRUD, 9c982df
@@ -2933,10 +3017,21 @@ geopolitical.**
   say which FRED series and transform is each release's headline figure
   (CPI as level, MoM or YoY; Employment Situation as the `PAYEMS` change or
   `UNRATE`). That is with the owner, so prior and actual are served empty
-  with that reason stated. **Seeds to verify by hand:** ECB 2026 is seeded
+  with that reason stated.
+  *Amended 2026-11-16:* **actuals come through the remainder spec** (Q23c;
+  its R6–R8, unit U6, merged in PR #15). Each release's headline is a fixed
+  FRED series and transform from `econ_release_series.csv`: CPI as the
+  monthly change, Employment Situation as the `PAYEMS` change. The figure is
+  the **first print**, computed in `Decimal` from FRED's release-day vintage
+  and stored once in `econ_release_value` (migration 0019), never in
+  `calendar_event`, whose daily refresh rewrites prior and actual. The open
+  item above is closed. Its live done-when checks are recorded under the
+  remainder's U6.
+  **Seeds to verify by hand:** ECB 2026 is seeded
   only from 2026-10-10, because its calendar no longer lists earlier
   meetings. ECB "14:15 CET" is read as Frankfurt local time. BoE and BoJ rows
-  are date-only, shown as the bank's local date. *Depends on:* 0, 2, 3, all
+  are date-only, shown as the bank's local date. *(Hand verification
+  deferred by the owner, Q23d, 2026-11-09.)* *Depends on:* 0, 2, 3, all
   done, so it runs in parallel with step 5 under Q22's migration rule.
 - *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
   project's key first**: its swagger flags are null, and a premium 403 goes

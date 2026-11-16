@@ -31,24 +31,29 @@ Corollary is a single-user equity options trading terminal. Python engine, React
 uv sync                          # install
 uv run python -m pytest           # backend tests — NOT `uv run pytest`, see below
 uv run python -m pytest -m risk   # risk tests only — run before any engine change
-uv run alembic upgrade head       # migrations — wired, 0004 is head
+uv run alembic upgrade head       # migrations — wired, 0020 is head
 uv run python -m corollary.engine    # start engine
 uv run python -m uvicorn corollary.api:dev_app --reload --env-file .env  # start API for editing — no sockets
 uv run python -m uvicorn corollary.api:app --env-file .env             # start API for real — opens the vendor sockets
 uv run python scripts/weekly_audit.py  # unattended weekly audit: starts corollary.api:headless_app (no sockets, Discord on), waits for the Saturday run, stops it
-uv run python scripts/weekday_session.py  # unattended trading day: runs corollary.api:headless_app until the calendar close + 30 min, keeping the machine awake only meanwhile; holds port 8000 -- see its docstring to stop it
-uv run mypy corollary            # type check, must be clean
+uv run python scripts/weekday_session.py  # unattended trading day: runs corollary.api:headless_app until the later of the calendar close + 30 min and 18:05 ET (R8), keeping the machine awake only meanwhile; holds port 8000 -- see its docstring to stop it
+uv run python -m mypy corollary  # type check, must be clean — NOT `uv run mypy`, see below
 ```
 
 **`uv run pytest` and `uv run uvicorn` do not work on this machine** — the
 generated console shim is blocked by Windows Application Control (`os error
 4551`), the same policy that blocks uv's managed 3.12 build. The `python -m`
 form of each runs the identical code and is unaffected, because it goes
-through the interpreter rather than the generated `.exe`. `uv run mypy` and
-`uv run alembic` are fine, so this is specific to the blocked entry points,
-not to uv — and **not** specific to pytest, which is what the uvicorn block
-(hit 2026-09-11, same `os error 4551`) established. Assume any new console
-script is blocked until shown otherwise, and reach for `python -m` first.
+through the interpreter rather than the generated `.exe`. `uv run alembic`
+is fine, so this is specific to the blocked entry points, not to uv — and
+**not** specific to pytest, which is what the uvicorn block (hit 2026-09-11,
+same `os error 4551`) established. Assume any new console script is blocked
+until shown otherwise, and reach for `python -m` first. **`uv run mypy` was
+on the fine list until 2026-11-11 and is not any more:** in a fresh worktree
+its new venv's `mypy.exe` shim is blocked by the same `os error 4551`, while
+`uv run python -m mypy corollary` runs. A venv whose shim happens to launch
+proves nothing about the next one, so the commands above use the `python -m`
+form for mypy too.
 
 **mypy is installed from its sdist, so it is pure Python.** Since about
 2026-10-23, Smart App Control has blocked the mypyc-compiled wheel's unsigned

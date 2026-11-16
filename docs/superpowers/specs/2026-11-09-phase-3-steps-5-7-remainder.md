@@ -4,9 +4,17 @@
 **Status:** Draft. The owner decisions it rests on were taken on 2026-11-09 and
 are recorded under *Owner decisions* (Q23). Nothing here is blocked on a
 question.
+**Amended 2026-11-11 with Q24** (four owner decisions taken while U5 and U6
+ran), recorded under *Owner decisions — 2026-11-11 (Q24)*. Q24c amends R4
+step 4.
+**Amended 2026-11-16 (U7):** unit statuses, final migration numbers, what was
+built where it differs from the text, and the *Not verified* items now
+verified. Each is a dated note beside the text it amends; the original text
+stays.
 **Parent spec:** `2026-09-23-phase-3-context-design.md` (steps 5, 6 and 7, and
 Q22). This spec amends that spec's decision 13 and Q6, and the parent gains a
-Q23 entry pointing here, in the same commit.
+Q23 entry pointing here, in the same commit. *(Verified 2026-11-16: the Q23
+entry landed in `a308f7c`, this spec's own commit.)*
 **Branch:** every unit branches from, and its pull request targets, **`master`**.
 **Phase:** 3 — context. **No order reaches a broker, and nothing built here is
 an input to anything that could place one.**
@@ -147,6 +155,23 @@ Each item is carried as a check at implementation time.
   U6's keyed probe records the response shape first. If the field is absent,
   R7 falls back to comparing the vintage on the release day against the
   vintage on the day before.
+  **Verified 2026-11-10 (U6a's keyed probe), and the answer reshaped R7's
+  query.** Every row carries `realtime_start` and `realtime_end`, but FRED
+  **clips** each row's real-time period to the window asked for. A
+  single-day query (`realtime_start = realtime_end = D`) therefore stamps
+  every row `D` and cannot say which value is new. The working query is
+  **one request with `realtime_start = D-1` and `realtime_end = D`**:
+  - **The release-day vintage** is the rows whose `realtime_end == D`.
+  - **New or revised on D** is a row starting on `D` with either no row for
+    that date ending on `D-1`, or one whose value differs **by `Decimal`
+    comparison**. FRED's number formatting is not canonical (`'159128'`
+    against `'159128.0'` is one number, not a revision).
+  - **The prior is read from that same vintage, not the latest one.**
+    Without the `realtime_end == D` filter, PAYEMS' prior for the
+    2026-11-06 release came out stale (159044), giving **+249K instead of
+    +165K**. `corollary/data/econ_values.py` carries the rule, and a test pins
+    the filter.
+  See R7's amended *fetch* and *which observation* paragraphs.
 - **How soon after a release FRED posts it.** The parent spec assumed about 10
   minutes. R8's retry schedule exists so the figure does not matter.
 - **Whether a figure computed from FRED's rounded levels equals the agency's
@@ -160,8 +185,13 @@ Each item is carried as a check at implementation time.
   and its history on FRED may be limited. If the vintage query refuses, that
   release shows *"not available from FRED"* with the vendor's reason, and the
   other fourteen are unaffected.
+  **Verified 2026-11-10 (U6a's probe): it refuses.** Every vintage query
+  answers HTTP 400, *"The series does not exist in ALFRED but may exist in
+  FRED"*. The release is served `unavailable` with that reason, as planned.
 - **How many stored Motley Fool duplicates exist beyond Nov 2–3.** R2's
   re-link reports the count.
+  **Verified 2026-11-10:** the live re-link added **92** twin links (198
+  linked in all); a second run added none. See U2.
 
 ---
 
@@ -210,6 +240,77 @@ the owner can override either:
   text alone. The cost: a five-day backlog can span five sessions, and so can
   satisfy Q23b on its own. A fetch-lag cap (for example, skip any story
   fetched more than N hours after publication) is the owner's to ask for.
+
+---
+
+## Owner decisions — 2026-11-11 (Q24)
+
+Put to the owner on 2026-11-11, after U5's re-grade (run 3) and U2's live
+re-link raised them, and answered the same day (Q24c after a second
+explanation). The owner's words are quoted. These are **owner decisions, not
+assumptions**. Q24a, Q24b and Q24c are built on `phase3-rem-grading`
+(`2f01ce9`, `29711a7`); Q24d merged with U6 in PR #15 (`0ec68c1`).
+
+- **Q24a — Backfill missing tradeability verdicts.** Answer: *"1 backfill"*.
+  Run 3 wrote 612 labels `off_watch_untradeable`, and up to 181 of them had
+  no verdict on or before their session at all, because verdicts are written
+  only by the daily refresh, for its own date, and none exist for Nov 4–9.
+  Built as **decision 27** in `corollary/data/news/audit.py`:
+  - **What is backfilled.** At most `VERDICT_BACKFILL_CAP = 100` `(ticker,
+    session)` pairs a run, oldest session first, each computed with
+    `refresh_tradeability(session_date=S)`, which reads only sessions
+    strictly before S. Only where no verdict on or before S exists: a stale
+    but existing verdict is decision 25's to use and is never replaced.
+  - **A pair no verdict reached** (a vendor error, no asset directory, a
+    deferral) is held pending up to the 28-day trailing window, then written
+    **`off_watch_unverdicted`**, a new membership skip reason (migration
+    0020).
+  - **`off_watch_untradeable` is written only on a failing verdict.**
+  - **An unreadable cached row is no verdict on the audit path**
+    (`signals.verdict_histories`). Movers keeps its fail-closed reading of
+    the same row (decision 21).
+  - **"No completed session before S" counts as a failing verdict**, as it
+    does in the daily refresh.
+  - **Named residual look-ahead,** accepted and documented rather than
+    patched: the ADV bars are split-adjusted, so a split between S and the
+    run rescales S's figures; `has_options`, the standard-root check and the
+    ticker's symbol are the vendor's **current** answers. No point-in-time
+    source exists for any of them, and the daily refresh reads them the same
+    way for its own date.
+  - **Backfilled verdicts enter the shared decision-21 cache**, so Movers can
+    read them. *Carried to Phase 4:* the scanner must require
+    `session_date == today` and never read a backfilled old-session verdict
+    as current.
+- **Q24b — Grade a twin group from its earliest stamp.** Answer: *"use the
+  earliest timestamp"*. U2's live re-link found the late Finnhub "Yahoo" copy
+  canonical in 66 of the 92 pairs, so a per-copy stamp measured the 1h window
+  from minute 20 to minute 80. Built as **decision 26** in `audit.py`: a
+  label's `published_at` is the earliest in its duplicate group, and every
+  derived instant (both windows, the reference session, R3's label session)
+  follows from it. *Known transition, recorded rather than patched:* a label
+  with one window already written under its copy's stamp has its other
+  window graded from the group's earliest.
+- **Q24c — A void restores `changed_at` exactly.** Answer: *"option A
+  then"*. A restored `active`/`demoted` status takes `changed_at` = the
+  **`started_at`** of the earlier run that made the transition, which is what
+  that run wrote, not that audit row's `at` (the run's finish, minutes
+  later, which would start a since-demotion window late). **This amends R4
+  step 4.** Built in `corollary/data/news/audit_void.py`.
+- **Q24d — Widen the weekday runner's hours to cover R8.** Answer: *"winden
+  the hours"* [sic]. Built in `scripts/weekday_session.py`:
+  - **Trigger:** Task Scheduler at 08:30 local on weekdays (the machine is on
+    Eastern time), plus at logon.
+  - **Stop:** the later of the calendar close + 30 min and **18:05 ET**
+    (`EARLIEST_STOP_ET`). That covers R8's 08:40 first attempts through its
+    18:00 retries, half-days included.
+  - **Runway:** it launches only with at least **60 minutes** (`MIN_RUNWAY`)
+    before its stop, so the start-up catch-ups can finish. After 17:05 ET it
+    launches nothing (`TOO_LATE`).
+  - **The trigger's `StartBoundary` must carry no UTC offset**
+    (`YYYY-MM-DDT08:30:00`). The old one carried `-05:00`, which fires an
+    hour late once daylight saving starts. The weekday trigger was fixed on
+    2026-11-14. The weekly-audit trigger carries the same offset and has
+    not been changed; that waits on the owner.
 
 ---
 
@@ -286,6 +387,13 @@ session's share would be a rule the owner did not ask for.
 - **Applying the floor to demotion only.** Re-promotion has the same
   correlation problem. The owner's answer was about eligibility in general.
 
+*Amended 2026-11-16, as built (U3, PR #13):* the column is migration **0017**
+(`0017_accuracy_sessions.py`), with no backfill of pre-Q23b rows. The reader
+that serves sessions and `sessionsNeeded` is
+`corollary/api/routes/sentiment.py`, not `settings.py` as *Module layout*
+says; the route path is unchanged. Under Q24b, a label's session follows from
+its twin group's earliest stamp.
+
 ### R4. Voiding a run: archive, restore, record — through a script, never a route
 
 Amends parent Q6 (*"the weekly audit run is the **only** writer"*). The audit
@@ -316,6 +424,11 @@ It cannot set a status no run computed.
      *"restored when run N was voided: <void reason>; the original reason text
      is not retained"*. `audit_log` never stored the original reason, and this
      spec does not invent one.
+     *Amended 2026-11-11 by Q24c:* `changed_at` is that row's **run's
+     `started_at`**, not the row's `at`. A run stamps its transitions'
+     `changed_at` with its start, and its audit row's `at` is its finish, so
+     restoring `at` would have moved the since-demotion basis minutes late.
+     The restore now reproduces exactly what the earlier run wrote.
    - **A source run N did not move** is untouched.
 5. **Records it.** One `audit_log` row per restored source: category
    `sentiment`, previous value = run N's status, new value = the restored one.
@@ -354,6 +467,25 @@ the app up: it is one short transaction under the session's `busy_timeout`.
 - **Notifying through `sentiment_repromoted`.** A void is not a re-promotion,
   and a Discord line saying Massive was "re-promoted" would be false.
 
+*Amended 2026-11-16, as built (U4, PR #13):*
+- **Migration 0018** (`0018_audit_void.py`) adds `voided_at` and
+  `void_reason` with **`ADD COLUMN` plus a column CHECK**, not the batch
+  rebuild *Database* describes. A rebuild's `DROP TABLE audit_run` fails
+  under `PRAGMA foreign_keys=ON` once `label_outcome`, `sentiment_accuracy`
+  or `sentiment_source_status` holds a row pointing at it, which the live
+  database does. SQLite enforces a column CHECK naming another column exactly
+  as it does a table CHECK, and a test upgrades a referenced `audit_run`.
+  `ck_audit_log_sentiment_row` was widened (a batch rebuild of `audit_log`,
+  which nothing references) for the `active|demoted → unaudited` restore row.
+- **Parent Q6's "only writer"** stands amended as this decision says, and
+  so does `audit_runner.py`'s module docstring, which still calls the runner
+  the **only writer** of `audit_run`, `label_outcome`,
+  `sentiment_accuracy`, `sentiment_source_status` and the `sentiment` audit
+  rows. Read it with R4: `audit_void.py` also writes them when it voids a
+  run, and only to restore a status a run decided. *(The docstring itself
+  does not yet say so; that is a code edit, outside U7.)*
+- **Step 4 is amended by Q24c** (above).
+
 ### R5. Run 2 is voided and the audit re-run, in this order
 
 1. R1 merged, and the live app restarted on it.
@@ -376,6 +508,14 @@ That is the rule working, not a fault.
 *Rejected:* voiding before R1 and R3 are live. The re-grade would then run
 under the same rule that is being voided.
 
+*Amended 2026-11-16, as run (U5):* steps 1–4 ran in order on 2026-11-10/11;
+run 2 was voided at 2026-11-11 00:59:52Z with 348 outcomes archived. Step 5
+was **not** a manual `POST`: `weekly_audit.py`'s start-up catch-up re-graded
+the voided Nov 7 slot as **run 3** (trigger `scheduled`), which made a
+manual run redundant. The outcome matched the expectation: both sources
+stayed `unaudited`, Massive on 3 sessions and rules on 4. A further void and
+re-grade under Q24 is planned (see *Order of work*, U5).
+
 ### R6. An economic release's figures live in their own table, keyed to the calendar row
 
 `econ_release_value(release_id, release_date, series_id, period, actual,
@@ -397,6 +537,19 @@ prior, unit_label, vintage_date, fetched_at)`:
   on one row, and the next producer to touch it would have to remember too.
 - **Storing FRED's current value.** Revisions would rewrite a release's figure
   after the fact, against Q23c.
+
+*Amended 2026-11-16, as built (U6, PR #15):*
+- **Migration 0019** (`0019_econ_release_value.py`) adds `econ_release_value`
+  as above and a second table, **`econ_release_fetch`**: the last attempt
+  per release (`attempted_at`, an `outcome` of `figure | not_posted |
+  no_value | refused | error`, and a `detail`). It gives R8's `unavailable`
+  state the vendor's reason to quote while the value table stays
+  write-once. Neither table has a foreign key to `calendar_event`; the join
+  is by value, on read.
+- **`unitLabel` is the existing `unit` field.** `GET /api/calendar` serves
+  the seed's `unit_label` in `CalendarEventItem.unit`, which the panel
+  already rendered beside `prior`/`actual`, rather than a new `unitLabel`
+  field (*API*, below). `valueState` and `valueNote` are new, as specified.
 
 ### R7. The figure is FRED's release-day vintage, transformed in exact `Decimal` by a seed
 
@@ -424,17 +577,42 @@ refuses both seeds. That follows the existing calendar-seed rule.
 | 13 | `INDPRO` | `pct_change` | 1 | `% m/m` | 1 |
 | 291 | `EXHOSLUSM495S` | `level` | 0.000001 | `M SAAR` | 2 |
 
+*Amended 2026-11-16, as built (U6):* the seed gained a seventh column,
+**`frequency`** (`monthly | quarterly`; `ECIALLCIV` and `A191RL1Q225SBEA` are
+quarterly, the rest monthly). It is a deliberate extension of the column list
+above: the fetch's lookback must be known before the request, and
+`econ_values.py` checks that x(t−1) and x(t−2) are each exactly one period
+earlier at that frequency. `decimals` is also capped at 4, the stored
+precision.
+
 **The fetch.** `fred/series/observations` with `series_id`,
 `realtime_start = realtime_end = release_date`, `file_type=json`, and an
 `observation_start` far enough back to hold three observations (four months
 for monthly series, a year for quarterly). Because this is the vintage, a
 fetch weeks late still returns exactly what was known on release day.
+*Amended 2026-11-16, from U6a's probe:* the query is
+**`realtime_start = D-1`, `realtime_end = D`**, still one request, because
+FRED clips each row's real-time period to the window and a single-day window
+cannot show what changed (see *Not verified*). `output_type=1` and `units=lin` are sent
+explicitly, and a response whose echo differs is refused. The four-month and
+one-year lookbacks are a **floor**. The lookback was widened to **6 months
+for monthly series and 15 for quarterly** (`fred.VINTAGE_LOOKBACK_MONTHS`),
+still one request.
 
 **Which observation.** The release's observation is the latest-dated one
 **new or revised on `release_date`**, by its `realtime_start` (see *Not
 verified* for the fallback). If there is none, FRED has not posted the release
 yet. The **prior** is the observation immediately before it **in the same
 vintage**, so a revision published that day is reflected in it.
+*Amended 2026-11-16, as built:*
+- **The release-day vintage** is the rows with `realtime_end == D`, and the
+  prior is read **from that vintage**. Without that filter PAYEMS' prior came
+  out stale (159044, giving +249K instead of +165K).
+- **New or revised** is decided by `Decimal` comparison against the row
+  ending `D-1`, never by string.
+- **x(t) must also be the newest-dated observation in the D vintage.** A day
+  that only revises an older month is not the release, so it reads as not
+  posted and the catch-up retries.
 
 **The transforms,** computed in `Decimal` with every input parsed from text:
 
@@ -486,6 +664,15 @@ A new context job, `econ_first_prints`, runs in the scheduler:
 
 The daily catch-up keeps trying `unavailable` rows while they remain in the
 stored window. The 7 days only changes what the row says.
+
+*Amended 2026-11-16, as built (U6, PR #15):* the job's rule lives in
+`corollary/data/econ_first_prints.py` and the store in
+`corollary/data/econ_store.py`; `engine/scheduler.py` only wakes it. First
+attempts fall at 08:40, 09:25 and 10:10 ET for the seed's three release
+times. The release-day grid is not gated on the NYSE session (the jobs report
+can land on Good Friday). The 10:00 ET catch-up runs on NYSE trading days
+only. Every attempt happens only while the backend runs, so Q24d widened the
+weekday runner to 18:05 ET.
 
 *Rejected:*
 - **A single fetch at +10 minutes.** FRED's posting lag is not verified, and a
@@ -542,6 +729,13 @@ scripts/
 └── void_audit_run.py             # R4
 ```
 
+*Amended 2026-11-16, as built:* the sentiment readout's route is
+`api/routes/sentiment.py`, not `settings.py` (R3's note). The econ half split
+three ways: `data/econ_values.py` (the pure transform),
+`data/econ_store.py` (the value and fetch tables) and
+`data/econ_first_prints.py` (R8's due-attempt rule and the fill run). Q24d
+changed `scripts/weekday_session.py`.
+
 ### Database
 
 One migration per unit that adds schema. Numbers are assigned at merge, after
@@ -559,6 +753,20 @@ head `0016` (Q22's rule).
   (R4).
 - `econ_release_value` (R6).
 
+*Amended 2026-11-16 — final numbers, assigned at merge (Q22's rule):*
+
+| Revision | File | What | Unit |
+|---|---|---|---|
+| `0017` | `0017_accuracy_sessions.py` | `sentiment_accuracy.sessions` (R3) | U3 |
+| `0018` | `0018_audit_void.py` | the void tool: `audit_run` void columns (`ADD COLUMN` + column CHECK, not a rebuild; R4's note), `label_outcome_voided`, the widened audit-log CHECK, the `sentiment_audit_voided` routes (R4) | U4 |
+| `0019` | `0019_econ_release_value.py` | `econ_release_value` and `econ_release_fetch` (R6's note) | U6d |
+| `0020` | `0020_unverdicted_skip.py` | the `off_watch_unverdicted` skip reason on `label_outcome` and `label_outcome_voided` (Q24a) | Q24a |
+
+`0019` was written as a provisional `0017` on `phase3-rem-econ`. `0020` was
+written as `0019` on `phase3-rem-grading`, and renumbered at merge because
+PR #15 landed first. Head is **`0020`**; the live database is at `0019` until
+the grading branch deploys.
+
 ### API
 
 - **`GET /api/calendar`:** each `economic` row gains `unitLabel`, `valueState`
@@ -567,7 +775,12 @@ head `0016` (Q22's rule).
   `prior`/`actual` come from `econ_release_value`. The blanket *"Prior and
   actual for economic releases are not filled yet"* reason string is removed.
   `consensus` stays `"unavailable"` (parent Q3).
-- **`GET /api/settings/sentiment`:** as R9.
+  *Amended 2026-11-16, as built:* `unitLabel` is served as the existing
+  `unit` field (R6's note). `prior` and `actual` are the stored figure rounded
+  server-side to the seed's `decimals` (`ROUND_HALF_UP`), and are null unless
+  `valueState` is `filled`.
+- **`GET /api/settings/sentiment`:** as R9 (served from
+  `api/routes/sentiment.py`).
 
 ### Frontend
 
@@ -632,28 +845,48 @@ probe):
 no control. The calendar renders all four value states.
 
 **Before every engine change:** `uv run python -m pytest -m risk`, `uv run
-mypy corollary`, and `npm run typecheck` and `npm run test` in `web/`.
+python -m mypy corollary`, and `npm run typecheck` and `npm run test` in
+`web/`. *(Amended 2026-11-16: was `uv run mypy corollary`, whose console shim
+Application Control blocks in a fresh worktree; see CLAUDE.md.)*
 
 ---
 
 ## Doc amendments
 
+*Applied 2026-11-16 in U7, each marked below. None was struck.*
+
 - **Parent spec** — the first one is made in this spec's own commit; the rest
   land in U7:
-  - **Q23**, pointing here.
-  - **Decision 13's eligibility** gains the session floor (R3).
-  - **Q6's** "only writer" is amended by R4.
+  - **Q23**, pointing here. *Applied in `a308f7c`, verified 2026-11-16. U7
+    added a Q24 entry beside it.*
+  - **Decision 13's eligibility** gains the session floor (R3). *Applied.*
+  - **Q6's** "only writer" is amended by R4. *Applied, in Q6, decision 13 and
+    the API section's "No reinstate route" line.*
   - **Step 5's status:** the mean-versus-median question is closed (P1).
+    *Applied.*
   - **Step 6's status:** run 2 happened, and was voided by Q23a. "The run" is
-    met by the re-grade run.
-  - **Step 7's status:** actuals come through this spec.
+    met by the re-grade run. *Applied: the re-grade is run 3.*
+  - **Step 7's status:** actuals come through this spec. *Applied.*
   - **Migration numbers:** steps 5–7 read their final numbers (`0013`, `0014`,
     `0015`), no longer "provisional". Step 7's text still says `0013`.
+    *Applied: step 7's `calendar_event` is `0015`, confirmed against
+    `corollary/db/migrations/versions/`.*
 - **PRD §10:** the notification table gains `sentiment_audit_voided`.
+  *Applied.*
 - **PRD §8.3:** economic releases show the first print, computed from FRED's
-  levels.
+  levels. *Applied, naming the release-day vintage.*
 - **CLAUDE.md:** the `alembic upgrade head` comment says *"0004 is head"*. It
-  is stale (head `0016` today) and will be again after this spec.
+  is stale (head `0016` today) and will be again after this spec. *Applied:
+  head `0020`.*
+- *Added 2026-11-16, from what U3–U6 and Q24 found, and applied in U7:*
+  - **CLAUDE.md, Commands:** `uv run mypy corollary` becomes `uv run python
+    -m mypy corollary`, and the paragraph after the block no longer says
+    `uv run mypy` is fine. In a fresh worktree its shim is blocked by the
+    same `os error 4551`.
+  - **CLAUDE.md, Commands:** the weekday runner's line reads *"until the later
+    of the calendar close + 30 min and 18:05 ET (R8)"* (Q24d).
+  - **This spec:** *Testing*'s "before every engine change" line takes the
+    same `python -m mypy` form.
 
 ---
 
@@ -662,29 +895,40 @@ mypy corollary`, and `npm run typecheck` and `npm run test` in `web/`.
 Each unit gives **Status**, **Depends on**, **Files** and **Done when**, like
 the parent's list.
 
+*Statuses amended 2026-11-16 (U7).* The original "not started" stays beside
+each, struck through by the dated status that replaces it.
+
 **U1. Merge `phase3-fixes`.**
-- *Status:* not started. *Depends on:* nothing.
+- *Status:* ~~not started~~ **merged in PR #13** (`c7cda12`, 2026-11-11),
+  through `phase3-rem-audit`; the live app was restarted on it for U5.
+  *Depends on:* nothing.
 - *Files:* the branch as it stands. Its spec edit merges cleanly.
 - *Done when:* merged into `master`; `pytest`, `pytest -m risk` and `mypy` pass
   on the merge; the live app is restarted on it.
 
 **U2. Re-link stored articles.**
-- *Status:* not started. *Depends on:* U1.
+- *Status:* ~~not started~~ **merged in PR #14** (`91ab671`, 2026-11-11).
+  The re-link ran against the live database on 2026-11-10 with the app
+  stopped: **92 twin links added, 198 linked in all**, no rows otherwise
+  changed; a dry run before and a run after on merged code both found
+  nothing more. In 66 of the 92 pairs the late Finnhub copy is the canonical
+  row, which raised Q24b. *Depends on:* U1.
 - *Files:* `corollary/data/news/ingest.py`, `scripts/relink_articles.py`, tests.
 - *Done when:* R2's tests pass, and the script has run against the live
   database and reported its count.
 
 **U3. The five-session floor.**
-- *Status:* not started. *Depends on:* U1 (it shares `audit.py` and
-  `audit_runner.py`).
+- *Status:* ~~not started~~ **merged in PR #13** (migration `0017`).
+  *Depends on:* U1 (it shares `audit.py` and `audit_runner.py`).
 - *Files:* `audit.py`, `audit_runner.py`, `db/models.py`, a migration
   (`sentiment_accuracy.sessions`), `api/routes/settings.py`, `api/schemas.py`,
   `web/src/pages/Settings.tsx`, `web/src/lib/settings.ts`, tests.
 - *Done when:* R3's tests pass and Settings shows sessions.
 
 **U4. The void tool.**
-- *Status:* not started. *Depends on:* U3 (shared readers and the migration
-  chain).
+- *Status:* ~~not started~~ **merged in PR #13** (migration `0018`). Q24c's
+  exact `changed_at` restore is on `phase3-rem-grading` (`29711a7`), not yet
+  merged. *Depends on:* U3 (shared readers and the migration chain).
 - *Files:* `corollary/data/news/audit_void.py`, `scripts/void_audit_run.py`, a
   migration (`audit_run` void columns, `label_outcome_voided`, the route rows,
   the audit-log CHECK if needed), `api/routes/settings.py`,
@@ -692,7 +936,20 @@ the parent's list.
 - *Done when:* R4's tests pass, and a voided run is excluded everywhere R4 names.
 
 **U5. Void run 2 and re-grade (R5). Operational, launched by the owner.**
-- *Status:* not started. *Depends on:* U1 to U4 merged and the app restarted.
+- *Status:* ~~not started~~ **done 2026-11-11.** Run 2 was voided at
+  00:59:52Z (348 outcomes archived; Massive `demoted → unaudited`, rules
+  `active → unaudited`; `sentiment_audit_voided` reached the bell and
+  Discord). Run 3 was the re-grade, by the start-up catch-up rather than a
+  manual `POST` (R5's note). Both sources stayed `unaudited`, at **3**
+  (Massive) and **4** (rules) sessions, as R5 expected.
+  *Status note, 2026-11-16:* on **2026-11-15 03:52 UTC, run 4** ran: the
+  Saturday start-up catch-up, because the 10:00 ET slot was missed while the
+  machine was off or asleep. It moved **rules to `active`** (7 sessions) and
+  **Massive to `demoted`** (6 sessions). It graded under the **pre-Q24
+  rules**, on `master` without Q24a or Q24b. **A re-grade under Q24 is
+  planned once the grading branch deploys:** void run 4, then run 3 (newest
+  first, since the tool voids only the latest standing run), relink, restart.
+  *Depends on:* U1 to U4 merged and the app restarted.
 - *Files:* none. The spec's statuses are updated once it is done.
 - *Done when:*
   - run 2 is voided
@@ -702,8 +959,26 @@ the parent's list.
     `sessions` figures explain why not
 
 **U6. Economic first prints.**
-- *Status:* not started. *Depends on:* nothing. It runs **in parallel** with
-  U1 to U4.
+- *Status:* ~~not started~~ **merged in PR #15** (`97f5046`), with Q24d.
+  Deployed 2026-11-14: the live database is at `0019`, and first prints are
+  filling. *Live done-when checks* (2026-11-16):
+  - **Every past release in the stored window is `filled` or states why
+    not: met.** All seven releases from Nov 2 to Nov 13 qualify. Six are
+    `filled` (TTLCONS, JTSJOL, BOPGSTB, PAYEMS, CPIAUCSL, PPIFIS). Existing
+    Home Sales is `unavailable`, with ALFRED's refusal as its reason.
+  - **The dates refresh leaves stored values alone: met in the live
+    database.** The refresh ran at 2026-11-16 07:12 UTC, after the values
+    were stored at 2026-11-14 06:09 UTC. All six values are intact with
+    their `fetched_at` unchanged, and `calendar_event.prior`/`.actual` stay
+    NULL on every economic row. That refresh rewrote only three December
+    rows, none of which held a value. So the case of rewriting a row that
+    holds a value is shown by the tests alone, not yet live.
+  - **The next release after deploy fills on its day: pending.** The first
+    is 2026-11-17 at 08:30 ET (Retail Sales, Import and Export Prices), then
+    G.17 at 09:15 ET.
+
+  *Depends on:* nothing. It
+  runs **in parallel** with U1 to U4.
 - *Pre-flight:* a keyed probe through `--env-file .env` records vintage
   fixtures for `CPIAUCSL`, `PAYEMS`, `BOPGSTB` and `EXHOSLUSM495S`, and
   settles the `realtime_start` field question in *Not verified* before R7's
@@ -719,8 +994,11 @@ the parent's list.
     database
 
 **U7. Doc amendments.**
-- *Status:* not started. *Depends on:* U1 to U6.
-- *Files:* the parent spec, `PRD.md`, `CLAUDE.md`.
+- *Status:* ~~not started~~ **applied 2026-11-16 on `phase3-rem-grading`**,
+  to land with Q24a–c. Every item under *Doc amendments* is applied; none
+  struck. *Depends on:* U1 to U6.
+- *Files:* the parent spec, `PRD.md`, `CLAUDE.md`. *(Amended 2026-11-16: and
+  this spec, for its statuses and as-built notes.)*
 - *Done when:* every item under *Doc amendments* is applied, or struck with a
   reason.
 
@@ -736,7 +1014,9 @@ U4 after U3. U5 after U2 and U4. U7 last.
 - **A fetch-lag cap on grading** (P2). It is the owner's to ask for.
 - **A per-session share cap** (R3's known limit).
 - **Any UI control that voids, demotes or re-promotes** (R4, parent Q6).
-- **Re-grading any run but run 2.** Run 1 graded nothing.
+- **Re-grading any run but run 2.** Run 1 graded nothing. *(Amended
+  2026-11-16: Q24a and Q24b change what is graded, so voiding runs 4 and 3
+  and re-grading under Q24 is now planned. See U5's status note.)*
 - **Consensus figures for economic releases** (parent Q3: not bought).
 - **Releases before the stored calendar window.** No ALFRED backfill.
 - **Any Phase 4 consumer** of the sentiment flag. How the scanner reads it
