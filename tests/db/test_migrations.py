@@ -204,10 +204,25 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
 VERSIONS_DIR = REPO_ROOT / "corollary" / "db" / "migrations" / "versions"
 
 
+def _string_tuple(value: ast.expr) -> tuple[str, ...] | None:
+    """``value`` as a tuple of strings if it is a tuple of string literals --
+    a merge revision's ``down_revision`` -- else ``None``."""
+    if not isinstance(value, ast.Tuple):
+        return None
+    strings: list[str] = []
+    for element in value.elts:
+        if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+            return None
+        strings.append(element.value)
+    return tuple(strings)
+
+
 def _declared(path: Path, name: str) -> object:
     """The literal a revision file assigns to module-level ``name``, read by
     parsing -- never by importing, and never through Alembic, whose scan is
-    exactly what hides a duplicate."""
+    exactly what hides a duplicate. A constant, or a tuple of string
+    constants (a merge revision's ``down_revision``), which
+    :func:`_revision_chain_problems` then reports as non-linear."""
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             targets, value = [node.target.id], node.value
@@ -217,9 +232,12 @@ def _declared(path: Path, name: str) -> object:
         else:
             continue
         if name in targets:
-            if not isinstance(value, ast.Constant):
+            if isinstance(value, ast.Constant):
+                return value.value
+            strings = _string_tuple(value) if value is not None else None
+            if strings is None:
                 raise AssertionError(f"{path.name}: {name} is not a literal")
-            return value.value
+            return strings
     raise AssertionError(f"{path.name}: declares no {name}")
 
 
@@ -294,6 +312,27 @@ def test_the_chain_guard_catches_a_second_file_declaring_a_revision(tmp_path: Pa
         'revision = "0099"\ndown_revision = "0007"\n', encoding="utf-8"
     )
     assert any("expected one head" in p for p in _revision_chain_problems(scratch))
+
+
+def test_the_chain_guard_reports_a_merge_revision_as_non_linear(tmp_path: Path) -> None:
+    """A tuple ``down_revision`` -- Alembic's merge revision -- is read as the
+    tuple it is and reported, rather than refused as "not a literal" before
+    the guard's own check can say what is wrong."""
+    scratch = tmp_path / "versions"
+    shutil.copytree(VERSIONS_DIR, scratch, ignore=shutil.ignore_patterns("__pycache__"))
+    (scratch / "0099_merge.py").write_text(
+        'revision = "0099"\ndown_revision = ("0019", "0018")\n', encoding="utf-8"
+    )
+    assert _declared(scratch / "0099_merge.py", "down_revision") == ("0019", "0018")
+    problems = _revision_chain_problems(scratch)
+    assert "revision '0099' has a non-linear down_revision ('0019', '0018')" in problems
+
+    # A tuple of anything but string literals is still no literal.
+    (scratch / "0099_merge.py").write_text(
+        'revision = "0099"\ndown_revision = ("0019", PARENT)\n', encoding="utf-8"
+    )
+    with pytest.raises(AssertionError, match="down_revision is not a literal"):
+        _revision_chain_problems(scratch)
 
 
 def test_0009_downgrades_to_0008_and_back(db_path: Path) -> None:
