@@ -155,6 +155,7 @@ from corollary.engine.scheduler import (
     FinnhubNewsSource,
     Scheduler,
     SchedulerFactory,
+    await_cancelled_audit,
     build_context_scheduler,
     no_scheduler,
 )
@@ -1288,15 +1289,21 @@ def create_app(
                 # context services, so none can start while the jobs stop.
                 app.state.context_services = None
                 await context_scheduler.aclose()
-                # A manual audit run in flight is stopped like a job: the
-                # runner closes its row ``failed`` on the cancel; only a row
-                # whose commit it never saw is left ``running``, for the next
-                # run to close as abandoned past ``ABANDONED_RUN_AFTER``.
+                # A manual audit run in flight is stopped like the audit job,
+                # bound included (owner decision Q26): the runner waits for its
+                # worker step and closes its row ``failed`` on the cancel. Still
+                # running after ``AUDIT_SHUTDOWN_GRACE``, it is cancelled again
+                # and logged, and its row is left as the abandoned step leaves
+                # it -- ``running``, as is one whose commit the runner never
+                # saw, for the next run to close as abandoned past
+                # ``ABANDONED_RUN_AFTER``. If the step had just ended and the
+                # runner is writing the failure, that write is waited for
+                # (``await_cancelled_audit``).
                 manual: asyncio.Task[object] | None = app.state.sentiment_audit_task
                 if manual is not None and not manual.done():
                     manual.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await manual
+                        await await_cancelled_audit(manual, job="sentiment_audit_manual")
                 # A job task cancelled mid-``to_thread`` leaves its worker
                 # thread running; wait (bounded) for its session to close, so
                 # no commit lands after this lifespan has returned. Never

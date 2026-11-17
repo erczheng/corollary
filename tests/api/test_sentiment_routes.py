@@ -14,6 +14,7 @@ scheduler's ``sentiment_audit_deps`` is replaced, because building real
 """
 
 import ast
+import asyncio
 import inspect
 import logging
 import re
@@ -54,7 +55,8 @@ from corollary.data.providers.interface import Bar
 from corollary.db.models import AuditRun, SentimentSourceStatus
 from corollary.engine.runtime import OperatorNotice
 from corollary.engine import scheduler as scheduler_module
-from corollary.engine.scheduler import SENTIMENT_AUDIT_JOB, JobStatus
+from corollary.engine.scheduler import SENTIMENT_AUDIT_JOB, JobStatus, await_cancelled_audit
+from tests.data.news.test_audit_runner import hold_worker_step
 
 from .news_support import add_accuracy, add_audit_run, set_source_status
 
@@ -2200,3 +2202,71 @@ def test_the_runners_lock_held_by_the_daily_backfill_is_a_409_that_names_it(
     assert fields["inputs"]["holder"] == "tradeability_cache"
     assert "tradeability_cache" in fields["rule"]
     assert _runs(db_engine) == []
+
+
+@pytest.mark.parametrize("abandoned", [True, False])
+def test_a_manual_run_cancelled_at_shutdown_logs_what_became_of_its_row(
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    abandoned: bool,
+) -> None:
+    """Audit L2(c): the route's last line on a manual run shutdown cancelled.
+
+    Abandoned -- still held in a step when ``AUDIT_SHUTDOWN_GRACE`` ran out
+    (owner decision Q26) -- its row is as that step leaves it, here
+    ``running`` for a later run to close past ``ABANDONED_RUN_AFTER``, and
+    the line says so, naming the step and shutdown's cancel. Let go inside
+    the grace, the runner closed it ``failed``, and the line says that.
+    """
+    monkeypatch.setattr(
+        scheduler_module, "sentiment_audit_deps", lambda services, clock=None: _deps(db_engine)
+    )
+    entered, release, finished = hold_worker_step(monkeypatch, "_first_plan")
+
+    async def scenario() -> None:
+        task = sentiment_routes._start_manual_run(
+            object(),  # type: ignore[arg-type]  # read only by the patched deps
+            lambda run_id: None,
+            "route-cid",
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            task.cancel()  # shutdown's first
+            if not abandoned:
+                release.set()
+            await await_cancelled_audit(
+                task, job="sentiment_audit_manual", grace=0.2 if abandoned else 60.0
+            )
+        finally:
+            release.set()
+        assert await asyncio.to_thread(finished.wait, 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert task.cancelled()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
+
+    (line,) = [
+        r for r in caplog.records if r.__dict__.get("event") == "sentiment_audit_manual_cancelled"
+    ]
+    assert line.__dict__["correlation_id"] == "route-cid"
+    assert line.__dict__["abandoned"] is abandoned
+    # Rule 8: the line carries its own UTC timestamp (Q26 re-audit LOW-2).
+    assert datetime.fromisoformat(line.__dict__["at"]).utcoffset() == timedelta(0)
+    (status,) = [run.status for run in _runs(db_engine)]
+    if abandoned:
+        (expired,) = [
+            r for r in caplog.records
+            if r.__dict__.get("event") == "sentiment_audit_shutdown_grace_expired"
+        ]
+        assert status == "running"
+        assert line.__dict__["step"] == "_first_plan"
+        assert expired.__dict__["correlation_id"] in line.__dict__["cancel_message"]
+        assert "ABANDONED_RUN_AFTER" in line.getMessage()
+        assert "closed its row failed" not in line.getMessage()
+    else:
+        assert status == "failed"
+        assert line.__dict__["step"] is None
+        assert "closed its row failed" in line.getMessage()

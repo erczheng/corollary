@@ -23,6 +23,7 @@ import functools
 import heapq
 import importlib.util
 import inspect
+import json
 import logging
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -43,7 +44,11 @@ from corollary.db.session import create_db_engine, sqlite_url
 from corollary.engine import scheduler as scheduler_module
 from corollary.engine.runtime import EngineRuntime, Notification
 from corollary.engine.scheduler import (
+    AUDIT_SHUTDOWN_GRACE,
     CASH_SESSION_WAKE_JOBS,
+    SENTIMENT_AUDIT_AT,
+    SENTIMENT_AUDIT_DAYS,
+    SENTIMENT_AUDIT_JOB,
     ALPACA_NEWS_IN_SESSION,
     ALPACA_NEWS_OTHERWISE,
     ASSET_DIRECTORY_AT,
@@ -65,6 +70,7 @@ from corollary.engine.scheduler import (
     Sleeper,
     TwoRate,
     WatchTierCadence,
+    await_cancelled_audit,
     build_context_scheduler,
     context_jobs,
     every_day,
@@ -115,6 +121,10 @@ from tests.data.seeds.test_nport_snapshot import FakeResolver, FakeSec, sec_prov
 from corollary.data.seeds import SpdrSeed, nport
 from tests.api.news_support import make_seed
 from corollary.db.models import SpdrHoldingsSnapshot
+from corollary.db.models import AuditRun
+from corollary.data.news.audit_runner import run_sentiment_audit
+from tests.data.news.test_audit_runner import _deps as audit_deps
+from tests.data.news.test_audit_runner import hold_worker_step
 from corollary.ratelimit import SEC_DATA_HOST
 
 UTC = timezone.utc
@@ -990,6 +1000,274 @@ async def test_aclose_is_safe_before_and_after_start() -> None:
     scheduler.start()
     await scheduler.aclose()
     await scheduler.aclose()
+
+
+# --------------------------------------------------------------------------
+# Shutdown's bound on the sentiment audit (owner decision Q26)
+# --------------------------------------------------------------------------
+
+#: The grace these tests give the audit job: long enough to measure, short
+#: enough to wait out.
+_TEST_AUDIT_GRACE = 0.5
+#: How far past the grace a bounded ``aclose`` may run here. A hang guard on
+#: one bounded wait -- a second cancel, one task step, one log line -- never
+#: a budget for a run. The held step outlasts it, so an unbounded wait fails.
+_PAST_THE_GRACE = 10.0
+#: How early a loop timer may fire on Windows (its ~15.6 ms clock tick).
+_TIMER_SLACK = 0.1
+
+
+def _audit_job(db_engine: Engine, *, grace: float | None) -> ScheduledJob:
+    """The shipped ``sentiment_audit`` job's shape over the real runner.
+
+    Its catch-up runs one scheduled run at start, as the shipped job's does
+    after a missed Saturday. The runner's deps are its own tests', so
+    nothing here reaches a vendor.
+    """
+    deps = audit_deps(db_engine)
+
+    async def audit() -> None:
+        await run_sentiment_audit(deps, trigger="scheduled")
+
+    return ScheduledJob(
+        name=SENTIMENT_AUDIT_JOB,
+        schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
+        run=audit,
+        catch_up=audit,
+        rule="test: the sentiment self-audit",
+        shutdown_grace=grace,
+    )
+
+
+def _audit_rows(db_engine: Engine) -> list[tuple[str, dict[str, object]]]:
+    with Session(db_engine) as session:
+        return [
+            (row.status, json.loads(row.detail or "{}"))
+            for row in session.scalars(select(AuditRun).order_by(AuditRun.id))
+        ]
+
+
+def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event", None) == event]
+
+
+@pytest.mark.asyncio
+async def test_aclose_cancels_a_held_sentiment_audit_again_once_its_grace_has_passed(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Owner decision Q26 (iii): the audit job's shutdown wait is bounded.
+
+    The run is held inside a worker step, which ignores the first cancel.
+    ``aclose`` waits the job's grace, cancels it again -- logged with the
+    rule, the job, the wait, the timestamp and a correlation id -- and
+    returns with the step still held. The run's row stays ``running``, for
+    a later run to close past ``ABANDONED_RUN_AFTER``. The other job is
+    cancelled and awaited as always.
+    """
+    entered, release, finished = hold_worker_step(monkeypatch, "_first_plan")
+
+    async def quick() -> None:
+        return None
+
+    other = ScheduledJob(
+        name="other", schedule=EveryWhileOpen(timedelta(minutes=15)), run=quick, rule="test"
+    )
+    scheduler = Scheduler(
+        [_audit_job(db_engine, grace=_TEST_AUDIT_GRACE), other],
+        secrets=no_secrets,
+        clock=lambda: WED_1500_ET,
+    )
+    try:
+        with caplog.at_level(logging.INFO):
+            scheduler.start()
+            assert await asyncio.to_thread(entered.wait, HANG_GUARD_SECONDS)
+            tasks = [t for t in asyncio.all_tasks() if t.get_name().startswith("context-job:")]
+            assert len(tasks) == 2
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            await asyncio.wait_for(
+                scheduler.aclose(), timeout=_TEST_AUDIT_GRACE + _PAST_THE_GRACE
+            )
+            elapsed = loop.time() - began
+            assert not finished.is_set()  # returned with the step still held
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, HANG_GUARD_SECONDS)
+
+    assert elapsed >= _TEST_AUDIT_GRACE - _TIMER_SLACK
+    assert all(t.cancelled() for t in tasks)
+    (expired,) = _events(caplog, "sentiment_audit_shutdown_grace_expired")
+    assert expired.levelno == logging.ERROR
+    assert getattr(expired, "job") == SENTIMENT_AUDIT_JOB
+    assert getattr(expired, "grace_seconds") == _TEST_AUDIT_GRACE
+    assert getattr(expired, "waited_seconds") >= _TEST_AUDIT_GRACE - _TIMER_SLACK
+    assert "Q26" in getattr(expired, "rule")
+    assert datetime.fromisoformat(getattr(expired, "at")).tzinfo is not None
+    correlation_id = getattr(expired, "correlation_id")
+    assert len(correlation_id) == 32
+    # The runner's own line names the run, and carries shutdown's id.
+    (abandoned,) = _events(caplog, "sentiment_audit_run_abandoned")
+    assert (getattr(abandoned, "stage"), getattr(abandoned, "step")) == ("plan", "_first_plan")
+    assert correlation_id in getattr(abandoned, "cancel_message")
+    assert not _events(caplog, "sentiment_audit_failed")
+    ((status, detail),) = _audit_rows(db_engine)
+    assert getattr(abandoned, "audit_run_id") is not None
+    assert (status, detail) == ("running", {})
+
+
+@pytest.mark.asyncio
+async def test_a_step_ending_just_at_the_grace_leaves_shutdown_waiting_on_the_failure_write(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit L1, pinned as the owner ruled it: no third bound.
+
+    The held step ends just before the grace runs out, so when the second
+    cancel comes the run is already recording its failure. It lands in that
+    write's wait, which treats it as a first cancel and waits for the
+    ``_fail_run`` thread -- and so shutdown waits for that one write, past
+    the grace. The row ends ``failed``, by the runner's own write, and no
+    abandonment is logged. Both waits are held here, so the order is fixed.
+    """
+    step_entered, step_release, _ = hold_worker_step(monkeypatch, "_first_plan")
+    write_entered, write_release, write_finished = hold_worker_step(monkeypatch, "_fail_run")
+    task = asyncio.create_task(run_sentiment_audit(audit_deps(db_engine), trigger="scheduled"))
+    try:
+        with caplog.at_level(logging.INFO):
+            assert await asyncio.to_thread(step_entered.wait, HANG_GUARD_SECONDS)
+            task.cancel()  # shutdown's first
+            for _ in range(5):
+                await asyncio.sleep(0)
+            step_release.set()  # the step ends inside the grace ...
+            assert await asyncio.to_thread(write_entered.wait, HANG_GUARD_SECONDS)
+            # ... so the failure write is in flight when the grace runs out.
+            waiting = asyncio.create_task(
+                await_cancelled_audit(task, job=SENTIMENT_AUDIT_JOB, grace=_TEST_AUDIT_GRACE)
+            )
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + HANG_GUARD_SECONDS
+            while not _events(caplog, "sentiment_audit_shutdown_grace_expired"):
+                assert loop.time() < deadline, "the grace never expired"
+                await asyncio.sleep(0.01)
+            # Bounded by the write, not by the grace: still waiting on it a
+            # further two graces on, with the write held.
+            done, _ = await asyncio.wait({waiting}, timeout=2 * _TEST_AUDIT_GRACE)
+            assert not done and not task.done()
+            assert not write_finished.is_set()
+            write_release.set()
+            await asyncio.wait_for(waiting, timeout=HANG_GUARD_SECONDS)
+    finally:
+        step_release.set()
+        write_release.set()
+
+    assert task.cancelled()
+    ((status, detail),) = _audit_rows(db_engine)
+    assert status == "failed"
+    assert (detail["stage"], detail["error_type"]) == ("plan", "CancelledError")
+    (expired,) = _events(caplog, "sentiment_audit_shutdown_grace_expired")
+    # The rule says so, rather than promising a row left running.
+    assert "failure write" in getattr(expired, "rule")
+    assert "busy timeout" in getattr(expired, "rule")
+    # The runner's line for the window carries shutdown's correlation id.
+    (cancelled,) = _events(caplog, "sentiment_audit_failure_recording_cancelled")
+    assert getattr(expired, "correlation_id") in getattr(cancelled, "cancel_message")
+    assert not _events(caplog, "sentiment_audit_run_abandoned")
+    assert len(_events(caplog, "sentiment_audit_failed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_held_audit_that_lets_go_within_its_grace_is_recorded_failed_as_before(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Inside the grace nothing changes: one cancel, the step finishes, the
+    run is closed ``failed`` with the cancellation's type, and no second
+    cancel is sent or logged."""
+    entered, release, _ = hold_worker_step(monkeypatch, "_first_plan")
+    scheduler = Scheduler(
+        [_audit_job(db_engine, grace=HANG_GUARD_SECONDS)],
+        secrets=no_secrets,
+        clock=lambda: WED_1500_ET,
+    )
+    try:
+        with caplog.at_level(logging.INFO):
+            scheduler.start()
+            assert await asyncio.to_thread(entered.wait, HANG_GUARD_SECONDS)
+            closing = asyncio.create_task(scheduler.aclose())
+            for _ in range(20):
+                await asyncio.sleep(0)
+            assert not closing.done()  # the first cancel waits for the step
+            release.set()
+            await asyncio.wait_for(closing, timeout=HANG_GUARD_SECONDS)
+    finally:
+        release.set()
+    ((status, detail),) = _audit_rows(db_engine)
+    assert status == "failed"
+    assert (detail["stage"], detail["error_type"]) == ("plan", "CancelledError")
+    assert not _events(caplog, "sentiment_audit_shutdown_grace_expired")
+    assert not _events(caplog, "sentiment_audit_run_abandoned")
+    assert len(_events(caplog, "sentiment_audit_failed")) == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_still_waits_out_every_other_job_and_cancels_it_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q26 chose (iii) over (ii): no other job's shutdown wait is bounded.
+
+    A job that takes longer than the audit's grace to honour its cancel is
+    still cancelled once and awaited to its end -- with the grace cut to
+    almost nothing, so a bound applied to every job would show here.
+    """
+    monkeypatch.setattr(scheduler_module, "AUDIT_SHUTDOWN_GRACE", 0.01)
+    inside = asyncio.Event()
+    cancels: list[str] = []
+    cleaned: list[str] = []
+
+    async def slow_to_stop() -> None:
+        inside.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancels.append("first")
+            try:
+                await asyncio.sleep(0.3)  # longer than the audit's grace
+            except asyncio.CancelledError:
+                cancels.append("second")
+                raise
+            cleaned.append("done")
+            raise
+
+    scheduler = Scheduler(
+        [
+            ScheduledJob(
+                name="slow_to_stop",
+                schedule=EveryWhileOpen(timedelta(minutes=15)),
+                run=slow_to_stop,
+                catch_up=slow_to_stop,
+                rule="test",
+            )
+        ],
+        secrets=no_secrets,
+        clock=lambda: WED_1500_ET,
+    )
+    with caplog.at_level(logging.INFO):
+        scheduler.start()
+        await asyncio.wait_for(inside.wait(), timeout=HANG_GUARD_SECONDS)
+        await asyncio.wait_for(scheduler.aclose(), timeout=HANG_GUARD_SECONDS)
+    assert cancels == ["first"]
+    assert cleaned == ["done"]
+    assert not _events(caplog, "sentiment_audit_shutdown_grace_expired")
+
+
+@pytest.mark.asyncio
+async def test_only_the_shipped_sentiment_audit_job_has_a_shutdown_grace(
+    db_engine: Engine,
+) -> None:
+    jobs = _jobs_by_name(_news_services(db_engine), lambda: WED_1500_ET)
+    graced = {
+        name: job.shutdown_grace for name, job in jobs.items() if job.shutdown_grace is not None
+    }
+    assert graced == {SENTIMENT_AUDIT_JOB: AUDIT_SHUTDOWN_GRACE}
+    assert AUDIT_SHUTDOWN_GRACE == 20.0
 
 
 # --------------------------------------------------------------------------

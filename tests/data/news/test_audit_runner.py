@@ -17,10 +17,13 @@ it ``rules`` goes ``unaudited -> active`` and ``massive`` goes
 
 import ast
 import asyncio
+import functools
 import inspect
 import json
+import logging
 import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -1241,6 +1244,270 @@ def test_a_cancellation_while_opening_closes_the_runs_own_row(
     monkeypatch.undo()
     later = _run(_deps(db_engine, clock=TickingClock(SATURDAY_10 + timedelta(minutes=1))))
     assert later.detail["graded"] == 4 * LABELS_PER_SOURCE
+
+
+# ------------- owner decision Q26: a second cancellation abandons the held step
+
+
+def hold_worker_step(
+    monkeypatch: pytest.MonkeyPatch, name: str, *, hold: float = 60.0
+) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """Hold ``audit_runner.<name>`` on its worker thread until ``release``.
+
+    Returns ``(entered, release, finished)``: ``entered`` is set once the
+    thread is inside the step, ``finished`` once the real step has run after
+    the release. The hold (60 s) outlasts every bound a test waits on, so a
+    shutdown that waited for the thread fails on its timeout instead of
+    passing. Release it in a ``finally``. Also used by the scheduler's and the
+    lifespan's shutdown tests.
+    """
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real = getattr(audit_runner, name)
+
+    @functools.wraps(real)  # the step keeps its name in the runner's log lines
+    def held(*args: object) -> object:
+        entered.set()
+        try:
+            release.wait(hold)
+            return real(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(audit_runner, name, held)
+    return entered, release, finished
+
+
+def test_a_second_cancellation_abandons_the_step_and_leaves_the_row_running(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shutdown's second cancel (owner decision Q26) stops the wait at once.
+
+    The first cancel waits for the held thread, as above. The second returns
+    while the thread is still inside its step and writes nothing more for the
+    run: that thread may hold the write lock or be about to commit, so the
+    row stays ``running`` -- and a later run closes it past
+    :data:`ABANDONED_RUN_AFTER`, as for a process that died mid-run.
+    """
+    _the_week(db_engine)
+    entered, release, finished = hold_worker_step(monkeypatch, "_write_outcomes")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run_sentiment_audit(_deps(db_engine), trigger="scheduled"))
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            task.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not task.done()  # the first cancellation waits for the thread
+            task.cancel("shutdown-cid")
+            done, _ = await asyncio.wait({task}, timeout=10)
+            assert done == {task} and task.cancelled()
+            assert not finished.is_set()  # let go while the thread was still held
+            assert not audit_runner._RUN_LOCK.locked()
+            with Session(db_engine) as session:
+                run = session.scalars(select(AuditRun)).one()
+                assert (run.status, run.finished_at) == ("running", None)
+        finally:
+            release.set()
+        # The abandoned step still ends on its own thread -- here by committing.
+        assert await asyncio.to_thread(finished.wait, 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.INFO, logger=audit_runner.__name__):
+        asyncio.run(scenario())
+
+    with Session(db_engine) as session:
+        run = session.scalars(select(AuditRun)).one()
+        abandoned_id = run.id
+        assert (run.status, run.finished_at) == ("running", None)
+    assert _count(db_engine, LabelOutcome) == 4 * LABELS_PER_SOURCE
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "sentiment_audit_failed" not in events  # nothing recorded it failed
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_run_abandoned"
+    )]
+    assert line.levelno == logging.ERROR
+    assert getattr(line, "audit_run_id") == abandoned_id
+    assert (getattr(line, "stage"), getattr(line, "step")) == ("grade", "_write_outcomes")
+    assert getattr(line, "trigger") == "scheduled"
+    assert getattr(line, "cancel_message") == "shutdown-cid"
+    assert "Q26" in getattr(line, "rule")
+    assert len(getattr(line, "correlation_id")) == 32
+    # Audit L3: the step is in the words, and they do not promise ``running``
+    # unconditionally -- an abandoned close may still commit ``succeeded``.
+    assert "_write_outcomes" in line.getMessage()
+    assert "succeeded" in line.getMessage() and "succeeded" in getattr(line, "rule")
+    (finished_line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_abandoned_worker_finished"
+    )]
+    assert getattr(finished_line, "error_type") is None
+    # Audit L2(b): the thread's late line names the run it belonged to.
+    assert getattr(finished_line, "step") == "_write_outcomes"
+    assert getattr(finished_line, "audit_run_id") == abandoned_id
+    assert getattr(finished_line, "correlation_id") == getattr(line, "correlation_id")
+    assert getattr(finished_line, "cancel_message") == "shutdown-cid"
+
+    # The next run past the bound closes the row, as it would a dead process's.
+    monkeypatch.undo()
+    later_start = SATURDAY_10 + ABANDONED_RUN_AFTER + timedelta(minutes=1)
+    later = _run(_deps(db_engine, clock=TickingClock(later_start)))
+    with Session(db_engine) as session:
+        closed = session.get(AuditRun, abandoned_id)
+        assert closed is not None and closed.status == "failed"
+        assert json.loads(closed.detail or "{}")["abandoned"] is True
+        current = session.get(AuditRun, later.run_id)
+        assert current is not None and current.status == "succeeded"
+
+
+def _cancel_twice_while_opening(
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    committed: bool,
+) -> None:
+    """Hold ``_open_run``; cancel; then cancel again with ``"shutdown-cid"``.
+
+    ``committed=False`` sends the second cancel with the insert still held.
+    ``committed=True`` releases it first and blocks the loop until the
+    thread has returned -- the row committed and its id noted -- so the
+    second cancel lands while ``_on_worker`` has not yet seen it. The
+    loop's executor has one thread, so a no-op queued behind the step ends
+    only once the step has (audit L2(a)).
+    """
+    entered, release, finished = hold_worker_step(monkeypatch, "_open_run")
+
+    async def scenario() -> None:
+        pool = ThreadPoolExecutor(max_workers=1)
+        asyncio.get_running_loop().set_default_executor(pool)
+        task = asyncio.create_task(run_sentiment_audit(_deps(db_engine), trigger="manual"))
+        try:
+            # Polled on the loop: the pool's one thread is the held step.
+            for _ in range(1000):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert entered.is_set()
+            task.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not task.done()  # the first cancellation waits for the thread
+            if committed:
+                release.set()
+                pool.submit(lambda: None).result(timeout=10)  # blocks the loop
+            task.cancel("shutdown-cid")
+            done, _ = await asyncio.wait({task}, timeout=10)
+            assert done == {task} and task.cancelled()
+        finally:
+            release.set()
+        assert await asyncio.to_thread(finished.wait, 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.INFO, logger=audit_runner.__name__):
+        asyncio.run(scenario())
+
+
+def test_a_second_cancellation_before_the_row_is_confirmed_logs_shutdowns_message(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit L2(a): the not-started line carries the second cancel's message,
+    which is what links it to shutdown's ``grace_expired`` line. The row the
+    thread commits afterwards is left ``running``, as that line says."""
+    _cancel_twice_while_opening(db_engine, monkeypatch, caplog, committed=False)
+
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_not_started"
+    )]
+    assert getattr(line, "row_confirmed") is False
+    assert getattr(line, "error_type") == "WorkerAbandoned"
+    assert getattr(line, "cancel_message") == "shutdown-cid"
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "sentiment_audit_run_abandoned" not in events
+    assert "sentiment_audit_failed" not in events
+    with Session(db_engine) as session:
+        run = session.scalars(select(AuditRun)).one()
+        assert (run.status, run.finished_at) == ("running", None)
+    (finished_line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_abandoned_worker_finished"
+    )]
+    # No id was known when the wait was abandoned; the run's own id was.
+    assert getattr(finished_line, "audit_run_id") is None
+    assert getattr(finished_line, "correlation_id") == getattr(line, "correlation_id")
+
+
+def test_a_second_cancellation_after_the_open_committed_leaves_that_row_running(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit L2(a): ``_open``'s abandoned-after-commit branch. The id was
+    noted, so the run is logged abandoned at ``open`` by that id -- and,
+    the second cancel being shutdown's, nothing closes it ``failed``."""
+    _cancel_twice_while_opening(db_engine, monkeypatch, caplog, committed=True)
+
+    with Session(db_engine) as session:
+        run = session.scalars(select(AuditRun)).one()
+        assert (run.status, run.finished_at) == ("running", None)
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_run_abandoned"
+    )]
+    assert getattr(line, "audit_run_id") == run.id
+    assert (getattr(line, "stage"), getattr(line, "step")) == ("open", "open_and_note")
+    assert getattr(line, "trigger") == "manual"
+    assert getattr(line, "cancel_message") == "shutdown-cid"
+    events = [getattr(r, "event", None) for r in caplog.records]
+    assert "sentiment_audit_not_started" not in events
+    assert "sentiment_audit_failed" not in events
+
+
+def test_an_abandoned_close_can_still_commit_succeeded_and_its_notices_are_never_queued(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Audit L3, a known residual of owner decision Q26, pinned as it is.
+
+    Abandoned inside ``_close_run``, the step still commits once released:
+    the run ends ``succeeded`` and its source transitions stand, but
+    ``_emit_all`` never runs, so no transition notice is queued. The
+    abandonment line names the step and says so, rather than promising a
+    ``running`` row.
+    """
+    _five_session_week(db_engine)
+    sink = Sink()
+    entered, release, finished = hold_worker_step(monkeypatch, "_close_run")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_sentiment_audit(_deps(db_engine, sink=sink), trigger="scheduled")
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            task.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            task.cancel("shutdown-cid")
+            done, _ = await asyncio.wait({task}, timeout=10)
+            assert done == {task} and task.cancelled()
+        finally:
+            release.set()
+        assert await asyncio.to_thread(finished.wait, 10)
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.INFO, logger=audit_runner.__name__):
+        asyncio.run(scenario())
+
+    with Session(db_engine) as session:
+        run = session.scalars(select(AuditRun)).one()
+        assert run.status == "succeeded"
+        statuses = {s.source: s.status for s in session.scalars(select(SentimentSourceStatus))}
+    assert (statuses["massive"], statuses["rules"]) == ("demoted", "active")
+    assert sink.notices == []  # the transitions stand; their notices were never queued
+    (line,) = [r for r in caplog.records if getattr(r, "event", None) == (
+        "sentiment_audit_run_abandoned"
+    )]
+    assert (getattr(line, "stage"), getattr(line, "step")) == ("close", "_close_run")
+    assert "_close_run" in line.getMessage()
+    assert "never queued" in getattr(line, "rule")
 
 
 # ------------- follow-up F2: the hold-back bound releases only attempted faults

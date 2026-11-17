@@ -27,8 +27,10 @@ a. **Open.** Close any ``running`` row older than
    (``models.AuditRun``). A cancellation that arrives while this commits
    closes the row it committed ``failed`` (``detail.stage = "open"``)
    before re-raising, so on a single cancellation it does not block the
-   next run for :data:`ABANDONED_RUN_AFTER`; a second cancellation during
-   that wait leaves the row to that bound (:func:`_open`).
+   next run for :data:`ABANDONED_RUN_AFTER`. A second cancellation during
+   that wait -- shutdown's, sent once ``AUDIT_SHUTDOWN_GRACE`` has passed
+   since its first (owner decision Q26) -- leaves the row to that bound
+   (:func:`_open`).
 b. **Plan.** The labels with an unwritten window, the keys already written,
    the duplicate groups already claimed, step 0's watch universe, and each
    off-watch ticker's cached tradeability verdict history
@@ -75,7 +77,18 @@ only, logs it, and re-raises -- the scheduler's job contract. Every status
 write is ``UPDATE ... WHERE id = ? AND status = 'running'`` with its rowcount
 checked, so no two writers can turn one terminal state into the other; and a
 cancelled run waits for its in-flight worker thread (:func:`_on_worker`)
-before the lock is released. Nothing here
+before the lock is released. **Except at shutdown** (owner decision Q26):
+``Scheduler.aclose`` (the ``sentiment_audit`` job) and the lifespan (a manual
+run) wait ``AUDIT_SHUTDOWN_GRACE`` (``engine/scheduler.py``) after the first
+cancellation, then cancel again. On that second one the run stops waiting,
+logs ``sentiment_audit_run_abandoned``, writes nothing more and releases
+the lock while the thread runs on; its row stays ``running`` until a later
+run closes it past :data:`ABANDONED_RUN_AFTER` -- unless the abandoned step
+was the close and still commits ``succeeded``, its notices never queued
+(:func:`_log_abandoned`). A second cancel that lands in the failure write,
+because the step ended just before the grace, is honoured as a first: the
+row is closed ``failed`` and shutdown waits for that write
+(:func:`_record_failure`). Nothing here
 reads or writes ``engine_state``: a context job is never a rule-9 producer
 (decision 1).
 
@@ -154,6 +167,7 @@ Decisions this module takes (flagged in the unit's report)
 """
 
 import asyncio
+import functools
 import json
 import logging
 import threading
@@ -235,6 +249,7 @@ __all__ = [
     "VerdictBackfillOutcome",
     "WatchUniverseSource",
     "WatchUniverseUnavailable",
+    "WorkerAbandoned",
     "backfill_verdicts",
     "load_verdicts_needed",
     "run_sentiment_audit",
@@ -462,27 +477,93 @@ def _is_data_fault(exc: BaseException) -> bool:
     )
 
 
+class WorkerAbandoned(asyncio.CancelledError):
+    """A second cancellation stopped :func:`_on_worker` waiting for a live thread.
+
+    Still a cancellation: every handler that honours one honours this, and
+    the task ends cancelled. But the step may still be running on its
+    thread, holding SQLite's write lock or about to commit, so nothing more
+    is written for the run (:func:`_run_locked`, :func:`_open`). Its row is
+    left as that step leaves it: ``running`` for a later run to close past
+    :data:`ABANDONED_RUN_AFTER` -- or, if the step was ``_close_run`` and it
+    commits, ``succeeded`` (owner decision Q26; :func:`_log_abandoned`).
+    ``cancel_message`` is the second cancellation's message: shutdown's
+    carries its correlation id. The handler that catches this names the run
+    (:meth:`name_run`) for the line :func:`_abandoned_worker_finished` logs.
+    """
+
+    def __init__(self, step: str, cancel_message: str | None) -> None:
+        super().__init__(f"stopped waiting for the {step} worker thread")
+        self.step = step
+        self.cancel_message = cancel_message
+        self.audit_run_id: int | None = None
+        self.correlation_id: str | None = None
+
+    def name_run(self, audit_run_id: int | None, correlation_id: str) -> None:
+        """The run this step belonged to; ``audit_run_id`` is ``None`` before its row is known."""
+        self.audit_run_id = audit_run_id
+        self.correlation_id = correlation_id
+
+
+def _abandoned_worker_finished(abandoned: WorkerAbandoned, task: "asyncio.Future[Any]") -> None:
+    """An abandoned step's thread ended while the loop still ran: say how.
+
+    Also retrieves its exception, which nobody else will. At process exit
+    the loop cancels the waiting task first, and this logs nothing. The run
+    is named by then: the handler that caught ``abandoned`` did so in the
+    same task step as the raise, and this runs on a later one.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    logger.log(
+        logging.WARNING if exc is None else logging.ERROR,
+        "an abandoned sentiment audit worker thread finished its step %s",
+        abandoned.step,
+        extra={
+            "event": "sentiment_audit_abandoned_worker_finished",
+            "step": abandoned.step,
+            "error_type": None if exc is None else type(exc).__name__,
+            "audit_run_id": abandoned.audit_run_id,
+            "cancel_message": abandoned.cancel_message,
+            "correlation_id": abandoned.correlation_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
 async def _on_worker(fn: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
     """``asyncio.to_thread``, except a cancellation first waits for the thread.
 
     A cancelled ``await asyncio.to_thread(...)`` stops waiting but the thread
     runs on, so its commit could land after the run released the lock, or
     after ``_fail_run`` closed the row. Here the **first** cancellation waits
-    (shielded) for the thread to finish and then re-raises; a second
-    cancellation during that wait is honoured at once, so shutdown is never
-    held hostage by a stuck thread.
+    (shielded) for the thread to finish and then re-raises. A **second**
+    cancellation during that wait is honoured at once, raised as
+    :class:`WorkerAbandoned`, and the thread runs on unwatched. Shutdown is
+    what sends it (owner decision Q26): ``Scheduler.aclose`` for the
+    ``sentiment_audit`` job, and the lifespan for a manual run, each once the
+    task is still running ``AUDIT_SHUTDOWN_GRACE`` (``engine/scheduler.py``)
+    after the first. The only other source is a cancellation of that
+    shutdown wait itself, which is passed on to the run.
     """
     task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    step = getattr(fn, "__name__", "unknown")
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        await asyncio.wait({task})
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as again:
+            abandoned = WorkerAbandoned(step, str(again) or None)
+            task.add_done_callback(functools.partial(_abandoned_worker_finished, abandoned))
+            raise abandoned from again
         if not task.cancelled() and task.exception() is not None:
             logger.error(
                 "a sentiment audit worker thread failed after its run was cancelled",
                 extra={
                     "event": "sentiment_audit_worker_failed_after_cancel",
-                    "step": getattr(fn, "__name__", "unknown"),
+                    "step": step,
                     "error_type": type(task.exception()).__name__,
                 },
             )
@@ -1761,9 +1842,11 @@ async def _open(
     :data:`ABANDONED_RUN_AFTER`, so the id is noted as the thread commits it
     and, on the cancel path, that row is closed ``failed`` (``stage =
     "open"``) before the cancellation propagates: only this run's own row,
-    by its id. A *second* cancellation during ``_on_worker``'s wait returns
-    before the thread does; the row, if it then lands, is left for the
-    abandonment bound to close -- shutdown is not held hostage.
+    by its id. A *second* cancellation during ``_on_worker``'s wait -- sent
+    by shutdown once ``AUDIT_SHUTDOWN_GRACE`` has passed since the first
+    (owner decision Q26) -- returns before the thread does, and nothing is
+    written: the row, if it lands, is left ``running`` for the abandonment
+    bound to close, so shutdown is not held hostage.
     """
     opened: list[tuple[int, datetime]] = []
 
@@ -1783,6 +1866,10 @@ async def _open(
         )
     except asyncio.CancelledError as exc:
         if not opened:
+            cancel_message = None
+            if isinstance(exc, WorkerAbandoned):
+                exc.name_run(None, correlation_id)
+                cancel_message = exc.cancel_message
             logger.error(
                 "sentiment audit run cancelled before its row was confirmed "
                 "written; a row that lands later is closed by the "
@@ -1792,12 +1879,17 @@ async def _open(
                     "row_confirmed": False,
                     "trigger": trigger,
                     "error_type": type(exc).__name__,
+                    # Shutdown's second cancel carries its correlation id (Q26).
+                    "cancel_message": cancel_message,
                     "correlation_id": correlation_id,
                 },
             )
             raise
-        # Closes the row and logs; it re-raises only a further cancellation.
         noted_id, noted_at = opened[0]
+        if isinstance(exc, WorkerAbandoned):
+            _log_abandoned(noted_id, noted_at, "open", trigger, exc, correlation_id)
+            raise
+        # Closes the row and logs; it re-raises only a further cancellation.
         await _record_failure(deps, noted_id, noted_at, "open", exc, correlation_id)
         raise
     except AuditAlreadyRunning:
@@ -1962,6 +2054,9 @@ async def _run_locked(
             _close_run, deps.session_factory, run_id, audits, statuses, finished_at, detail
         )
     except BaseException as exc:
+        if isinstance(exc, WorkerAbandoned):
+            _log_abandoned(run_id, started_at, stage, trigger, exc, correlation_id)
+            raise
         await _record_failure(deps, run_id, started_at, stage, exc, correlation_id)
         raise
 
@@ -2022,6 +2117,56 @@ async def _run_locked(
     )
 
 
+def _log_abandoned(
+    run_id: int,
+    started_at: datetime,
+    stage: str,
+    trigger: AuditTrigger,
+    exc: WorkerAbandoned,
+    correlation_id: str,
+) -> None:
+    """A run whose step a second cancellation stopped waiting for (owner decision Q26).
+
+    Writes nothing, and says what the row may still become: the abandoned
+    step runs on and may commit. If that step is ``_close_run``, the run can
+    end ``succeeded`` with its source transitions standing and their notices
+    never queued -- a known residual the owner accepted (audit L3), not
+    money-bearing. Any other step leaves the row ``running``. The step's
+    name is in the message, so a reader can tell which case it was.
+    """
+    exc.name_run(run_id, correlation_id)
+    logger.error(
+        "sentiment audit run %d was abandoned at %s, in step %s: a second cancellation "
+        "stopped the wait for its worker thread and nothing more is written for the run. "
+        "The step may still commit: if it is _close_run the run can end succeeded, its "
+        "source transitions standing and their notices never queued; if it is _fail_run "
+        "it ends failed; otherwise its row stays running until a later run closes it "
+        "past ABANDONED_RUN_AFTER",
+        run_id,
+        stage,
+        exc.step,
+        extra={
+            "event": "sentiment_audit_run_abandoned",
+            "rule": (
+                "owner decision Q26: after a second cancellation nothing more is "
+                "written for the run, but the abandoned step may still commit. If it "
+                "is the close (_close_run), the run can end succeeded with its source "
+                "transitions standing and their notices never queued; otherwise a "
+                "later run closes its running row once it is older than "
+                f"ABANDONED_RUN_AFTER ({ABANDONED_RUN_AFTER})"
+            ),
+            "audit_run_id": run_id,
+            "stage": stage,
+            "step": exc.step,
+            "trigger": trigger,
+            "started_at": started_at.isoformat(),
+            "cancel_message": exc.cancel_message,
+            "correlation_id": correlation_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
 async def _record_failure(
     deps: SentimentAuditDeps,
     run_id: int,
@@ -2035,8 +2180,17 @@ async def _record_failure(
     Never raises over the original exception -- **except** a cancellation
     that arrives while the failure is being recorded, which propagates: it
     is the caller's to honour, and swallowing it would end a cancelled task
-    with the run's own exception instead. :func:`_on_worker` has by then
-    waited for the ``_fail_run`` thread, so the row is closed either way.
+    with the run's own exception instead. On a first such cancellation
+    :func:`_on_worker` has by then waited for the ``_fail_run`` thread, so
+    the row is closed either way. That includes shutdown's *second* cancel
+    (owner decision Q26) when the step it was meant for ended just before
+    ``AUDIT_SHUTDOWN_GRACE`` ran out: it lands here, in this write's wait,
+    which treats it as a first. So the row is closed ``failed`` by this
+    write, and shutdown waits for it -- one UPDATE, bounded in practice by
+    the SQLite busy timeout -- rather than for the grace (audit L1; no third
+    cancel, by ruling). Only a further cancellation during that wait leaves
+    the row closed if the thread still commits and ``running`` for
+    :data:`ABANDONED_RUN_AFTER` otherwise.
     """
     detail = {
         "correlation_id": correlation_id,
@@ -2052,13 +2206,21 @@ async def _record_failure(
             closed = await _on_worker(
                 _fail_run, deps.session_factory, run_id, finished_at, detail
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancel:
+            cancel_message = str(cancel) or None
+            if isinstance(cancel, WorkerAbandoned):
+                cancel.name_run(run_id, correlation_id)
+                cancel_message = cancel.cancel_message
             logger.error(
                 "a sentiment audit run was cancelled while its failure was recorded",
                 extra={
                     "event": "sentiment_audit_failure_recording_cancelled",
                     "audit_run_id": run_id,
+                    # Shutdown's second cancel, landing here (audit L1), names
+                    # its correlation id in this message.
+                    "cancel_message": cancel_message,
                     "correlation_id": correlation_id,
+                    "at": datetime.now(timezone.utc).isoformat(),
                 },
             )
             raise
