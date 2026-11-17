@@ -48,7 +48,11 @@ frequency or series mismatch), logged at ERROR as one and recorded as an
 ``error`` -- never as ``not_posted``, ``no_value`` or ``refused``. The seed
 load and the calendar read are **not** per release: a refused seed
 (:class:`~corollary.data.seeds.SeedError`) or a corrupted calendar row fails
-the whole run, the way ``calendar_releases`` fails on a refused seed.
+the whole run, the way ``calendar_releases`` fails on a refused seed. A
+damaged first-print row (``econ_release_value`` or ``econ_release_fetch``)
+**is** one release's: the read logs it, and that release is skipped -- never
+fetched, never written over -- and reported in
+:attr:`FirstPrintsRun.unreadable`.
 
 **Budget.** One FRED request per attempt, through the provider's own
 ``api.stlouisfed.org`` limiter (120/min). No other request is made.
@@ -299,6 +303,10 @@ class FirstPrintsRun:
     pending: tuple[datetime, ...]
     #: Stored rows whose release has left the seed: never attempted.
     unseeded: tuple[str, ...]
+    #: Unfilled releases with a stored row that could not be read back
+    #: (``EconomicRelease.unreadable``): never attempted, since neither the
+    #: write-once value nor the attempt could land over a damaged row.
+    unreadable: tuple[str, ...] = ()
 
     @property
     def errors(self) -> tuple[ReleaseAttempt, ...]:
@@ -306,10 +314,20 @@ class FirstPrintsRun:
 
 
 def _read_blocking(
-    session_factory: Callable[[], Session], seeds: EconReleaseSeeds
+    session_factory: Callable[[], Session],
+    seeds: EconReleaseSeeds,
+    now: datetime,
+    correlation_id: str,
 ) -> tuple[EconomicRelease, ...]:
     with session_factory() as session:
-        return read_economic_releases(session, _STORED_FROM, _STORED_TO, seeds=seeds)
+        return read_economic_releases(
+            session,
+            _STORED_FROM,
+            _STORED_TO,
+            now=now,
+            correlation_id=correlation_id,
+            seeds=seeds,
+        )
 
 
 def _record_blocking(
@@ -473,16 +491,27 @@ async def fill_first_prints(
 
     Each attempt is its own transaction and its own failure; see the module
     docstring. Raises only for what is not one release's: the calendar read
-    (a corrupted economic row raises ``ValueError`` there, by design).
+    (a corrupted economic *calendar* row raises ``ValueError`` there, by
+    design). A damaged ``econ_release_value`` or ``econ_release_fetch`` row
+    is one release's: the read logs it, and that release is skipped -- no
+    request is made for it, because ``store_first_print`` and
+    ``record_attempt`` both read the damaged row first and would fail on it
+    every run -- while every other release proceeds.
     """
     now = _utc(clock(), "clock()")
-    releases = await asyncio.to_thread(_read_blocking, session_factory, seeds)
+    # The run's read and what it skips share one id; each attempt mints its own.
+    run_id = uuid.uuid4().hex
+    releases = await asyncio.to_thread(_read_blocking, session_factory, seeds, now, run_id)
 
     attempted: list[ReleaseAttempt] = []
     unseeded: list[str] = []
+    unreadable: list[str] = []
     filled: set[tuple[int, date]] = set()
     for release in releases:
         if release.value is not None:
+            continue
+        if release.unreadable is not None:
+            unreadable.append(f"{release.release_id}:{release.release_date.isoformat()}")
             continue
         series = release.series
         if series is None:
@@ -507,14 +536,27 @@ async def fill_first_prints(
             },
         )
 
+    if unreadable:
+        logger.warning(
+            "stored economic releases have an unreadable row and were not fetched",
+            extra={
+                "event": "econ_first_print_unreadable",
+                "rule": "spec R8 / Q23c: a damaged stored row is never written over",
+                "correlation_id": run_id,
+                "releases": unreadable,
+                "at": now.isoformat(),
+            },
+        )
+
     pending = sorted(
         {
             release.release_at
             for release in releases
             if release.value is None
             and release.series is not None
+            and release.unreadable is None
             and (release.release_id, release.release_date) not in filled
             and next_release_day_slot(release.release_at, now) is not None
         }
     )
-    return FirstPrintsRun(tuple(attempted), tuple(pending), tuple(unseeded))
+    return FirstPrintsRun(tuple(attempted), tuple(pending), tuple(unseeded), tuple(unreadable))

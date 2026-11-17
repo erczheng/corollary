@@ -87,6 +87,7 @@ from corollary.engine.scheduler import (
     build_context_scheduler,
 )
 from tests.api.conftest import FakeProvider, RecordedBroker
+from tests.api.scheduler_drive import drive_until_parked, until
 from tests.engine.test_scheduler import (
     HALF_DAY_OPEN,
     FakeAlpacaContext,
@@ -412,13 +413,12 @@ def _context_tasks() -> list[asyncio.Task[object]]:
 
 
 async def _drive(app: object, clock: FakeClock) -> None:
-    scheduler = app.state.scheduler  # type: ignore[attr-defined]
-    await asyncio.wait_for(scheduler.ready(), timeout=10)
-    driver = asyncio.get_running_loop().create_task(clock.drive())
-    try:
-        await asyncio.wait_for(clock.parked.wait(), timeout=30)
-    finally:
-        driver.cancel()
+    """Drive the lifespan's scheduler until ``clock`` parks: per-step guards, no run budget.
+
+    See ``tests/api/scheduler_drive.py``. The driver is awaited, so a stuck
+    job fails here naming itself rather than as an anonymous timeout.
+    """
+    await drive_until_parked(app.state.scheduler, clock)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -462,11 +462,10 @@ async def test_the_jobs_are_handed_the_app_state_the_routes_read(
         assert isinstance(app.state.cash_position_refresher, CashPositionsRefresher)
 
         # The lifespan's refresher reads the paper book once at start.
-        async def first_read() -> None:
-            while app.state.position_underlyings.as_of is None:
-                await asyncio.sleep(0.01)
-
-        await asyncio.wait_for(first_read(), timeout=10)
+        await until(
+            lambda: app.state.position_underlyings.as_of is not None,
+            "the lifespan's paper positions refresher's first read",
+        )
         held = await services.position_underlyings()
         assert "positions" in paper_broker.calls
         assert cash_broker.calls == []

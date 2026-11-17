@@ -117,6 +117,7 @@ __all__ = [
     "ERROR_DETAIL_MAX",
     "FETCH_OUTCOMES",
     "NOT_PUBLISHED_NOTE",
+    "NOT_READ_PREFIX",
     "STORED_EXPONENT",
     "UNAVAILABLE_AFTER_DAYS",
     "VALUE_STATES",
@@ -486,6 +487,13 @@ NOT_AVAILABLE_PREFIX: Final = "not available from FRED"
 #: a week, and must never read as FRED not publishing (U6d audit L2).
 NOT_FETCHED_PREFIX: Final = "could not be fetched from FRED"
 
+#: What the note leads with when a stored row for the release could not be
+#: read back -- a damaged database, not FRED and not the fetch -- before the
+#: table and the error's type (``econ_store.economic_releases_of`` composes
+#: those). The row is left exactly as stored: the value table is write-once
+#: (Q23c), so it is never repaired or deleted on read.
+NOT_READ_PREFIX: Final = "could not be read from the database"
+
 
 def _error_type(detail: str | None) -> str:
     """The exception type an ``error`` attempt's detail leads with.
@@ -534,14 +542,22 @@ def value_display(
     value_series_id: str | None,
     last_attempt: Attempt | None,
     now: datetime,
+    unreadable: str | None = None,
 ) -> ValueDisplay:
     """The R8 display state of one economic row at ``now``.
 
     ``value_series_id`` is the stored value's series, ``None`` when no value
-    is stored. In order:
+    is stored -- or when the stored one could not be read. ``unreadable``
+    names a stored row that could not be read back (its table and error
+    type), ``None`` when every row read cleanly. In order:
 
     * a stored value is ``filled``, labelled with its series, whenever it is
-      read;
+      read -- an unreadable *attempt* beside it hides nothing, because the
+      attempt does not decide a filled row's state;
+    * a release with an unreadable row and no readable value is
+      ``unavailable`` **at once**, with :data:`NOT_READ_PREFIX` and the
+      reason, whatever the clock says: a damaged row is neither upcoming nor
+      awaiting, and guessing what it held would show a state nobody stored;
     * before ``release_at`` is ``upcoming``;
     * a last attempt FRED ``refused`` is ``unavailable`` **at once**, with
       :data:`NOT_AVAILABLE_PREFIX` and the vendor's reason. A refusal is
@@ -559,6 +575,8 @@ def value_display(
     now = _aware(now, "now")
     if value_series_id is not None:
         return ValueDisplay("filled", computed_label(value_series_id))
+    if unreadable is not None:
+        return ValueDisplay("unavailable", f"{NOT_READ_PREFIX}: {unreadable}")
     if now < release_at:
         return ValueDisplay("upcoming", None)
     if last_attempt is not None and last_attempt.outcome == "refused":

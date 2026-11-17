@@ -14,7 +14,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 
 from corollary.data.calendar import replace_window
@@ -32,8 +32,14 @@ from corollary.data.econ_first_prints import (
     next_release_day_slot,
     release_day_slots,
 )
-from corollary.data.econ_store import read_attempt, read_economic_releases, read_value
-from corollary.data.econ_values import Figure, NotPosted
+from corollary.data.econ_store import (
+    read_attempt,
+    read_economic_releases,
+    read_value,
+    record_attempt,
+    store_first_print,
+)
+from corollary.data.econ_values import Attempt, Figure, NotPosted
 from corollary.data.providers.fred import (
     FredError,
     FredRefusal,
@@ -341,7 +347,9 @@ async def test_a_refusal_is_recorded_and_the_catch_up_keeps_trying_it(engine: En
     run = await fill(engine, source, PAYEMS_AT + ATTEMPT_DELAY)
     assert [r.attempt.outcome for r in run.attempted] == ["refused"]
     with Session(engine) as session:
-        (release,) = read_economic_releases(session, PAYEMS_DAY, PAYEMS_DAY, seeds=SEEDS)
+        (release,) = read_economic_releases(
+            session, PAYEMS_DAY, PAYEMS_DAY, now=PAYEMS_AT, seeds=SEEDS
+        )
     assert release.last_attempt is not None
     assert release.last_attempt.attempt.detail == REFUSAL
     shown = release.display(PAYEMS_AT + ATTEMPT_DELAY)
@@ -423,6 +431,69 @@ async def test_a_failing_store_costs_only_its_own_release(
         assert read_value(session, 51, BOP_DAY) is not None
         cpi = read_attempt(session, 10, CPI_DAY)
     assert cpi is not None and cpi.attempt.outcome == "error"
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "raw"),
+    [
+        ("econ_release_value", "actual", "not a number"),
+        ("econ_release_fetch", "outcome", "bogus"),
+    ],
+    ids=["value", "attempt"],
+)
+@pytest.mark.asyncio
+async def test_a_release_with_an_unreadable_row_is_skipped_and_the_others_proceed(
+    engine: Engine,
+    caplog: pytest.LogCaptureFixture,
+    table: str,
+    column: str,
+    raw: str,
+) -> None:
+    """One damaged row is one release's: no request for it, nothing written over it.
+
+    Before, the read raised out of the whole run and no release was
+    fetched at all. Fetching the damaged one would only fail every run:
+    ``store_first_print`` and ``record_attempt`` both read the row first.
+    """
+    store_rows(engine, (10, CPI_DAY), (51, BOP_DAY))
+    with Session(engine) as session:
+        if table == "econ_release_value":
+            figure = Figure(
+                "CPIAUCSL", date(2026, 9, 1), Decimal("0.6485"), Decimal("0.3960"), CPI_DAY
+            )
+            store_first_print(session, 10, CPI_DAY, CPI, figure, fetched_at=CPI_AT)
+        else:
+            record_attempt(session, 10, CPI_DAY, Attempt("not_posted", None), at=CPI_AT)
+        session.commit()
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        try:
+            conn.execute(
+                text(f"UPDATE {table} SET {column} = :raw WHERE release_id = 10"), {"raw": raw}
+            )
+            conn.commit()
+        finally:
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    source = FakeVintages({"CPIAUCSL": [CPI_WINDOW], "BOPGSTB": [BOP_WINDOW]})
+    # A catch-up after both releases: each would be due once.
+    with caplog.at_level(logging.WARNING):
+        run = await fill(engine, source, _et(date(2026, 11, 9), 10, 0))
+
+    assert [c[0] for c in source.calls] == ["BOPGSTB"]
+    assert {r.release_id: r.attempt.outcome for r in run.attempted} == {51: "figure"}
+    assert run.unreadable == ("10:2026-10-14",)
+    assert run.errors == ()
+    assert all(at != CPI_AT for at in run.pending)
+    events = {getattr(r, "event", None) for r in caplog.records}
+    assert {"econ_release_row_unreadable", "econ_first_print_unreadable"} <= events
+    with engine.connect() as conn:
+        stored = conn.execute(
+            text(f"SELECT {column} FROM {table} WHERE release_id = 10")
+        ).scalar_one()
+    assert stored == raw  # never written over
+    with Session(engine) as session:
+        assert read_value(session, 51, BOP_DAY) is not None
 
 
 @pytest.mark.asyncio

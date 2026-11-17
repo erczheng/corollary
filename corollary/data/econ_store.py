@@ -24,6 +24,18 @@ seed's ``unit_label`` and ``decimals``. The display state is derived from the
 result by :meth:`EconomicRelease.display` (pure, ``econ_values.value_display``)
 and never stored.
 
+**One damaged row costs one release, never the read.** The value and the
+attempt are read per release, by key, and a stored row that cannot be read
+back -- a damaged database, past the tables' CHECKs: text ``Money`` cannot
+decode, a date that will not parse, a NaN figure, an outcome no attempt has
+-- leaves that release's :attr:`EconomicRelease.unreadable` set and is
+logged at ERROR with the rule, the inputs and the time (rule 8). Every other
+release reads as usual. The row is left as stored, never repaired or
+deleted (Q23c: the value table is write-once); the release displays
+``unavailable`` with the reason. Before this, one such row raised out of the
+whole read: ``GET /api/calendar`` answered 500 for every kind of event in the
+range, and the ``econ_first_prints`` job fetched nothing for any release.
+
 Every function flushes and none commits: the caller owns the transaction, as
 in :mod:`corollary.data.calendar`. Every instant is passed in and must be
 aware; it is stored as UTC.
@@ -39,7 +51,6 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Final
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from corollary.data.calendar import StoredCalendarEvent, read_range
@@ -76,6 +87,46 @@ __all__ = [
 #: ``calendar_releases.release_vendor_id``'s shape, ``10:2026-10-14``.
 _VENDOR_ID: Final = re.compile(r"([1-9][0-9]*):([0-9]{4}-[0-9]{2}-[0-9]{2})")
 
+#: What reading one stored row back raises when the row is damaged past its
+#: CHECKs. ``Money`` decoding text that is not a number raises
+#: ``decimal.InvalidOperation`` -- an ``ArithmeticError``, **not** a
+#: ``ValueError``. A date or instant that will not parse raises
+#: ``ValueError``; a column of the wrong storage class, ``TypeError``. A row
+#: that decodes but breaks its table's own rules raises ``ValueError`` from
+#: :func:`_stored_value` or :func:`_stored_attempt`. ``MoneyComparisonError``
+#: is deliberately none of these: it is a caller's bug and must still stop
+#: the process.
+_UNREADABLE: Final = (ValueError, TypeError, ArithmeticError)
+
+#: How much of a read error's text the log keeps. Its type is always kept.
+_ERROR_LOG_MAX: Final = 300
+
+#: ``Money``'s stored width, repeated as ``corollary.data.news.audit`` and the
+#: migrations repeat it: ``ck_econ_release_value_actual``/``_prior`` bound the
+#: text to it, and a figure read back wider was damaged past that CHECK.
+_MONEY_TEXT_WIDTH: Final = 40
+
+#: Every ``econ_release_value`` column the read touches; each is NOT NULL.
+_VALUE_COLUMNS: Final = (
+    "release_id",
+    "release_date",
+    "series_id",
+    "period",
+    "actual",
+    "prior",
+    "unit_label",
+    "vintage_date",
+    "fetched_at",
+)
+#: Every NOT NULL ``econ_release_fetch`` column the read touches.
+_FETCH_COLUMNS: Final = ("release_id", "release_date", "attempted_at", "outcome")
+
+_UNREADABLE_RULE: Final = (
+    "spec R8 / Q23c: a stored first-print row that cannot be read back makes "
+    "that release unavailable with the reason; it is never guessed, repaired or "
+    "deleted, and no other release is affected"
+)
+
 
 @dataclass(frozen=True)
 class StoredEconValue:
@@ -111,6 +162,12 @@ class EconomicRelease:
     ``calendar_releases.release_events``), as UTC. ``series`` is the release's
     ``econ_release_series.csv`` row, ``None`` only for a calendar row whose
     release has since left the seed.
+
+    ``unreadable`` names each stored row of this release that could not be
+    read back, as ``"<table> (<error type>)"`` joined by ``"; "`` -- for
+    example ``"econ_release_value (InvalidOperation)"`` -- and is ``None``
+    when every row read cleanly. An unreadable row reads as absent:
+    ``value`` or ``last_attempt`` is then ``None`` though a row exists.
     """
 
     event: StoredCalendarEvent
@@ -120,6 +177,7 @@ class EconomicRelease:
     series: EconReleaseSeries | None
     value: StoredEconValue | None
     last_attempt: StoredFetchAttempt | None
+    unreadable: str | None = None
 
     @property
     def unit_label(self) -> str | None:
@@ -144,6 +202,7 @@ class EconomicRelease:
             value_series_id=None if self.value is None else self.value.series_id,
             last_attempt=None if self.last_attempt is None else self.last_attempt.attempt,
             now=now,
+            unreadable=self.unreadable,
         )
 
 
@@ -153,8 +212,27 @@ def _utc(at: datetime, name: str) -> datetime:
     return at.astimezone(UTC)
 
 
+def _no_nulls(row: object, table: str, columns: Sequence[str]) -> None:
+    """``ValueError`` for a NULL in a NOT NULL column: damage no CHECK pragma explains."""
+    for column in columns:
+        if getattr(row, column) is None:
+            raise ValueError(f"{table} holds NULL in NOT NULL column {column}")
+
+
 def _stored_value(row: EconReleaseValue) -> StoredEconValue:
-    return StoredEconValue(
+    """The row, detached; ``ValueError`` for one its table's constraints would have refused.
+
+    Decoding is ``Money``'s and the date types' (see :data:`_UNREADABLE`).
+    This refuses what decodes but is still not a first print, each one a
+    shape the table refuses on the way in: a NULL; a NaN or infinite figure
+    (``Decimal`` parses both; displaying one raises or prints ``NaN``); a
+    figure ``ck_econ_release_value_actual``/``_prior`` would not store -- an
+    exponent form or wider than :data:`_MONEY_TEXT_WIDTH`, either of which
+    makes the display's rounding raise; a blank series or unit; and a
+    vintage other than the release day.
+    """
+    _no_nulls(row, "econ_release_value", _VALUE_COLUMNS)
+    stored = StoredEconValue(
         release_id=row.release_id,
         release_date=row.release_date,
         series_id=row.series_id,
@@ -165,10 +243,36 @@ def _stored_value(row: EconReleaseValue) -> StoredEconValue:
         vintage_date=row.vintage_date,
         fetched_at=row.fetched_at.astimezone(UTC),
     )
+    for name, figure in (("actual", stored.actual), ("prior", stored.prior)):
+        if not figure.is_finite():
+            raise ValueError(f"econ_release_value holds a non-finite {name} {figure!r}")
+        # ``Money`` writes ``format(value, "f")``, which never yields a positive
+        # exponent (plain ``'100'`` reads back as exponent 0, ``'1E+2'`` as 2)
+        # and the CHECK bounds its width.
+        exponent = figure.as_tuple().exponent
+        if (
+            not isinstance(exponent, int)
+            or exponent > 0
+            or len(format(figure, "f")) > _MONEY_TEXT_WIDTH
+        ):
+            raise ValueError(
+                f"econ_release_value holds a {name} no Money column stores: "
+                f"{str(figure)[:_MONEY_TEXT_WIDTH]!r}"
+            )
+    if not stored.series_id.strip() or not stored.unit_label.strip():
+        raise ValueError("econ_release_value holds a blank series_id or unit_label")
+    if stored.vintage_date != stored.release_date:
+        raise ValueError(
+            f"econ_release_value holds vintage {stored.vintage_date} for release day "
+            f"{stored.release_date}"
+        )
+    return stored
 
 
 def _stored_attempt(row: EconReleaseFetch) -> StoredFetchAttempt:
-    if row.outcome not in FETCH_OUTCOMES:  # pragma: no cover - ck_econ_release_fetch_outcome
+    """The row, detached; ``ValueError`` for one ``Attempt`` -- and so the CHECKs -- refuses."""
+    _no_nulls(row, "econ_release_fetch", _FETCH_COLUMNS)
+    if row.outcome not in FETCH_OUTCOMES:
         raise ValueError(f"econ_release_fetch holds an unknown outcome {row.outcome!r}")
     return StoredFetchAttempt(
         release_id=row.release_id,
@@ -364,6 +468,8 @@ def read_economic_releases(
     start: date,
     end: date,
     *,
+    now: datetime,
+    correlation_id: str | None = None,
     seeds: EconReleaseSeeds | None = None,
 ) -> tuple[EconomicRelease, ...]:
     """Every live economic calendar row dated ``[start, end]``, with its value and attempt.
@@ -371,15 +477,23 @@ def read_economic_releases(
     In :func:`~corollary.data.calendar.read_range`'s order and by its rules
     (the Eastern ``date``, soft-deleted rows excluded). ``seeds`` defaults to
     the committed econ seeds. :func:`economic_releases_of` over that range;
-    see it for what raises.
+    see it for ``now``, ``correlation_id`` and what raises.
     """
-    return economic_releases_of(session, read_range(session, start, end), seeds=seeds)
+    return economic_releases_of(
+        session,
+        read_range(session, start, end),
+        now=now,
+        correlation_id=correlation_id,
+        seeds=seeds,
+    )
 
 
 def economic_releases_of(
     session: Session,
     events: Sequence[StoredCalendarEvent],
     *,
+    now: datetime,
+    correlation_id: str | None = None,
     seeds: EconReleaseSeeds | None = None,
 ) -> tuple[EconomicRelease, ...]:
     """The economic rows among ``events``, in their order, each with its value and attempt.
@@ -391,11 +505,20 @@ def economic_releases_of(
     skipped. ``seeds`` defaults to the committed econ seeds, loaded only if
     an economic row is present.
 
-    Raises ``ValueError`` for a row that cannot be joined honestly: a
+    Each release's value and last attempt are read **by its own key**, so a
+    damaged row costs that release alone -- and a damaged row for another
+    date of the same release, outside ``events``, is never read at all. A row
+    that cannot be read back is logged at ERROR, stamped ``now`` (the
+    caller's clock, aware) and the caller's ``correlation_id`` (the request
+    or run the read serves), and named in :attr:`EconomicRelease.unreadable`;
+    see the module docstring.
+
+    Raises ``ValueError`` for a calendar row that cannot be joined honestly: a
     malformed ``vendor_id``, one naming a different date from the row's own,
     or a row with no release instant. Each is a corrupted calendar row, and
     guessing its release would show another release's figure beside it.
     """
+    now = _utc(now, "now")
     events = [e for e in events if e.kind is CalendarKind.ECONOMIC]
     if not events:
         return ()
@@ -418,30 +541,83 @@ def economic_releases_of(
             )
         keyed.append((event, release_id, release_date, event.at.astimezone(UTC)))
 
-    ids = sorted({release_id for _, release_id, _, _ in keyed})
-    values: dict[tuple[int, date], StoredEconValue] = {}
-    attempts: dict[tuple[int, date], StoredFetchAttempt] = {}
-    if ids:
-        for value_row in session.scalars(
-            select(EconReleaseValue).where(EconReleaseValue.release_id.in_(ids))
-        ):
-            values[(value_row.release_id, value_row.release_date)] = _stored_value(value_row)
-        for fetch_row in session.scalars(
-            select(EconReleaseFetch).where(EconReleaseFetch.release_id.in_(ids))
-        ):
-            attempts[(fetch_row.release_id, fetch_row.release_date)] = _stored_attempt(
-                fetch_row
+    releases: list[EconomicRelease] = []
+    for event, release_id, release_date, release_at in keyed:
+        unreadable: list[str] = []
+        value: StoredEconValue | None = None
+        last_attempt: StoredFetchAttempt | None = None
+        try:
+            value = read_value(session, release_id, release_date)
+        except _UNREADABLE as exc:
+            unreadable.append(
+                _unreadable(
+                    exc,
+                    "econ_release_value",
+                    event,
+                    release_id,
+                    release_date,
+                    now=now,
+                    correlation_id=correlation_id,
+                )
             )
-
-    return tuple(
-        EconomicRelease(
-            event=event,
-            release_id=release_id,
-            release_date=release_date,
-            release_at=release_at,
-            series=seeds.series.by_id(release_id),
-            value=values.get((release_id, release_date)),
-            last_attempt=attempts.get((release_id, release_date)),
+        try:
+            last_attempt = read_attempt(session, release_id, release_date)
+        except _UNREADABLE as exc:
+            unreadable.append(
+                _unreadable(
+                    exc,
+                    "econ_release_fetch",
+                    event,
+                    release_id,
+                    release_date,
+                    now=now,
+                    correlation_id=correlation_id,
+                )
+            )
+        releases.append(
+            EconomicRelease(
+                event=event,
+                release_id=release_id,
+                release_date=release_date,
+                release_at=release_at,
+                series=seeds.series.by_id(release_id),
+                value=value,
+                last_attempt=last_attempt,
+                unreadable="; ".join(unreadable) or None,
+            )
         )
-        for event, release_id, release_date, release_at in keyed
+    return tuple(releases)
+
+
+def _unreadable(
+    exc: Exception,
+    table: str,
+    event: StoredCalendarEvent,
+    release_id: int,
+    release_date: date,
+    *,
+    now: datetime,
+    correlation_id: str | None,
+) -> str:
+    """Log one stored row that could not be read back (rule 8); return ``"<table> (<type>)"``."""
+    error_type = type(exc).__name__
+    logger.error(
+        "a stored %s row for release %s on %s could not be read; that release is "
+        "served unavailable and the row is left as stored",
+        table,
+        release_id,
+        release_date.isoformat(),
+        extra={
+            "event": "econ_release_row_unreadable",
+            "rule": _UNREADABLE_RULE,
+            "table": table,
+            "release_id": release_id,
+            "release_date": release_date.isoformat(),
+            "calendar_event_id": event.id,
+            "error_type": error_type,
+            "error": str(exc)[:_ERROR_LOG_MAX],
+            "correlation_id": correlation_id,
+            "at": now.isoformat(),
+        },
     )
+    return f"{table} ({error_type})"

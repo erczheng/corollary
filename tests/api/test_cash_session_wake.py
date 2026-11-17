@@ -41,6 +41,7 @@ from corollary.engine.scheduler import (
     Scheduler,
     context_jobs,
 )
+from tests.api.scheduler_drive import await_ready, until
 from tests.api.test_cash_positions_refresher import _registry
 from tests.api.test_news_wiring import _held
 from tests.engine.test_calendar_cash_scope import CASH_ONLY, _NEW_PLTR, _scoped_services
@@ -292,18 +293,15 @@ def test_a_poll_longer_than_the_interval_or_not_positive_is_refused() -> None:
 # --------------------------------------------------------------------------
 
 
-async def _until(condition: Callable[[], bool], timeout: float = 10) -> None:
-    async def wait() -> None:
-        while not condition():
-            await asyncio.sleep(0.005)
-
-    await asyncio.wait_for(wait(), timeout=timeout)
-
-
 async def _drive_for(clock: FakeClock, span: timedelta) -> None:
+    """Drive ``clock`` ``span`` on, awaited directly: bounded by its step ceiling, not a timeout.
+
+    See ``tests/api/scheduler_drive.py``: a whole-run wall-clock budget here
+    failed a correct run on a loaded machine, and hid which job was stuck.
+    """
     clock.stop_at = clock.now + span
     clock.parked.clear()
-    await asyncio.wait_for(clock.drive(), timeout=10)
+    await clock.drive()
 
 
 def _events_named(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
@@ -351,7 +349,7 @@ async def test_a_mid_morning_confirmation_reaches_the_calendar_once_and_leaves_t
     )
     with caplog.at_level(logging.INFO):
         scheduler.start()
-        await asyncio.wait_for(scheduler.ready(), timeout=10)
+        await await_ready(scheduler)
         refresher.start()
         try:
             await _drive_for(clock, timedelta(minutes=1))
@@ -364,7 +362,10 @@ async def test_a_mid_morning_confirmation_reaches_the_calendar_once_and_leaves_t
             await _drive_for(clock, timedelta(minutes=1))
             (first,) = read_at
             assert first - confirmed <= CASH_SESSION_POLL
-            await _until(lambda: len(_events_named(caplog, "context_job_woken_ran")) == 2)
+            await until(
+                lambda: len(_events_named(caplog, "context_job_woken_ran")) == 2,
+                "both woken calendar runs after the first confirmation",
+            )
 
             assert sorted(call["tickers"] for call in replace_spy.calls) == [
                 frozenset({CASH_ONLY}),
@@ -381,7 +382,10 @@ async def test_a_mid_morning_confirmation_reaches_the_calendar_once_and_leaves_t
             _confirm(sessions, clock(), correlation_id="cid-again")
             await _drive_for(clock, timedelta(minutes=1))
             assert len(read_at) == 2
-            await _until(lambda: len(_events_named(caplog, "context_job_wake_capped")) == 2)
+            await until(
+                lambda: len(_events_named(caplog, "context_job_wake_capped")) == 2,
+                "both capped wakes after the second confirmation",
+            )
             assert len(replace_spy.calls) == 2
 
             status = scheduler.status()
@@ -454,18 +458,22 @@ async def test_a_woken_write_is_not_the_next_starts_catch_up_evidence(
     )
     with caplog.at_level(logging.INFO):
         scheduler.start()
-        await asyncio.wait_for(scheduler.ready(), timeout=10)
+        await await_ready(scheduler)
         refresher.start()
         try:
-            await _until(
+            await until(
                 lambda: all(
                     scheduler.status()[name].failures == 1 for name in CASH_SESSION_WAKE_JOBS
-                )
+                ),
+                "both start-up catch-ups failing against the downed vendor",
             )
             failing["on"] = False
             _confirm(sessions, clock())
             await _drive_for(clock, timedelta(minutes=1))
-            await _until(lambda: len(_events_named(caplog, "context_job_woken_ran")) == 2)
+            await until(
+                lambda: len(_events_named(caplog, "context_job_woken_ran")) == 2,
+                "both woken calendar runs after the vendor recovered",
+            )
             live = _live(db_engine)
             assert _NEW_PLTR["calendar_earnings"] in live
             assert _NEW_PLTR["calendar_dividends"] in live
@@ -486,9 +494,10 @@ async def test_a_woken_write_is_not_the_next_starts_catch_up_evidence(
     )
     again.start()
     try:
-        await asyncio.wait_for(again.ready(), timeout=10)
-        await _until(
-            lambda: all(again.status()[name].runs == 1 for name in CASH_SESSION_WAKE_JOBS)
+        await await_ready(again)
+        await until(
+            lambda: all(again.status()[name].runs == 1 for name in CASH_SESSION_WAKE_JOBS),
+            "both restart catch-ups running",
         )
     finally:
         await again.aclose()
