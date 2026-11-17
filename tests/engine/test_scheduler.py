@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import httpx
 import pytest
@@ -86,7 +86,8 @@ from tests.engine.test_calendar_jobs import (
 )
 from corollary.data.news.assets import AssetDirectoryHolder
 from corollary.data.news.pollers import NewsStore, watch_interval
-from corollary.data.providers.interface import AssetDirectory
+from corollary.calendars import nyse_session_containing
+from corollary.data.providers.interface import AssetDirectory, ProviderError
 from corollary.ratelimit import (
     ALPACA_DATA_HOST,
     ALPACA_PAPER_TRADING_HOST,
@@ -1305,6 +1306,10 @@ class FakeAlpacaContext(FakeAlpaca):
     directory_calls: int = 0
     minute_bar_calls: int = 0
     minute_bar_adjustments: list[str] = dataclasses.field(default_factory=list)
+    #: Sessions whose daily bars cannot be read. A verdict for one never
+    #: lands, so its pair stays needed and every backfill attempts it again.
+    unanswered_bar_sessions: frozenset[date] = frozenset()
+    bar_sessions: list[date] = dataclasses.field(default_factory=list)
 
     async def active_equities(self) -> AssetDirectory:
         self.directory_calls += 1
@@ -1316,6 +1321,9 @@ class FakeAlpacaContext(FakeAlpaca):
     async def adv_daily_bars(
         self, symbols: object, *, session_date: date
     ) -> dict[str, list[object]]:
+        self.bar_sessions.append(session_date)
+        if session_date in self.unanswered_bar_sessions:
+            raise ProviderError(f"SYNTHETIC: no daily bars for {session_date.isoformat()}")
         return {}
 
     async def stock_bars(
@@ -2006,6 +2014,32 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     watched = _WatchedRuntime(db_engine, monkeypatch, halted=halted_before)
     state_before = _state_snapshot(db_engine)
 
+    # Owner decision Q25 (d): the tradeability job's verdict backfill is part
+    # of its shipped body, so it runs here too, past every gate (audit M3).
+    # An off-watch label from 16 Nov whose session's bars never answer: its
+    # verdict never lands, so the pair stays needed and each off-session run
+    # of the job really attempts it -- watch universe, need read, backfill,
+    # ``refresh_tradeability(session_date=16 Nov)``. ``backfill_verdicts`` is
+    # called through and its outcome recorded, with the clock of each call.
+    from tests.data.news.test_audit_runner import _label as _audit_label
+
+    label_session = date(2026, 11, 16)
+    with Session(db_engine) as session:
+        _audit_label(
+            session, ticker="XQ", source="rules", direction="bullish",
+            at=datetime(2026, 11, 16, 15, 0, tzinfo=UTC),
+        )
+        session.commit()
+    backfills: list[tuple[str, int, datetime]] = []
+    real_backfill = scheduler_module.backfill_verdicts
+
+    async def counted_backfill(*args: Any, **kwargs: Any) -> Any:
+        outcome = await real_backfill(*args, **kwargs)
+        backfills.append((kwargs["caller"], outcome.attempted, kwargs["clock"]()))
+        return outcome
+
+    monkeypatch.setattr(scheduler_module, "backfill_verdicts", counted_backfill)
+
     # Thanksgiving evening into Friday's half-day: every kind of slot a
     # shipped job has fires here -- the overnight slow grids, the 03:00 prune,
     # the 07:30 directory, the watch window opening at 06:00, the open's 60 s
@@ -2031,7 +2065,12 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
     async with _recorded_fred() as fred, _recorded_sec() as sec:
         openfigi = provider_for(openfigi_fake)
         rates = RiskFreeRateSource()
-        alpaca = FailingAlpacaNews() if mode == "alpaca_news_fails" else FakeAlpacaContext()
+        unanswered = frozenset({label_session})
+        alpaca = (
+            FailingAlpacaNews(unanswered_bar_sessions=unanswered)
+            if mode == "alpaca_news_fails"
+            else FakeAlpacaContext(unanswered_bar_sessions=unanswered)
+        )
         finnhub, massive = FakeFinnhubNews(), FakeMassive()
         cusips = FakeResolver()
         # Step 7's calendar vendors, answering rows inside each window, so
@@ -2161,6 +2200,15 @@ async def test_the_shipped_context_jobs_never_move_the_halt_state(
         runs = [(r.trigger, r.status) for r in session.scalars(select(AuditRun))]
     assert runs == [("scheduled", "succeeded")] * 2
     assert status["sentiment_audit"].skips == 0
+    # The tradeability job's Q25 backfill stage ran inside the shipped body,
+    # past every gate: it attempted the pending pair and asked the refresh for
+    # that session -- and only ever outside a regular session (ruling P1).
+    by_job = [(n, t) for caller, n, t in backfills if caller == "tradeability_cache"]
+    assert any(n >= 1 for n, _ in by_job), (
+        "the tradeability backfill never attempted a pair; widen the window"
+    )
+    assert all(nyse_session_containing(t) is None for _, t in by_job), by_job
+    assert label_session in alpaca.bar_sessions
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()

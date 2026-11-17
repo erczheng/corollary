@@ -1707,7 +1707,7 @@ describe('running the audit by hand', () => {
     expect(line.className).toContain('text-on-surface-variant')
   })
 
-  it('says a run is in progress on a 409', async () => {
+  it('says the audit is busy on a 409, naming the holder', async () => {
     const { panel } = await run({
       postAudit: jsonResponse(409, {
         error: {
@@ -1717,9 +1717,26 @@ describe('running the audit by hand', () => {
       }),
     })
 
-    const line = await within(panel).findByText(/a run is already in progress/)
+    const line = await within(panel).findByText(/the audit is busy/)
     expect(line.textContent).toContain('sentiment audit run 8 (scheduled) is still in progress')
     expect(line.className).not.toMatch(/error/)
+  })
+
+  /** Q25: the daily verdict backfill holds the same lock and writes no run. */
+  it('promises no outcome when the daily backfill holds the lock', async () => {
+    const { panel } = await run({
+      postAudit: jsonResponse(409, {
+        error: {
+          code: 'sentiment_audit_running',
+          message:
+            "the audit's run lock is held by tradeability_cache (the daily verdict backfill), which grades no label; try again in a few minutes",
+        },
+      }),
+    })
+
+    const line = await within(panel).findByText(/the audit is busy/)
+    expect(line.textContent).toContain('held by tradeability_cache')
+    expect(line.textContent).not.toMatch(/a run is already in progress|Its outcome will appear/)
   })
 
   /** A degraded data dependency is not a fault and not a loss: `caution`. */

@@ -159,7 +159,8 @@ import logging
 import threading
 import uuid
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Final, Literal, ParamSpec, Protocol, TypeVar, cast
@@ -220,6 +221,7 @@ from corollary.wire import WireFormatError
 __all__ = [
     "ABANDONED_RUN_AFTER",
     "AUDIT_BAR_ADJUSTMENT",
+    "AUDIT_RUN_HOLDER",
     "BAR_BATCH_MAX_SYMBOLS",
     "FETCH_ABORT_AFTER",
     "AuditAlreadyRunning",
@@ -230,9 +232,13 @@ __all__ = [
     "OnOpened",
     "SentimentAuditDeps",
     "VerdictBackfill",
+    "VerdictBackfillOutcome",
     "WatchUniverseSource",
     "WatchUniverseUnavailable",
+    "backfill_verdicts",
+    "load_verdicts_needed",
     "run_sentiment_audit",
+    "try_run_lock",
 ]
 
 logger = logging.getLogger(__name__)
@@ -249,6 +255,27 @@ _TICK: Final = timedelta(microseconds=1)
 #: an ``asyncio.Lock``: it is taken without blocking, so it never stalls the
 #: event loop, and it is bound to no loop.
 _RUN_LOCK: Final = threading.Lock()
+
+
+class _RunLockHolder:
+    """Who holds :data:`_RUN_LOCK` (owner decision Q25, re-audit finding 2).
+
+    Written only by the taker that holds the lock -- right after it is
+    acquired and right before it is released, with no ``await`` between
+    either and the lock call -- so a refused taker, reading it straight
+    after its own failed ``acquire``, names whoever refused it. ``None``
+    means not recorded: only a bare ``_RUN_LOCK.acquire`` (a test) leaves it
+    so, and it reads as an audit run, the lock's original holder.
+    """
+
+    def __init__(self) -> None:
+        self.name: str | None = None
+
+
+_HOLDER: Final = _RunLockHolder()
+
+#: The holder a sentiment audit run records on :data:`_RUN_LOCK`.
+AUDIT_RUN_HOLDER: Final = "sentiment_audit"
 
 #: Symbols per minute-bar request: one request per session over at most this
 #: many symbols (decision 6 below). The house ceiling for a multi-symbol bars
@@ -321,8 +348,27 @@ NoticeSink = Callable[[TransitionNotice, datetime, str], None]
 
 
 class AuditAlreadyRunning(RuntimeError):
-    """Another audit run is live -- in this process, or a ``running`` row
-    younger than :data:`ABANDONED_RUN_AFTER` -- so this one did not start."""
+    """The run lock is held -- by another audit run in this process, by the
+    daily tradeability job's verdict backfill (owner decision Q25), or a
+    ``running`` row younger than :data:`ABANDONED_RUN_AFTER` is another
+    process's live run -- so this one did not start.
+
+    :attr:`holder` names who: :data:`AUDIT_RUN_HOLDER` for an audit run (this
+    process's or another's), the taker's own name for anything that took the
+    lock through :func:`try_run_lock`, ``None`` when it was not recorded.
+    Callers word their refusal from it (re-audit finding 2): a backfill holds
+    the lock to store verdicts and grades no label, so "another audit run,
+    grading the same labels" would be false.
+    """
+
+    def __init__(self, message: str, *, holder: str | None = None) -> None:
+        super().__init__(message)
+        self.holder = holder
+
+    @property
+    def held_by_audit_run(self) -> bool:
+        """Whether an audit run holds it -- the holder, or an unrecorded one."""
+        return self.holder is None or self.holder == AUDIT_RUN_HOLDER
 
 
 class WatchUniverseUnavailable(RuntimeError):
@@ -516,7 +562,8 @@ def _open_run(
             if started_at - run_started <= ABANDONED_RUN_AFTER:
                 raise AuditAlreadyRunning(
                     f"audit run {run_id} has been running since {run_started.isoformat()}, "
-                    f"no more than {ABANDONED_RUN_AFTER} ago: another process's live run"
+                    f"no more than {ABANDONED_RUN_AFTER} ago: another process's live run",
+                    holder=AUDIT_RUN_HOLDER,
                 )
         for run_id, run_started in running:
             closed = _set_terminal(
@@ -747,6 +794,114 @@ def _load_verdicts(
         ticker: [(day, None if verdict is None else verdict.passes) for day, verdict in history]
         for ticker, history in found.items()
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _FirstPlan:
+    """Step b's reads and the plan made on them, before any backfill."""
+
+    labels: list[AuditLabel]
+    written: set[tuple[int, str]]
+    claimed: set[tuple[int, str, str]]
+    universe: frozenset[str]
+    off_watch: set[str]
+    tradeable: dict[str, list[tuple[date, bool | None]]]
+    plan: AuditPlan
+
+
+def _first_plan(
+    session_factory: Callable[[], Session],
+    members: Collection[str],
+    run_at: datetime,
+    correlation_id: str,
+) -> _FirstPlan:
+    """The labels, their verdicts and the plan on them -- the one place the need is read.
+
+    The run (:func:`_run_locked`), the daily refresh's backfill and the
+    one-off drain script (owner decision Q25) all read decision 27's need
+    through here, so "off-watch" and "reference session" are derived once.
+    """
+    labels, written, claimed = _load_labels(session_factory)
+    universe = frozenset(members) | {MARKET_TICKER}
+    off_watch = {label.ticker for label in labels if label.ticker not in universe}
+    tradeable = _load_verdicts(
+        session_factory,
+        labels,
+        off_watch,
+        run_at.astimezone(NYSE_TZ).date(),
+        correlation_id,
+    )
+    plan = plan_audit(
+        labels,
+        watch_universe=universe,
+        tradeable=tradeable,
+        written=written,
+        claimed_groups=claimed,
+        run_at=run_at,
+    )
+    return _FirstPlan(labels, written, claimed, universe, off_watch, tradeable, plan)
+
+
+def load_verdicts_needed(
+    session_factory: Callable[[], Session],
+    members: Collection[str],
+    run_at: datetime,
+    correlation_id: str,
+) -> tuple[tuple[str, date], ...]:
+    """Decision 27's need as a run at ``run_at`` would read it. Reads only; writes nothing.
+
+    Exactly :attr:`AuditPlan.verdicts_needed` from :func:`_first_plan` --
+    the run's own loaders and :func:`~audit.plan_audit` -- over the watch
+    universe ``members`` (the market pseudo-ticker is added, as the run adds
+    it). Every ``(ticker, reference session)`` of an off-watch label with a
+    matured window and **no** verdict on or before that session, oldest
+    session first, then ticker. Blocking: call it on a worker thread.
+    """
+    run_at = _aware_utc(run_at, "run_at")
+    return _first_plan(session_factory, members, run_at, correlation_id).plan.verdicts_needed
+
+
+@contextmanager
+def try_run_lock(holder: str) -> Iterator[bool]:
+    """Take this process's run lock **without blocking**; yields whether it was taken.
+
+    ``holder`` names the taker -- the daily job passes its job name,
+    ``tradeability_cache`` -- and is recorded while the lock is held, so a run
+    refused meanwhile carries it (:attr:`AuditAlreadyRunning.holder`) and
+    says who refused it rather than "another audit run" (re-audit finding
+    2). A taker that is refused records nothing: the holder stays whoever
+    holds the lock.
+
+    The daily refresh's backfill (owner decision Q25, audit finding L3)
+    holds the lock a run holds, for its need read and its backfill, so
+    decision 25's "never replaced" holds when the row is written and not
+    only when the need is read: while the job holds it a run is refused
+    (:class:`AuditAlreadyRunning`), exactly as by another run, and while a
+    run holds it the job stands aside. ``_RUN_LOCK`` is a
+    :class:`threading.Lock` and every taker only ever *tries* it
+    (``blocking=False``), so holding it across awaits never blocks the event
+    loop or the heartbeat. Released on every exit, a cancellation included.
+    """
+    taken = _RUN_LOCK.acquire(blocking=False)
+    if taken:
+        _HOLDER.name = holder
+    try:
+        yield taken
+    finally:
+        if taken:
+            _HOLDER.name = None
+            _RUN_LOCK.release()
+
+
+def _lock_refusal() -> AuditAlreadyRunning:
+    """The refusal a taker raises straight after its ``acquire`` failed, naming the holder."""
+    holder = _HOLDER.name
+    if holder is None or holder == AUDIT_RUN_HOLDER:
+        return AuditAlreadyRunning("a sentiment audit run is already in progress", holder=holder)
+    return AuditAlreadyRunning(
+        f"the run lock is held by {holder}, not by an audit run; this run did not start",
+        holder=holder,
+    )
 
 
 def _write_outcomes(
@@ -1079,7 +1234,7 @@ class _VerdictFault:
 
 
 @dataclass(frozen=True, slots=True)
-class _Backfilled:
+class VerdictBackfillOutcome:
     """What the backfill stage did; ``held`` is what the plan gets as ``verdict_held``."""
 
     configured: bool
@@ -1089,10 +1244,13 @@ class _Backfilled:
     capped: tuple[tuple[str, date], ...]
     held: frozenset[tuple[str, date]]
     faults: tuple[_VerdictFault, ...]
+    #: Why the call stopped before a session (``backfill_verdicts``' ``stop``);
+    #: ``None`` when every attempted session was asked.
+    stopped: str | None = None
 
 
-def _no_backfill(needed: Sequence[tuple[str, date]], *, configured: bool) -> _Backfilled:
-    return _Backfilled(
+def _no_backfill(needed: Sequence[tuple[str, date]], *, configured: bool) -> VerdictBackfillOutcome:
+    return VerdictBackfillOutcome(
         configured=configured,
         needed=len(needed),
         attempted=0,
@@ -1115,28 +1273,126 @@ async def _backfill_verdicts(
     clock: Callable[[], datetime],
     run_id: int,
     correlation_id: str,
-) -> _Backfilled:
-    """Step b': a verdict for each ``(ticker, session)`` in ``needed`` that has none.
+) -> VerdictBackfillOutcome:
+    """Step b': the run's backfill, at most :data:`~audit.VERDICT_BACKFILL_CAP` pairs.
 
-    ``needed`` is :attr:`AuditPlan.verdicts_needed` -- sorted by session,
-    then ticker, and only pairs with **no** verdict on or before the session,
-    so a stale but existing one is never replaced (decision 27). The first
-    :data:`~audit.VERDICT_BACKFILL_CAP` are attempted, the rest logged and
-    held. One :func:`~corollary.data.news.tradeability.refresh_tradeability`
-    call per session, for exactly that session's tickers: it judges only the
+    The cap is read here, at the call, so it stays the runner's one stated
+    number. Owner decision Q25 (2026-11-16) left it at 100 on purpose: a
+    start-up catch-up during market hours must not spend the ``paper-api.``
+    bucket the order path will share. Everything else is
+    :func:`backfill_verdicts`.
+    """
+    return await backfill_verdicts(
+        backfill,
+        needed,
+        session_factory=session_factory,
+        clock=clock,
+        max_pairs=VERDICT_BACKFILL_CAP,
+        caller="sentiment_audit",
+        correlation_id=correlation_id,
+        run_id=run_id,
+    )
+
+
+class _CountedIpoDates:
+    """An :class:`IpoDateSource` that counts every lookup it passes on (audit L2).
+
+    The IPO bound is spent at the source, not read back from a returned
+    :class:`RefreshResult`: a session whose refresh raises after asking has
+    still spent its lookups, and the next session must not get them back.
+    """
+
+    def __init__(self, source: IpoDateSource) -> None:
+        self._source = source
+        self.lookups = 0
+
+    async def ipo_date(self, symbol: str) -> date | None:
+        self.lookups += 1
+        return await self._source.ipo_date(symbol)
+
+
+class _RootAnswers:
+    """:class:`TradeabilityInputs` with each ticker's standard-root answer asked once.
+
+    ``has_standard_root`` is the vendor's **current** answer, not a
+    point-in-time one (decision 27's named residual), so it is the same for
+    every session of one ticker, and asking it again for the next session
+    buys nothing but a ``paper-api.`` request. Only an answer is kept: a
+    ``ProviderError`` propagates to the refresh exactly as before, and the
+    next session asks again. Bars pass straight through, because they are
+    per session. One instance lives for one :func:`backfill_verdicts` call,
+    so a later call reads the vendor afresh.
+    """
+
+    def __init__(self, inputs: TradeabilityInputs) -> None:
+        self._inputs = inputs
+        self._roots: dict[str, bool] = {}
+
+    async def has_standard_root(self, ticker: str) -> bool:
+        known = self._roots.get(ticker)
+        if known is not None:
+            return known
+        answer = await self._inputs.has_standard_root(ticker)
+        self._roots[ticker] = answer
+        return answer
+
+    async def adv_daily_bars(
+        self, symbols: Sequence[str], *, session_date: date
+    ) -> Mapping[str, Sequence[Bar]]:
+        return await self._inputs.adv_daily_bars(symbols, session_date=session_date)
+
+
+async def backfill_verdicts(
+    backfill: VerdictBackfill,
+    needed: Sequence[tuple[str, date]],
+    *,
+    session_factory: Callable[[], Session],
+    clock: Callable[[], datetime],
+    max_pairs: int,
+    caller: str,
+    correlation_id: str,
+    max_ipo_lookups: int = MAX_IPO_LOOKUPS_PER_RUN,
+    run_id: int | None = None,
+    stop: Callable[[], str | None] | None = None,
+) -> VerdictBackfillOutcome:
+    """A verdict for each of the first ``max_pairs`` ``(ticker, session)`` in ``needed``.
+
+    ``needed`` is :attr:`AuditPlan.verdicts_needed`, as
+    :func:`load_verdicts_needed` reads it: sorted by session, then ticker,
+    and only pairs with **no** verdict on or before the session, so a stale
+    but existing one is never replaced (decision 27). The first
+    ``max_pairs`` are attempted, the rest logged and held. Each attempted
+    pair costs at most one standard-root request on the ``paper-api.``
+    bucket, so ``max_pairs`` is the caller's bound on that bucket. There is
+    one :func:`~corollary.data.news.tradeability.refresh_tradeability` call
+    per session, for exactly that session's tickers. It judges only the
     sessions strictly before ``session_date``, asks the provider for bars
     ending before it, and **stores** every verdict it reaches. IPO lookups
-    share one budget across the run, :data:`MAX_IPO_LOOKUPS_PER_RUN`, so
-    several sessions cannot multiply the refresh's bound.
+    share one budget, ``max_ipo_lookups``, across the call, so several
+    sessions cannot multiply the refresh's bound; they are counted as they
+    are asked (:class:`_CountedIpoDates`), so a session that raises has
+    still spent them. A ticker's standard-root answer is asked once per call
+    (:class:`_RootAnswers`).
 
-    Nothing reached is a verdict: a provider error, a skipped refresh (no
+    ``stop``, when given, is asked before each session's refresh; a reason
+    ends the call there (the one-off drain's re-check of the market
+    calendar, audit finding M1). The sessions not reached are neither
+    attempted nor faulted: their pairs are held, pending, and
+    :attr:`VerdictBackfillOutcome.stopped` carries the reason.
+
+    ``caller`` names who asked, in every log line: ``sentiment_audit``, the
+    daily ``tradeability_cache`` job, or the one-off drain script (owner
+    decision Q25). ``run_id`` is the audit run's, and ``None`` for the
+    others. Nothing here writes an ``audit_run`` row or a grade.
+
+    Nothing reached is a verdict. A provider error, a skipped refresh (no
     usable asset directory), a deferral, or any exception from one session's
     call is a :class:`_VerdictFault`, and its pair is held. Every attempted
     pair not stored, and every capped one, is in ``held``. A cancellation
     propagates. Nothing here touches ``engine_state`` or the watchdog: a
     context job is never a rule-9 producer.
     """
-    cap = VERDICT_BACKFILL_CAP
+    cap = max(0, max_pairs)
     attempt = list(needed[:cap])
     capped = tuple(needed[cap:])
     if capped:
@@ -1148,13 +1404,14 @@ async def _backfill_verdicts(
             extra={
                 "event": "sentiment_audit_verdict_backfill_capped",
                 "rule": (
-                    "Q24a: at most VERDICT_BACKFILL_CAP verdicts are backfilled a run, "
-                    "the oldest session first; the rest stay pending, never untradeable"
+                    "Q24a/Q25: at most the caller's bound of verdicts are backfilled a "
+                    "call, the oldest session first; the rest stay pending, never untradeable"
                 ),
                 "cap": cap,
                 "needed": len(needed),
                 "capped": len(capped),
                 "first_capped_session": capped[0][1].isoformat(),
+                "caller": caller,
                 "audit_run_id": run_id,
                 "correlation_id": correlation_id,
             },
@@ -1163,23 +1420,49 @@ async def _backfill_verdicts(
     for ticker, day in attempt:
         by_session.setdefault(day, []).append(ticker)
 
-    assets = backfill.assets()
-    ipo_budget = MAX_IPO_LOOKUPS_PER_RUN
+    inputs = _RootAnswers(backfill.inputs)
+    assets = backfill.assets() if attempt else None
+    ipo_bound = max(0, max_ipo_lookups)
+    ipo_dates = None if backfill.ipo_dates is None else _CountedIpoDates(backfill.ipo_dates)
     stored: list[tuple[str, date]] = []
     faults: list[_VerdictFault] = []
+    asked: list[tuple[str, date]] = []
+    stopped: str | None = None
     for day in sorted(by_session):
         tickers = sorted(by_session[day])
+        if stop is not None:
+            stopped = stop()
+            if stopped is not None:
+                logger.warning(
+                    "verdict backfill stopped before %s: %s",
+                    day.isoformat(),
+                    stopped,
+                    extra={
+                        "event": "sentiment_audit_verdict_backfill_stopped",
+                        "rule": "Q25: the caller's stop check ends the call between sessions",
+                        "reason": stopped,
+                        "session_date": day.isoformat(),
+                        "stored": len(stored),
+                        "remaining": sum(len(v) for d, v in by_session.items() if d >= day),
+                        "caller": caller,
+                        "audit_run_id": run_id,
+                        "correlation_id": correlation_id,
+                    },
+                )
+                break
+        asked.extend((t, day) for t in tickers)
+        spent = 0 if ipo_dates is None else ipo_dates.lookups
         try:
             result = await refresh_tradeability(
-                provider=backfill.inputs,
+                provider=inputs,
                 assets=assets,
                 tickers=tickers,
                 session_date=day,
                 session_factory=session_factory,
                 now=clock,
                 max_tickers=len(tickers),
-                ipo_dates=backfill.ipo_dates,
-                max_ipo_lookups=ipo_budget,
+                ipo_dates=ipo_dates,
+                max_ipo_lookups=max(0, ipo_bound - spent),
             )
         except Exception as exc:
             logger.error(
@@ -1191,6 +1474,7 @@ async def _backfill_verdicts(
                     "session_date": day.isoformat(),
                     "tickers": tickers,
                     "error_type": type(exc).__name__,
+                    "caller": caller,
                     "audit_run_id": run_id,
                     "correlation_id": correlation_id,
                 },
@@ -1199,7 +1483,6 @@ async def _backfill_verdicts(
                 _VerdictFault(t, day, f"backfill_raised:{type(exc).__name__}") for t in tickers
             )
             continue
-        ipo_budget = max(0, ipo_budget - result.ipo_requests)
         if result.skipped is not None:
             faults.extend(_VerdictFault(t, day, "refresh_skipped") for t in tickers)
             continue
@@ -1220,29 +1503,32 @@ async def _backfill_verdicts(
         logging.WARNING if ordered_faults or capped else logging.INFO,
         "sentiment audit verdict backfill: %d needed, %d attempted, %d stored, %d faults",
         len(needed),
-        len(attempt),
+        len(asked),
         len(stored),
         len(ordered_faults),
         extra={
             "event": "sentiment_audit_verdict_backfill",
             "needed": len(needed),
-            "attempted": len(attempt),
+            "attempted": len(asked),
             "stored": len(stored),
             "capped": len(capped),
             "held": len(held),
             "faults": [_verdict_fault_json(f) for f in ordered_faults],
+            "stopped": stopped,
+            "caller": caller,
             "audit_run_id": run_id,
             "correlation_id": correlation_id,
         },
     )
-    return _Backfilled(
+    return VerdictBackfillOutcome(
         configured=True,
         needed=len(needed),
-        attempted=len(attempt),
+        attempted=len(asked),
         stored=tuple(stored),
         capped=capped,
         held=held,
         faults=ordered_faults,
+        stopped=stopped,
     )
 
 
@@ -1311,7 +1597,7 @@ def _detail(
     released: Sequence[tuple[int, str]],
     fetched: _Fetched,
     audits: Sequence[SourceAudit],
-    backfilled: _Backfilled,
+    backfilled: VerdictBackfillOutcome,
 ) -> dict[str, object]:
     """``audit_run.detail``: counts, symbols and ids only -- no vendor text, no secret."""
     capped_labels = {
@@ -1413,7 +1699,9 @@ async def run_sentiment_audit(
     """One sentiment self-audit run, end to end (the module docstring's a-g).
 
     Raises :class:`AuditAlreadyRunning`, before touching the database, when
-    another run is live in this process, and from step a when another
+    the run lock is held in this process -- by another run, or by the daily
+    job's verdict backfill, named in :attr:`AuditAlreadyRunning.holder` --
+    and from step a when another
     process's ``running`` row is younger than :data:`ABANDONED_RUN_AFTER`.
     Raises :class:`WatchUniverseUnavailable`, with no row written, when the
     universe is degraded. Any failure after the run's row is inserted marks
@@ -1431,10 +1719,12 @@ async def run_sentiment_audit(
     if trigger not in ("scheduled", "manual"):
         raise ValueError(f"unknown audit trigger {trigger!r}")
     if not _RUN_LOCK.acquire(blocking=False):
-        raise AuditAlreadyRunning("a sentiment audit run is already in progress")
+        raise _lock_refusal()
+    _HOLDER.name = AUDIT_RUN_HOLDER
     try:
         return await _run_locked(deps, trigger, on_opened)
     finally:
+        _HOLDER.name = None
         _RUN_LOCK.release()
 
 
@@ -1585,25 +1875,12 @@ async def _run_locked(
 
     stage = "plan"
     try:
-        labels, written_keys, claimed = await _on_worker(_load_labels, deps.session_factory)
-        universe = frozenset(members) | {MARKET_TICKER}
-        off_watch = {label.ticker for label in labels if label.ticker not in universe}
-        tradeable = await _on_worker(
-            _load_verdicts,
-            deps.session_factory,
-            labels,
-            off_watch,
-            started_at.astimezone(NYSE_TZ).date(),
-            correlation_id,
+        first = await _on_worker(
+            _first_plan, deps.session_factory, members, started_at, correlation_id
         )
-        plan = plan_audit(
-            labels,
-            watch_universe=universe,
-            tradeable=tradeable,
-            written=written_keys,
-            claimed_groups=claimed,
-            run_at=started_at,
-        )
+        labels, written_keys, claimed = first.labels, first.written, first.claimed
+        universe, off_watch = first.universe, first.off_watch
+        tradeable, plan = first.tradeable, first.plan
         backfilled = _no_backfill(plan.verdicts_needed, configured=deps.backfill is not None)
         if deps.backfill is not None and plan.verdicts_needed:
             stage = "backfill"

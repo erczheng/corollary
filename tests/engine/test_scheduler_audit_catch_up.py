@@ -556,3 +556,82 @@ async def test_the_audit_catch_up_never_moves_the_halt_state(
 
     assert _state_snapshot(db_engine) == state_before
     watched.assert_untouched()
+
+
+# ------------------------------- Q25 re-audit 1: the gate the backfill waits on
+
+
+def _raise_on_read(*_: object, **__: object) -> object:
+    raise RuntimeError("SYNTHETIC: audit_run is unreadable")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["ran", "not_needed", "imminent", "no_provider", "deferred_then_ran", "refused", "failed"],
+)
+def test_the_catch_up_settles_the_gate_whatever_it_did(
+    db_engine: Engine, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Set in a ``finally``: ran, skipped, deferred to the close, refused or failed."""
+    import corollary.engine.scheduler as scheduler_module
+    from corollary.data.news import audit_runner
+
+    _the_week(db_engine)
+    start = {
+        "deferred_then_ran": MONDAY_IN_SESSION,
+        "imminent": NEXT_SLOT - timedelta(minutes=15),
+    }.get(case, SUNDAY)
+    if case == "not_needed":
+        _insert_run(db_engine, started_at=SLOT, status="succeeded")
+    if case == "failed":
+        monkeypatch.setattr(scheduler_module, "_audit_runs_since_blocking", _raise_on_read)
+    services = _services(db_engine, None if case == "no_provider" else FakeBars())
+    services.audit_catch_up_settled.clear()  # as a started scheduler leaves it
+    clock = SteppedClock(start)
+    unsettled_while_deferred: list[bool] = []
+
+    def during_the_wait() -> None:
+        unsettled_while_deferred.append(not services.audit_catch_up_settled.is_set())
+
+    clock.on_sleep = during_the_wait
+    if case == "failed":
+        with pytest.raises(RuntimeError):
+            _catch_up(services, clock)
+    elif case == "refused":
+        with audit_runner.try_run_lock("tradeability_cache") as taken:
+            assert taken
+            outcome = _catch_up(services, clock)
+        assert isinstance(outcome, JobSkipped) and "tradeability_cache" in outcome.reason
+        assert "grades the same labels" not in outcome.reason
+    else:
+        _catch_up(services, clock)
+    assert services.audit_catch_up_settled.is_set()
+    if case == "deferred_then_ran":
+        assert unsettled_while_deferred and all(unsettled_while_deferred)
+        assert [(t, s) for t, s, _ in _runs(db_engine)] == [("scheduled", "succeeded")]
+
+
+def test_a_cancelled_catch_up_settles_the_gate(db_engine: Engine) -> None:
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    services.audit_catch_up_settled.clear()
+    clock = SteppedClock(MONDAY_IN_SESSION)
+    parked = asyncio.Event()
+
+    async def park(seconds: float) -> None:
+        parked.set()
+        await asyncio.Event().wait()
+
+    async def cancel_during_the_deferral() -> None:
+        jobs = {j.name: j for j in context_jobs(services, clock=clock, sleep=park)}
+        catch_up = jobs[SENTIMENT_AUDIT_JOB].catch_up
+        assert catch_up is not None
+        task = asyncio.create_task(catch_up())
+        await asyncio.wait_for(parked.wait(), timeout=5)
+        assert not services.audit_catch_up_settled.is_set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_during_the_deferral())
+    assert services.audit_catch_up_settled.is_set()

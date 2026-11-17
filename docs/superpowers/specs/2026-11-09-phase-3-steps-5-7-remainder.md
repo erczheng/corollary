@@ -312,6 +312,150 @@ assumptions**. Q24a, Q24b and Q24c are built on `phase3-rem-grading`
     2026-11-14. The weekly-audit trigger carries the same offset and has
     not been changed; that waits on the owner.
 
+## Owner decisions — 2026-11-16 (Q25)
+
+Put to the owner on 2026-11-16, after live audit run 5's re-grade, and
+answered the same day. Its `verdict_backfill` detail needed **2117**
+`(ticker, session)` pairs across **1596** tickers. It attempted and stored
+**100** (`VERDICT_BACKFILL_CAP`), held **2017**, and had **0** faults, which
+left **2585** off-watch labels pending. At 100 pairs a weekly run, the oldest
+held labels (session Nov 2) would pass decision 27's 28-day hold around Dec 1
+and be written `off_watch_unverdicted`, never graded. The options were:
+(b) raise the cap, (c) drain with extra off-hours audit runs, and (d) have
+the daily refresh write a verdict for every off-watch label's ticker.
+
+- **Answer:** *"implement d and have choose one of b or c which ever is best
+  suited and most efficient for the task"*.
+- **d — the daily refresh fills decision 27's need.** Built in
+  `corollary/engine/scheduler.py`
+  (`_tradeability` → `_off_watch_verdict_backfill`). After its own date's
+  check, the `tradeability_cache` job reads the audit's need
+  (`audit_runner.load_verdicts_needed`, the run's own loaders and
+  `plan_audit`) and fills it oldest first, through the audit's backfill
+  (`audit_runner.backfill_verdicts`) and `refresh_tradeability(session_date=S)`.
+  - **Bound.** `TRADEABILITY_BACKFILL_BOUND = MAX_TICKERS_PER_RUN` (100),
+    less today's `root_requests`, so the job's worst case on `paper-api.` is
+    what it was before Q25. IPO lookups are bounded the same way.
+  - **Only outside a regular session** (ruling P1, after the rules audit).
+    The calendar's `nyse_session_containing(at)` is checked first, before
+    the deps, the watch universe and the label plan; an open session is a
+    logged stand-aside naming its date and the rule. It is asked **again
+    before each session's refresh** (re-audit finding 4): the job passes
+    `backfill_verdicts` a `stop` that answers while `nyse_session_containing`
+    does, so a 09:29 run that reaches 09:30 keeps what it stored, asks
+    nothing more, and logs `tradeability_backfill_stopped` with the rule, the
+    session, the instant and the counts.
+  - **Clear of the weekly audit's slot.** It stands aside within
+    `TRADEABILITY_BACKFILL_AUDIT_CLEARANCE` (one job interval, 15 min) of a
+    scheduled Saturday 10:00 ET slot, before or after. *Not in the rulings;
+    added with L3 below and flagged for the owner:* the job now holds the
+    run lock, and a scheduled run that finds it held skips for the week.
+  - **Never before the start-up catch-up has settled** (re-audit finding 1).
+    The job has no catch-up of its own and first runs at the next 15-min
+    grid slot, which can fall seconds after start while the sentiment
+    audit's catch-up still polls for the paper positions -- or exactly on a
+    deferred catch-up's close, since every close is on the grid (re-audit
+    finding 3). `ContextServices.audit_catch_up_settled`, a `CatchUpGate`
+    (an `asyncio.Event` behind corollary code, because the rule-9 isolation
+    scan admits only corollary objects in the services), is cleared by
+    `Scheduler.start()` for a scheduler that
+    holds the `sentiment_audit` job (`ScheduledJob.catch_up_settled`) and
+    set in a `finally` around `_sentiment_audit_catch_up`, whether it ran,
+    skipped, deferred, failed or was cancelled. Until then the backfill
+    stands aside, logged with the rule, checked just before it would try the
+    lock. It is created set, so services with no audit job wired (a test's,
+    the drain script's) never block the backfill.
+  - **Never without an asset directory** (re-audit finding 1). With
+    `services.assets.current()` `None` every attempted pair would fault
+    `refresh_skipped` and check nothing, so the backfill stands aside, logged,
+    before the lock -- no lock held for nothing, no 100 WARNING faults.
+  - **It holds the audit's run lock** (audit finding L3), not an advisory
+    check. `audit_runner.try_run_lock("tradeability_cache")` tries
+    `_RUN_LOCK` without blocking and holds it for the watch universe, the
+    need read and the backfill; if a run holds it, the job stands aside and
+    logs it. **The holder is recorded** (re-audit finding 2): a run refused
+    meanwhile raises `AuditAlreadyRunning` with `holder =
+    "tradeability_cache"`, so the scheduled or catch-up run's skip reason and
+    the manual `POST`'s 409 message and logged `inputs.holder` name the
+    daily job's backfill -- which grades no label -- rather than "another
+    audit run grading the same labels". The route's code and envelope are
+    unchanged. The lock is a
+    `threading.Lock` that every taker only *tries*, so holding it across
+    awaits never blocks the event loop or the heartbeat. The upsert in
+    `store_tradeability` is unchanged, because decision 27's damaged-row
+    replacement depends on it. **Remaining residual:** the lock is
+    per-process, so a second process (the drain script) is excluded by its
+    own refusal, below, and not by the lock. Between a job's backfill and a
+    run's, the only difference left in the same pair's row is the vendor's
+    *current* answers -- the bars are the same point in time (sessions
+    before S); `has_options` and the standard root are asked again.
+    **The start-up race is closed** (re-audit findings 1 and 3): a catch-up
+    waiting on the positions refresher, or deferred to the close, can no
+    longer find the lock held by this job, because the job does not try the
+    lock until the catch-up has settled. A manual `POST` can still meet the
+    job's lock, and is refused with the holder named.
+  - A stale but existing verdict is never replaced (decision 25).
+  - A skip stays a skip unless the backfill **stored** a verdict (audit L1).
+  - The asset directory's staleness is logged once a run on the job's path,
+    by today's check (ruling P2); the audit's run keeps its own line.
+  - Movers' fail-closed reading (decision 21) is unchanged. **Known
+    residual (audit L4, recorded rather than patched, since decision 21 is
+    the owner's):** `signals.latest_verdicts` takes the newest row on or
+    before today with no age bound, so a verdict this job backfills for an
+    old S can stand in for today's when today's check defers or errors.
+    This is the Q24a carry above, now reached daily: the Phase 4 scanner must
+    require `session_date == today`.
+  - It is never a rule-9 input: a failure is logged with the rule, the
+    inputs and the timestamp, and the job's own outcome is unchanged.
+  - **Drain rate.** The job runs every 15 min (`TRADEABILITY_EVERY`, an
+    `EveryInterval` grid) while the app is up. The app is up from 08:30 ET to
+    the later of close + 30 min and 18:05 ET (Q24d). On a regular day that is
+    **3 or 4 off-session runs before the open** (08:45, 09:00, 09:15, and
+    08:30 only when the scheduler is already up at that instant -- a grid job
+    runs at the first slot *after* start; 09:30 is in the session) and **9
+    after the close** (16:00 through 18:00; the close's own instant is outside
+    the session), so **12 or 13 runs** a weekday. A 13:00 half-day has 21
+    after the close. At most 100 pairs a run, less today's own root requests,
+    that is up to about **1200-1300 pairs a trading day**, so the 2117-pair
+    backlog would clear in about two trading days
+    without the script. Saturday's headless window (`weekly_audit.py`) adds
+    about **none**: it is up only around the 10:00 slot, which the clearance
+    above keeps the job out of.
+- **b once, not c, and not a permanent raise.** Built as
+  `scripts/backfill_verdicts.py --max-pairs N [--dry-run]`, run once
+  off-hours. It writes no `audit_run` row and no grade; the next audit run
+  grades. Its refusals each log the rule, the inputs and a timestamp, as
+  JSON lines on stderr alongside the backfill's own (audit L5):
+  - **A regular session open** (exit 3), per the calendar: at launch, and
+    again before each session's refresh (audit M1), so a drain launched at
+    09:22 stops at the first session boundary after 09:30 and keeps what it
+    stored. `--dry-run` refuses the same way.
+  - **The app is running** (exit 5, audit M2): anything answering
+    `GET /api/health` on 127.0.0.1:8000. Alpaca's 200/min is per account,
+    and the script's own limiter admits 190 a minute on top of the app's.
+    Stop the app first. Asked at launch and **again before each session's
+    refresh** (re-audit finding 5), once a session and never once a pair,
+    because `weekday_session.py` (08:30 ET) and `weekly_audit.py` (Saturday
+    09:45 ET) can launch the headless app mid-drain: the drain then stops,
+    keeps what it stored, prints the partial counts and exits 5.
+  - **No Alpaca keys** (exit 6), naming the variables only (rule 6).
+  - **No IPO-date source** (exit 7, audit L6): without `FINNHUB_API_KEY` a
+    partial window is stored `ipo_date_unavailable` for a past session,
+    permanently. `--dry-run` says whether one is configured.
+  - **An unexpected error** (exit 8, re-audit finding 6): logged with its
+    type and the rule, never its message or a traceback, which could carry
+    vendor text. No other exit status is returned.
+  - **Why not c.** c would take about 21 audit runs, each making about 1313
+    bar requests, and would leave 21 run rows and 21 transition evaluations.
+  - **Why b once.** It is one pass of at most about 2117 standard-root
+    requests on the `paper-api.` bucket, fewer in practice because a
+    ticker's root answer is asked once for all its sessions.
+  - **Why not a permanent raise.** The runner keeps `VERDICT_BACKFILL_CAP =
+    100`. A start-up catch-up during market hours then cannot spend the
+    trading bucket the order path will share from Phase 6.
+- **Decision 27 is amended** in `corollary/data/news/audit.py`: the daily
+  refresh now covers its need too.
+
 ---
 
 ## Decisions

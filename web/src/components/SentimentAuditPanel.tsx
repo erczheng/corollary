@@ -306,10 +306,13 @@ function RefusalLine({ refusal }: { refusal: AuditTriggerRefusal }) {
         </p>
       )
     case 'running':
+      // The holder can be an audit run *or* the daily verdict backfill (Q25),
+      // which writes no run, so this must not promise an outcome. The server's
+      // message names the holder; the frame stays true either way.
       return (
         <p role="status" className="mt-2 max-w-prose text-caption text-on-surface-variant">
-          Not started: a run is already in progress ({refusal.message}). Its outcome will appear
-          here when it finishes.
+          Not started: the audit is busy ({refusal.message}). Try again in a few minutes. A run
+          that is under way shows here when it finishes.
         </p>
       )
     case 'unavailable':

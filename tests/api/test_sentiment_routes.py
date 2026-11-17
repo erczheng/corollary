@@ -1981,3 +1981,28 @@ def test_the_module_imports_no_event_loop_blocking_sleep() -> None:
     assert "time.sleep" not in source
     assert "run_until_complete" not in source
     assert inspect.iscoroutinefunction(sentiment_routes.start_sentiment_audit)
+
+
+def test_the_runners_lock_held_by_the_daily_backfill_is_a_409_that_names_it(
+    app: FastAPI,
+    sentiment_client: TestClient,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Q25 re-audit 2: the same code and shape, but the message says who holds the lock."""
+    _arm(app, monkeypatch, _deps(db_engine))
+    with audit_runner.try_run_lock("tradeability_cache") as taken:
+        assert taken
+        with caplog.at_level(logging.WARNING):
+            response = sentiment_client.post(AUDIT)
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert set(error) == {"code", "message"}
+    assert error["code"] == "sentiment_audit_running"
+    assert "tradeability_cache" in error["message"]
+    assert "another sentiment audit run" not in error["message"]
+    fields = _assert_logged(caplog, 409)
+    assert fields["inputs"]["holder"] == "tradeability_cache"
+    assert "tradeability_cache" in fields["rule"]
+    assert _runs(db_engine) == []

@@ -697,15 +697,34 @@ async def start_sentiment_audit(
         opened.cancel()
         exc = None if task.cancelled() else task.exception()
         if isinstance(exc, AuditAlreadyRunning):
+            # Same code and envelope either way; the message and the logged
+            # holder say who refused it (owner decision Q25, re-audit 2).
+            if exc.held_by_audit_run:
+                message = "another sentiment audit run is in progress"
+                rule = (
+                    "one audit run at a time (the runner's in-process lock, or "
+                    "another process's running row at its step a)"
+                )
+            else:
+                message = (
+                    f"the audit's run lock is held by {exc.holder}, the daily job's "
+                    "verdict backfill, which stores tradeability verdicts and grades no "
+                    "label; try again in a few minutes"
+                )
+                rule = (
+                    f"one holder of the runner's in-process lock at a time; {exc.holder} "
+                    "holds it for its verdict backfill (owner decision Q25)"
+                )
             raise _refuse(
                 status_code=409,
                 code="sentiment_audit_running",
-                message="another sentiment audit run is in progress",
-                rule=(
-                    "one audit run at a time (the runner's in-process lock, or "
-                    "another process's running row at its step a)"
-                ),
-                inputs={"refused_by": "runner", "error_type": type(exc).__name__},
+                message=message,
+                rule=rule,
+                inputs={
+                    "refused_by": "runner",
+                    "holder": exc.holder,
+                    "error_type": type(exc).__name__,
+                },
                 at=now,
                 correlation_id=correlation_id,
             )
