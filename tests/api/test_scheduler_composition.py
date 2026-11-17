@@ -30,6 +30,7 @@ from corollary.engine.scheduler import (
     build_context_scheduler,
     no_scheduler,
 )
+from tests.api.scheduler_drive import await_ready, drive_until_parked
 from tests.engine.test_scheduler import (
     HALF_DAY_CLOSE,
     HALF_DAY_OPEN,
@@ -64,13 +65,9 @@ async def test_the_no_op_job_runs_in_the_lifespan_across_a_holiday_and_a_half_da
         assert app.state.engine_runtime is not None
         assert app.state.socket_supervisor is None  # no vendor socket, ever
         # The calendar builds on a worker thread first; the driver parks when
-        # nothing sleeps on the fake clock, so it waits for that build.
-        await asyncio.wait_for(app.state.scheduler.ready(), timeout=10)
-        driver = asyncio.get_running_loop().create_task(clock.drive())
-        try:
-            await asyncio.wait_for(clock.parked.wait(), timeout=10)
-        finally:
-            driver.cancel()
+        # nothing sleeps on the fake clock, so it waits for that build. Per-step
+        # guards only, the driver awaited: see tests/api/scheduler_drive.py.
+        await drive_until_parked(app.state.scheduler, clock)
         probe = app.state.scheduler.status()["calendar_probe"]
 
     # Wednesday 15:15, 15:30, 15:45 ET; nothing on Thanksgiving; Friday every
@@ -209,7 +206,7 @@ async def test_a_scheduler_task_that_died_does_not_skip_the_rest_of_shutdown(
     app = create_app(registry=registry, db_engine=db_engine, scheduler=doomed)
     with caplog.at_level(logging.ERROR, logger="corollary.engine.scheduler"):
         async with app.router.lifespan_context(app):
-            await asyncio.wait_for(app.state.scheduler.ready(), timeout=10)
+            await await_ready(app.state.scheduler)
             for _ in range(50):
                 await asyncio.sleep(0)
             assert [
