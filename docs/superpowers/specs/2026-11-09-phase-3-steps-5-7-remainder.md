@@ -456,6 +456,85 @@ the daily refresh write a verdict for every off-watch label's ticker.
 - **Decision 27 is amended** in `corollary/data/news/audit.py`: the daily
   refresh now covers its need too.
 
+## Owner decisions — 2026-11-17 (Q26)
+
+Found on 2026-11-16 while chasing a hanging test. `Scheduler.aclose` cancels
+each job task once and then waits with no bound. Every job re-raises at once
+except the sentiment audit. Its `_on_worker` waits on the first cancel for
+its thread to finish the step in flight, then records the run `failed`. The
+docstrings said a *second* cancel is honoured "so shutdown is never held
+hostage", but nothing sent one: not `aclose`, and not the lifespan's handling
+of a manual run. The unattended runners (`weekday_session.py`,
+`weekly_audit.py`) kill the server `STOP_GRACE` (60 s) after asking it to
+stop, so a slow step could cost the cleanup after it: the session drain, the
+notice flush, `runtime.aclose()`, and the rule 9 alerts' Discord grace. The
+options were:
+
+- **(i)** keep it, and document it;
+- **(ii)** bound `Scheduler.aclose` for every job;
+- **(iii)** bound only the audit job and the manual run.
+
+- **Answer:** *"lets do iii for now"*. The owner chose (iii) **for now**, so
+  (ii) stays the general option. Wrapping `ContextSessions.drain` in an outer
+  `asyncio.wait_for` was proposed separately and **not** approved.
+- **The bound.** `AUDIT_SHUTDOWN_GRACE = 20 s` (`engine/scheduler.py`), with
+  its reasoning stated there. Each threaded step is one SQLite transaction,
+  and a contended lock fails after the 5 s busy timeout, so a step plus its
+  failure write takes about 10 s; 20 s is twice that. The rest of shutdown is
+  bounded at about 15 s (the 10 s drain and the 5 s Discord grace), which
+  leaves about 25 s of the 60 s `STOP_GRACE`.
+  `await_cancelled_audit` waits that long after the first cancel. If the task
+  is still running, it logs `sentiment_audit_shutdown_grace_expired` and
+  cancels it again, with that log line's correlation id as the cancel
+  message. The log line carries the rule, the job, the grace, the wait and
+  the timestamp. `Scheduler.aclose` applies it only to a job with
+  `ScheduledJob.shutdown_grace`, which only `sentiment_audit` sets. The
+  lifespan applies it to the manual run's task. Every other job is still
+  cancelled once and awaited with no bound.
+- **After the second cancel nothing is written.** `_on_worker` raises
+  `WorkerAbandoned`, a `CancelledError`. The run logs
+  `sentiment_audit_run_abandoned` (run id, stage, step, trigger, the run's
+  correlation id and the cancel message), skips its failure write and
+  releases the lock. Its row stays `running`, and the next run closes it past
+  `ABANDONED_RUN_AFTER` (2 h), as it would after a process that died
+  mid-run -- except in the two cases below. The failure write is skipped
+  because the abandoned thread may still hold SQLite's write lock or be about
+  to commit. A write there would wait out the busy timeout, and could land
+  before the step's own commit. The abandonment line names the step.
+- **When the second cancel lands in the failure write (audit L1).** If the
+  held step ends just before the grace runs out, the run is already
+  recording its failure when the second cancel comes. It lands in that
+  write's wait, which treats it as a first cancel and waits for the
+  `_fail_run` thread. So the row is closed `failed` by the runner's own
+  write, and shutdown waits for that one write: a single UPDATE, bounded in
+  practice by the 5 s SQLite busy timeout, so about the grace plus 5 s at
+  worst. The ruling was **no third cancel**; the docstrings and the
+  `sentiment_audit_shutdown_grace_expired` rule say this instead, and
+  `test_a_step_ending_just_at_the_grace_leaves_shutdown_waiting_on_the_failure_write`
+  pins it.
+- **Known residual: an abandoned close (audit L3).** The abandoned step may
+  still commit. If it was `_close_run`, the run can end `succeeded` with its
+  source-status transitions standing and their notices never queued, because
+  `_emit_all` never runs. Before Q26 the failure write blocked behind that
+  commit and logged `sentiment_audit_failure_not_applied`. The ruling was
+  **no new mechanism**: it is narrow and not money-bearing.
+  `sentiment_audit_run_abandoned` names the step and says so in its message
+  and rule, and
+  `test_an_abandoned_close_can_still_commit_succeeded_and_its_notices_are_never_queued`
+  pins it.
+- **The abandoned thread is not stopped.** On Python 3.14, `asyncio.run`
+  (uvicorn's runner) waits up to 300 s for the default executor at exit. The
+  interpreter's `concurrent.futures` exit hook then joins its threads with no
+  bound. So process exit still waits for the step to end, and the runners'
+  kill at `STOP_GRACE` ends it if it is still running. The difference is that
+  the lifespan's cleanup has run by then. The kill loses only the step's
+  uncommitted transaction, which SQLite discards. Nothing half-commits.
+  There is no cooperative stop flag, because the steps have no boundary
+  inside them: each is one database function on one thread, and the thread
+  ends when the step does.
+- **Rule 9 is untouched.** Shutdown never calls `halt()` and never writes
+  `engine_state`, and the watchdog and heartbeat keep their shutdown order.
+
 ---
 
 ## Decisions
