@@ -20,8 +20,15 @@ if you were not told.
 ```
 uv run python -m pytest
 uv run python -m pytest -m risk
-uv run mypy corollary
+uv run python -m mypy corollary
 ```
+
+Always the `python -m` form. The generated `pytest.exe` and `mypy.exe`
+shims are blocked by Windows Application Control (`os error 4551`). For
+mypy that has held in fresh worktrees since 2026-11-11, even where an
+older venv's shim still launches. A 4551 from a bare shim is the policy
+block, not a failing suite. mypy is built from its sdist (`compiled: no`),
+so a full run takes roughly 80s. Let it finish.
 
 `uv run python -m pytest -m risk` runs before **any** engine change, no exceptions.
 The marker is registered in `pyproject.toml` under `--strict-markers`; if it
@@ -92,8 +99,13 @@ back under a concurrent writer is its own hazard.
   list` fail outright, and any bare `uvx` invocation resolving to 3.12 dies
   instantly. It is a policy block, not a missing DLL — report it as such
   rather than as a broken test.
-- Alembic is **not yet wired** — no `alembic.ini` exists yet. `uv run
-  alembic upgrade head` failing is expected until the phase that wires it,
-  and should be reported as not-applicable rather than as a failure.
+- Alembic **is wired**: `alembic.ini` at the repo root, with revisions
+  under `corollary/db/migrations/versions/`. The pytest suite verifies the
+  migrations (`tests/db/*migration*.py`) by upgrading and downgrading
+  temporary SQLite files, so a migration failure shows up there as a real
+  failure. **Never run `uv run alembic upgrade head` as a check.** With no
+  `COROLLARY_DATABASE_URL` set, it migrates `corollary.db` in the working
+  directory, which is the owner's real database, not a fixture. Changing
+  it is a state change, not evidence.
 
 Finish with a one-line verdict per suite: name, pass/fail, count.
