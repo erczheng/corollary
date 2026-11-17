@@ -81,7 +81,11 @@ fetches at start only while no observation has ever been stored, or the newest
 one is more than two sessions old (a long downtime). The Saturday sentiment
 audit runs a missed slot once, when ``audit_run`` holds no run since it, and
 defers to the calendar's close if the start is in session
-(``_sentiment_audit_catch_up``). The slots themselves are
+(``_sentiment_audit_catch_up``). Until that catch-up has settled, the
+tradeability job's verdict backfill does not try the audit's run lock
+(:attr:`ScheduledJob.catch_up_settled`, owner decision Q25): its first grid
+slot can fall seconds after start, or on the close the catch-up deferred
+to, and holding the lock then would refuse the missed week's run. The slots themselves are
 **anchored to the session open** (``open + k * interval``), not to the instant
 the process started: anchored to the start, every save would push the first
 run a full interval out, and a developer saving more often than the interval
@@ -150,7 +154,12 @@ from typing import Final, Protocol
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from corollary.calendars import NYSE_TZ, nyse_session_close, nyse_session_open
+from corollary.calendars import (
+    NYSE_TZ,
+    nyse_session_close,
+    nyse_session_containing,
+    nyse_session_open,
+)
 from corollary.data.calendar import (
     WindowReplace,
     count_live_in_window,
@@ -212,7 +221,10 @@ from corollary.data.news.audit_runner import (
     SentimentAuditDeps,
     VerdictBackfill,
     WatchUniverseUnavailable,
+    backfill_verdicts,
+    load_verdicts_needed,
     run_sentiment_audit,
+    try_run_lock,
 )
 from corollary.data.news.pollers import (
     AlpacaNewsPoller,
@@ -234,7 +246,13 @@ from corollary.data.news.pollers import (
     refresh_tradeability_cache,
     watch_interval,
 )
-from corollary.data.news.tradeability import IpoDateSource, TradeabilityInputs
+from corollary.data.news.tradeability import (
+    MAX_IPO_LOOKUPS_PER_RUN,
+    MAX_TICKERS_PER_RUN,
+    IpoDateSource,
+    RefreshResult,
+    TradeabilityInputs,
+)
 from corollary.data.news.watchlist import watch_universe as watch_universe_of
 from corollary.data.providers.finnhub import CalendarAccessDenied
 from corollary.data.providers.fred import FRED_API_KEY_ENV
@@ -295,9 +313,11 @@ __all__ = [
     "SENTIMENT_AUDIT_DAYS",
     "SENTIMENT_AUDIT_JOB",
     "SentimentAuditUnavailable",
+    "TRADEABILITY_BACKFILL_BOUND",
     "TRADEABILITY_EVERY",
     "AlpacaContextSource",
     "AtTime",
+    "CatchUpGate",
     "CONTEXT_SESSIONS_DRAIN_TIMEOUT",
     "ContextServices",
     "ContextSessions",
@@ -762,6 +782,35 @@ class JobSkipped:
 JobBody = Callable[[], Awaitable[JobSkipped | None]]
 
 
+class CatchUpGate:
+    """Whether a start-up catch-up another job waits on has settled (owner decision Q25).
+
+    An :class:`asyncio.Event` behind corollary code, with the event's own
+    ``set`` / ``clear`` / ``is_set``: :class:`ContextServices` may hold only
+    objects from ``corollary`` (or builtins), because the rule-9 isolation
+    scan import-checks every field's module, and a stdlib object is code that
+    scan cannot see into. **Created set** -- "nothing is pending" -- until a
+    started scheduler clears it (:attr:`ScheduledJob.catch_up_settled`).
+    Nothing awaits it: readers ask :meth:`is_set`, so it never parks a job.
+    """
+
+    def __init__(self) -> None:
+        self._settled = asyncio.Event()
+        self._settled.set()
+
+    def is_set(self) -> bool:
+        """Whether the catch-up has settled, or none is wired."""
+        return self._settled.is_set()
+
+    def set(self) -> None:
+        """The catch-up has settled: ran, skipped, deferred and ran, failed or was cancelled."""
+        self._settled.set()
+
+    def clear(self) -> None:
+        """A started scheduler holds the catch-up and has not run it yet."""
+        self._settled.clear()
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduledJob:
     """One job: a name, when it runs, what it runs, and why it matters.
@@ -791,6 +840,16 @@ class ScheduledJob:
     #: about the Cash-only tickers), because it runs outside the slot its full
     #: body is budgeted for. See :meth:`Scheduler.waker`.
     woken: JobBody | None = None
+    #: An event another job waits on until this job's :attr:`catch_up` has
+    #: settled -- the sentiment audit's, which the tradeability job's verdict
+    #: backfill waits on (owner decision Q25, re-audit finding 1). The
+    #: scheduler **clears** it in :meth:`Scheduler.start`, before any job's
+    #: task exists, and the catch-up body sets it when it returns, raises or
+    #: is cancelled. So it reads "pending" only while a started scheduler
+    #: holds this job: a job set built but never started, or a scheduler
+    #: without this job, leaves it as created -- set -- and blocks nobody.
+    #: ``None`` for every other job.
+    catch_up_settled: CatchUpGate | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -979,6 +1038,11 @@ class Scheduler:
         if self._warm_task is not None:
             return
         loop = asyncio.get_running_loop()
+        # Before any task exists, so no job can read a gate as settled
+        # ahead of the catch-up it stands for (see ScheduledJob.catch_up_settled).
+        for job in self._jobs:
+            if job.catch_up is not None and job.catch_up_settled is not None:
+                job.catch_up_settled.clear()
         self._warm_task = loop.create_task(
             self._warm_calendar(), name="context-scheduler:calendar"
         )
@@ -2011,6 +2075,16 @@ class ContextServices:
     #: production the same ``FredProvider`` as :attr:`fred`, so its one
     #: ``api.stlouisfed.org`` limiter meters every FRED request.
     fred_vintages: VintageSource | None = None
+    #: Owner decision Q25, re-audit finding 1: whether the sentiment audit's
+    #: start-up catch-up has **settled** -- ran, skipped, deferred to the
+    #: close and then ran or skipped, failed, or was cancelled. The
+    #: tradeability job's verdict backfill stands aside until it is set, so
+    #: it can never take the audit's run lock ahead of the catch-up's run.
+    #: Created set: only a started scheduler holding the ``sentiment_audit``
+    #: job clears it (:attr:`ScheduledJob.catch_up_settled`), so services
+    #: with no audit job wired -- a test's, a script's -- never block the
+    #: backfill. A :class:`CatchUpGate`; read with ``is_set()`` only.
+    audit_catch_up_settled: CatchUpGate = field(default_factory=CatchUpGate)
 
     def __post_init__(self) -> None:
         if self.seed_loader is None:
@@ -2090,6 +2164,24 @@ MASSIVE_NEWS_EVERY = timedelta(minutes=15)
 ASSET_DIRECTORY_AT = time(7, 30)
 #: ADV / tradeability for off-watch tickers carrying a qualifying news signal: every 15 min.
 TRADEABILITY_EVERY = timedelta(minutes=15)
+#: Owner decision Q25 (d), 2026-11-16: after today's check, the same job
+#: backfills decision 27's missing verdicts, oldest session first. **The job
+#: as a whole spends no more ``paper-api.`` requests a run than the refresh's
+#: own per-run bound** (``MAX_TICKERS_PER_RUN``): each backfilled pair costs
+#: at most one standard-root request, and the backfill gets only what today's
+#: ``root_requests`` left of the bound, so a run's worst case on the bucket
+#: the order path will share is what it was before Q25. IPO lookups
+#: (Finnhub) are bounded the same way, by ``MAX_IPO_LOOKUPS_PER_RUN`` less
+#: today's. Bars are on the ``data.`` bucket, one request per session per
+#: 200 tickers.
+TRADEABILITY_BACKFILL_BOUND: Final = MAX_TICKERS_PER_RUN
+#: The backfill stands aside when a scheduled sentiment-audit slot is this
+#: close, before or after (inclusive). It holds the audit's run lock while it
+#: works (audit finding L3), and a scheduled run that finds the lock held
+#: skips -- for the week. One job interval either side means no backfill
+#: starts at the slot itself, or close enough before it to still be holding
+#: the lock when the slot fires.
+TRADEABILITY_BACKFILL_AUDIT_CLEARANCE: Final = TRADEABILITY_EVERY
 #: Retention: nightly at 03:00 ET. 03:00 exists exactly once on both DST
 #: change days -- spring forward skips 02:00-03:00 and lands *on* 03:00 EDT,
 #: fall back repeats 01:00-02:00 -- so the prune neither doubles nor vanishes.
@@ -2146,17 +2238,255 @@ async def _asset_directory_catch_up(services: ContextServices) -> JobSkipped | N
 async def _tradeability(
     services: ContextServices, universe: UniverseSource, clock: UtcClock
 ) -> JobSkipped | None:
-    """Check today's off-watch tickers. Finnhub settles a partial ADV window (Q12)."""
-    return _skipped(
-        await refresh_tradeability_cache(
-            holder=services.assets,
-            provider=services.alpaca,
-            universe=universe,
-            session_factory=services.session_factory,
-            now=clock(),
-            ipo_dates=services.finnhub,
-        )
+    """Check today's off-watch tickers, then backfill missing verdicts (Q25).
+
+    Finnhub settles a partial ADV window (Q12). Today's check runs first and
+    is reported as before: a skip is still a skip unless the backfill then
+    **stored** a verdict (audit finding L1 -- a pair attempted against no
+    asset directory faults ``refresh_skipped`` and checked nothing). The
+    backfill (:func:`_off_watch_verdict_backfill`) never raises an
+    ``Exception`` into the job, so a failure there cannot turn today's
+    completed check into a failure.
+    """
+    today = await refresh_tradeability_cache(
+        holder=services.assets,
+        provider=services.alpaca,
+        universe=universe,
+        session_factory=services.session_factory,
+        now=clock(),
+        ipo_dates=services.finnhub,
     )
+    stored = await _off_watch_verdict_backfill(services, clock, today)
+    outcome = _skipped(today)
+    if outcome is not None and stored:
+        return None
+    return outcome
+
+
+_TRADEABILITY_BACKFILL_RULE: Final = (
+    "owner decision Q25 (d): the daily tradeability job backfills decision 27's "
+    "missing (ticker, session) verdicts, oldest first, within what today's check "
+    "left of MAX_TICKERS_PER_RUN paper-api requests; a context job, never a rule 9 input"
+)
+_TRADEABILITY_BACKFILL_SESSION_RULE: Final = (
+    "ruling P1 (Q25 audit): the daily verdict backfill runs only outside a regular "
+    "NYSE session, per the market calendar, so it never spends the paper-api bucket "
+    "the order path shares while the market is open; asked at the start and again "
+    "before each session's refresh (re-audit finding 4)"
+)
+_TRADEABILITY_BACKFILL_CATCH_UP_RULE: Final = (
+    "Q25 re-audit finding 1: the daily verdict backfill never tries the audit's run "
+    "lock before the sentiment audit's start-up catch-up has settled, so it cannot "
+    "refuse that catch-up's run and leave the missed week unaudited"
+)
+_TRADEABILITY_BACKFILL_DIRECTORY_RULE: Final = (
+    "Q25 re-audit finding 1: with no asset directory held every attempted pair would "
+    "fault refresh_skipped and check nothing, so the backfill stands aside before the "
+    "run lock rather than hold it for nothing"
+)
+#: Who the daily job's backfill is: its job name, in every backfill log line
+#: (``caller``) and on the audit's run lock while it holds it (``holder``).
+_TRADEABILITY_BACKFILL_HOLDER: Final = "tradeability_cache"
+
+
+def _audit_slot_near(at: datetime) -> datetime | None:
+    """The scheduled sentiment-audit slot within the backfill's clearance of ``at``, or ``None``."""
+    latest = latest_sentiment_audit_slot(at)
+    if at - latest <= TRADEABILITY_BACKFILL_AUDIT_CLEARANCE:
+        return latest
+    upcoming = AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS).next_run(at)
+    if upcoming is not None and upcoming - at <= TRADEABILITY_BACKFILL_AUDIT_CLEARANCE:
+        return upcoming
+    return None
+
+
+async def _off_watch_verdict_backfill(
+    services: ContextServices, clock: UtcClock, today: RefreshResult | PollSkipped
+) -> int:
+    """Decision 27's need, filled by the daily job. Returns the verdicts stored.
+
+    The need is the audit's own (:func:`load_verdicts_needed`, over the
+    audit's watch universe and its degraded-universe refusals), and each pair
+    is filled with ``refresh_tradeability(session_date=S)`` through the
+    audit's :class:`VerdictBackfill` (:func:`sentiment_audit_deps`), which
+    reads only the sessions before S. A stale but existing verdict on or
+    before S is no need, so it is never replaced (decision 25). Movers'
+    fail-closed reading of the cache (decision 21) is untouched: this only
+    stores verdicts, through the refresh's own upsert.
+
+    Bounded by :data:`TRADEABILITY_BACKFILL_BOUND` less today's
+    ``root_requests``. It stands aside, logged with the rule, the inputs and
+    the timestamp, in this order, each checked before anything is read:
+
+    1. while a regular session is open, per the market calendar (ruling P1).
+       Asked again **before each session's refresh** (the ``stop`` given to
+       :func:`backfill_verdicts`, re-audit finding 4), so a run that reaches
+       the open keeps what it stored and asks nothing more; the stop is
+       logged as ``tradeability_backfill_stopped``;
+    2. within :data:`TRADEABILITY_BACKFILL_AUDIT_CLEARANCE` of a scheduled
+       sentiment-audit slot, so it never holds the run lock as one fires;
+    3. when today's check used the whole bound;
+    4. until the sentiment audit's start-up catch-up has settled
+       (:attr:`ContextServices.audit_catch_up_settled`, re-audit finding 1):
+       the job has no catch-up of its own and first runs at the next grid
+       slot, which can fall a few seconds after start -- or exactly on a
+       deferred catch-up's close -- while the catch-up still waits;
+    5. when no asset directory is held (re-audit finding 1): every pair would
+       fault ``refresh_skipped`` and check nothing;
+    6. when the audit's run lock is held (audit finding L3). Otherwise it
+       **holds** that lock (:func:`try_run_lock`, never blocking, recorded as
+       ``tradeability_cache`` so a run refused meanwhile names it) for the
+       watch universe, the need read and the backfill, so a run cannot fill
+       the same pairs meanwhile.
+
+    Gates 4-6 are checked just before the lock is tried, so a stand-aside
+    there never holds it.
+
+    The backfill reads the held directory directly: today's check has
+    already logged a stale one this run (ruling P2), and the audit's
+    :func:`sentiment_audit_deps` keeps its own line for its own run.
+    **Rule 9:** it touches no ``engine_state`` and no watchdog, and an
+    ``Exception`` from any step is logged -- the rule, the inputs, the
+    timestamp, the type -- and swallowed. A cancellation propagates, and the
+    lock is released on the way out.
+    """
+    spent_roots = today.root_requests if isinstance(today, RefreshResult) else 0
+    spent_ipo = today.ipo_requests if isinstance(today, RefreshResult) else 0
+    budget = max(0, TRADEABILITY_BACKFILL_BOUND - spent_roots)
+    ipo_budget = max(0, MAX_IPO_LOOKUPS_PER_RUN - spent_ipo)
+    at = _require_utc(clock())
+    correlation_id = uuid.uuid4().hex
+    inputs: dict[str, object] = {
+        "max_pairs": budget,
+        "max_ipo_lookups": ipo_budget,
+        "today_root_requests": spent_roots,
+        "today_ipo_requests": spent_ipo,
+    }
+
+    def stood_aside(
+        reason: str, *, rule: str = _TRADEABILITY_BACKFILL_RULE, session_date: date | None = None
+    ) -> int:
+        logger.info(
+            "tradeability backfill skipped: %s",
+            reason,
+            extra={
+                "event": "tradeability_backfill_skipped",
+                "reason": reason,
+                "budget": budget,
+                "inputs": inputs,
+                "rule": rule,
+                "session_date": None if session_date is None else session_date.isoformat(),
+                "at": at.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+        return 0
+
+    open_session = nyse_session_containing(at)
+    if open_session is not None:
+        return stood_aside(
+            f"the regular session of {open_session.isoformat()} is open",
+            rule=_TRADEABILITY_BACKFILL_SESSION_RULE,
+            session_date=open_session,
+        )
+    slot = _audit_slot_near(at)
+    if slot is not None:
+        return stood_aside(
+            f"the scheduled sentiment audit slot at {slot.isoformat()} is within "
+            f"{TRADEABILITY_BACKFILL_AUDIT_CLEARANCE}; the run lock is left to it"
+        )
+    if budget < 1:
+        return stood_aside("today's check used the whole paper-api bound")
+    opened: list[tuple[date, datetime]] = []
+
+    def session_opened() -> str | None:
+        moment = _require_utc(clock())
+        session = nyse_session_containing(moment)
+        if session is None:
+            return None
+        opened.append((session, moment))
+        return f"the regular session of {session.isoformat()} is open"
+
+    try:
+        deps = sentiment_audit_deps(services, clock)
+        if deps is None or deps.backfill is None:
+            return stood_aside("no Alpaca provider is configured")
+        backfill = VerdictBackfill(
+            inputs=deps.backfill.inputs,
+            assets=services.assets.current,
+            ipo_dates=deps.backfill.ipo_dates,
+        )
+        if not services.audit_catch_up_settled.is_set():
+            return stood_aside(
+                "the sentiment audit's start-up catch-up has not settled; the run lock "
+                "is left to its run",
+                rule=_TRADEABILITY_BACKFILL_CATCH_UP_RULE,
+            )
+        if services.assets.current() is None:
+            return stood_aside(
+                "no asset directory is held, so has_options is unknown and every pair "
+                "would fault refresh_skipped",
+                rule=_TRADEABILITY_BACKFILL_DIRECTORY_RULE,
+            )
+        with try_run_lock(_TRADEABILITY_BACKFILL_HOLDER) as taken:
+            if not taken:
+                return stood_aside(
+                    "a sentiment audit run holds the run lock and backfills its own need"
+                )
+            try:
+                members = await deps.watch_universe()
+            except WatchUniverseUnavailable as exc:
+                return stood_aside(f"the watch universe is degraded: {exc}")
+            needed = await asyncio.to_thread(
+                load_verdicts_needed, services.session_factory, members, at, correlation_id
+            )
+            if not needed:
+                return 0
+            outcome = await backfill_verdicts(
+                backfill,
+                needed,
+                session_factory=services.session_factory,
+                clock=clock,
+                max_pairs=budget,
+                max_ipo_lookups=ipo_budget,
+                caller=_TRADEABILITY_BACKFILL_HOLDER,
+                correlation_id=correlation_id,
+                stop=session_opened,
+            )
+    except Exception as exc:
+        logger.error(
+            "tradeability backfill failed; the missing verdicts are asked again next run",
+            extra={
+                "event": "tradeability_backfill_failed",
+                "rule": _TRADEABILITY_BACKFILL_RULE,
+                "inputs": inputs,
+                "at": at.isoformat(),
+                "error_type": type(exc).__name__,
+                "correlation_id": correlation_id,
+            },
+        )
+        return 0
+    if outcome.stopped is not None and opened:
+        session, moment = opened[-1]
+        logger.info(
+            "tradeability backfill stopped: %s",
+            outcome.stopped,
+            extra={
+                "event": "tradeability_backfill_stopped",
+                "reason": outcome.stopped,
+                "rule": _TRADEABILITY_BACKFILL_SESSION_RULE,
+                "session_date": session.isoformat(),
+                "inputs": {
+                    **inputs,
+                    "attempted": outcome.attempted,
+                    "stored": len(outcome.stored),
+                    "held": len(outcome.held),
+                },
+                "at": moment.isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+    return len(outcome.stored)
 
 
 async def _news_prune(store: NewsStore, clock: UtcClock) -> JobSkipped | None:
@@ -2813,14 +3143,30 @@ async def _sentiment_audit(services: ContextServices, clock: UtcClock) -> JobSki
         return JobSkipped(_SENTIMENT_AUDIT_NO_BARS)
     try:
         await run_sentiment_audit(deps, trigger="scheduled")
-    except AuditAlreadyRunning:
-        return JobSkipped(
-            "another sentiment audit run is in progress (a manual one, or another "
-            "process's); it grades the same labels"
-        )
+    except AuditAlreadyRunning as exc:
+        return JobSkipped(_audit_lock_refusal(exc))
     except WatchUniverseUnavailable as exc:
         return JobSkipped(str(exc))
     return None
+
+
+def _audit_lock_refusal(exc: AuditAlreadyRunning) -> str:
+    """A refused scheduled run's skip reason, naming who holds the lock (re-audit finding 2).
+
+    Only another audit run "grades the same labels". The daily tradeability
+    job's verdict backfill holds the lock to store verdicts and grades
+    nothing, so its refusal says so.
+    """
+    if exc.held_by_audit_run:
+        return (
+            "another sentiment audit run is in progress (a manual one, or another "
+            "process's); it grades the same labels"
+        )
+    return (
+        f"the run lock is held by {exc.holder} -- the daily job's verdict backfill "
+        "(owner decision Q25), which stores tradeability verdicts and grades no label -- "
+        "so this run did not start; the next start's catch-up or the next slot runs it"
+    )
 
 
 #: How long the start-up catch-up waits for the paper positions refresher's
@@ -2979,6 +3325,30 @@ def _audit_not_needed(slot: datetime, runs: _AuditRunsSince) -> JobSkipped:
 async def _sentiment_audit_catch_up(
     services: ContextServices, clock: UtcClock, sleep: Sleeper
 ) -> JobSkipped | None:
+    """The start-up catch-up (:func:`_sentiment_audit_catch_up_body`), then the gate set.
+
+    :attr:`ContextServices.audit_catch_up_settled` is set in a ``finally``:
+    whether the catch-up ran, skipped, deferred to the close, raised or was
+    cancelled, the tradeability job's verdict backfill stops standing aside
+    for it (owner decision Q25, re-audit finding 1). Until then that
+    backfill never tries the run lock, so it cannot refuse this run.
+    """
+    try:
+        return await _sentiment_audit_catch_up_body(services, clock, sleep)
+    finally:
+        services.audit_catch_up_settled.set()
+        logger.info(
+            "the sentiment audit's start-up catch-up has settled; the verdict backfill may run",
+            extra={
+                "event": "sentiment_audit_catch_up_settled",
+                "at": clock().isoformat(),
+            },
+        )
+
+
+async def _sentiment_audit_catch_up_body(
+    services: ContextServices, clock: UtcClock, sleep: Sleeper
+) -> JobSkipped | None:
     """At start: run the missed Saturday's audit once, decided from ``audit_run``.
 
     The FRED/SPDR/calendar pattern -- decide from the rows, never from process
@@ -3078,6 +3448,7 @@ def _sentiment_audit_job(
         schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
         run=functools.partial(_sentiment_audit, services, clock),
         catch_up=functools.partial(_sentiment_audit_catch_up, services, clock, sleep),
+        catch_up_settled=services.audit_catch_up_settled,
         rule=(
             "the sentiment self-audit (decisions 12-13): grades matured labels on "
             "SIP minute bars, stores each source's accuracy and applies the "

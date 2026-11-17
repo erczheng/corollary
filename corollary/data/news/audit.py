@@ -316,6 +316,35 @@ after 23, below, so no earlier number moves):
     **today's** symbol. No point-in-time source exists for any of these,
     and the daily refresh reads them the same way for its own date. Rare,
     accepted, and named here rather than patched.
+    *Amended 2026-11-16 by owner decision Q25:* **the daily refresh now
+    fills the same need too.** Live run 5 needed 2117 pairs and the cap
+    filled 100. So after its own date's check, the ``tradeability_cache``
+    job reads this need (``audit_runner.load_verdicts_needed``, the run's own
+    loaders and :func:`plan_audit`) and fills it oldest first, through the
+    same backfill (``audit_runner.backfill_verdicts``) and the same
+    ``refresh_tradeability(session_date=S)`` call. Its bound is what today's
+    check left of ``tradeability.MAX_TICKERS_PER_RUN`` standard-root
+    requests (``scheduler.TRADEABILITY_BACKFILL_BOUND``), so the job's
+    worst case on the ``paper-api.`` bucket is unchanged. It runs only
+    outside a regular session, per the market calendar -- asked at its start
+    and again before each session's refresh, so a run that reaches the open
+    stops there -- and clear of the weekly audit's slot. It stands aside
+    until the audit's start-up catch-up has settled
+    (``ContextServices.audit_catch_up_settled``), so it can never refuse
+    that catch-up's run, and while no asset directory is held. Otherwise it
+    **holds** the run lock while it reads the need and fills it, recorded as
+    its holder, so a run refused meanwhile names it rather than "another
+    audit run"; it stands aside when a run holds the lock, so a run cannot
+    backfill the same pairs meanwhile. ``scripts/backfill_verdicts.py``
+    drained the backlog once, off-hours and with the app stopped -- checked
+    at launch and again before each session's refresh, against both the
+    calendar and the app -- through the same pieces. Both are
+    verdict-only: neither writes an ``audit_run`` row or a grade, and the
+    next run grades on what they stored. **The runner's**
+    :data:`VERDICT_BACKFILL_CAP` **stays 100.** Within one backfill call a
+    ticker's standard-root answer is asked once for all its sessions. It is
+    the vendor's current answer, per the residual above, so it is the same
+    for each session.
 
 A note for unit 6.4 (the runner)
 --------------------------------
