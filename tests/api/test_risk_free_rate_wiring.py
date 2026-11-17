@@ -9,7 +9,6 @@
   at start. Replayed from the recorded response; no live calls.
 """
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -43,6 +42,7 @@ from corollary.pricing.rates import (
 )
 from corollary.ratelimit import FRED_HOST, HostRateLimiter
 from tests.api.conftest import VendorLookupGuard
+from tests.api.scheduler_drive import drive_until_parked
 from tests.data.providers.test_fred_provider import FAKE_KEY, dgs3mo_body, fixture_body_text
 from tests.engine.test_scheduler import WED_1500_ET, FakeClock
 
@@ -304,12 +304,8 @@ async def _fetch_once_at_start(
     )
     async with app.router.lifespan_context(app):
         assert registry.rates.current() == FALLBACK_RISK_FREE_RATE  # seeded empty
-        await asyncio.wait_for(app.state.scheduler.ready(), timeout=10)
-        driver = asyncio.get_running_loop().create_task(clock.drive())
-        try:
-            await asyncio.wait_for(clock.parked.wait(), timeout=10)
-        finally:
-            driver.cancel()
+        # Per-step guards only, the driver awaited: see tests/api/scheduler_drive.py.
+        await drive_until_parked(app.state.scheduler, clock)
         status = app.state.scheduler.status()["fred_dgs3mo"]
 
     assert status.failures == 0
