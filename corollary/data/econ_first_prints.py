@@ -57,27 +57,22 @@ fetched, never written over -- and reported in
 **Budget.** One FRED request per attempt, through the provider's own
 ``api.stlouisfed.org`` limiter (120/min). No other request is made.
 
-**Known limit: the schedule learns of a new row only when this job runs**
-(U6e audit L2). The release-day wakes come from
-:attr:`FirstPrintsRun.pending`, which the scheduler's ``ReleaseAttemptPlan``
-takes from this job's own runs, and the scheduler sleeps toward the slot it
-was last given without asking again. A row ``calendar_releases`` stores
-*after* this job's last read is therefore not woken for until the job next
-runs for another reason -- in the worst case the next 10:00 catch-up. Two
-ways in: a first boot, where both start-up catch-ups run at once and this one
+**A row stored after this job's last run is woken for on its own release day**
+(handoff item D, closing what was U6e audit L2). The release-day wakes come
+from the scheduler's ``ReleaseAttemptPlan``: this job's own runs replace it
+with :attr:`FirstPrintsRun.pending`, and ``calendar_releases`` adds the
+release instants it stores. An addition sets the plan's ``changed`` event,
+which this job's task races against its sleep (``ScheduledJob.replan``) and
+answers by asking its schedule again, taking the new slot only if it is
+earlier. The two cases that used to wait for the next 10:00 catch-up now do
+not: a first boot, where both start-up catch-ups run at once and this one
 reads the table before the refresh has written it (a boot at 07:00 on a CPI
-day first asks at 10:00, not 08:40); and a reschedule that the 10:00 refresh
-writes just after this job's 10:00 run read the table (the next trading day's
-release is then first asked at that day's 10:00). **Nothing is lost**: the due
-rule is evaluated against the stored attempts at every run, so the catch-up
-asks for the release and its release-day grid resumes from there
-(``test_known_limit_a_row_stored_after_the_jobs_last_run_waits_for_the_next_catch_up``
-pins that bound). What is lost is the early release-day attempts before that
-catch-up. Refreshing the plan from ``calendar_releases`` would not close it on
-its own, because the sleeping job would not re-read the plan; the fix is a
-scheduler loop that re-asks a schedule when it signals a change, raced
-against the sleep the way a cash-session wake is. That change is to the loop
-every job shares, so it is deferred, not made here.
+day now asks at 08:40); and a reschedule that the 10:00 refresh writes just
+after this job's 10:00 run read the table.
+``test_asleep_the_job_replans_when_the_refresh_stores_a_release`` pins it
+through the real loop. Nothing was ever lost -- the due rule is evaluated
+against the stored attempts at every run -- only the early release-day
+attempts before that catch-up, which this restores.
 """
 
 from __future__ import annotations
