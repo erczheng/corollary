@@ -1372,9 +1372,26 @@ class _Guarded:
     returns_row: set[str] = field(default_factory=set)
     #: ``update`` / ``insert`` / ``delete``, and any name imported as one.
     statements: set[str] = field(default_factory=lambda: set(_STATEMENT_CALLS))
+    #: Holds a statement or query over a guarded table -- ``stmt =
+    #: update(AuditRun)...``, ``q = session.query(AuditRun)...`` -- as opposed
+    #: to a row, or a value merely computed from one. Only these take a chain
+    #: write by bare name: a dict that happens to be called ``rows`` does not.
+    queries: set[str] = field(default_factory=set)
+    #: A model imported from the models module that is **not** guarded.
+    other_models: set[str] = field(default_factory=set)
+    #: Seen to hold a row of one of :attr:`other_models` and nothing guarded:
+    #: the target a Settings PATCH loop sets by ``setattr(row, k, v)``.
+    other_rows: set[str] = field(default_factory=set)
 
-    def size(self) -> tuple[int, int, int, int]:
-        return (len(self.models), len(self.handles), len(self.rows), len(self.returns_row))
+    def size(self) -> tuple[int, ...]:
+        return (
+            len(self.models),
+            len(self.handles),
+            len(self.rows),
+            len(self.returns_row),
+            len(self.queries),
+            len(self.other_rows),
+        )
 
 
 def _names_the_void(dotted: str) -> bool:
@@ -1397,15 +1414,33 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
 
 
 def _log_field_ids(tree: ast.AST) -> set[int]:
-    """The keys of every logging call's literal ``extra={...}``. Only a dict
-    written in the call counts: one held in a variable is scanned like any
-    other."""
+    """The keys of every logging call's literal ``extra={...}``, and the keys
+    and literal string values of a refusal's literal ``inputs={...}`` (rule 8:
+    a refusal logs its inputs, which may name ``voided_at`` or ``audit_run``
+    as data). Only a dict written in the call counts: one held in a variable
+    is scanned like any other. ``inputs=`` on a call that writes -- a
+    statement builder, a chain write, a session write -- is never exempt.
+
+    Exempt from the column-name and table-key checks only: SQL, the void's
+    module and the archive are still refused in these strings."""
     found: set[int] = set()
+    writes = _STATEMENT_CALLS | _CHAIN_WRITES | _SESSION_WRITES
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _call_name(node) in _LOG_CALLS:
-            for keyword in node.keywords:
-                if keyword.arg == "extra" and isinstance(keyword.value, ast.Dict):
-                    found.update(id(key) for key in keyword.value.keys if key is not None)
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        for keyword in node.keywords:
+            if not isinstance(keyword.value, ast.Dict):
+                continue
+            if keyword.arg == "extra" and name in _LOG_CALLS:
+                found.update(id(key) for key in keyword.value.keys if key is not None)
+            elif keyword.arg == "inputs" and name not in writes:
+                found.update(id(key) for key in keyword.value.keys if key is not None)
+                found.update(
+                    id(value)
+                    for value in keyword.value.values
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                )
     return found
 
 
@@ -1505,6 +1540,48 @@ def _annotation_refs(node: ast.AST | None, g: _Guarded) -> bool:
     return False
 
 
+#: Calls that build a query rather than a write: ``select(AuditRun)``,
+#: ``session.query(AuditRun)``.
+_QUERY_CALLS = frozenset({"select", "query"})
+
+
+def _is_query(node: ast.AST, g: _Guarded) -> bool:
+    """Whether ``node`` is a statement or query over a guarded table, read
+    down its spine -- each call's receiver, never its arguments:
+    ``update(AuditRun).where(...)``, ``session.query(AuditRun).filter_by(...)``,
+    ``AuditRun.__table__``, or a name already holding one. ``f(run)`` is a
+    value computed from a row, and ``session.scalars(select(AuditRun)).all()``
+    a list of rows: neither is a statement, since the guarded table is only an
+    argument."""
+    while True:
+        if _is_handle(node, g):
+            return True
+        if isinstance(node, ast.Name):
+            return node.id in g.queries
+        if isinstance(node, ast.Call):
+            if _call_name(node) in (_STATEMENT_CALLS | _QUERY_CALLS) and any(
+                _is_handle(arg, g) for arg in node.args
+            ):
+                return True
+            node = node.func
+        elif isinstance(node, (ast.Attribute, ast.Subscript)):
+            node = node.value
+        else:
+            return False
+
+
+def _refs_other(node: ast.AST | None, g: _Guarded) -> bool:
+    """Whether ``node`` names a non-guarded model or one of its rows."""
+    if node is None:
+        return False
+    for part in ast.walk(node):
+        if isinstance(part, ast.Name) and (part.id in g.other_models or part.id in g.other_rows):
+            return True
+        if isinstance(part, ast.Attribute) and part.attr in g.other_models:
+            return True
+    return False
+
+
 def _stored_names(target: ast.AST) -> list[str]:
     return [
         part.id
@@ -1515,6 +1592,8 @@ def _stored_names(target: ast.AST) -> list[str]:
 
 def _bind_value(targets: Sequence[ast.AST], value: ast.AST, g: _Guarded) -> None:
     names = [name for target in targets for name in _stored_names(target)]
+    if _is_query(value, g):
+        g.queries.update(names)
     if _is_model(value, g):
         g.models.update(names)
         g.handles.update(names)
@@ -1522,6 +1601,8 @@ def _bind_value(targets: Sequence[ast.AST], value: ast.AST, g: _Guarded) -> None
         g.handles.update(names)
     elif _refs(value, g, row_attributes=False):
         g.rows.update(names)
+    elif _refs_other(value, g):
+        g.other_rows.update(names)
 
 
 def _bind(node: ast.AST, g: _Guarded) -> None:
@@ -1534,11 +1615,15 @@ def _bind(node: ast.AST, g: _Guarded) -> None:
         for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]:
             if arg is not None and _annotation_refs(arg.annotation, g):
                 g.rows.add(arg.arg)
+            elif arg is not None and _refs_other(arg.annotation, g):
+                g.other_rows.add(arg.arg)
     elif isinstance(node, ast.Assign):
         _bind_value(node.targets, node.value, g)
     elif isinstance(node, ast.AnnAssign):
         if _annotation_refs(node.annotation, g):
             g.rows.update(_stored_names(node.target))
+        elif _refs_other(node.annotation, g):
+            g.other_rows.update(_stored_names(node.target))
         if node.value is not None:
             _bind_value([node.target], node.value, g)
     elif isinstance(node, ast.NamedExpr):
@@ -1546,6 +1631,8 @@ def _bind(node: ast.AST, g: _Guarded) -> None:
     elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
         if _refs(node.iter, g, row_attributes=False):
             g.rows.update(_stored_names(node.target))
+        elif _refs_other(node.iter, g):
+            g.other_rows.update(_stored_names(node.target))
 
 
 def _guarded_names(tree: ast.AST) -> _Guarded:
@@ -1559,6 +1646,8 @@ def _guarded_names(tree: ast.AST) -> _Guarded:
                 if alias.name in _GUARDED_MODELS:
                     g.models.add(bound)
                     g.handles.add(bound)
+                elif (node.module or "").split(".")[-1] == "models":
+                    g.other_models.add(bound)
                 if alias.name in _STATEMENT_CALLS:
                     g.statements.add(bound)
     while True:
@@ -1608,6 +1697,18 @@ def _setattr_parts(node: ast.Call) -> tuple[ast.AST | None, ast.AST | None]:
     return receiver, (args[0] if args else None)
 
 
+def _other_row_only(target: ast.AST | None, g: _Guarded) -> bool:
+    """``target`` is a bare name seen holding a non-guarded model's row, and
+    never a guarded row, table or query anywhere in the module."""
+    return (
+        isinstance(target, ast.Name)
+        and target.id in g.other_rows
+        and target.id not in g.rows
+        and target.id not in g.handles
+        and target.id not in g.queries
+    )
+
+
 def _call_violations(node: ast.Call, g: _Guarded) -> list[str]:
     """The writes a call makes to a guarded table, in any column."""
     name = _call_name(node)
@@ -1618,11 +1719,21 @@ def _call_violations(node: ast.Call, g: _Guarded) -> list[str]:
         found.append(f"constructs {ast.unparse(node.func)}")
     if isinstance(node.func, ast.Attribute):
         receiver = node.func.value
+        # A bare name takes a chain write only if it holds a statement, query
+        # or table over a guarded model. ``rows.insert(0, x)`` on a list, or
+        # ``by_source.update(extra)`` on a dict computed from a row, is a
+        # container's method -- an ORM row has no ``.update()`` to call, and
+        # ``run.__dict__.update`` is an attribute receiver, still caught below.
+        over_guarded = (
+            _is_query(receiver, g)
+            if isinstance(receiver, ast.Name)
+            else _refs(receiver, g, row_attributes=True)
+        )
         # ``.values()`` with nothing to set is a dict's, never a write.
         if (
             name in _CHAIN_WRITES
             and (name != "values" or node.args or node.keywords)
-            and _refs(receiver, g, row_attributes=True)
+            and over_guarded
         ):
             found.append(f"calls .{name}() on a chain over a guarded table")
         if name in _SESSION_WRITES and any(
@@ -1632,8 +1743,12 @@ def _call_violations(node: ast.Call, g: _Guarded) -> list[str]:
     if name in {"setattr", "__setattr__"}:
         target, attribute = _setattr_parts(node)
         if not (isinstance(attribute, ast.Constant) and isinstance(attribute.value, str)):
-            # The FastAPI patch loop, ``setattr(run, k, v)``: any column at all.
-            found.append(f"calls {name}() with a name the scan cannot read")
+            # The FastAPI patch loop, ``setattr(run, k, v)``: any column at all
+            # -- unless the scan can see the target is a row of a model that is
+            # not guarded, and nothing binds it to a guarded one. A target it
+            # cannot place is still refused.
+            if not _other_row_only(target, g):
+                found.append(f"calls {name}() with a name the scan cannot read")
         elif target is not None and _refs(target, g, row_attributes=False):
             found.append(f"sets {attribute.value} on a guarded row by {name}()")
     return found
@@ -1713,14 +1828,24 @@ def _void_violations(source: str) -> list[str]:
     annotations, ``for`` targets and functions annotated to return a row.
 
     Also refused, because nothing in ``corollary/api`` needs them: a
-    ``setattr`` whose name is not a literal, raw SQL writing a table the scan
-    cannot read, and any non-docstring string naming the void's module or
-    script. Kept as a second net where the table is out of sight: a void
-    column set by attribute, used as a dict key, or named in a string.
+    ``setattr`` whose name is not a literal -- unless its target is a name
+    seen holding a row of a model that is *not* guarded, and never a guarded
+    one (the FastAPI partial-update idiom on, say, ``RiskLimit``) -- raw SQL
+    writing a table the scan cannot read, and any non-docstring string naming
+    the void's module or script. Kept as a second net where the table is out
+    of sight: a void column set by attribute, used as a dict key, or named in
+    a string.
+
+    A chain write called on a **bare name** counts only when that name holds
+    a statement, query or table over a guarded model (``q =
+    session.query(AuditRun)``); a list or dict merely computed from guarded
+    rows (``rows.insert``, ``by_source.update``) is a container.
 
     Reads pass: ``select(...)``, ``session.get``, the ``voided_at IS NULL``
     filter, building ``VoidedAuditRun(voided_at=...)``. Docstrings may name
-    anything, and a logging call's literal ``extra`` keys name log fields."""
+    anything; a logging call's literal ``extra`` keys name log fields, and a
+    refusal's literal ``inputs={...}`` keys and string values name its
+    inputs (rule 8) -- for the column-name check only, never SQL or the void."""
     tree = ast.parse(source)
     g = _guarded_names(tree)
     docstrings = _docstring_ids(tree)
@@ -1877,6 +2002,25 @@ _MUST_CATCH = [
     "conn.exec_driver_sql('INSERT OR REPLACE INTO \"main\".\"label_outcome\" VALUES (?)')",
     "conn.execute(text(f'UPDATE {table} SET status = :s'))",
     "conn.execute(text('DELETE FROM %s' % table))",
+    # Handoff item C: the edges of the narrowing, which must still fail.
+    # A patch loop on a guarded row, with another model in sight.
+    "from corollary.db.models import RiskLimit\n"
+    "run = session.get(AuditRun, n)\n"
+    "for k, v in body.model_dump().items():\n    setattr(run, k, v)",
+    # A name that held another model's row and is also bound to a guarded one.
+    "from corollary.db.models import RiskLimit\n"
+    "row = session.get(RiskLimit, n)\nrow = session.get(AuditRun, n)\nsetattr(row, k, v)",
+    # Another model's row, but the name is never seen holding it.
+    "from corollary.db.models import RiskLimit\nsetattr(setting, k, v)",
+    # A statement, query or table held in a name still takes no chain write.
+    "q = session.query(AuditRun).filter_by(id=n)\nq.update({'status': 'failed'})",
+    "q = session.query(LabelOutcome)\nq.delete()",
+    "t = AuditRun.__table__\nt.delete()",
+    # A refusal's inputs exempt column and table names, never SQL or the void.
+    "_refuse(rule=R, inputs={'sql': 'DELETE FROM audit_run'})",
+    "_refuse(rule=R, inputs={'how': 'scripts/void_audit_run.py'})",
+    # ``inputs=`` on a write is no refusal.
+    "session.execute(update(t).values(inputs={'voided_at': now}))",
 ]
 
 
@@ -1907,6 +2051,21 @@ _MUST_PASS = [
     "by_id = {run.id: run for run in rows}\nfor run in by_id.values():\n    pass",
     "setattr(request.app.state, 'sentiment_audit_task', task)",
     "message = f'cannot update {name} now'",
+    # Handoff item C: legitimate forms the scan used to refuse.
+    # The FastAPI partial-update idiom, on a model that is not guarded.
+    "from corollary.db.models import RiskLimit\n"
+    "setting = session.get(RiskLimit, name)\n"
+    "for k, v in body.model_dump().items():\n    setattr(setting, k, v)",
+    "from corollary.db.models import RiskLimit\n"
+    "def patch(setting: RiskLimit, body) -> None:\n"
+    "    for k, v in body.model_dump().items():\n        setattr(setting, k, v)",
+    # A container's own methods, on names computed from guarded rows.
+    "run = session.get(AuditRun, n)\n"
+    "by_source = _accuracy_by_source(session, run)\nby_source.update(extra)",
+    "rows = session.scalars(select(AuditRun)).all()\nrows.insert(0, header)",
+    # Rule 8: a refusal's inputs may name the column or the table as data.
+    "raise _refuse(rule=R, inputs={'voided_at': stamp, 'table': 'audit_run'}, at=now)",
+    "_refuse(rule=R, inputs={'column': 'voided_at', 'audit_run': n}, at=now)",
 ]
 
 
@@ -1935,6 +2094,41 @@ def test_the_void_scan_fails_a_planted_violation_in_the_real_route_module() -> N
         "imports corollary.data.news.audit_void.void_audit_run",
         "assigns run.voided_at",
     ]
+
+
+#: Handoff item C's false positives, planted in the real route module as a
+#: future change would write them.
+_LEGITIMATE_PLANTS = (
+    "\n\nfrom corollary.db.models import RiskLimit\n"
+    "def _patch(session: Session, name: str, body: object) -> None:\n"
+    "    setting = session.get(RiskLimit, name)\n"
+    "    for k, v in body.model_dump().items():\n"
+    "        setattr(setting, k, v)\n"
+    "\n\ndef _merge(session: Session, extra: dict, cid: str) -> None:\n"
+    "    accuracy_run = _latest_run(session, succeeded_only=True)\n"
+    "    by_source = _accuracy_by_source(session, accuracy_run, cid)\n"
+    "    by_source.update(extra)\n"
+    "\n\ndef _listing(session: Session, header: object) -> None:\n"
+    "    rows = session.scalars(select(AuditRun)).all()\n"
+    "    rows.insert(0, header)\n"
+    "\n\ndef _refused(run: AuditRun, now: datetime) -> None:\n"
+    "    raise _refuse(rule='R4', inputs={'voided_at': str(run.voided_at), "
+    "'table': 'audit_run', 'audit_run': run.id, 'column': 'voided_at'}, at=now)\n"
+)
+
+
+def test_the_void_scan_passes_the_legitimate_forms_in_the_real_route_module() -> None:
+    """Each of handoff item C's false positives, in the real module, passes;
+    and with a real void planted beside them, that void is still found."""
+    source = Path(sentiment_routes.__file__).read_text(encoding="utf-8")
+    assert _void_violations(source + _LEGITIMATE_PLANTS) == []
+    planted = source + _LEGITIMATE_PLANTS + (
+        "\n\ndef _planted(session: Session, n: int, body: object) -> None:\n"
+        "    run = session.get(AuditRun, n)\n"
+        "    for k, v in body.model_dump().items():\n"
+        "        setattr(run, k, v)\n"
+    )
+    assert _void_violations(planted) == ["calls setattr() with a name the scan cannot read"]
 
 
 def test_the_void_scan_fails_a_write_in_any_column_through_the_modules_own_reads() -> None:
