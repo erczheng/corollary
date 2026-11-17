@@ -6,6 +6,10 @@ directly below. Planning was authorised by the owner's request for this scope.
 Implementation was not: Q20 still pauses step 8, and only the owner can lift
 it (Q27). No unit below starts until Q27 is answered. The units that Q28
 reaches are marked.
+*Amended 2026-11-17:* **both questions are answered** (see *Owner decisions —
+2026-11-17 (Q27, Q28)* below). Q27 releases U10 now, ahead of the rest, and
+the rest of step 8 after it. Q28 takes option (b), with a *provisional*
+marker added. Nothing is blocked on a question.
 **Parent spec:** `2026-09-23-phase-3-context-design.md`. This spec carries its
 step 8: decision 5 (the composite), decision 16 (the real halt), decision 19's
 FRED client, owner decision Q2 (the seven proxies), and the PRD §8.3 and §8.5
@@ -21,14 +25,29 @@ job.
 
 ---
 
-## Open questions: blocking
+## Owner decisions — 2026-11-17 (Q27, Q28)
 
-These were not put to the owner during planning, because no question tool was
-available to the planning session. Each one is written for the owner to
-answer. No answer has been assumed. Until one is given, the units named are
-blocked.
+*Heading amended 2026-11-17; it read "Open questions: blocking".* These were
+not put to the owner during planning, because no question tool was available
+to the planning session. Each one was written for the owner to answer. No
+answer was assumed. Both were answered on 2026-11-17, and each answer is
+recorded at the top of its question, with the owner's words quoted. The
+question text below each answer is kept as it was asked.
 
-**Q27: Does this spec release step 8 for implementation?** Q20 (2026-09-30)
+**Q27: Does this spec release step 8 for implementation?**
+- **Answer:** *"for the code issues we can fix those right now before
+  starting on step 8"*. The "code issues" are this spec's *Problem* item 3,
+  the three surfaces that read the fixture halt, which is unit U10.
+  - **U10 is released now** and is built first, on its own branch, ahead of
+    the rest. That is option (b)'s scope, taken first.
+  - **The rest of step 8 follows U10.** This is a parent-session reading of
+    *"before starting on step 8"*: the owner expects step 8 to start once
+    the halt fix is in. U0–U9 and U11 are therefore released to begin after
+    U10. *The owner should confirm this reading before U0's probes run*,
+    since U0 is the first unit that needs the owner at the keyboard.
+  - **Step 9 stays paused under Q20.** Nothing here touches it.
+
+*As asked:* Q20 (2026-09-30)
 paused step 5 and everything after it. Q22 (2026-10-10) released steps 5, 6
 and 7 only. Asking for this scope authorised the planning, not the build.
 
@@ -48,7 +67,31 @@ paused under Q20 whatever the answer.
 *Blocks:* every unit.
 
 **Q28: On a morning before FRED has posted, which close does the composite
-describe?** FRED posts each close the next morning. On 2026-11-17 (*Constraints*),
+describe?**
+- **Answer:** *"whatever makes the most sense and will cause the least
+  amount of confusion"*. The owner delegated the choice. It was made in the
+  parent session as **option (b), with a *provisional* marker added**, and C8
+  carries it.
+  - **Why (b).** Under (a), at 08:00 the gauge is two closes old while every
+    other surface in the terminal (positions, Markets, the calendar) is on
+    yesterday's close. Then at about 11:15 ET it jumps forward a session.
+    Under (b) the gauge is on the same close as everything else, and only
+    the two FRED rows carry an older date. (b) also meets the parent's *Done
+    when* item 3 as written.
+  - **Why the marker.** (b) has one surprise of its own. When FRED posts
+    mid-morning, the composite for the same close *D* is recomputed with the
+    newer VIX and junk values, so a figure labelled "as of Nov 16" can move a
+    point with no market event to explain it. So **while any component lags
+    *D*, the composite says it is provisional and names what it is waiting
+    for** (for example, *"Provisional: VIX and junk from Nov 13; FRED posts
+    mid-morning"*). The marker clears by itself once all included components
+    are dated *D*. A move while the marker is showing is then expected, not
+    unexplained.
+  - **Rejected:** (a), for the reasons above. Also rejected is (b) without
+    the marker, because a same-dated number that changes mid-morning is the
+    exact confusion the owner asked to avoid.
+
+*As asked:* FRED posts each close the next morning. On 2026-11-17 (*Constraints*),
 `VIXCLS` for Nov 16 was posted at **09:37 ET** and `BAMLH0A0HYM2` for Nov 16
 at **10:44 ET**. The five Alpaca components for a session are in hand by
 17:00 ET that day. So from 17:00 ET on day D until about 11:00 ET on D+1, the
@@ -556,7 +599,7 @@ recomputes `volatility` and `junk_bond` over the recheck window.
   off the mean of the rows beneath it. That is the disagreement §8.5 forbids.
 - **Silent renormalisation** (parent decision 5).
 
-### C8. The as-of rule. **Blocked on Q28.**
+### C8. The as-of rule. ~~**Blocked on Q28.**~~ **Q28: option (b), with a provisional marker (2026-11-17).**
 
 Two rules are fixed whichever answer Q28 gets:
 
@@ -567,6 +610,25 @@ Two rules are fixed whichever answer Q28 gets:
 Q28 decides only whether a component may lag *D* by one session, under
 option (b), or must match *D*, under option (a). U2 builds the chosen rule as
 one pure function with a test per boundary.
+
+*Amended 2026-11-17, Q28 answered:* **the rule is (b).**
+
+- ***D* is the latest session for which the five Alpaca components have
+  values**, subject to the close + 60 minutes rule above.
+- **A component may lag *D* by at most one session.** It then uses its newest
+  value dated on or before *D*, and its `lagSessions` is 1. A value more than
+  one session older than *D* is excluded with reason `stale`, and the count
+  ("N of 7") drops.
+- **`provisional` is true whenever any included component has `lagSessions`
+  > 0.** The read result carries it, U7 serves it, and U8 and U9 render it in
+  words, naming each lagged component and its date. It is derived on read
+  like everything else, never stored, so it clears by itself once FRED's
+  values for *D* land.
+- **Yesterday's change (C9) is unaffected.** A lagged component is still
+  in the set, so lagging alone never trips *"component set changed"*.
+
+*Rejected:* (a), and (b) without the marker. Both are under Q27 and Q28
+above.
 
 ### C9. Yesterday's change is derived, and printed only when like is compared with like
 
@@ -806,6 +868,7 @@ number. Scores and counts are `int`, and dates are `CalendarDate`.
 
 ```
 asOf: date | null              expectedAsOf: date      stale: bool
+provisional: bool              provisionalNote: str | null  # C8 (Q28 b): names each lagged component and its date
 composite: int | null          componentsAveraged: int componentsTotal: 7
 unavailableReason: str | null  # e.g. "no component has 60 sessions yet"
 previous: {asOf, composite, componentsAveraged} | null
@@ -815,7 +878,7 @@ components: [{
   key, name, description,      # description says what it is a proxy of (C2)
   proxyOf, proxy, source,      # e.g. "S&P 500 vs its 125-day MA" / "SPY vs its 125-session MA" / "alpaca_daily:sip"
   rawValue, rawLabel,          # display only (C15); rawLabel e.g. "SPY 2.1% above its 125-session MA"
-  valueDate, lagSessions,      # lagSessions per C8 (always 0 under Q28 option a)
+  valueDate, lagSessions,      # lagSessions per C8: 0 or 1 (Q28 option b)
   observations, formingNeeds: 60, forming: bool,
   z, score: int | null,
   orientation: "greed_up" | "fear_up",
@@ -925,9 +988,11 @@ wrong number originates. Everything else gets the standard coverage.
     asserted over random fixtures, not one.
   - forming and excluded components are not averaged and are counted.
   - zero usable components gives no composite and a reason.
-- **The as-of rule (C8, once Q28 is answered):** one test per boundary. A
+- **The as-of rule (C8, Q28 option b):** one test per boundary. A
   lag of 0 and of 1 session, and a lag of 2, which is stale. A bond-holiday
-  junk gap. The close + 60 minute boundary for *D*.
+  junk gap. The close + 60 minute boundary for *D*. `provisional` is true
+  exactly when an included component lags *D*, false once every included
+  component is dated *D*, and its note names each lagged component and date.
 - **The previous composite** is derived over windows ending the session
   before. A different component set gives `change: null` and the note.
 
@@ -1006,7 +1071,8 @@ Each lands with the unit that makes it true, or in U11.
 - **Parent spec, step 8's entry.** *Depends on* loses the stale Q17 text
   (accepted 2026-10-01). Its status points here, made in this spec's own
   commit. Its status becomes "done" in U11. When answered, a Q27 and Q28
-  entry points here, like Q23 and Q24.
+  entry points here, like Q23 and Q24. *(Applied 2026-11-17, with the
+  answers.)*
 - **Parent spec, *Feeds and budgets*:**
   - the composite-prices row: ~15 a day, ~27 once.
   - the top-sector row: one request for eleven funds, not shared.
@@ -1020,7 +1086,9 @@ Each lands with the unit that makes it true, or in U11.
   - Put/call is SPY's chain, accumulated forward and forming for 60
     sessions.
   - The breakdown is visible, not hover-only.
-  - The as-of rule, as Q28 settles it.
+  - The as-of rule as Q28 settled it (option b). The composite is as of the
+    latest close, a lagged component prints its own date, and the composite
+    says it is provisional while any component lags.
 - **PRD §8.5, Market Pulse.**
   - VIX is FRED's last close, with its date. Step 0 found no intraday
     source on this plan.
@@ -1048,11 +1116,14 @@ parent and the remainder do, plus its rule 9 position, its rule 8 logging and
 its `Decimal` handling. **A unit's status changes in the same commit as the
 thing it describes.** Every unit is one pull request into `master`.
 
-**Every unit is blocked on Q27.** U2 and everything that serves or renders the
-composite (U7, U8, U9) is also blocked on Q28.
+~~**Every unit is blocked on Q27.** U2 and everything that serves or renders the
+composite (U7, U8, U9) is also blocked on Q28.~~ *Amended 2026-11-17:* both
+are answered. U10 goes first, and the rest follow it (Q27). U2's as-of rule
+is option (b), with the provisional marker (Q28, C8).
 
 **U0. Pre-flight: keyed probes. Operational, launched by the owner.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* nothing.
 - *What it does:* `scripts/probe_phase3_step8.py`, run with `uv run --env-file
   .env python scripts/probe_phase3_step8.py <check>`, so no agent reads
@@ -1093,7 +1164,8 @@ composite (U7, U8, U9) is also blocked on Q28.
   - item 4 has a dated re-probe owner.
 
 **U1. Session ranges and the seven raw computations, pure.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* nothing. Runs in parallel with U0, U3 and U10.
 - *What it does:*
   - `calendars.nyse_sessions_between(start, end)`.
@@ -1118,7 +1190,8 @@ composite (U7, U8, U9) is also blocked on Q28.
   are clean.
 
 **U2. Scoring and the composite, pure.**
-- *Status:* not started; blocked on Q27 and **Q28** (the as-of rule).
+- *Status:* not started. ~~Blocked on Q27 and **Q28**.~~ Released
+  2026-11-17, to follow U10 (Q27). The as-of rule is option (b) (Q28).
 - *Depends on:* U1 (the enum and the orientation table).
 - *What it does:* C6–C10.
   - The window over rows.
@@ -1138,10 +1211,11 @@ composite (U7, U8, U9) is also blocked on Q28.
   - `corollary/data/macro/composite.py`.
   - `tests/data/macro/test_composite.py`.
 - *Done when:* U2's tests in *Testing* pass, including the as-of boundaries
-  for the rule Q28 chose.
+  for the rule Q28 chose (option b, C8) and the `provisional` flag.
 
 **U3. Schema and store.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* nothing (the CHECK list is literal, and a test ties it to
   U1's enum once both exist). Runs in parallel with U1.
 - *What it does:*
@@ -1166,7 +1240,8 @@ composite (U7, U8, U9) is also blocked on Q28.
 - *Done when:* U3's tests pass, and `uv run alembic heads` shows one head.
 
 **U4. The FRED macro job.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* U0 (the `fred` check), U1, U3.
 - *What it does:* C5. `fred_macro.py` fetches through `ObservationSource`,
   stores through `risk_free.store_observations`, and recomputes `volatility`
@@ -1193,7 +1268,8 @@ composite (U7, U8, U9) is also blocked on Q28.
     previous session's VIX and junk.
 
 **U5. The composite prices job and the history load.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* U0 (`bars-*`), U1, U3. Runs in parallel with U4 and U6.
 - *What it does:* C3, C13.
   - `prices.py`: fetches SPY `split`, SPY and TLT `all`, and the seed
@@ -1226,7 +1302,8 @@ composite (U7, U8, U9) is also blocked on Q28.
     four before it.
 
 **U6. The put/call job.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* U0 (`chain-*`), U1, U3, and U5's `AfterClose` and
   `macro_prices`. If U5 has not merged, U6 adds those two itself and U5
   rebases.
@@ -1250,7 +1327,8 @@ composite (U7, U8, U9) is also blocked on Q28.
   - live, three consecutive trading days write three rows.
 
 **U7. The two routes.**
-- *Status:* not started; blocked on Q27 and Q28 (through U2).
+- *Status:* not started. ~~Blocked on Q27 and Q28 (through U2).~~ Released
+  2026-11-17, to follow U10 (Q27). Q28 is answered.
 - *Depends on:* U2, U3. U4–U6 are needed for the live check, not for the
   code.
 - *What it does:*
@@ -1276,7 +1354,8 @@ composite (U7, U8, U9) is also blocked on Q28.
   both routes serve the stored composite.
 
 **U8. News: the real gauge.**
-- *Status:* not started; blocked on Q27 and Q28 (through U7).
+- *Status:* not started. ~~Blocked on Q27 and Q28 (through U7).~~ Released
+  2026-11-17, to follow U10 (Q27). Q28 is answered.
 - *Depends on:* U7. Runs in parallel with U9.
 - *What it does:*
   - `useComposite()`.
@@ -1299,11 +1378,14 @@ composite (U7, U8, U9) is also blocked on Q28.
   - News shows the composite with all seven components.
   - Every proxy is stated visibly.
   - Put/call is shown forming with its count.
+  - While any component lags, the gauge says it is provisional and names
+    each lagged component and its date (C8, Q28).
   - The panel's marker is off.
   - `typecheck` and `test` pass.
 
 **U9. Research: the real Market Pulse.**
-- *Status:* not started; blocked on Q27 and Q28 (through U7).
+- *Status:* not started. ~~Blocked on Q27 and Q28 (through U7).~~ Released
+  2026-11-17, to follow U10 (Q27). Q28 is answered.
 - *Depends on:* U7. Runs in parallel with U8.
 - *What it does:*
   - `useMarketPulse()`, polled at 60 s while visible.
@@ -1322,11 +1404,13 @@ composite (U7, U8, U9) is also blocked on Q28.
   - Pulse's composite agrees with News to the digit on the same load (a
     test, and a side-by-side check on the live app).
   - VIX shows its close date.
+  - The composite carries the same provisional note as News (C8, Q28).
   - The top sector shows its session and answered count.
 
 **U10. The real halt on Research, the chain ticket and the palette.**
-- *Status:* not started; blocked on Q27 only. It is the one unit Q27 option
-  (b) releases on its own.
+- *Status:* not started. ~~Blocked on Q27 only. It is the one unit Q27
+  option (b) releases on its own.~~ **Released 2026-11-17 (Q27), first,**
+  ahead of every other unit.
 - *Depends on:* nothing. It runs in parallel with everything.
 - *What it does:* C12 and decision 16.
 - *Rule 9:* reads the halt, writes nothing, resumes nothing. Fail-closed
@@ -1348,7 +1432,8 @@ composite (U7, U8, U9) is also blocked on Q28.
   - `typecheck` and `test` pass.
 
 **U11. Doc amendments and statuses.**
-- *Status:* not started; blocked on Q27.
+- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27).
 - *Depends on:* U0–U10.
 - *Files:*
   - `PRD.md`.
@@ -1362,8 +1447,9 @@ composite (U7, U8, U9) is also blocked on Q28.
   - the parent's step 8 reads done, with this spec as its record.
   - the parent's step 10 carries step 8's items as already applied.
 
-**Parallelism.** Once Q27 is answered, U0, U1, U3 and U10 can start at once.
-U2 follows U1 once Q28 is answered. U4, U5 and U6 follow U0, U1 and U3, in
+**Parallelism.** ~~Once Q27 is answered, U0, U1, U3 and U10 can start at once.
+U2 follows U1 once Q28 is answered.~~ *Amended 2026-11-17:* U10 goes first
+(Q27). After it, U0, U1 and U3 can start at once. U2 follows U1. U4, U5 and U6 follow U0, U1 and U3, in
 parallel with each other. U7 follows U2 and U3. U8 and U9 follow U7, in
 parallel. U11 is last. **The longest path is U0's two sittings** (a close
 and the next pre-open), then U5, U7, U8 and U11. Put/call then forms for 60
