@@ -3056,6 +3056,12 @@ geopolitical.**
 - *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4 —
   which has no accepted snapshot until Q17's guard decision lands. Paused by
   Q20.
+  *Amended 2026-11-17:* **scoped, not started.** The work is broken into
+  units U0–U11 by `2026-11-17-phase-3-step-8-composite.md`, which is blocked
+  on two owner questions: Q27 (does it release step 8 from Q20?) and Q28
+  (which close the composite describes before FRED posts). The seed
+  dependency above is stale: the 2026-06-30 N-PORT snapshot was accepted on
+  2026-10-01 (Q17), so the only block is Q20.
 - *Files:* `corollary/data/macro/{components,composite}.py`, migration for
   `composite_component_value`, `/api/news/composite`, `/api/markets/pulse`,
   `SentimentGauge`, `web/src/pages/Research.tsx`,
