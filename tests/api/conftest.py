@@ -18,9 +18,20 @@ engine sets it on every connect.
 **The environment** is a plain mapping passed into the registry, so a test
 decides whether the live keys are present without touching ``os.environ`` --
 and no test needs a real key for either account.
+
+**The network** is refused, for every test here, by :func:`no_vendor_network`:
+a lookup of any host but loopback raises at once, and a test that made one
+fails at teardown naming the host. Both halves matter. The refusal makes a
+boot deterministic -- a vendor call fails in microseconds instead of racing
+shutdown over a real TLS handshake. The failure is what stops the refusal
+hiding anything, because the app *catches* a vendor's connection error and
+keeps serving: refused and silent, a test that reached for Alpaca would pass.
 """
 
+import ipaddress
 import json
+import socket
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -230,6 +241,113 @@ class FakeProvider:
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+def _names_no_remote_host(host: str | bytes | None) -> bool:
+    """``True`` for a lookup that cannot leave the machine: loopback, or no host.
+
+    ``None`` and ``""`` are what a server binding a port asks for. Bytes are
+    what anyio passes (it IDNA-encodes the name before the loop resolves it).
+    """
+    if host is None:
+        return True
+    name = host.decode("ascii", "replace") if isinstance(host, bytes) else host
+    if name in ("", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+class VendorLookupGuard:
+    """Stands in for ``socket.getaddrinfo``: refuses and records non-loopback hosts.
+
+    Name resolution is the layer every vendor connection passes through: the
+    providers' ``httpx.AsyncClient`` resolves via httpcore, anyio and the
+    event loop's ``getaddrinfo``, which reads ``socket.getaddrinfo`` at call
+    time; the websocket clients go through the same loop call. The vendor
+    hosts are names, never IP literals, so a guard here sees all of them. (A
+    connect to an IP *literal* skips resolution and is not covered -- nothing
+    in ``corollary/`` dials one.)
+
+    Called from worker threads -- the loop resolves on its executor -- so the
+    record is locked.
+    """
+
+    def __init__(self, *, real: Callable[..., Any]) -> None:
+        self._real = real
+        self._lock = threading.Lock()
+        self._refused: list[str] = []
+        self._expected = False
+
+    def __call__(self, host: str | bytes | None, *args: Any, **kwargs: Any) -> Any:
+        if _names_no_remote_host(host):
+            return self._real(host, *args, **kwargs)
+        name = host.decode("ascii", "replace") if isinstance(host, bytes) else str(host)
+        with self._lock:
+            self._refused.append(name)
+        raise socket.gaierror(
+            socket.EAI_NONAME,
+            f"tests/api resolves no host but loopback; refused {name!r}",
+        )
+
+    @property
+    def refused(self) -> list[str]:
+        """Every refused host, in order, repeats included."""
+        with self._lock:
+            return list(self._refused)
+
+    def expect_refused(self) -> None:
+        """Declare the refusals this test's point, so its teardown does not fail.
+
+        For a test that boots real vendor clients on purpose and needs only
+        that they cannot connect. Call it in the test, beside the reason.
+        """
+        self._expected = True
+
+    def failure(self) -> str | None:
+        """Why the test must fail at teardown, or ``None`` when it need not."""
+        refused = self.refused
+        if not refused or self._expected:
+            return None
+        return (
+            f"this test tried to resolve {sorted(set(refused))}: a tests/api test "
+            "must not reach a vendor host. The lookup was refused, and the app "
+            "will have caught the connection error and kept serving -- which "
+            "is why this fails here rather than passing. Give the app a "
+            "registry with fakes (the `make_registry` fixture, MockTransport "
+            "brokers and providers); or, if booting real clients that cannot "
+            "connect is the test's point, call "
+            "`no_vendor_network.expect_refused()` in it."
+        )
+
+
+@pytest.fixture(autouse=True)
+def no_vendor_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[VendorLookupGuard]:
+    """Every API test: non-loopback lookups refused, and a test that made one fails.
+
+    Autouse, so it is set up before -- and torn down after -- every fixture
+    the test uses, a ``TestClient`` lifespan included: a job still running
+    when the app shuts down resolves under the guard too.
+
+    **No proxy, either.** httpx (``trust_env``) and websockets
+    (``proxy=True``) both take a proxy from the environment, and on Windows
+    from the registry through :func:`urllib.request.getproxies`. A proxy on
+    loopback would be the only lookup, allowed, while the vendor's name rode
+    inside its CONNECT. That would reach the vendor and record nothing.
+    ``NO_PROXY=*`` turns proxying off for every host in both libraries. It
+    also makes the environment non-empty for ``getproxies``, so the registry
+    is never consulted.
+    """
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "*")
+    guard = VendorLookupGuard(real=socket.getaddrinfo)
+    monkeypatch.setattr(socket, "getaddrinfo", guard)
+    yield guard
+    failure = guard.failure()
+    if failure is not None:
+        pytest.fail(failure, pytrace=False)
 
 
 @pytest.fixture
