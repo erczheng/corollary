@@ -60,9 +60,15 @@ For each step in the approved spec's order of work:
    to files already in that list. This runs **before** the gates and
    **sequentially**, because the gates must review the code that will be
    committed, not a version a cleanup then rewrites. Steps on disjoint
-   files can each be simplified in parallel. Leave the simplifier at its
-   frontmatter effort and do not escalate it. Escalation is for the people
-   writing the logic.
+   files can each be simplified in parallel.
+
+   **Effort: `medium` or `high`, never above.** The owner set this range
+   on 2026-11-17, and it is the instruction that authorizes the override.
+   The frontmatter default is `high`, which suits any step touching
+   `corollary/`. Pass `effort: "medium"` when the step is web-only: in the
+   UI, ship fast, and the engine re-checks every limit anyway. Never pass
+   `xhigh` or `max`. A cleanup that needs that much thought is not a
+   cleanup, and escalation is for the people writing the logic.
 
    **Skip it** for docs-only or config-only steps, and for **fix rounds**.
    A fix should be the smallest change that answers a finding, and
