@@ -233,3 +233,19 @@ def test_the_plan_flags_only_an_instant_it_did_not_already_hold() -> None:
     assert plan.pending == (t1, t2)
     with pytest.raises(ValueError):
         plan.add([datetime(2026, 11, 20, 8, 30)])  # naive: refused, as replace refuses it
+
+
+def test_an_instant_added_during_a_run_survives_that_runs_replace() -> None:
+    """The run's answer was read before the addition, so it cannot be the whole truth."""
+    t1 = datetime(2026, 11, 18, 13, 30, tzinfo=UTC)
+    t2 = datetime(2026, 11, 19, 13, 30, tzinfo=UTC)
+    plan = ReleaseAttemptPlan()
+
+    plan.begin()
+    plan.add([t2])  # the refresh, while the run fetches
+    plan.replace([t1])  # the run's answer, read before it
+    assert plan.pending == (t1, t2)
+
+    # Outside a run, the run's answer is the whole plan again.
+    plan.replace([t1])
+    assert plan.pending == (t1,)

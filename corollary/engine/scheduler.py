@@ -714,6 +714,14 @@ class ReleaseAttemptPlan:
     catch-up. :meth:`replace` -- the job's own run -- does not set it: the
     loop asks the schedule afresh after every run anyway.
 
+    **An addition during a run survives that run's** :meth:`replace`. The
+    body calls :meth:`begin` before it reads the table, and ``replace`` keeps
+    every instant :meth:`add` brought since. Both jobs fire at 10:00 ET, so
+    the refresh storing a release while the first-prints run is between its
+    read and its ``replace`` is the ordinary case, not a corner: without
+    this the run's snapshot, taken before the store, would erase the
+    addition, and the loop would clear the flag and plan without it.
+
     An instant added for a release that is already filled, or withdrawn by
     the refresh, costs at most one wake that makes no request: the body
     decides per release, from the stored rows, and its next run replaces
@@ -725,18 +733,30 @@ class ReleaseAttemptPlan:
         #: Set by :meth:`add` when the plan gains an instant. Cleared by the
         #: job's task each time it asks the schedule.
         self.changed = asyncio.Event()
+        #: What :meth:`add` brought since :meth:`begin`; ``None`` outside a run.
+        self._added_in_run: set[datetime] | None = None
 
     @property
     def pending(self) -> tuple[datetime, ...]:
         return self._pending
 
+    def begin(self) -> None:
+        """A run is about to read the table: its :meth:`replace` keeps what :meth:`add` brings."""
+        self._added_in_run = set()
+
     def replace(self, pending: Iterable[datetime]) -> None:
-        self._pending = tuple(sorted(_require_utc(moment) for moment in pending))
+        """The run's own answer, plus every instant :meth:`add` brought since :meth:`begin`."""
+        kept = self._added_in_run or set()
+        self._added_in_run = None
+        self._pending = tuple(sorted({*(_require_utc(moment) for moment in pending), *kept}))
 
     def add(self, instants: Iterable[datetime]) -> None:
         """Merge ``instants`` in; set :attr:`changed` if any was not already planned."""
+        incoming = {_require_utc(moment) for moment in instants}
+        if self._added_in_run is not None:
+            self._added_in_run |= incoming
         planned = frozenset(self._pending)
-        merged = planned | {_require_utc(moment) for moment in instants}
+        merged = planned | incoming
         if merged != planned:
             self._pending = tuple(sorted(merged))
             self.changed.set()
@@ -4578,11 +4598,17 @@ async def _econ_first_prints(
     fails the run, as ``calendar_releases`` does; it is **not** caught here --
     and :func:`~corollary.data.econ_first_prints.fill_first_prints` attempts
     each due release in its own transaction. The plan is replaced with what
-    is still pending, so the schedule wakes for the next release-day slot.
+    is still pending, so the schedule wakes for the next release-day slot --
+    keeping whatever ``calendar_releases`` added while this run was reading
+    and fetching (:meth:`ReleaseAttemptPlan.begin`). With no source the plan
+    is emptied: a job that can fetch nothing has no release-day grid to wake
+    on, and the refresh's additions must not pile up behind it.
     """
     source = services.fred_vintages
     if source is None:
+        plan.replace(())
         return JobSkipped(_NO_FRED_VINTAGES)
+    plan.begin()
     seeds = await asyncio.to_thread(load_econ_release_seeds)
     run = await fill_first_prints(source, services.session_factory, seeds, clock=clock)
     plan.replace(run.pending)

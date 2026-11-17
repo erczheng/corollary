@@ -15,6 +15,7 @@ that on three substitutes: the check the 09:25 test makes rejects each one.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -611,6 +612,88 @@ async def test_a_row_the_refresh_stores_after_the_jobs_last_run_joins_its_plan_a
     _plan(econ).changed.clear()
     assert await refresh.run() is None
     assert not _plan(econ).changed.is_set()
+
+
+class GatedVintages(FakeVintages):
+    """:class:`FakeVintages` whose every request waits on :attr:`gate`.
+
+    Holds a first-prints run open between its table read and its plan
+    ``replace``, which is where the 10:00 refresh lands when both jobs fire.
+    """
+
+    def __init__(self, script: dict[str, Sequence[object]]) -> None:
+        super().__init__(script)
+        self.asking = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def vintage_window(
+        self, series_id: str, release_day: date, *, frequency: VintageFrequency
+    ) -> FredVintageWindow | FredRefusal:
+        self.asking.set()
+        await self.gate.wait()
+        return await super().vintage_window(series_id, release_day, frequency=frequency)
+
+
+@pytest.mark.asyncio
+async def test_a_release_stored_while_a_run_is_fetching_survives_that_runs_replace(
+    engine: Engine,
+) -> None:
+    """Rules audit of handoff item D: the shipped schedules fire both jobs at 10:00 ET.
+
+    The refresh stores Thursday's CPI after the first-prints run has read
+    the table and while it is fetching BOP's figure. The run's own answer,
+    taken before the store, must not erase Thursday: the plan keeps what was
+    added during the run. The next run, with nothing new, plans Thursday
+    08:40 and nothing else.
+    """
+    thursday = BOP_DAY + timedelta(days=1)
+    store_rows(engine, (51, BOP_DAY))
+    clock = Clock(_et(BOP_DAY, 10, 0))
+    vintages = GatedVintages({"BOPGSTB": [BOP_WINDOW]})
+    releases = FakeReleases(
+        [
+            FredReleaseDate(51, _release_name(51), BOP_DAY),
+            FredReleaseDate(10, _release_name(10), thursday),
+        ]
+    )
+    econ, refresh = _shipped_pair(
+        _services(lambda: Session(engine), vintages=vintages, releases=releases), clock
+    )
+
+    run = asyncio.ensure_future(econ.run())
+    # A hang guard, never a budget: the run reaches its FRED request in milliseconds.
+    await asyncio.wait_for(vintages.asking.wait(), timeout=120)
+    assert await refresh.run() is None  # the 10:00 refresh, mid-run
+    vintages.gate.set()
+    assert await run is None  # BOP's figure, stored
+
+    assert _et(thursday, 8, 30) in _plan(econ).pending
+    with Session(engine) as session:
+        assert read_value(session, 51, BOP_DAY) is not None
+
+    # The next run tidies the plan: BOP is filled, Thursday still to come.
+    clock.now = _et(BOP_DAY, 10, 10)
+    assert isinstance(await econ.run(), JobSkipped)
+    assert _plan(econ).pending == (_et(thursday, 8, 30),)
+    assert econ.schedule.next_run(clock()) == _et(thursday, 8, 40)
+    assert vintages.calls == [("BOPGSTB", BOP_DAY, "monthly")]
+
+
+@pytest.mark.asyncio
+async def test_with_no_fred_vintages_the_plan_is_emptied_not_grown(engine: Engine) -> None:
+    """Rules audit of handoff item D: a job that can fetch nothing has no grid to wake on."""
+    tuesday = date(2026, 11, 17)
+    clock = Clock(_et(tuesday, 10, 0))
+    releases = FakeReleases([FredReleaseDate(10, _release_name(10), WED)])
+    econ, refresh = _shipped_pair(
+        _services(lambda: Session(engine), vintages=None, releases=releases), clock
+    )
+    assert await refresh.run() is None
+    assert _plan(econ).pending == (_et(WED, 8, 30),)
+
+    assert isinstance(await econ.run(), JobSkipped)
+    assert _plan(econ).pending == ()
+    assert econ.schedule.next_run(clock()) == _et(WED, 10, 0)  # the catch-up alone
 
 
 @pytest.mark.asyncio
