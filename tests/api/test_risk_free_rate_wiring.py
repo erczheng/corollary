@@ -42,13 +42,16 @@ from corollary.pricing.rates import (
     rate_from_dgs3mo,
 )
 from corollary.ratelimit import FRED_HOST, HostRateLimiter
+from tests.api.conftest import VendorLookupGuard
 from tests.data.providers.test_fred_provider import FAKE_KEY, dgs3mo_body, fixture_body_text
 from tests.engine.test_scheduler import WED_1500_ET, FakeClock
 
 UTC = timezone.utc
 
 #: Paper keys only, and obviously fake -- enough for ``from_env`` to build a
-#: provider object; nothing here makes a request with them.
+#: provider object. The one test that boots the shipped scheduler on them
+#: does make requests, and every one is refused at the lookup
+#: (``no_vendor_network`` in ``conftest.py``); none reaches a vendor.
 PAPER_ENV = {
     "ALPACA_PAPER_API_KEY": "PKTESTTESTTESTTEST",
     "ALPACA_PAPER_SECRET_KEY": "not-a-real-secret",
@@ -223,9 +226,23 @@ def test_an_unmigrated_database_names_the_migration_when_the_seed_fails(
 
 @pytest.mark.risk
 def test_a_missing_fred_key_does_not_stop_the_shipped_scheduler_app_booting(
-    db_engine: Engine, monkeypatch: pytest.MonkeyPatch
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    no_vendor_network: VendorLookupGuard,
 ) -> None:
-    """``FRED_API_KEY`` unset, the shipped scheduler factory: the app serves."""
+    """``FRED_API_KEY`` unset, the shipped scheduler factory: the app serves.
+
+    The registry is the real ``from_env`` one -- reading the key's absence is
+    the point -- so its clients are the real Alpaca ones, and the shipped
+    jobs and the paper-positions refresher call them at start. Every one of
+    those lookups is refused (``no_vendor_network``), so each call fails at
+    once with a connect error the app catches. Until 2026-11-16 they went to
+    the real ``paper-api`` and ``data`` hosts with the dummy keys, and the
+    test hung the gate twice with sockets left in CloseWait to both. Whatever
+    stalled it, a boot whose shutdown races real TLS handshakes to a vendor
+    is nothing this test is about.
+    """
+    no_vendor_network.expect_refused()
     monkeypatch.delenv(FRED_API_KEY_ENV, raising=False)
     registry = ServiceRegistry.from_env(PAPER_ENV)
     app = create_app(
@@ -237,6 +254,13 @@ def test_a_missing_fred_key_does_not_stop_the_shipped_scheduler_app_booting(
         assert "fred_dgs3mo" in app.state.scheduler.status()
         assert "econ_first_prints" in app.state.scheduler.status()
     assert registry.rates.current() == FALLBACK_RISK_FREE_RATE
+    # ``expect_refused`` excuses the lookups, not any host: a regression that
+    # made the boot reach somewhere new -- FRED with an empty key, say -- would
+    # be refused and swallowed like these, so name the hosts this boot may try.
+    assert set(no_vendor_network.refused) <= {
+        "paper-api.alpaca.markets",
+        "data.alpaca.markets",
+    }
 
 
 def _registry_with(
