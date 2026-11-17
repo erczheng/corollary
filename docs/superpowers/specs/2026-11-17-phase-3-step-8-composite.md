@@ -1097,15 +1097,22 @@ Each lands with the unit that makes it true, or in U11.
     realtime feed.
 - **PRD §11, Phase 4 carry-forward.** *"Research reads a different halt"* is
   recorded as resolved by step 8, together with the palette's fixture OR and
-  Research's Manual-mode gap (C12).
+  Research's Manual-mode gap (C12). *(Applied with U10, 2026-11-17.)*
 - **Phase 2 spec, carried items.** The Research/`isHalted` item is closed by
-  decision 16 (C12).
+  decision 16 (C12). *(Applied with U10, 2026-11-17.)*
 - **CLAUDE.md, Layout.** `data/macro/` is no longer *"(stub)"*:
   `components.py`, `composite.py`, the store and the three jobs.
+- **CLAUDE.md, "Where frontend logic lives".** *(Added 2026-11-17 by U10;
+  lands in U11.)* An entry for `web/src/lib/entryGate.ts`: the one
+  "may a new position open now" rule, read from the engine's halt and closed
+  while it is unknown. It should name `useEntryGate()` and
+  `haltSource.test.ts`, so the next surface that opens a position reaches
+  for it, not for `useUIStore`.
 - **Code docstrings:**
   - `corollary/data/macro/__init__.py`.
   - `FredObservationRecord`: the two series, and C15's wording.
-  - `CommandPalette.tsx`'s *"Still the fixture halt"* comment.
+  - `CommandPalette.tsx`'s *"Still the fixture halt"* comment. *(Applied
+    with U10, 2026-11-17.)*
 
 ---
 
@@ -1408,9 +1415,63 @@ is option (b), with the provisional marker (Q28, C8).
   - The top sector shows its session and answered count.
 
 **U10. The real halt on Research, the chain ticket and the palette.**
-- *Status:* not started. ~~Blocked on Q27 only. It is the one unit Q27
-  option (b) releases on its own.~~ **Released 2026-11-17 (Q27), first,**
-  ahead of every other unit.
+- *Status:* ~~not started. Blocked on Q27 only. It is the one unit Q27
+  option (b) releases on its own.~~ ~~**Released 2026-11-17 (Q27), first,**
+  ahead of every other unit.~~ **Built 2026-11-17** on
+  `phase3-step8-u10-real-halt`, stacked on `phase3-step8-spec`; not yet
+  merged. *Evidence:* `npm run typecheck` is clean and `npm run test` passes
+  (1,479 tests in 46 files, after the audit fixes below). The guard test
+  fails by name on a planted `useUIStore((s) => s.isHalted)` in a new page
+  file, which was removed afterwards. `npm run build` succeeds, and the
+  three colour utilities are in the emitted CSS. The rules audit found
+  nothing high-severity; its findings and what was done follow the as-built
+  notes.
+  *As built, where it adds to the text below:*
+  - **One gate, not three reads.** `web/src/lib/entryGate.ts` holds the rule
+    as a pure function over the engine-state query's fields, and
+    `useEntryGate()` in `queries.ts` wraps it. Research and the chain ticket
+    call the hook. The palette calls `entryGate(engineQuery)` over the query
+    it already holds for Halt/Resume.
+  - **A failed read closes the gate even with a cached "running"**, because
+    a refetch that fails leaves the last answer in `data`. A cached halt
+    stays the stated reason.
+  - **The confirm dialogs honour the gate too.** On Research and the chain
+    ticket, a halt that lands while the confirm is open disables its submit,
+    states the reason, and `onConfirm` re-checks before acting. The
+    dead-man's switch fires on its own (rule 9), so the halt can arrive
+    between Review and Submit.
+  - **The reason is on the page**, as a `role="status"` line, not only in
+    the button's `title`. The colours are `ENTRY_BLOCK_CLASS`: `caution`
+    for a halt, `error` for a failed read, `on-surface-variant` for a read
+    in flight.
+  - `RecommendationActions` takes `entryBlocked: string | null` in place of
+    `halted: boolean`.
+  - **The palette's Halt/Resume pair is unchanged:** neither is offered while
+    pending, and a failed read falls through to Halt.
+
+  *The rules audit (2026-11-17), and what was done about it:*
+  - **Engine state was never polled (medium, pre-existing; fixed here).**
+    `useEngineState()` had no `refetchInterval`, though the Phase 2 frame
+    contract (human decision 2, 2026-09-13), `liveSocket.ts`, `types.ts` and
+    `queries.ts` all said it was polled at 15s. So a halt the dead-man's
+    switch took reached an open page only on a refocus. That held for the
+    Dashboard's pill as well as the new gate. It now polls at
+    `ENGINE_STATE_POLL_MS` = 15s with `refetchIntervalInBackground: true`.
+    That setting is a parent-session choice, flagged for the owner: a
+    visible, unfocused window is how the terminal is watched, and this read
+    is local, with no vendor budget behind it. A test pins the cadence the
+    way the bell's is pinned.
+  - **The gate opens only on `halted: false`** (low; fixed). An empty body
+    or a renamed field reads `unavailable`, with a stated reason.
+  - **The guard catches `{ isHalted = false }` too** (low; fixed). Its
+    remaining blind spots are written into its docstring: a selector
+    exported from the store, and a read on a line beginning with `*`.
+  - **Nits fixed:** the chain ticket's confirm no longer nests a `<p>` in a
+    `<p>`, and a failure with no message reads *"The request failed."*
+  - **Carried to Phase 6 (not U10's surface):** Activity's *Add to
+    position* (`OrderTicket.tsx`, `mode === 'add'`) is a new entry. It is
+    disabled today only by `READ_ONLY_REASON`. When that is lifted it must
+    take `useEntryGate()`, and nothing forces it to.
 - *Depends on:* nothing. It runs in parallel with everything.
 - *What it does:* C12 and decision 16.
 - *Rule 9:* reads the halt, writes nothing, resumes nothing. Fail-closed

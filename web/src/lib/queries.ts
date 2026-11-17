@@ -29,6 +29,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
+import { entryGate, type EntryGate } from './entryGate'
 import {
   DEFAULT_HISTORY_PERIOD,
   DEFAULT_HISTORY_TIMEFRAME,
@@ -417,13 +418,39 @@ export function useChain(underlying: string | null, query: ChainQuery = {}) {
  * Engine
  * ---------------------------------------------------------------------- */
 
+/** How often engine state is re-read: 15s, the Phase 2 frame contract
+ * (human decision 2, 2026-09-13). The halt stays off the websocket because
+ * rule 9 halts *because* the socket died, so this poll is how a halt the
+ * dead-man's switch takes reaches an open page. */
+export const ENGINE_STATE_POLL_MS = 15_000
+
 /** Halt state and the t₀ marker. Not account-scoped: one engine, one halt,
- * and a halt found while Cash is selected is the same halt. */
+ * and a halt found while Cash is selected is the same halt.
+ *
+ * **Polled, and polled while the window is unfocused.** Until 2026-11-17 it
+ * was not polled at all, though the contract above said it was. So a halt the
+ * dead-man's switch took left the Dashboard pill reading "Trading On" and
+ * Execute enabled until the window was refocused. `refetchIntervalInBackground`
+ * is on because a visible, unfocused window is how a trading terminal is
+ * watched (`useMarketPoll` makes the same point), and the halt is the one
+ * state that must not go stale there. This reads the local engine only, with
+ * no vendor budget behind it, which is why polling a hidden tab is acceptable
+ * here and not for market data (decision 18). */
 export function useEngineState() {
   return useQuery({
     queryKey: queryKeys.engineState(),
     queryFn: ({ signal }) => fetchEngineState({ signal }),
+    refetchInterval: ENGINE_STATE_POLL_MS,
+    refetchIntervalInBackground: true,
+    staleTime: ENGINE_STATE_POLL_MS - 1_000,
   })
+}
+
+/** Whether a new position may open now, read from the engine's halt and
+ * closed while that is unknown (spec decision C12, `entryGate.ts`). The same
+ * query as `useEngineState`, so it is one request. */
+export function useEntryGate(): EntryGate {
+  return entryGate(useEngineState())
 }
 
 /** Halt the engine, with a reason. Stops new entries; closes nothing. */

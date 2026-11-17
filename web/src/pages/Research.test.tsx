@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, within, fireEvent, act } from '@testing-library/react'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { render, screen, within, fireEvent, act, waitFor } from '@testing-library/react'
 import App from '../App'
+import { queryClient } from '../lib/queryClient'
+import { queryKeys } from '../lib/queries'
 import { useUIStore } from '../lib/store'
+import type { EngineStateResponse } from '../lib/types'
 import {
   CHAT_FALLBACK,
   LLM_ORIGINATION,
@@ -16,10 +19,79 @@ import { formatSignedNumber, formatStrategyName } from '../lib/format'
 
 const initialState = useUIStore.getState()
 
+const RUNNING: EngineStateResponse = {
+  halted: false,
+  haltedReason: null,
+  haltedAt: null,
+  t0: '2026-09-12T19:14:37.242679Z',
+}
+const HALTED: EngineStateResponse = {
+  ...RUNNING,
+  halted: true,
+  haltedReason: 'Halted by hand from the command palette',
+  haltedAt: '2026-11-17T14:00:00Z',
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: () => Promise.resolve(body),
+  } as unknown as Response
+}
+
+/** How `GET /api/engine/state` answers: a state, a failure, or never.
+ *
+ * Execute reads the engine's halt (spec decision C12), so every test that
+ * clicks it needs the engine to have said "running". Everything else on this
+ * page is still a fixture, so every other read is refused, which keeps an
+ * assertion here from depending on another page's data. */
+type EngineAnswer = EngineStateResponse | 'fail' | 'never'
+
+function stubEngine(answer: EngineAnswer = RUNNING) {
+  const fetchMock = vi.fn((input: unknown) => {
+    const url = String(input)
+    if (url.includes('/engine/state')) {
+      if (answer === 'never') return new Promise<Response>(() => {})
+      if (answer === 'fail') {
+        return Promise.resolve(
+          jsonResponse(503, {
+            error: { code: 'engine_unavailable', message: 'The engine is not reachable.' },
+          }),
+        )
+      }
+      return Promise.resolve(jsonResponse(200, answer))
+    }
+    return Promise.resolve(
+      jsonResponse(503, {
+        error: { code: 'not_stubbed', message: 'Not stubbed: this file tests Research.' },
+      }),
+    )
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 beforeEach(() => {
   window.history.pushState({}, '', '/research')
   useUIStore.setState({ ...initialState }, true)
+  queryClient.clear()
+  stubEngine()
 })
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  queryClient.clear()
+})
+
+/** Render, and wait until the engine has said it is running, so Execute is
+ * live. */
+async function renderRunning(): Promise<void> {
+  render(<App />)
+  await waitFor(() =>
+    expect(screen.queryByText(/^Reading engine state/)).not.toBeInTheDocument(),
+  )
+}
 
 function section(name: string): HTMLElement {
   return screen.getByRole('region', { name })
@@ -348,8 +420,8 @@ describe('Recommended Trades (full)', () => {
     expect(within(table()).getByText('LLM')).toBeInTheDocument()
   })
 
-  it('executes behind a confirm naming the risk manager', () => {
-    render(<App />)
+  it('executes behind a confirm naming the risk manager', async () => {
+    await renderRunning()
     const target = RECOMMENDATIONS[0]
 
     const row = within(table())
@@ -366,8 +438,8 @@ describe('Recommended Trades (full)', () => {
     expect(within(table()).getAllByText('Executed').length).toBeGreaterThan(0)
   })
 
-  it('warns in the confirm when the candidate is an unvalidated origination', () => {
-    render(<App />)
+  it('warns in the confirm when the candidate is an unvalidated origination', async () => {
+    await renderRunning()
     const llm = RECOMMENDATIONS.find((r) => r.unvalidated)!
 
     const row = within(table())
@@ -393,15 +465,18 @@ describe('Recommended Trades (full)', () => {
     expect(within(row).queryByRole('button', { name: 'Queue' })).not.toBeInTheDocument()
   })
 
-  it('stops offering Execute once a row has been acted on', () => {
-    render(<App />)
+  it('stops offering Execute once a row has been acted on', async () => {
+    await renderRunning()
     const target = RECOMMENDATIONS[0]
     act(() => useUIStore.getState().executeRecommendation(target.id))
 
     const row = within(table())
       .getAllByRole('row')
       .find((r) => r.textContent?.includes(recommendationTitle(target)))!
-    expect(within(row).getByRole('button', { name: 'Execute' })).toBeDisabled()
+    const execute = within(row).getByRole('button', { name: 'Execute' })
+    expect(execute).toBeDisabled()
+    // Disabled because it was acted on, not because the engine is unread.
+    expect(execute).toHaveAttribute('title', 'Already acted on')
     expect(within(table()).getByText('Executed')).toBeInTheDocument()
   })
 
@@ -430,16 +505,90 @@ describe('Recommended Trades (full)', () => {
     expect(useUIStore.getState().dispositions[target.id]).toBe('executed')
   })
 
-  it('disables Execute while the engine is halted, but not Dismiss', () => {
-    render(<App />)
-    act(() => {
-      useUIStore.getState().setExecutionMode('auto')
-      useUIStore.getState().halt()
+  /** Spec decision C12. Execute reads the **engine's** halt, in Manual as in
+   * Auto, and stays off while that is unknown. It used to read the fixture
+   * store's flag, which nothing in production sets, and only in Auto, so a
+   * halted engine never disabled it. Dismiss is never gated: waving off a
+   * candidate opens nothing. */
+  describe('the engine halt', () => {
+    function firstRow(): HTMLElement {
+      return within(table()).getAllByRole('row')[1]
+    }
+
+    it.each(['manual', 'auto'] as const)(
+      'disables Execute while the engine is halted, in %s mode, but not Dismiss',
+      async (mode) => {
+        stubEngine(HALTED)
+        act(() => useUIStore.getState().setExecutionMode(mode))
+        render(<App />)
+
+        const panel = section('Recommended Trades')
+        expect(await within(panel).findByText(/^Trading is halted/)).toBeInTheDocument()
+        const execute = within(firstRow()).getByRole('button', { name: 'Execute' })
+        expect(execute).toBeDisabled()
+        expect(execute.getAttribute('title')).toMatch(/^Trading is halted/)
+        expect(within(firstRow()).getByRole('button', { name: /^Dismiss/ })).toBeEnabled()
+      },
+    )
+
+    it('reads the engine, not the fixture store', async () => {
+      // The store says halted. The engine says running. The engine wins.
+      act(() => {
+        useUIStore.getState().setExecutionMode('auto')
+        useUIStore.getState().halt()
+      })
+      await renderRunning()
+
+      expect(within(firstRow()).getByRole('button', { name: 'Execute' })).toBeEnabled()
     })
 
-    const row = within(table()).getAllByRole('row')[1]
-    expect(within(row).getByRole('button', { name: 'Execute' })).toBeDisabled()
-    expect(within(row).getByRole('button', { name: /^Dismiss/ })).toBeEnabled()
+    it('keeps Execute off, and says so, while the engine state is being read', () => {
+      stubEngine('never')
+      render(<App />)
+
+      expect(
+        within(section('Recommended Trades')).getByText(/^Reading engine state/),
+      ).toBeInTheDocument()
+      expect(within(firstRow()).getByRole('button', { name: 'Execute' })).toBeDisabled()
+      expect(within(firstRow()).getByRole('button', { name: /^Dismiss/ })).toBeEnabled()
+    })
+
+    it('keeps Execute off, and says why, when the engine state cannot be read', async () => {
+      stubEngine('fail')
+      render(<App />)
+
+      expect(
+        await within(section('Recommended Trades')).findByText(
+          /^Engine state unavailable: The engine is not reachable\./,
+          {},
+          // One retry of a 5xx, a second apart, before the read gives up.
+          { timeout: 4000 },
+        ),
+      ).toBeInTheDocument()
+      expect(within(firstRow()).getByRole('button', { name: 'Execute' })).toBeDisabled()
+    })
+
+    /** The halt can arrive while the confirm is open: the dead-man's switch
+     * fires on its own (rule 9). The confirm is the last step before
+     * submitting, so it honours the halt too. */
+    it('refuses the confirm if the engine halts while it is open', async () => {
+      await renderRunning()
+      const target = RECOMMENDATIONS[0]
+      const row = within(table())
+        .getAllByRole('row')
+        .find((r) => r.textContent?.includes(recommendationTitle(target)))!
+      fireEvent.click(within(row).getByRole('button', { name: 'Execute' }))
+
+      // TanStack delivers a cache write on its next tick, not inside `act`.
+      act(() => queryClient.setQueryData(queryKeys.engineState(), HALTED))
+
+      const dialog = screen.getByRole('alertdialog')
+      const submit = within(dialog).getByRole('button', { name: 'Submit to risk manager' })
+      await waitFor(() => expect(submit).toBeDisabled())
+      expect(dialog.textContent).toMatch(/Trading is halted/)
+      fireEvent.click(submit)
+      expect(useUIStore.getState().dispositions[target.id]).toBeUndefined()
+    })
   })
 
   it('explains an emptied list rather than showing a bare table', () => {
