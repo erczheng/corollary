@@ -51,7 +51,9 @@ instead of silently running zero tests.
 - **Feed names are config**, read only inside the provider, from
   `ALPACA_OPTIONS_FEED` / `ALPACA_STOCK_FEED_HISTORICAL` /
   `ALPACA_STOCK_FEED_REALTIME`. Never a literal.
-- **Type hints everywhere. `uv run mypy corollary` clean.**
+- **Type hints everywhere. `uv run python -m mypy corollary` clean.**
+  The `python -m` form, because the bare `uv run mypy` shim is blocked by
+  Windows Application Control (`os error 4551`) in fresh worktrees.
 - UTC in storage, `America/New_York` on display. Market calendar for session
   boundaries, never hardcoded hours.
 - Structured JSON logs, one correlation ID per decision, so a trade traces
@@ -166,7 +168,7 @@ back under a concurrent writer is its own hazard.
 ## Finishing
 
 Report what you wrote, the tests you added, and the **actual** output of
-`uv run python -m pytest`, `uv run python -m pytest -m risk`, and `uv run mypy corollary`. Paste
+`uv run python -m pytest`, `uv run python -m pytest -m risk`, and `uv run python -m mypy corollary`. Paste
 the real result lines. If something fails, say so with the output — a
 truthful failure is worth more than a confident claim, and the orchestrator
 re-verifies anyway. Do not commit; the orchestrator approves and the

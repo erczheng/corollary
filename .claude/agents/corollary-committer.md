@@ -48,7 +48,10 @@ decide only whether its approval is **still true** at the moment you act.
    with the surrounding text rather than silently passing it.
 4. **The suites actually pass.** Re-run what the entry's `verified` block
    claims. Backend: `uv run python -m pytest`, plus `uv run python -m pytest -m risk` and
-   `uv run mypy corollary` whenever any `corollary/**` path is listed.
+   `uv run python -m mypy corollary` whenever any `corollary/**` path is
+   listed. Use the `python -m` form. The bare `uv run mypy` shim is blocked
+   by Windows Application Control (`os error 4551`) in fresh venvs, and a
+   4551 is the policy block, not a type error.
    Frontend: `npm run typecheck` and `npm run test -- --run` from `web/`
    whenever any `web/**` path is listed. If your output contradicts the
    claim, reject and record both. You re-run rather than trust because an
