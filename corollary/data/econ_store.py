@@ -34,7 +34,9 @@ release reads as usual. The row is left as stored, never repaired or
 deleted (Q23c: the value table is write-once); the release displays
 ``unavailable`` with the reason. Before this, one such row raised out of the
 whole read: ``GET /api/calendar`` answered 500 for every kind of event in the
-range, and the ``econ_first_prints`` job fetched nothing for any release.
+range, and the ``econ_first_prints`` job fetched nothing for any release. An
+economic *calendar* row that cannot be joined to a release at all is the
+same: left out of the result and logged, never guessed.
 
 Every function flushes and none commits: the caller owns the transaction, as
 in :mod:`corollary.data.calendar`. Every instant is passed in and must be
@@ -122,9 +124,9 @@ _VALUE_COLUMNS: Final = (
 _FETCH_COLUMNS: Final = ("release_id", "release_date", "attempted_at", "outcome")
 
 _UNREADABLE_RULE: Final = (
-    "spec R8 / Q23c: a stored first-print row that cannot be read back makes "
-    "that release unavailable with the reason; it is never guessed, repaired or "
-    "deleted, and no other release is affected"
+    "spec R8 / Q23c: a stored first-print or economic calendar row that cannot be "
+    "read back makes that release unavailable with the reason; it is never guessed, "
+    "repaired or deleted, and no other release is affected"
 )
 
 
@@ -513,10 +515,13 @@ def economic_releases_of(
     or run the read serves), and named in :attr:`EconomicRelease.unreadable`;
     see the module docstring.
 
-    Raises ``ValueError`` for a calendar row that cannot be joined honestly: a
-    malformed ``vendor_id``, one naming a different date from the row's own,
-    or a row with no release instant. Each is a corrupted calendar row, and
-    guessing its release would show another release's figure beside it.
+    A calendar row that cannot be joined honestly -- no or a malformed
+    ``vendor_id``, one naming a different date from the row's own, or no
+    release instant -- is **left out** of the result and logged the same way
+    (``econ_calendar_row_unreadable``). Guessing its release would show
+    another release's figure beside it, so it is never guessed; the caller
+    decides what an absent row means (``GET /api/calendar`` serves it
+    ``unavailable``; the ``econ_first_prints`` job never sees it).
     """
     now = _utc(now, "now")
     events = [e for e in events if e.kind is CalendarKind.ECONOMIC]
@@ -527,19 +532,12 @@ def economic_releases_of(
 
     keyed: list[tuple[StoredCalendarEvent, int, date, datetime]] = []
     for event in events:
-        if event.vendor_id is None:  # pragma: no cover - ck_calendar_event_vendor_id
-            raise ValueError(f"economic calendar row {event.id} has no vendor_id")
-        release_id, release_date = parse_release_vendor_id(event.vendor_id)
-        if release_date != event.date:
-            raise ValueError(
-                f"economic calendar row {event.id}'s vendor_id {event.vendor_id!r} names "
-                f"{release_date}, but the row is dated {event.date}"
-            )
-        if event.at is None:
-            raise ValueError(
-                f"economic calendar row {event.id} ({event.vendor_id}) has no release instant"
-            )
-        keyed.append((event, release_id, release_date, event.at.astimezone(UTC)))
+        try:
+            release_id, release_date, release_at = _release_key(event)
+        except ValueError as exc:
+            _unjoinable(exc, event, now=now, correlation_id=correlation_id)
+            continue
+        keyed.append((event, release_id, release_date, release_at))
 
     releases: list[EconomicRelease] = []
     for event, release_id, release_date, release_at in keyed:
@@ -587,6 +585,55 @@ def economic_releases_of(
             )
         )
     return tuple(releases)
+
+
+def _release_key(event: StoredCalendarEvent) -> tuple[int, date, datetime]:
+    """An economic calendar row's ``(release_id, release_date, release_at UTC)``.
+
+    ``ValueError`` for a row that cannot be joined honestly: no or a
+    malformed ``vendor_id``, one naming another date than the row's own, or
+    no release instant. Each is a corrupted calendar row.
+    """
+    if event.vendor_id is None:
+        raise ValueError(f"economic calendar row {event.id} has no vendor_id")
+    release_id, release_date = parse_release_vendor_id(event.vendor_id)
+    if release_date != event.date:
+        raise ValueError(
+            f"economic calendar row {event.id}'s vendor_id {event.vendor_id!r} names "
+            f"{release_date}, but the row is dated {event.date}"
+        )
+    if event.at is None:
+        raise ValueError(
+            f"economic calendar row {event.id} ({event.vendor_id}) has no release instant"
+        )
+    return release_id, release_date, event.at.astimezone(UTC)
+
+
+def _unjoinable(
+    exc: ValueError,
+    event: StoredCalendarEvent,
+    *,
+    now: datetime,
+    correlation_id: str | None,
+) -> None:
+    """Log one economic calendar row that cannot be joined to a release (rule 8)."""
+    logger.error(
+        "economic calendar row %s cannot be joined to a release; it is served "
+        "unavailable and left as stored",
+        event.id,
+        extra={
+            "event": "econ_calendar_row_unreadable",
+            "rule": _UNREADABLE_RULE,
+            "table": "calendar_event",
+            "calendar_event_id": event.id,
+            "vendor_id": None if event.vendor_id is None else event.vendor_id[:64],
+            "date": event.date.isoformat(),
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:_ERROR_LOG_MAX],
+            "correlation_id": correlation_id,
+            "at": now.isoformat(),
+        },
+    )
 
 
 def _unreadable(
