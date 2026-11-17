@@ -46,13 +46,15 @@ that release's ``error`` attempt (scrubbed through
 the next. A ``ValueError`` out of ``first_print`` is a caller's bug (a
 frequency or series mismatch), logged at ERROR as one and recorded as an
 ``error`` -- never as ``not_posted``, ``no_value`` or ``refused``. The seed
-load and the calendar read are **not** per release: a refused seed
-(:class:`~corollary.data.seeds.SeedError`) or a corrupted calendar row fails
-the whole run, the way ``calendar_releases`` fails on a refused seed. A
-damaged first-print row (``econ_release_value`` or ``econ_release_fetch``)
-**is** one release's: the read logs it, and that release is skipped -- never
-fetched, never written over -- and reported in
-:attr:`FirstPrintsRun.unreadable`.
+load is **not** per release: a refused seed
+(:class:`~corollary.data.seeds.SeedError`) fails the whole run, the way
+``calendar_releases`` fails on a refused seed. A damaged row **is** one
+release's. A first-print row (``econ_release_value`` or
+``econ_release_fetch``) that cannot be read back is logged by the read, and
+that release is skipped -- never fetched, never written over -- and reported
+in :attr:`FirstPrintsRun.unreadable`. An economic calendar row that cannot be
+joined to a release is logged by the read and left out of it, so the run
+never sees it.
 
 **Budget.** One FRED request per attempt, through the provider's own
 ``api.stlouisfed.org`` limiter (120/min). No other request is made.
@@ -490,13 +492,13 @@ async def fill_first_prints(
     """Attempt every stored economic release that is due at ``clock()``, one at a time.
 
     Each attempt is its own transaction and its own failure; see the module
-    docstring. Raises only for what is not one release's: the calendar read
-    (a corrupted economic *calendar* row raises ``ValueError`` there, by
-    design). A damaged ``econ_release_value`` or ``econ_release_fetch`` row
-    is one release's: the read logs it, and that release is skipped -- no
-    request is made for it, because ``store_first_print`` and
-    ``record_attempt`` both read the damaged row first and would fail on it
-    every run -- while every other release proceeds.
+    docstring. Raises only for what is not one release's. A damaged
+    ``econ_release_value`` or ``econ_release_fetch`` row is one release's:
+    the read logs it, and that release is skipped -- no request is made for
+    it, because ``store_first_print`` and ``record_attempt`` both read the
+    damaged row first and would fail on it every run -- while every other
+    release proceeds. An economic calendar row that cannot be joined to a
+    release is left out by the read itself, and logged there.
     """
     now = _utc(clock(), "clock()")
     # The run's read and what it skips share one id; each attempt mints its own.

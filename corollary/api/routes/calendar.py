@@ -37,7 +37,10 @@ dependency tree to keep it so.
   be read back serves that release ``unavailable``, its note naming the
   table and the error (``could not be read from the database: ...``), and is
   logged with the rule, the inputs and the time (rule 8). Every other row is
-  served as usual, and the stored row is left exactly as it is.
+  served as usual, and the stored row is left exactly as it is. An economic
+  ``calendar_event`` row that cannot be joined to a release at all (a
+  malformed ``vendor_id``, one naming another date, no release instant) is
+  served the same way, its note naming ``calendar_event``.
 * **Notices** say aloud what the rows cannot: central-bank seed gaps for each
   year the range touches (decision 8 -- no file, unpublished, partial, or a
   seed file that fails validation); and each calendar job's last success,
@@ -129,6 +132,7 @@ from corollary.data.calendar_event import CalendarKind
 from corollary.data.calendar_finnhub import EARNINGS_WINDOW, IPO_WINDOW
 from corollary.data.calendar_releases import FRED_RELEASES_HORIZON_DAYS
 from corollary.data.econ_store import EconomicRelease, economic_releases_of
+from corollary.data.econ_values import NOT_READ_PREFIX
 from corollary.data.seeds import SeedError
 from corollary.data.seeds.calendar_seeds import MAX_DISPLAY_DECIMALS
 from corollary.db.models import CalendarEvent
@@ -326,7 +330,7 @@ class EconomicFields:
     value_note: str | None
 
 
-def economic_fields(release: EconomicRelease, now: datetime) -> EconomicFields:
+def economic_fields(release: EconomicRelease | None, now: datetime) -> EconomicFields:
     """One economic row's first print and R8 display state at ``now``. Pure.
 
     ``prior``/``actual`` come from the stored first print alone, rounded by
@@ -334,7 +338,19 @@ def economic_fields(release: EconomicRelease, now: datetime) -> EconomicFields:
     ``unit`` is :attr:`EconomicRelease.unit_label`: the unit the stored figure
     was computed in, else the seed's -- the same seed column, kept with the
     figure so a later seed edit cannot relabel a number already stored.
+
+    ``release`` is ``None`` for an economic row the join left out because its
+    calendar row cannot be joined to a release (``economic_releases_of``
+    logged why): ``unavailable``, with no figure, unit or guess.
     """
+    if release is None:
+        return EconomicFields(
+            prior=None,
+            actual=None,
+            unit=None,
+            value_state="unavailable",
+            value_note=f"{NOT_READ_PREFIX}: calendar_event",
+        )
     shown = release.display(now)
     prior: Decimal | None = None
     actual: Decimal | None = None
@@ -1018,7 +1034,7 @@ def read_calendar(
             events=[
                 event_item(event)
                 if event.kind is not CalendarKind.ECONOMIC
-                else event_item(event, economic_fields(releases[event.id], now))
+                else event_item(event, economic_fields(releases.get(event.id), now))
                 for event in day_events
             ],
         )

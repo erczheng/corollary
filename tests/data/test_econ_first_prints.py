@@ -497,6 +497,33 @@ async def test_a_release_with_an_unreadable_row_is_skipped_and_the_others_procee
 
 
 @pytest.mark.asyncio
+async def test_a_calendar_row_that_cannot_be_joined_no_longer_fails_the_run(
+    engine: Engine,
+) -> None:
+    """It used to raise out of the read and fail the run for every release."""
+    store_rows(engine, (10, CPI_DAY), (51, BOP_DAY))
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        try:
+            conn.execute(
+                text(
+                    "UPDATE calendar_event SET vendor_id = '10-2026-10-14' "
+                    "WHERE vendor_id = '10:2026-10-14'"
+                )
+            )
+            conn.commit()
+        finally:
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    source = FakeVintages({"CPIAUCSL": [CPI_WINDOW], "BOPGSTB": [BOP_WINDOW]})
+    run = await fill(engine, source, _et(date(2026, 11, 9), 10, 0))
+
+    assert [c[0] for c in source.calls] == ["BOPGSTB"]
+    assert {r.release_id: r.attempt.outcome for r in run.attempted} == {51: "figure"}
+    assert run.errors == ()
+
+
+@pytest.mark.asyncio
 async def test_a_stored_value_is_never_fetched_again_or_rewritten(engine: Engine) -> None:
     store_rows(engine, (10, CPI_DAY))
     source = FakeVintages({"CPIAUCSL": [CPI_WINDOW]})
