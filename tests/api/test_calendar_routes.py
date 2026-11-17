@@ -767,6 +767,55 @@ def test_one_unreadable_first_print_row_costs_its_release_and_never_the_calendar
     assert stored == raw
 
 
+def test_an_economic_calendar_row_that_cannot_be_joined_is_unavailable_and_never_the_range(
+    calendar: TestClient, db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed ``vendor_id`` used to raise out of the join and 500 the range."""
+    add_events(
+        db_engine,
+        econ_row(10, CPI_AT),
+        econ_row(50, CPI_AT, title="Employment Situation"),
+        earnings(),
+    )
+    store_value(db_engine, 50, CPI_DAY, actual="254.0000", prior="78.0000")
+    cpi_id = row_id(db_engine, "10:2026-10-14")
+    with db_engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        try:
+            conn.execute(
+                text("UPDATE calendar_event SET vendor_id = '10-2026-10-14' WHERE id = :id"),
+                {"id": cpi_id},
+            )
+            conn.commit()
+        finally:
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    with caplog.at_level(logging.ERROR, logger="corollary.data.econ_store"):
+        response = calendar.get("/api/calendar", params={"from": "2026-10-14", "to": "2026-10-15"})
+
+    assert response.status_code == 200, response.text
+    events = {e["title"]: e for e in all_events(response.json())}
+    assert len(events) == 3
+    cpi = events["Consumer Price Index"]
+    assert {key: cpi[key] for key in ("valueState", "valueNote", "prior", "actual", "unit")} == {
+        "valueState": "unavailable",
+        "valueNote": f"{NOT_READ_PREFIX}: calendar_event",
+        "prior": None,
+        "actual": None,
+        "unit": None,
+    }
+    assert cpi["consensus"] == "unavailable"
+    jobs = events["Employment Situation"]
+    assert (jobs["valueState"], jobs["prior"], jobs["actual"]) == ("filled", "78", "254")
+    assert events["NVDA earnings"]["valueState"] is None
+    (record,) = [
+        r for r in caplog.records if getattr(r, "event", None) == "econ_calendar_row_unreadable"
+    ]
+    assert record.__dict__["calendar_event_id"] == cpi_id
+    assert record.__dict__["at"] == NOW.isoformat()
+    assert record.__dict__["correlation_id"]
+
+
 def test_the_calendar_rows_own_prior_and_actual_are_never_read(
     calendar: TestClient, db_engine: Engine
 ) -> None:

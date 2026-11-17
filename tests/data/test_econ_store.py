@@ -379,25 +379,60 @@ def test_the_vendor_id_parses_back_to_what_the_producer_composed() -> None:
     assert parse_release_vendor_id(release_vendor_id(10, CPI_DAY)) == (10, CPI_DAY)
 
 
-def test_a_calendar_row_whose_vendor_id_names_another_day_is_refused(engine: Engine) -> None:
+@pytest.mark.parametrize(
+    ("column", "raw", "says"),
+    [
+        ("vendor_id", "10:2026-10-15", "names 2026-10-15"),  # another day than the row's
+        ("vendor_id", "10-2026-10-14", "malformed vendor_id"),
+        ("at", None, "no release instant"),
+    ],
+    ids=["another-day", "malformed", "no-instant"],
+)
+def test_a_calendar_row_that_cannot_be_joined_is_left_out_and_logged(
+    engine: Engine, caplog: pytest.LogCaptureFixture, column: str, raw: str | None, says: str
+) -> None:
+    """Never guessed, and never the whole read: the other releases read as usual."""
     with Session(engine) as sess:
-        upsert_events(
-            sess,
-            [
-                CalendarEventInput(
-                    kind=CalendarKind.ECONOMIC,
-                    source=CalendarSource.FRED,
-                    vendor_id="10:2026-10-15",
-                    title="Consumer Price Index",
-                    date=CPI_DAY,
-                    at=CPI_AT,
-                )
-            ],
-            now=REFRESHED,
-        )
-        sess.commit()
-        with pytest.raises(ValueError, match="10:2026-10-15"):
-            read_economic_releases(sess, *WINDOW, now=READ, seeds=SEEDS)
+        _refresh(sess)
+        cpi_id = _calendar_row(sess, 10, CPI_DAY).id
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        try:
+            conn.execute(
+                text(f"UPDATE calendar_event SET {column} = :raw WHERE id = :id"),
+                {"raw": raw, "id": cpi_id},
+            )
+            conn.commit()
+        finally:
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    with caplog.at_level(logging.ERROR, logger="corollary.data.econ_store"):
+        with Session(engine) as sess:
+            releases = read_economic_releases(
+                sess, *WINDOW, now=READ, correlation_id="cid-read", seeds=SEEDS
+            )
+
+    assert [(r.release_id, r.release_date) for r in releases] == [
+        (51, BOP_DAY),
+        (50, PAYEMS_DAY),
+    ]
+    (record,) = [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "econ_calendar_row_unreadable"
+    ]
+    assert record.__dict__["rule"]
+    assert says in record.__dict__["error"]
+    assert {
+        key: record.__dict__[key]
+        for key in ("table", "calendar_event_id", "error_type", "correlation_id", "at")
+    } == {
+        "table": "calendar_event",
+        "calendar_event_id": cpi_id,
+        "error_type": "ValueError",
+        "correlation_id": "cid-read",
+        "at": READ.isoformat(),
+    }
 
 
 # --------------------------------------------------------------------------

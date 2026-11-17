@@ -15,6 +15,9 @@ that on three substitutes: the check the 09:25 test makes rejects each one.
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
+import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -569,17 +572,18 @@ async def test_the_dates_refresh_leaves_a_value_the_job_stored_alone(engine: Eng
 
 
 @pytest.mark.asyncio
-async def test_known_limit_a_row_stored_after_the_jobs_last_run_waits_for_the_next_catch_up(
+async def test_a_row_the_refresh_stores_after_the_jobs_last_run_joins_its_plan_at_once(
     engine: Engine,
 ) -> None:
-    """U6e audit L2, documented rather than fixed: see ``econ_first_prints``'s module docstring.
+    """Handoff item D, closing U6e audit L2 -- pinned here as a known limit until now.
 
-    The plan learns of a row only when this job runs. Here the dates refresh
-    writes Wednesday's CPI just after the job's Tuesday 10:00 run read the
-    table, so Wednesday's 08:40 is not woken. What this pins is the bound:
-    nothing is lost -- Wednesday's 10:00 catch-up asks, and the release is
-    back on its own grid at 10:10. A fix (a scheduler that re-asks a
-    schedule mid-sleep) turns the first ``next_run`` into 08:40.
+    The dates refresh writes Wednesday's CPI just after the job's Tuesday
+    10:00 run read the table. The refresh adds the release to the plan the
+    job schedules from and flags the change, so the next wake is the
+    release's own first slot, Wednesday 08:40 -- not Wednesday's 10:00
+    catch-up, which is what this test asserted while the limit stood.
+    ``test_asleep_the_job_replans_when_the_refresh_stores_a_release`` is
+    the same through the real loop.
     """
     tuesday = date(2026, 11, 17)
     clock = Clock(_et(tuesday, 10, 0))
@@ -588,21 +592,143 @@ async def test_known_limit_a_row_stored_after_the_jobs_last_run_waits_for_the_ne
     econ, refresh = _shipped_pair(
         _services(lambda: Session(engine), vintages=vintages, releases=releases), clock
     )
+    assert econ.replan is _plan(econ).changed
 
     # 10:00 Tuesday, both slots: econ reads first and finds nothing...
     assert isinstance(await econ.run(), JobSkipped)
-    # ...then the refresh writes the row.
+    assert _plan(econ).pending == ()
+    assert not _plan(econ).changed.is_set()  # its own run never flags a change
+    # ...then the refresh writes the row, and tells the plan.
     assert await refresh.run() is None
     with Session(engine) as session:
         assert len(read_economic_releases(session, WED, WED, now=clock(), seeds=SEEDS)) == 1
 
-    # The limit: the plan does not hold it, so the next wake is the catch-up.
-    assert _plan(econ).pending == ()
-    assert econ.schedule.next_run(clock()) == _et(WED, 10, 0)
-
-    # The bound: that catch-up asks, and the grid resumes.
-    clock.now = _et(WED, 10, 0)
-    assert await econ.run() is None
-    assert vintages.calls == [("CPIAUCSL", WED, "monthly")]
     assert _plan(econ).pending == (_et(WED, 8, 30),)
-    assert econ.schedule.next_run(clock()) == _et(WED, 10, 10)
+    assert _plan(econ).changed.is_set()
+    assert econ.schedule.next_run(clock()) == _et(WED, 8, 40)
+    assert vintages.calls == []  # a plan, not a request
+
+    # A second refresh storing nothing new flags nothing.
+    _plan(econ).changed.clear()
+    assert await refresh.run() is None
+    assert not _plan(econ).changed.is_set()
+
+
+class GatedVintages(FakeVintages):
+    """:class:`FakeVintages` whose every request waits on :attr:`gate`.
+
+    Holds a first-prints run open between its table read and its plan
+    ``replace``, which is where the 10:00 refresh lands when both jobs fire.
+    """
+
+    def __init__(self, script: dict[str, Sequence[object]]) -> None:
+        super().__init__(script)
+        self.asking = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def vintage_window(
+        self, series_id: str, release_day: date, *, frequency: VintageFrequency
+    ) -> FredVintageWindow | FredRefusal:
+        self.asking.set()
+        await self.gate.wait()
+        return await super().vintage_window(series_id, release_day, frequency=frequency)
+
+
+@pytest.mark.asyncio
+async def test_a_release_stored_while_a_run_is_fetching_survives_that_runs_replace(
+    engine: Engine,
+) -> None:
+    """Rules audit of handoff item D: the shipped schedules fire both jobs at 10:00 ET.
+
+    The refresh stores Thursday's CPI after the first-prints run has read
+    the table and while it is fetching BOP's figure. The run's own answer,
+    taken before the store, must not erase Thursday: the plan keeps what was
+    added during the run. The next run, with nothing new, plans Thursday
+    08:40 and nothing else.
+    """
+    thursday = BOP_DAY + timedelta(days=1)
+    store_rows(engine, (51, BOP_DAY))
+    clock = Clock(_et(BOP_DAY, 10, 0))
+    vintages = GatedVintages({"BOPGSTB": [BOP_WINDOW]})
+    releases = FakeReleases(
+        [
+            FredReleaseDate(51, _release_name(51), BOP_DAY),
+            FredReleaseDate(10, _release_name(10), thursday),
+        ]
+    )
+    econ, refresh = _shipped_pair(
+        _services(lambda: Session(engine), vintages=vintages, releases=releases), clock
+    )
+
+    run = asyncio.ensure_future(econ.run())
+    # A hang guard, never a budget: the run reaches its FRED request in milliseconds.
+    await asyncio.wait_for(vintages.asking.wait(), timeout=120)
+    assert await refresh.run() is None  # the 10:00 refresh, mid-run
+    vintages.gate.set()
+    assert await run is None  # BOP's figure, stored
+
+    assert _et(thursday, 8, 30) in _plan(econ).pending
+    with Session(engine) as session:
+        assert read_value(session, 51, BOP_DAY) is not None
+
+    # The next run tidies the plan: BOP is filled, Thursday still to come.
+    clock.now = _et(BOP_DAY, 10, 10)
+    assert isinstance(await econ.run(), JobSkipped)
+    assert _plan(econ).pending == (_et(thursday, 8, 30),)
+    assert econ.schedule.next_run(clock()) == _et(thursday, 8, 40)
+    assert vintages.calls == [("BOPGSTB", BOP_DAY, "monthly")]
+
+
+@pytest.mark.asyncio
+async def test_with_no_fred_vintages_the_plan_is_emptied_not_grown(engine: Engine) -> None:
+    """Rules audit of handoff item D: a job that can fetch nothing has no grid to wake on."""
+    tuesday = date(2026, 11, 17)
+    clock = Clock(_et(tuesday, 10, 0))
+    releases = FakeReleases([FredReleaseDate(10, _release_name(10), WED)])
+    econ, refresh = _shipped_pair(
+        _services(lambda: Session(engine), vintages=None, releases=releases), clock
+    )
+    assert await refresh.run() is None
+    assert _plan(econ).pending == (_et(WED, 8, 30),)
+
+    assert isinstance(await econ.run(), JobSkipped)
+    assert _plan(econ).pending == ()
+    assert econ.schedule.next_run(clock()) == _et(WED, 10, 0)  # the catch-up alone
+
+
+@pytest.mark.asyncio
+async def test_asleep_the_job_replans_when_the_refresh_stores_a_release(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Through the real :class:`Scheduler` loop, the two shipped jobs together.
+
+    The refresh is moved to 10:30 ET, after the first-prints job's 10:00
+    run, so Wednesday's CPI is stored while that job sleeps toward
+    Wednesday's 10:00 catch-up. It wakes, re-asks its schedule, and makes
+    its first request at 08:40 Wednesday. Without the re-plan the first
+    request is at 10:00, after this run stops.
+    """
+    tuesday = date(2026, 11, 17)
+    clock = FakeClock(_et(tuesday, 9, 0), stop_at=_et(WED, 9, 0), wait_for_threads=True)
+    vintages = TimedVintages({"CPIAUCSL": [not_posted]}, clock)
+    releases = FakeReleases([FredReleaseDate(10, _release_name(10), WED)])
+    econ, refresh = _shipped_pair(
+        _services(lambda: Session(engine), vintages=vintages, releases=releases), clock
+    )
+    refresh = dataclasses.replace(
+        refresh, schedule=AtTime(time(10, 30), trading_days), catch_up=None
+    )
+    scheduler = Scheduler([econ, refresh], secrets=no_secrets, clock=clock, sleep=clock.sleep)
+
+    with caplog.at_level(logging.INFO, logger="corollary.engine.scheduler"):
+        await run_until_parked(scheduler, clock)
+
+    assert vintages.asked == [("CPIAUCSL", _et(WED, 8, 40))]
+    (replanned,) = [
+        r for r in caplog.records if getattr(r, "event", None) == "context_job_replanned"
+    ]
+    assert replanned.__dict__["job"] == ECON_FIRST_PRINTS_JOB
+    assert replanned.__dict__["was"] == _et(WED, 10, 0).isoformat()
+    assert replanned.__dict__["now_due"] == _et(WED, 8, 40).isoformat()
+    assert replanned.__dict__["at"] == _et(tuesday, 10, 30).isoformat()
+    assert scheduler.status()[ECON_FIRST_PRINTS_JOB].failures == 0

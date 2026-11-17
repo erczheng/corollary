@@ -46,38 +46,35 @@ that release's ``error`` attempt (scrubbed through
 the next. A ``ValueError`` out of ``first_print`` is a caller's bug (a
 frequency or series mismatch), logged at ERROR as one and recorded as an
 ``error`` -- never as ``not_posted``, ``no_value`` or ``refused``. The seed
-load and the calendar read are **not** per release: a refused seed
-(:class:`~corollary.data.seeds.SeedError`) or a corrupted calendar row fails
-the whole run, the way ``calendar_releases`` fails on a refused seed. A
-damaged first-print row (``econ_release_value`` or ``econ_release_fetch``)
-**is** one release's: the read logs it, and that release is skipped -- never
-fetched, never written over -- and reported in
-:attr:`FirstPrintsRun.unreadable`.
+load is **not** per release: a refused seed
+(:class:`~corollary.data.seeds.SeedError`) fails the whole run, the way
+``calendar_releases`` fails on a refused seed. A damaged row **is** one
+release's. A first-print row (``econ_release_value`` or
+``econ_release_fetch``) that cannot be read back is logged by the read, and
+that release is skipped -- never fetched, never written over -- and reported
+in :attr:`FirstPrintsRun.unreadable`. An economic calendar row that cannot be
+joined to a release is logged by the read and left out of it, so the run
+never sees it.
 
 **Budget.** One FRED request per attempt, through the provider's own
 ``api.stlouisfed.org`` limiter (120/min). No other request is made.
 
-**Known limit: the schedule learns of a new row only when this job runs**
-(U6e audit L2). The release-day wakes come from
-:attr:`FirstPrintsRun.pending`, which the scheduler's ``ReleaseAttemptPlan``
-takes from this job's own runs, and the scheduler sleeps toward the slot it
-was last given without asking again. A row ``calendar_releases`` stores
-*after* this job's last read is therefore not woken for until the job next
-runs for another reason -- in the worst case the next 10:00 catch-up. Two
-ways in: a first boot, where both start-up catch-ups run at once and this one
+**A row stored after this job's last run is woken for on its own release day**
+(handoff item D, closing what was U6e audit L2). The release-day wakes come
+from the scheduler's ``ReleaseAttemptPlan``: this job's own runs replace it
+with :attr:`FirstPrintsRun.pending`, and ``calendar_releases`` adds the
+release instants it stores. An addition sets the plan's ``changed`` event,
+which this job's task races against its sleep (``ScheduledJob.replan``) and
+answers by asking its schedule again, taking the new slot only if it is
+earlier. The two cases that used to wait for the next 10:00 catch-up now do
+not: a first boot, where both start-up catch-ups run at once and this one
 reads the table before the refresh has written it (a boot at 07:00 on a CPI
-day first asks at 10:00, not 08:40); and a reschedule that the 10:00 refresh
-writes just after this job's 10:00 run read the table (the next trading day's
-release is then first asked at that day's 10:00). **Nothing is lost**: the due
-rule is evaluated against the stored attempts at every run, so the catch-up
-asks for the release and its release-day grid resumes from there
-(``test_known_limit_a_row_stored_after_the_jobs_last_run_waits_for_the_next_catch_up``
-pins that bound). What is lost is the early release-day attempts before that
-catch-up. Refreshing the plan from ``calendar_releases`` would not close it on
-its own, because the sleeping job would not re-read the plan; the fix is a
-scheduler loop that re-asks a schedule when it signals a change, raced
-against the sleep the way a cash-session wake is. That change is to the loop
-every job shares, so it is deferred, not made here.
+day now asks at 08:40); and a reschedule that the 10:00 refresh writes just
+after this job's 10:00 run read the table.
+``test_asleep_the_job_replans_when_the_refresh_stores_a_release`` pins it
+through the real loop. Nothing was ever lost -- the due rule is evaluated
+against the stored attempts at every run -- only the early release-day
+attempts before that catch-up, which this restores.
 """
 
 from __future__ import annotations
@@ -490,13 +487,13 @@ async def fill_first_prints(
     """Attempt every stored economic release that is due at ``clock()``, one at a time.
 
     Each attempt is its own transaction and its own failure; see the module
-    docstring. Raises only for what is not one release's: the calendar read
-    (a corrupted economic *calendar* row raises ``ValueError`` there, by
-    design). A damaged ``econ_release_value`` or ``econ_release_fetch`` row
-    is one release's: the read logs it, and that release is skipped -- no
-    request is made for it, because ``store_first_print`` and
-    ``record_attempt`` both read the damaged row first and would fail on it
-    every run -- while every other release proceeds.
+    docstring. Raises only for what is not one release's. A damaged
+    ``econ_release_value`` or ``econ_release_fetch`` row is one release's:
+    the read logs it, and that release is skipped -- no request is made for
+    it, because ``store_first_print`` and ``record_attempt`` both read the
+    damaged row first and would fail on it every run -- while every other
+    release proceeds. An economic calendar row that cannot be joined to a
+    release is left out by the read itself, and logged there.
     """
     now = _utc(clock(), "clock()")
     # The run's read and what it skips share one id; each attempt mints its own.
