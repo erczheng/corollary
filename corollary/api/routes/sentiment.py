@@ -151,7 +151,9 @@ from corollary.data.news.audit_runner import (
     ABANDONED_RUN_AFTER,
     AuditAlreadyRunning,
     AuditRunResult,
+    OnOpened,
     WatchUniverseUnavailable,
+    WorkerAbandoned,
 )
 from corollary.db.models import (
     SENTIMENT_SOURCES,
@@ -553,15 +555,80 @@ def _refuse(
 _START_REFUSALS: Final = (AuditAlreadyRunning, SentimentAuditUnavailable, WatchUniverseUnavailable)
 
 
-def _log_outcome(correlation_id: str, task: "asyncio.Task[AuditRunResult]") -> None:
+def _start_manual_run(
+    services: ContextServices, on_opened: OnOpened, correlation_id: str
+) -> "asyncio.Task[AuditRunResult]":
+    """The manual run's task, its end logged by :func:`_log_outcome`.
+
+    A run abandoned at shutdown (owner decision Q26) ends cancelled like
+    any other, so the task cannot tell :func:`_log_outcome` which it was;
+    this notes the runner's :class:`WorkerAbandoned` as it passes instead.
+    """
+    abandoned: list[WorkerAbandoned] = []
+    #: A plain cancellation's message: shutdown's second cancel landing in the
+    #: failure write (audit L1) carries its correlation id in it.
+    cancels: list[str | None] = []
+
+    async def run() -> AuditRunResult:
+        try:
+            return await run_sentiment_audit_now(services, trigger="manual", on_opened=on_opened)
+        except WorkerAbandoned as exc:
+            abandoned.append(exc)
+            raise
+        except asyncio.CancelledError as exc:
+            cancels.append(str(exc) or None)
+            raise
+
+    task = asyncio.create_task(run(), name="sentiment_audit_manual")
+    task.add_done_callback(
+        lambda done: _log_outcome(correlation_id, abandoned, done, cancels=cancels)
+    )
+    return task
+
+
+def _log_outcome(
+    correlation_id: str,
+    abandoned: "list[WorkerAbandoned]",
+    task: "asyncio.Task[AuditRunResult]",
+    *,
+    cancels: "list[str | None] | None" = None,
+) -> None:
     """The background run's end, whichever way it went. Retrieves the exception,
     so asyncio never reports one as never retrieved."""
     if task.cancelled():
+        if abandoned:
+            (stopped,) = abandoned
+            logger.warning(
+                "manual sentiment audit run cancelled (shutdown) and abandoned in step "
+                "%s: nothing more was written for it, so its row is as that step leaves "
+                "it -- running until a later run closes it past ABANDONED_RUN_AFTER, "
+                "succeeded if the step was the close, or failed if it was the failure write",
+                stopped.step,
+                extra={
+                    "event": "sentiment_audit_manual_cancelled",
+                    "rule": "owner decision Q26: shutdown's second cancel abandons the run",
+                    "abandoned": True,
+                    "step": stopped.step,
+                    "cancel_message": stopped.cancel_message,
+                    "correlation_id": correlation_id,
+                    "at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return
         logger.warning(
-            "manual sentiment audit run cancelled (shutdown); the runner closes "
-            "its row failed on the cancel, and only a row whose commit it never "
-            "saw is left for a later run to close as abandoned",
-            extra={"event": "sentiment_audit_manual_cancelled", "correlation_id": correlation_id},
+            "manual sentiment audit run cancelled (shutdown); the runner closed its row "
+            "failed on the cancel -- shutdown's second cancel included, if it landed in "
+            "that failure write -- and only a row whose commit it never saw is left for "
+            "a later run to close as abandoned",
+            extra={
+                "event": "sentiment_audit_manual_cancelled",
+                "rule": "a cancelled run is recorded failed by the runner",
+                "abandoned": False,
+                "step": None,
+                "cancel_message": cancels[-1] if cancels else None,
+                "correlation_id": correlation_id,
+                "at": datetime.now(timezone.utc).isoformat(),
+            },
         )
         return
     exc = task.exception()
@@ -683,12 +750,8 @@ async def start_sentiment_audit(
         if not opened.done():
             opened.set_result(run_id)
 
-    task = asyncio.create_task(
-        run_sentiment_audit_now(services, trigger="manual", on_opened=on_opened),
-        name="sentiment_audit_manual",
-    )
+    task = _start_manual_run(services, on_opened, correlation_id)
     state.sentiment_audit_task = task
-    task.add_done_callback(lambda done: _log_outcome(correlation_id, done))
     waiters: list[asyncio.Future[Any]] = [task, opened]
     await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
 

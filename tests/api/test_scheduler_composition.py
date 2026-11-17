@@ -15,12 +15,14 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from corollary.api.app import create_app
 from corollary.api.deps import ServiceRegistry
-from corollary.db.models import ENGINE_STATE_ID, EngineState
+from corollary.data.news.audit_runner import run_sentiment_audit
+from corollary.db.models import ENGINE_STATE_ID, AuditRun, EngineState
+from corollary.engine import scheduler as scheduler_module
 from corollary.engine.runtime import EngineRuntime
 from corollary.engine.scheduler import (
     ContextServices,
@@ -31,6 +33,8 @@ from corollary.engine.scheduler import (
     no_scheduler,
 )
 from tests.api.scheduler_drive import await_ready, drive_until_parked
+from tests.data.news.test_audit_runner import _deps as audit_deps
+from tests.data.news.test_audit_runner import hold_worker_step
 from tests.engine.test_scheduler import (
     HALF_DAY_CLOSE,
     HALF_DAY_OPEN,
@@ -252,6 +256,78 @@ async def test_the_manual_audit_reaches_the_services_the_scheduler_was_built_on(
         app.state.sentiment_audit_task = manual
     assert app.state.context_services is None
     assert manual.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_a_held_manual_audit_again_once_its_grace_has_passed(
+    registry: ServiceRegistry,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Owner decision Q26 (iii): the lifespan bounds a manual run's wait too.
+
+    A manual run held inside a worker step ignores shutdown's first cancel.
+    Past ``AUDIT_SHUTDOWN_GRACE`` the lifespan cancels it again and logs it,
+    and the rest of shutdown runs -- the registry, closed last, says so --
+    with the step still held. The run's row stays ``running``.
+    """
+    grace = 0.5
+    monkeypatch.setattr(scheduler_module, "AUDIT_SHUTDOWN_GRACE", grace)
+    entered, release, finished = hold_worker_step(monkeypatch, "_first_plan")
+    closed: list[str] = []
+    original_registry_aclose = registry.aclose
+
+    async def registry_aclose() -> None:
+        closed.append("registry")
+        await original_registry_aclose()
+
+    monkeypatch.setattr(registry, "aclose", registry_aclose)
+
+    def jobless(services: ContextServices, secrets: Callable[[], Sequence[str]]) -> Scheduler:
+        return Scheduler([], secrets=secrets)
+
+    app = create_app(registry=registry, db_engine=db_engine, scheduler=jobless)
+    lifespan = app.router.lifespan_context(app)
+    try:
+        with caplog.at_level(logging.INFO):
+            await lifespan.__aenter__()
+            manual = asyncio.create_task(
+                run_sentiment_audit(audit_deps(db_engine), trigger="manual"),
+                name="sentiment_audit_manual",
+            )
+            app.state.sentiment_audit_task = manual
+            assert await asyncio.to_thread(entered.wait, 30)
+            loop = asyncio.get_running_loop()
+            began = loop.time()
+            # A hang guard on the bounded wait, never a budget for a run.
+            await asyncio.wait_for(lifespan.__aexit__(None, None, None), timeout=grace + 10.0)
+            elapsed = loop.time() - began
+            assert not finished.is_set()  # shut down with the step still held
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 30)
+
+    assert grace - 0.1 <= elapsed < grace + 10.0
+    assert manual.cancelled()
+    assert closed == ["registry"]
+    (expired,) = [
+        r for r in caplog.records
+        if getattr(r, "event", None) == "sentiment_audit_shutdown_grace_expired"
+    ]
+    assert getattr(expired, "job") == "sentiment_audit_manual"
+    assert getattr(expired, "grace_seconds") == grace
+    (abandoned,) = [
+        r for r in caplog.records
+        if getattr(r, "event", None) == "sentiment_audit_run_abandoned"
+    ]
+    assert getattr(abandoned, "trigger") == "manual"
+    assert getattr(expired, "correlation_id") in getattr(abandoned, "cancel_message")
+    with Session(db_engine) as session:
+        (run,) = session.scalars(select(AuditRun)).all()
+        assert (run.id, run.status, run.finished_at) == (
+            getattr(abandoned, "audit_run_id"), "running", None
+        )
 
 
 @pytest.mark.asyncio

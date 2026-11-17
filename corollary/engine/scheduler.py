@@ -318,6 +318,7 @@ __all__ = [
     "AlpacaContextSource",
     "AtTime",
     "CatchUpGate",
+    "AUDIT_SHUTDOWN_GRACE",
     "CONTEXT_SESSIONS_DRAIN_TIMEOUT",
     "ContextServices",
     "ContextSessions",
@@ -344,6 +345,7 @@ __all__ = [
     "SpdrSnapshotAborted",
     "TwoRate",
     "WatchTierCadence",
+    "await_cancelled_audit",
     "build_context_scheduler",
     "context_jobs",
     "every_day",
@@ -850,6 +852,12 @@ class ScheduledJob:
     #: without this job, leaves it as created -- set -- and blocks nobody.
     #: ``None`` for every other job.
     catch_up_settled: CatchUpGate | None = None
+    #: Seconds :meth:`Scheduler.aclose` waits for this job's task after its
+    #: first cancel before cancelling it again (:func:`await_cancelled_audit`).
+    #: Only the ``sentiment_audit`` job sets it, to :data:`AUDIT_SHUTDOWN_GRACE`
+    #: -- owner decision Q26, option (iii). ``None`` -- every other job --
+    #: is cancelled once and awaited with no bound, as before Q26.
+    shutdown_grace: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -982,6 +990,101 @@ class JobWake:
 
 
 # --------------------------------------------------------------------------
+# Shutdown's bound on the sentiment audit (owner decision Q26)
+# --------------------------------------------------------------------------
+
+#: How long shutdown waits for a cancelled sentiment audit -- the
+#: ``sentiment_audit`` job's task, or a manual run's -- before it cancels it a
+#: second time (owner decision Q26, option iii). On the first cancel the
+#: runner waits for its worker thread to finish the step in flight and then
+#: records the run ``failed``. Every such step is one SQLite transaction
+#: (vendor requests are awaited on the loop and stop at once), and a
+#: contended lock fails after ``SQLITE_BUSY_TIMEOUT_MS`` (5 s), so a step
+#: plus its failure write takes about 10 s at the worst that is not a fault.
+#: 20 s is twice that. It also fits the unattended runners: they kill the
+#: server ``STOP_GRACE`` (60 s) after asking it to stop, and the rest of the
+#: lifespan's shutdown after this wait is bounded at about 15 s -- the
+#: context-session drain (:data:`CONTEXT_SESSIONS_DRAIN_TIMEOUT`, 10 s) and
+#: the Discord sink's grace (``DISCORD_SHUTDOWN_GRACE_SECONDS``, 5 s) -- which
+#: leaves about 25 s of margin. At most one audit holds the run lock, so
+#: shutdown spends this wait once, not once for the job and again for a
+#: manual run.
+AUDIT_SHUTDOWN_GRACE: Final = 20.0
+
+
+async def await_cancelled_audit(
+    task: "asyncio.Task[object]", *, job: str, grace: float | None = None
+) -> None:
+    """Wait for a sentiment audit task its caller has cancelled once (Q26).
+
+    Waits up to ``grace`` (default :data:`AUDIT_SHUTDOWN_GRACE`). If the
+    task is still running then -- its worker thread is still inside a step
+    -- this logs the rule, the job, how long it waited and the timestamp
+    with a correlation id, and cancels the task a second time with that id
+    as the message. The runner's ``_on_worker`` honours a second cancel at
+    once: it stops waiting for the thread and writes nothing more, so the
+    run's row stays ``running`` until a later run closes it past
+    ``ABANDONED_RUN_AFTER`` -- or, if the abandoned step was the close and
+    still commits, ends ``succeeded`` (the runner's ``_log_abandoned``). The
+    thread itself runs on until its step ends.
+
+    Then waits for the task to end, with no further bound. Usually that is
+    one task step. **But** if the held step ended just before the grace ran
+    out, the run is already recording its failure, and the second cancel
+    lands in that write's wait (the runner's ``_record_failure``), which
+    treats it as a first and waits for its thread. Then the row is closed
+    ``failed`` by the runner's own write, and this waits for that one write:
+    a single UPDATE, bounded in practice by the SQLite busy timeout
+    (``SQLITE_BUSY_TIMEOUT_MS``, 5 s), not by the grace. No third cancel is
+    sent -- the owner's ruling on the Q26 audit (L1). Never raises the
+    task's own outcome. A cancellation of this coroutine cancels the task
+    too, as ``asyncio.gather`` would, and propagates.
+
+    Used for the ``sentiment_audit`` job (:meth:`Scheduler.aclose`, through
+    :attr:`ScheduledJob.shutdown_grace`) and for the lifespan's manual run.
+    It is **not** for any other job: the owner chose (iii), bounding only
+    these two, over (ii), bounding every job.
+    """
+    bound = AUDIT_SHUTDOWN_GRACE if grace is None else grace
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    try:
+        await asyncio.wait({task}, timeout=bound)
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if not task.done():
+        correlation_id = uuid.uuid4().hex
+        waited = loop.time() - began
+        logger.error(
+            "a sentiment audit was still running %.1f s after shutdown cancelled it; "
+            "cancelling it again, so it stops waiting for its worker thread -- unless "
+            "it is already recording its failure, which is then waited for",
+            waited,
+            extra={
+                "event": "sentiment_audit_shutdown_grace_expired",
+                "rule": (
+                    "owner decision Q26: shutdown waits at most AUDIT_SHUTDOWN_GRACE "
+                    "for a cancelled sentiment audit, then cancels it again. If that "
+                    "lands in a step's wait, the run is abandoned and its row is left "
+                    "as the step leaves it, running until a later run closes it past "
+                    "ABANDONED_RUN_AFTER (sentiment_audit_run_abandoned). If it lands "
+                    "in the run's own failure write, the row is closed failed by that "
+                    "write and shutdown waits for it, bounded in practice by the SQLite "
+                    "busy timeout"
+                ),
+                "job": job,
+                "grace_seconds": bound,
+                "waited_seconds": round(waited, 3),
+                "at": _utc_now().isoformat(),
+                "correlation_id": correlation_id,
+            },
+        )
+        task.cancel(f"shutdown grace expired; correlation_id {correlation_id}")
+    await asyncio.gather(task, return_exceptions=True)
+
+
+# --------------------------------------------------------------------------
 # The scheduler
 # --------------------------------------------------------------------------
 
@@ -1080,16 +1183,34 @@ class Scheduler:
         exception is suppressed here. It is not silent: :meth:`_task_ended`
         logged it at the moment it died. A cancellation of ``aclose`` itself
         still propagates.
+
+        Every task is cancelled once and awaited with no bound, **except** a
+        job with a :attr:`ScheduledJob.shutdown_grace` -- only the
+        ``sentiment_audit`` job (owner decision Q26, option iii). Its task
+        is cancelled a second time if it is still running that long after
+        the first (:func:`await_cancelled_audit`), so its worker thread's
+        step cannot hold the rest of shutdown.
         """
+        # start() made one task per job, in job order.
+        jobs = dict(zip(self._tasks, self._jobs))
         tasks = list(self._tasks)
         if self._warm_task is not None:
             tasks.append(self._warm_task)
         self._tasks, self._warm_task = [], None
         for task in tasks:
             task.cancel()
+        waits: list[Awaitable[object]] = []
+        for task in tasks:
+            job = jobs.get(task)
+            if job is not None and job.shutdown_grace is not None:
+                waits.append(
+                    await_cancelled_audit(task, job=job.name, grace=job.shutdown_grace)
+                )
+            else:
+                waits.append(task)
         # return_exceptions: every outcome -- cancelled, died, returned --
         # comes back as a value rather than being raised here.
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*waits, return_exceptions=True)
 
     def _task_ended(self, task: "asyncio.Task[None]") -> None:
         """Say so, at once, when a job's task ends in anything but a cancellation.
@@ -3449,6 +3570,7 @@ def _sentiment_audit_job(
         run=functools.partial(_sentiment_audit, services, clock),
         catch_up=functools.partial(_sentiment_audit_catch_up, services, clock, sleep),
         catch_up_settled=services.audit_catch_up_settled,
+        shutdown_grace=AUDIT_SHUTDOWN_GRACE,
         rule=(
             "the sentiment self-audit (decisions 12-13): grades matured labels on "
             "SIP minute bars, stores each source's accuracy and applies the "
