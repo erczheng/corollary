@@ -91,6 +91,12 @@ the process started: anchored to the start, every save would push the first
 run a full interval out, and a developer saving more often than the interval
 would starve the job for the whole session.
 
+A job asleep toward its next slot can be told its schedule changed
+(:attr:`ScheduledJob.replan`). It asks the schedule again and moves only to
+an **earlier** slot, never a later one, and runs nothing at that moment: a
+planned slot is never delayed or skipped. Only ``econ_first_prints`` has one
+-- the dates refresh adding a release to its plan (handoff item D).
+
 A run that fetched nothing is *skipped*, not a success
 ------------------------------------------------------
 
@@ -699,21 +705,61 @@ class ReleaseAttemptPlan:
     by the schedule on the same event loop. The body's start-up catch-up runs
     before the schedule is first asked, so the plan is populated by then.
 
-    Only this job's runs refresh it, so a row ``calendar_releases`` stores
-    after the last run waits for the next one, at worst the 10:00 catch-up.
-    That is a known limit, documented in
-    :mod:`corollary.data.econ_first_prints` (*Known limit*).
+    **Added to by the dates refresh, which says so** (handoff item D, closing
+    U6e audit L2). ``calendar_releases`` shares the plan and passes the
+    release instants it stores to :meth:`add`; a new one sets :attr:`changed`, which
+    the job's own task races against its sleep (``ScheduledJob.replan``) and
+    answers by re-asking the schedule. So a row stored after the job's last
+    run is woken for on its own release-day grid, not at the next 10:00
+    catch-up. :meth:`replace` -- the job's own run -- does not set it: the
+    loop asks the schedule afresh after every run anyway.
+
+    **An addition during a run survives that run's** :meth:`replace`. The
+    body calls :meth:`begin` before it reads the table, and ``replace`` keeps
+    every instant :meth:`add` brought since. Both jobs fire at 10:00 ET, so
+    the refresh storing a release while the first-prints run is between its
+    read and its ``replace`` is the ordinary case, not a corner: without
+    this the run's snapshot, taken before the store, would erase the
+    addition, and the loop would clear the flag and plan without it.
+
+    An instant added for a release that is already filled, or withdrawn by
+    the refresh, costs at most one wake that makes no request: the body
+    decides per release, from the stored rows, and its next run replaces
+    the plan without it.
     """
 
     def __init__(self) -> None:
         self._pending: tuple[datetime, ...] = ()
+        #: Set by :meth:`add` when the plan gains an instant. Cleared by the
+        #: job's task each time it asks the schedule.
+        self.changed = asyncio.Event()
+        #: What :meth:`add` brought since :meth:`begin`; ``None`` outside a run.
+        self._added_in_run: set[datetime] | None = None
 
     @property
     def pending(self) -> tuple[datetime, ...]:
         return self._pending
 
+    def begin(self) -> None:
+        """A run is about to read the table: its :meth:`replace` keeps what :meth:`add` brings."""
+        self._added_in_run = set()
+
     def replace(self, pending: Iterable[datetime]) -> None:
-        self._pending = tuple(sorted(_require_utc(moment) for moment in pending))
+        """The run's own answer, plus every instant :meth:`add` brought since :meth:`begin`."""
+        kept = self._added_in_run or set()
+        self._added_in_run = None
+        self._pending = tuple(sorted({*(_require_utc(moment) for moment in pending), *kept}))
+
+    def add(self, instants: Iterable[datetime]) -> None:
+        """Merge ``instants`` in; set :attr:`changed` if any was not already planned."""
+        incoming = {_require_utc(moment) for moment in instants}
+        if self._added_in_run is not None:
+            self._added_in_run |= incoming
+        planned = frozenset(self._pending)
+        merged = planned | incoming
+        if merged != planned:
+            self._pending = tuple(sorted(merged))
+            self.changed.set()
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -850,6 +896,15 @@ class ScheduledJob:
     #: without this job, leaves it as created -- set -- and blocks nobody.
     #: ``None`` for every other job.
     catch_up_settled: CatchUpGate | None = None
+    #: Set when :attr:`schedule`'s answer may have moved **earlier** while
+    #: the job sleeps -- ``econ_first_prints``'s plan gaining a release the
+    #: dates refresh stored (handoff item D). The job's own task races it
+    #: against its sleep, as it races a wake, and answers by asking the
+    #: schedule again: an earlier slot replaces the one it was sleeping
+    #: toward, a later or equal one changes nothing, and nothing runs early.
+    #: The task clears it each time it asks the schedule. ``None`` for every
+    #: other job.
+    replan: asyncio.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1208,33 +1263,77 @@ class Scheduler:
                 return
             await self._sleep(min(remaining, _MAX_SLEEP_SECONDS))
 
-    async def _sleep_until_due_or_woken(self, due: datetime, wake: asyncio.Event) -> bool:
-        """Sleep until ``due`` or a wake. ``True`` for a wake, ``False`` for due.
+    async def _sleep_until_due_or_signalled(
+        self, due: datetime, signals: Sequence[asyncio.Event]
+    ) -> asyncio.Event | None:
+        """Sleep until ``due`` or a signal: the first signal found set, ``None`` for due.
 
+        The signals are a job's wake and its replan, in that order.
         **Due wins a tie**: a slot that has arrived runs as scheduled even if
-        a wake is also pending, and that run clears the wake. Each step races
-        one injected sleep against the event and cancels the loser, so the
-        job stays on its one task and a wake can only shorten a sleep. A
-        sleeper that raises still ends the task, as :meth:`_sleep_until`'s
-        would.
+        a signal is also pending, and that run clears the wake. Each step
+        races one injected sleep against the events and cancels the losers,
+        so the job stays on its one task and a signal can only shorten a
+        sleep. A sleeper that raises still ends the task, as
+        :meth:`_sleep_until`'s would.
         """
         while True:
             remaining = (due - self._now()).total_seconds()
             if remaining <= 0:
-                return False
-            if wake.is_set():
-                return True
+                return None
+            for signal in signals:
+                if signal.is_set():
+                    return signal
             sleeper = asyncio.ensure_future(self._sleep(min(remaining, _MAX_SLEEP_SECONDS)))
-            waiter = asyncio.ensure_future(wake.wait())
+            waiters = [asyncio.ensure_future(signal.wait()) for signal in signals]
             try:
-                await asyncio.wait({sleeper, waiter}, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait({sleeper, *waiters}, return_when=asyncio.FIRST_COMPLETED)
             finally:
-                for pending in (sleeper, waiter):
+                for pending in (sleeper, *waiters):
                     if not pending.done():
                         pending.cancel()
-                await asyncio.gather(sleeper, waiter, return_exceptions=True)
+                await asyncio.gather(sleeper, *waiters, return_exceptions=True)
             if not sleeper.cancelled():
                 sleeper.result()  # re-raise a broken sleeper's exception
+
+    def _replanned(self, job: ScheduledJob, upcoming: datetime) -> datetime:
+        """``upcoming``, or the schedule's fresh answer if that is **earlier**.
+
+        Asked on the job's own task when its :attr:`ScheduledJob.replan` is
+        set. Never later: the slot already planned stays a slot, so a
+        re-plan can only bring a run forward, never skip or delay one. A
+        schedule that cannot answer keeps ``upcoming`` and says so -- the
+        next scheduled run asks it again in the ordinary way.
+        """
+        now = self._now()
+        try:
+            fresh = job.schedule.next_run(now)
+        except Exception as exc:
+            logger.warning(
+                "a context job's schedule could not be re-asked after a change; "
+                "it keeps the slot it had",
+                extra={
+                    "event": "context_job_replan_failed",
+                    "job": job.name,
+                    "kept": upcoming.isoformat(),
+                    "error_type": type(exc).__name__,
+                    "detail": _describe_exception(exc, self._safe_secrets()),
+                    "at": now.isoformat(),
+                },
+            )
+            return upcoming
+        if fresh is None or fresh >= upcoming:
+            return upcoming
+        logger.info(
+            "a context job's schedule changed while it slept; it wakes earlier",
+            extra={
+                "event": "context_job_replanned",
+                "job": job.name,
+                "was": upcoming.isoformat(),
+                "now_due": fresh.isoformat(),
+                "at": now.isoformat(),
+            },
+        )
+        return fresh
 
     async def _run_woken(self, job: ScheduledJob, record: _JobRecord, wake: asyncio.Event) -> None:
         """One woken run on the job's own task, or a logged refusal under the cap.
@@ -1342,6 +1441,11 @@ class Scheduler:
         if job.catch_up is not None:
             await self._run_catch_up(job, job.catch_up, record)
         while True:
+            # Cleared *before* the schedule is asked, never after: a change
+            # landing between the two is then either in this answer or still
+            # set for the sleep below -- never lost.
+            if job.replan is not None:
+                job.replan.clear()
             try:
                 upcoming = (
                     job.schedule.next_run(self._now())
@@ -1371,17 +1475,28 @@ class Scheduler:
                 )
                 return
             wake = self._wakes.get(job.name)
-            if wake is None:
+            signals = tuple(signal for signal in (wake, job.replan) if signal is not None)
+            if not signals:
                 await self._sleep_until(upcoming)
             else:
                 # A woken run happens between slots and never moves the slot:
                 # after one, the job sleeps toward the same ``upcoming`` again
-                # -- and runs it at once if the woken run overran it.
-                while await self._sleep_until_due_or_woken(upcoming, wake):
-                    await self._run_woken(job, record, wake)
-                # The scheduled run reads the same Cash view a woken run
-                # would, so it serves any wake still pending.
-                wake.clear()
+                # -- and runs it at once if the woken run overran it. A replan
+                # runs nothing: it re-asks the schedule, and may only bring
+                # ``upcoming`` forward (``_replanned``).
+                while (
+                    fired := await self._sleep_until_due_or_signalled(upcoming, signals)
+                ) is not None:
+                    if wake is not None and fired is wake:
+                        await self._run_woken(job, record, wake)
+                    else:
+                        fired.clear()
+                        upcoming = self._replanned(job, upcoming)
+                        record.next_run = upcoming
+                if wake is not None:
+                    # The scheduled run reads the same Cash view a woken run
+                    # would, so it serves any wake still pending.
+                    wake.clear()
             due = upcoming
             started = self._now()
             record.last_started = started
@@ -4097,12 +4212,20 @@ async def _calendar_dividends(
     return None
 
 
-async def _calendar_releases(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
+async def _calendar_releases(
+    services: ContextServices, clock: UtcClock, plan: ReleaseAttemptPlan | None = None
+) -> JobSkipped | None:
     """FRED's release dates, ``FRED_RELEASES_HORIZON_DAYS`` ahead, at the committed table's ET times (Q3).
 
     ``ReleasesNotFetched`` -- no key, or nothing FRED listed is a timed
     release -- is a skip and withdraws nothing. The times table is read on a
     worker thread, so the fetcher does not read the file on the loop.
+
+    Once the rows are stored, their release instants go to ``plan``, the one
+    ``econ_first_prints`` schedules from, so a release stored after that
+    job's last run is woken for on its own release day (handoff item D;
+    :class:`ReleaseAttemptPlan`). Only after the write: an instant for a row
+    that was never stored would wake the job for nothing.
     """
     now = _require_utc(clock())
     today = _et_date(now)
@@ -4127,6 +4250,8 @@ async def _calendar_releases(services: ContextServices, clock: UtcClock) -> JobS
         now=now,
         gaps=_row_gaps(len(outcome.skipped)),
     )
+    if plan is not None:
+        plan.add(event.at for event in outcome.events if event.at is not None)
     return None
 
 
@@ -4304,9 +4429,17 @@ async def _calendar_catch_up(
 
 
 def _calendar_jobs(
-    services: ContextServices, universe: UniverseSource, clock: UtcClock
+    services: ContextServices,
+    universe: UniverseSource,
+    clock: UtcClock,
+    plan: ReleaseAttemptPlan | None = None,
 ) -> list[ScheduledJob]:
-    """The five calendar jobs. ``universe`` is the news jobs' watch-universe build."""
+    """The five calendar jobs. ``universe`` is the news jobs' watch-universe build.
+
+    ``plan`` is ``econ_first_prints``'s, which ``calendar_releases`` adds the
+    releases it stores to (:class:`ReleaseAttemptPlan`); ``None`` only where
+    the job set is built without that job.
+    """
 
     def catch_up(
         run: JobBody,
@@ -4337,7 +4470,7 @@ def _calendar_jobs(
     dividends_woken: JobBody = functools.partial(
         _calendar_dividends, services, universe, clock, cash_only=True
     )
-    releases: JobBody = functools.partial(_calendar_releases, services, clock)
+    releases: JobBody = functools.partial(_calendar_releases, services, clock, plan)
     central_banks: JobBody = functools.partial(_calendar_central_banks, services, clock)
     return [
         ScheduledJob(
@@ -4465,11 +4598,17 @@ async def _econ_first_prints(
     fails the run, as ``calendar_releases`` does; it is **not** caught here --
     and :func:`~corollary.data.econ_first_prints.fill_first_prints` attempts
     each due release in its own transaction. The plan is replaced with what
-    is still pending, so the schedule wakes for the next release-day slot.
+    is still pending, so the schedule wakes for the next release-day slot --
+    keeping whatever ``calendar_releases`` added while this run was reading
+    and fetching (:meth:`ReleaseAttemptPlan.begin`). With no source the plan
+    is emptied: a job that can fetch nothing has no release-day grid to wake
+    on, and the refresh's additions must not pile up behind it.
     """
     source = services.fred_vintages
     if source is None:
+        plan.replace(())
         return JobSkipped(_NO_FRED_VINTAGES)
+    plan.begin()
     seeds = await asyncio.to_thread(load_econ_release_seeds)
     run = await fill_first_prints(source, services.session_factory, seeds, clock=clock)
     plan.replace(run.pending)
@@ -4484,14 +4623,22 @@ async def _econ_first_prints(
     return None
 
 
-def _econ_first_prints_job(services: ContextServices, clock: UtcClock) -> ScheduledJob:
-    """``econ_first_prints``: its schedule and body share one :class:`ReleaseAttemptPlan`."""
-    plan = ReleaseAttemptPlan()
+def _econ_first_prints_job(
+    services: ContextServices, clock: UtcClock, plan: ReleaseAttemptPlan | None = None
+) -> ScheduledJob:
+    """``econ_first_prints``: its schedule and body share one :class:`ReleaseAttemptPlan`.
+
+    So does ``calendar_releases``, when :func:`context_jobs` hands both the
+    same plan; its :attr:`~ReleaseAttemptPlan.changed` is this job's
+    :attr:`~ScheduledJob.replan`, so a release stored mid-sleep re-plans it.
+    """
+    plan = ReleaseAttemptPlan() if plan is None else plan
     body: JobBody = functools.partial(_econ_first_prints, services, clock, plan)
     return ScheduledJob(
         name=ECON_FIRST_PRINTS_JOB,
         schedule=EconFirstPrintCadence(plan),
         run=body,
+        replan=plan.changed,
         # The same body: it decides from the stored attempts what is due, so a
         # restart fetches a slot it missed and nothing it already tried.
         catch_up=body,
@@ -4520,7 +4667,12 @@ def context_jobs(
     so a catch-up judges "stale" on the same clock the slots run on, and
     ``sleep`` is too, so the SPDR catch-up's bounded wait for the asset
     directory never sleeps on the wall clock under a test.
+
+    ``calendar_releases`` and ``econ_first_prints`` share one
+    :class:`ReleaseAttemptPlan`: the dates refresh adds what it stores, and
+    the first-prints job, asleep, re-plans (handoff item D).
     """
+    release_plan = ReleaseAttemptPlan()
     return [
         ScheduledJob(
             name="calendar_probe",
@@ -4550,8 +4702,8 @@ def context_jobs(
         *_news_jobs(services, clock),
         _spdr_job(services, clock, sleep),
         _sentiment_audit_job(services, clock, sleep),
-        *_calendar_jobs(services, _watch_universe_source(services), clock),
-        _econ_first_prints_job(services, clock),
+        *_calendar_jobs(services, _watch_universe_source(services), clock, release_plan),
+        _econ_first_prints_job(services, clock, release_plan),
     ]
 
 
