@@ -32,6 +32,12 @@ dependency tree to keep it so.
   ``unit_label``. ``valueState``/``valueNote`` are R8's display state,
   derived at the request's ``now`` (:func:`request_now`) and never stored.
   Every other kind carries both as ``null``.
+* **One damaged first-print row costs its own release, never the range.**
+  A stored ``econ_release_value`` or ``econ_release_fetch`` row that cannot
+  be read back serves that release ``unavailable``, its note naming the
+  table and the error (``could not be read from the database: ...``), and is
+  logged with the rule, the inputs and the time (rule 8). Every other row is
+  served as usual, and the stored row is left exactly as it is.
 * **Notices** say aloud what the rows cannot: central-bank seed gaps for each
   year the range touches (decision 8 -- no file, unpublished, partial, or a
   seed file that fails validation); and each calendar job's last success,
@@ -997,7 +1003,15 @@ def read_calendar(
     events = read_range(session, start, end)
     # Joined against this one read, not a second one (U6f): a refresh landing
     # between two reads could otherwise leave an economic row with no join.
-    releases = {release.event.id: release for release in economic_releases_of(session, events)}
+    # A stored first-print row that cannot be read back costs its own release
+    # alone -- served ``unavailable`` with the reason, and logged -- never the
+    # range (econ_store's module docstring).
+    releases = {
+        release.event.id: release
+        for release in economic_releases_of(
+            session, events, now=now, correlation_id=correlation_id
+        )
+    }
     days = [
         CalendarDay(
             date=day,

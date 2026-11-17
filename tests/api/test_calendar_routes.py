@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 
 from corollary.api.deps import (
@@ -70,6 +70,7 @@ from corollary.data.calendar_event import (
 from corollary.data.calendar_releases import release_events, release_vendor_id
 from corollary.data.econ_store import record_attempt, store_first_print
 from corollary.data.econ_values import (
+    NOT_READ_PREFIX,
     VALUE_STATES,
     Attempt,
     Figure,
@@ -675,6 +676,95 @@ def test_after_seven_days_the_last_attempt_says_why(
     at_now(app, CPI_AT + timedelta(days=8))
     event = read_one(calendar, CPI_DAY)
     assert (event["valueState"], event["valueNote"]) == ("unavailable", note)
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "raw", "error_type"),
+    [
+        ("econ_release_value", "actual", "not a number", "InvalidOperation"),
+        ("econ_release_value", "fetched_at", "garbage", "ValueError"),
+        # Decodes to a finite Decimal, then raised in the display's rounding.
+        ("econ_release_value", "actual", "1E+100", "ValueError"),
+        ("econ_release_fetch", "outcome", "bogus", "ValueError"),
+    ],
+    ids=["value-money", "value-instant", "value-exponent", "attempt-outcome"],
+)
+def test_one_unreadable_first_print_row_costs_its_release_and_never_the_calendar(
+    calendar: TestClient,
+    db_engine: Engine,
+    caplog: pytest.LogCaptureFixture,
+    table: str,
+    column: str,
+    raw: str,
+    error_type: str,
+) -> None:
+    """A single damaged first-print row used to 500 the whole range (handoff item A).
+
+    Now that release reads ``unavailable`` with the reason, the rule and its
+    inputs are logged (rule 8), every other row -- economic or not -- is
+    served exactly as before, and the stored row is left as it is (Q23c).
+    """
+    add_events(
+        db_engine,
+        econ_row(10, CPI_AT),
+        econ_row(50, CPI_AT, title="Employment Situation"),
+        earnings(),
+    )
+    store_value(db_engine, 50, CPI_DAY, actual="254.0000", prior="78.0000")
+    if table == "econ_release_value":
+        store_value(db_engine, 10, CPI_DAY, actual="0.6485", prior="0.3960")
+    else:
+        store_attempt(db_engine, 10, CPI_DAY, attempt_of(NotPosted("CPIAUCSL", CPI_DAY)))
+    with db_engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
+        try:
+            conn.execute(
+                text(f"UPDATE {table} SET {column} = :raw WHERE release_id = 10"), {"raw": raw}
+            )
+            conn.commit()
+        finally:
+            conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
+
+    with caplog.at_level(logging.ERROR, logger="corollary.data.econ_store"):
+        response = calendar.get("/api/calendar", params={"from": "2026-10-14", "to": "2026-10-15"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    events = {e["title"]: e for e in all_events(body)}
+    assert body["total"] == 3 and len(events) == 3
+    cpi, jobs, nvda = (
+        events["Consumer Price Index"],
+        events["Employment Situation"],
+        events["NVDA earnings"],
+    )
+    assert {key: cpi[key] for key in ("valueState", "valueNote", "prior", "actual", "unit")} == {
+        "valueState": "unavailable",
+        "valueNote": f"{NOT_READ_PREFIX}: {table} ({error_type})",
+        "prior": None,
+        "actual": None,
+        "unit": "% m/m",
+    }
+    assert (jobs["valueState"], jobs["prior"], jobs["actual"]) == ("filled", "78", "254")
+    assert (nvda["type"], nvda["estimate"], nvda["valueState"]) == ("earnings", "1.2350", None)
+
+    (record,) = [
+        r for r in caplog.records if getattr(r, "event", None) == "econ_release_row_unreadable"
+    ]
+    assert record.__dict__["rule"]
+    assert (record.__dict__["table"], record.__dict__["release_id"]) == (table, 10)
+    assert (record.__dict__["release_date"], record.__dict__["error_type"]) == (
+        "2026-10-14",
+        error_type,
+    )
+    assert record.__dict__["at"] == NOW.isoformat()
+    # The request's own id, so the log line ties to the response that served it.
+    assert isinstance(record.__dict__["correlation_id"], str) and record.__dict__["correlation_id"]
+
+    with db_engine.connect() as conn:
+        stored = conn.execute(
+            text(f"SELECT {column} FROM {table} WHERE release_id = 10")
+        ).scalar_one()
+    assert stored == raw
 
 
 def test_the_calendar_rows_own_prior_and_actual_are_never_read(

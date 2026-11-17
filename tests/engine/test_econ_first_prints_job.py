@@ -559,7 +559,7 @@ async def test_the_dates_refresh_leaves_a_value_the_job_stored_alone(engine: Eng
         after = session.get(EconReleaseValue, (10, CPI_DAY))
         assert after is not None
         assert (after.actual, after.prior, after.period, after.fetched_at) == snapshot
-        cpi, _ = read_economic_releases(session, CPI_DAY, later, seeds=SEEDS)
+        cpi, _ = read_economic_releases(session, CPI_DAY, later, now=clock(), seeds=SEEDS)
     assert _count(engine, EconReleaseValue) == 1
     assert cpi.value is not None and cpi.value.actual == snapshot[0]
     assert cpi.display(clock()).state == "filled"
@@ -594,7 +594,7 @@ async def test_known_limit_a_row_stored_after_the_jobs_last_run_waits_for_the_ne
     # ...then the refresh writes the row.
     assert await refresh.run() is None
     with Session(engine) as session:
-        assert len(read_economic_releases(session, WED, WED, seeds=SEEDS)) == 1
+        assert len(read_economic_releases(session, WED, WED, now=clock(), seeds=SEEDS)) == 1
 
     # The limit: the plan does not hold it, so the next wake is the catch-up.
     assert _plan(econ).pending == ()
