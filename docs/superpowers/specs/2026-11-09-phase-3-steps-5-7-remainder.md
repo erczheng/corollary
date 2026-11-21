@@ -311,6 +311,8 @@ assumptions**. Q24a, Q24b and Q24c are built on `phase3-rem-grading`
     hour late once daylight saving starts. The weekday trigger was fixed on
     2026-11-14. The weekly-audit trigger carries the same offset and has
     not been changed; that waits on the owner.
+    *Verified 2026-11-20:* the Weekly Audit task's `StartBoundary` is
+    `2026-11-09T09:45:00`, with no offset, so it was fixed after 2026-11-14.
 
 ## Owner decisions — 2026-11-16 (Q25)
 
