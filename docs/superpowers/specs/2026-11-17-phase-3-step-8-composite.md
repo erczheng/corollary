@@ -1164,8 +1164,25 @@ is option (b), with the provisional marker (Q28, C8).
   - item 4 has a dated re-probe owner.
 
 **U1. Session ranges and the seven raw computations, pure.**
-- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
-  U10 (Q27).
+- *Status:* ~~not started. Blocked on Q27.~~ ~~Released 2026-11-17, to
+  follow U10 (Q27).~~ **Built 2026-11-21** on `phase3-step8-u1-components`,
+  stacked on `phase3-step8-spec`; not yet merged. *Evidence:* the U1 tests
+  pass (101, in `test_components.py` and `test_calendars.py`), `pytest -m
+  risk` passes (723), the full suite passes (7,249), and `mypy corollary` is
+  clean (120 files, `compiled: no`). Ten deliberate mutations of the module
+  (a tie not counting as a high, the first-bar rule dropped, the sliding
+  window never evicting, flat closes counted as declines, and others) each
+  fail at least one test. The audit's fixes are in: exact-type guards on the
+  `universe` and `contracts` elements, so no float volume reaches the
+  arithmetic, and an OCC `symbol` on each contract, with repeats refused, so
+  a merged page cannot be counted twice. *Left for U5 and U6:* U5 fetches
+  bars from some sessions before the earliest strength window, because a
+  name's first bar stands in for its listing date. U6 parses `root` and
+  `is_put` with `instruments.parse_occ_symbol`, which `components.py` may
+  not import. *For the owner:* C1's "a ratio never goes stale" holds for
+  prices but not for volume. A split rescales one name's earlier volume, so
+  a `breadth` recomputed inside the recheck window can differ from the
+  first computation. Frozen rows are unaffected.
 - *Depends on:* nothing. Runs in parallel with U0, U3 and U10.
 - *What it does:*
   - `calendars.nyse_sessions_between(start, end)`.

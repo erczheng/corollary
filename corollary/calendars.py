@@ -65,8 +65,19 @@ so a window may *end* on it, but an instant *at* it is out of session and
 counts from the next open. Unlike :func:`nyse_close_at`, nothing here falls
 back: an answer past the published schedule raises, because an invented
 session would grade a label against a market that was never open.
+
+The fourth caller is the Fear & Greed composite
+-----------------------------------------------
+
+Step 8's windows count **sessions**, never calendar days: 125 closes, a
+252-session year, the session before *t*. :func:`nyse_sessions_between` is the
+range those windows are cut from, inclusive at both ends, half-days included
+as the whole sessions they are. It raises rather than answering short when a
+bound lies outside the published schedule: a window that silently held fewer
+sessions than asked would read as a gap in the market, not in the calendar.
 """
 
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from typing import Final, NamedTuple
@@ -81,6 +92,7 @@ __all__ = [
     "nyse_session_close",
     "nyse_session_containing",
     "nyse_session_open",
+    "nyse_sessions_between",
 ]
 
 #: The regular-session close, in Eastern. Stated as a wall-clock time in ET
@@ -277,3 +289,39 @@ def add_session_minutes(instant: datetime, minutes: int) -> datetime:
         remaining -= available
         cursor = nyse_next_open(close)
         day = cursor.astimezone(NYSE_TZ).date()
+
+
+@lru_cache(maxsize=1)
+def _session_dates() -> tuple[date, ...]:
+    """Every published session date, ascending -- the index range queries bisect."""
+    return tuple(sorted(_sessions()))
+
+
+def _require_date(value: date, name: str) -> None:
+    # ``datetime`` subclasses ``date``; an instant is not a session date, and
+    # comparing one against dates raises a TypeError somewhere less helpful.
+    if type(value) is not date:
+        raise TypeError(f"{name} must be a date, got {type(value).__name__} {value!r}")
+
+
+def nyse_sessions_between(start: date, end: date) -> tuple[date, ...]:
+    """Every NYSE session date from ``start`` to ``end``, both inclusive, ascending.
+
+    Either bound may be a non-session day; it bounds the range without being
+    in it. Half-days are sessions like any other. Raises ``ValueError`` when
+    ``start`` is after ``end``, or when either bound lies outside the
+    published schedule -- the calendar cannot say which days in that span
+    were sessions, and answering short would understate every window cut
+    from the result.
+    """
+    _require_date(start, "start")
+    _require_date(end, "end")
+    if start > end:
+        raise ValueError(f"start {start} is after end {end}")
+    dates = _session_dates()
+    if start < dates[0] or end > dates[-1]:
+        raise ValueError(
+            f"{start}..{end} is outside the published NYSE schedule "
+            f"({dates[0]}..{dates[-1]})"
+        )
+    return dates[bisect_left(dates, start) : bisect_right(dates, end)]
