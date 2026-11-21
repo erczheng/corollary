@@ -3046,7 +3046,15 @@ geopolitical.**
   only from 2026-10-10, because its calendar no longer lists earlier
   meetings. ECB "14:15 CET" is read as Frankfurt local time. BoE and BoJ rows
   are date-only, shown as the bank's local date. *(Hand verification
-  deferred by the owner, Q23d, 2026-11-09.)* *Depends on:* 0, 2, 3, all
+  deferred by the owner, Q23d, 2026-11-09.)* *Verified 2026-11-20, at the
+  owner's request:* each bank's official calendar page was read against
+  `central_banks_2026.csv` and `central_banks_2027.csv`, and **no date
+  differs**. ECB, Dec 2026 to Dec 2027: all nine decision days match; the
+  2026-10-29 row has left the page because it is past, and the page's own
+  sidebar confirms that meeting. BoE: all sixteen match, and both years are
+  headed "confirmed dates". BoJ: all sixteen meetings match on both days.
+  The ECB calendar page itself states no time. The 14:15 comes from the
+  seed's separate `time_source_url`, as its note says. *Depends on:* 0, 2, 3, all
   done, so it runs in parallel with step 5 under Q22's migration rule.
 - *Carries:* Q15 (Finnhub's IPO calendar). **Probe `/calendar/ipo` on this
   project's key first**: its swagger flags are null, and a premium 403 goes

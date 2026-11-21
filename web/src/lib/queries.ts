@@ -502,13 +502,20 @@ export const NOTIFICATION_POLL_MS = 15_000
  * retroactively erase notifications already received.
  *
  * `staleTime` sits under the interval so a refocus after a background spell
- * re-reads immediately rather than waiting out the remainder of a tick. */
+ * re-reads immediately rather than waiting out the remainder of a tick.
+ *
+ * **Polled while the window is unfocused**, like engine state (owner
+ * decision, 2026-11-20, delegated: "whatever makes the most sense"). The
+ * bell is how a rule 9 halt reaches this screen, and a visible, unfocused
+ * window is how the terminal is watched. The read is local, with no vendor
+ * budget behind it. */
 export function useNotifications(account?: AccountMode) {
   const mode = useAccountScope(account)
   return useQuery({
     queryKey: queryKeys.notifications(mode),
     queryFn: ({ signal }) => fetchNotifications(mode, {}, { signal }),
     refetchInterval: NOTIFICATION_POLL_MS,
+    refetchIntervalInBackground: true,
     staleTime: NOTIFICATION_POLL_MS - 1_000,
   })
 }

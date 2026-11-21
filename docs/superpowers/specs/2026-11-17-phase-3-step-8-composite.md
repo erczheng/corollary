@@ -1461,6 +1461,12 @@ is option (b), with the provisional marker (Q28, C8).
     visible, unfocused window is how the terminal is watched, and this read
     is local, with no vendor budget behind it. A test pins the cadence the
     way the bell's is pinned.
+    *Owner decision, 2026-11-20:* *"for the halt bell whatever makes the
+    most sense"*. The choice was to **keep it, and give the notification
+    bell the same setting.** The bell is how a rule 9 halt reaches the
+    screen, and it reads the local engine only. Both polls now run while
+    the window is unfocused. A hidden-tab poll of market data stays
+    forbidden (decision 18), because that one spends vendor budget.
   - **The gate opens only on `halted: false`** (low; fixed). An empty body
     or a renamed field reads `unavailable`, with a stated reason.
   - **The guard catches `{ isHalted = false }` too** (low; fixed). Its
