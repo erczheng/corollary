@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, screen, within, fireEvent, act } from '@testing-library/react'
 import App from '../App'
 import { queryClient } from '../lib/queryClient'
+import { queryKeys } from '../lib/queries'
 import { useUIStore } from '../lib/store'
 import { RECOMMENDATIONS, recommendationTitle } from '../lib/mockData'
 import type { EngineStateResponse } from '../lib/types'
@@ -478,36 +479,82 @@ describe('recommendation actions', () => {
   /** Halting stops new entries (CLAUDE.md rule 7). A surface that still
    * offers to open one is the surface it happens on by accident. */
   describe('while trading is halted', () => {
-    it('withdraws Execute on the fixture halt the Research page reads', async () => {
-      act(() => useUIStore.getState().halt())
-      const dialog = await openPalette()
-
-      expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
-    })
-
-    /** Either halt withdraws it — the gate is only ever more conservative,
-     * so halting from this very palette stops the Execute rows under it. */
-    it('withdraws Execute on the engine halt as well', async () => {
+    it('withdraws Execute on the engine halt', async () => {
       fetchMock = stubFetch(HALTED)
       const dialog = await openPalette()
 
       expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
     })
 
+    /** Spec decision C12: one halt in the application. The palette used to OR
+     * in the store's fixture halt so it agreed with Research; Research reads
+     * the engine now, and so does this. */
+    it('ignores the fixture halt in the store', async () => {
+      act(() => useUIStore.getState().halt())
+      const dialog = await openPalette()
+
+      expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
+    })
+
     /** Waving off a candidate opens nothing, so it is never gated. */
     it('keeps Dismiss available', async () => {
-      act(() => useUIStore.getState().halt())
+      fetchMock = stubFetch(HALTED)
       const dialog = await openPalette()
 
       expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
     })
 
-    it('brings Execute back on resume', async () => {
-      act(() => useUIStore.getState().halt())
-      act(() => useUIStore.getState().resume())
+    it('brings Execute back once the engine reports running again', async () => {
+      fetchMock = stubFetch(HALTED)
       const dialog = await openPalette()
+      expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
 
-      expect(within(dialog).getByText(`Execute ${title}`)).toBeInTheDocument()
+      // TanStack delivers a cache write on its next tick, not inside `act`.
+      act(() => queryClient.setQueryData(queryKeys.engineState(), RUNNING))
+
+      expect(await within(dialog).findByText(`Execute ${title}`)).toBeInTheDocument()
+    })
+  })
+
+  /** Spec decision C12: "not halted" is an answer only the engine can give.
+   * The palette read it as `?? false` before, so Execute was offered in the
+   * window before the engine answered, and after a failed read. */
+  describe('while the engine state is unknown', () => {
+    function stubEngineRead(answer: 'never' | 'fail') {
+      fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
+        const url = String(input)
+        if (url.includes('/engine/state')) {
+          return answer === 'never' ? new Promise<Response>(() => {}) : Promise.resolve(WRITE_FAILED)
+        }
+        return Promise.resolve(
+          jsonResponse(503, { error: { code: 'not_stubbed', message: 'Not stubbed.' } }),
+        )
+      })
+      vi.stubGlobal('fetch', fetchMock)
+    }
+
+    it('omits Execute while the read is in flight, and keeps Dismiss', () => {
+      stubEngineRead('never')
+      render(<App />)
+      act(() => useUIStore.getState().openPalette())
+      const dialog = screen.getByRole('dialog', { name: 'Command palette' })
+
+      expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
+      expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
+    })
+
+    it('omits Execute when the read failed, and keeps Dismiss', async () => {
+      stubEngineRead('fail')
+      render(<App />)
+      act(() => useUIStore.getState().openPalette())
+      const dialog = screen.getByRole('dialog', { name: 'Command palette' })
+      // A failed read falls through to Halt, the conservative one of the
+      // pair, so its arrival is the sign the read has settled. One retry of
+      // a 5xx, a second apart, comes first.
+      await within(dialog).findByRole('option', { name: /Halt trading/ }, { timeout: 4000 })
+
+      expect(within(dialog).queryByText(`Execute ${title}`)).not.toBeInTheDocument()
+      expect(within(dialog).getByText(`Dismiss ${title}`)).toBeInTheDocument()
     })
   })
 })

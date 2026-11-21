@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useUIStore } from '../lib/store'
 import { useEngineState, useHaltEngine, useResumeEngine } from '../lib/queries'
+import { entryGate } from '../lib/entryGate'
 import { RECOMMENDATIONS, recommendationTitle } from '../lib/mockData'
 import { dispositionOf, visibleRecommendations } from '../lib/research'
 import { DESTINATIONS } from '../lib/routes'
@@ -209,15 +210,14 @@ export function CommandPalette() {
   const { mutate: mutateHalt } = useHaltEngine()
   const { mutate: mutateResume } = useResumeEngine()
 
-  // Still the fixture halt, because the recommendations it gates are still
-  // fixtures: `Research.tsx` reads this same flag over this same list, and a
-  // palette that gated them on a different halt than the page they live on
-  // would disagree with it. Or-ed with the engine's real halt so the gate can
-  // only ever be *more* conservative — halting from this very palette must
-  // stop the Execute rows underneath it in the same breath. Both sides of
-  // this move to the API together when recommendations do.
-  const fixtureHalted = useUIStore((s) => s.isHalted)
-  const newEntriesStopped = engineHalted || fixtureHalted
+  // Whether Execute may open a position: the engine's halt, and closed while
+  // the engine has not answered or its read failed (spec decision C12). The
+  // same gate as Research's Execute and the chain ticket's Review, so the
+  // palette cannot disagree with the page a candidate lives on. It used to
+  // OR in the store's fixture halt to agree with Research; Research reads the
+  // engine now. Halting from this very palette still withdraws the Execute
+  // rows in the same breath, because the halt write lands in this query.
+  const newEntriesStopped = !entryGate(engineQuery).open
   const dispositions = useUIStore((s) => s.dispositions)
   const executeRecommendation = useUIStore((s) => s.executeRecommendation)
   const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
@@ -263,7 +263,8 @@ export function CommandPalette() {
       const acted = dispositionOf(r.id, dispositions) !== 'open'
       // Gated on the halt, which the palette was not honouring: halting
       // stops new entries (CLAUDE.md rule 7), and a surface that still
-      // offers to open one is the surface it happens on by accident.
+      // offers to open one is the surface it happens on by accident. Also
+      // gated while the engine's state is unknown, for the same reason.
       // Omitted rather than shown-disabled — there is no disabled state in
       // a command list, and a command that silently does nothing is worse
       // than an absent one.

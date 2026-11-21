@@ -230,7 +230,7 @@ describe('the bell', () => {
 
   /** Off the socket on purpose — rule 9 halts *because* the socket died — so
    * the poll is the delivery path, and its cadence is the contract. */
-  it('polls every 15 seconds', async () => {
+  it('polls every 15 seconds, focused or not', async () => {
     stubFetch()
     renderBell()
     await waitFor(() => expect(client.getQueryCache().find({ queryKey: queryKeys.notifications('paper') })).toBeDefined())
@@ -238,6 +238,9 @@ describe('the bell', () => {
     const observer = query.observers[0]
     expect(NOTIFICATION_POLL_MS).toBe(15_000)
     expect(observer.options.refetchInterval).toBe(15_000)
+    // A visible, unfocused window is how the terminal is watched, and the
+    // bell is how a rule 9 halt reaches it.
+    expect(observer.options.refetchIntervalInBackground).toBe(true)
   })
 })
 

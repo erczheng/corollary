@@ -10,7 +10,8 @@ import {
   type TimeInForce,
 } from '../lib/types'
 import { riskLimitFor } from '../lib/settings'
-import { useRiskLimits } from '../lib/queries'
+import { useEntryGate, useRiskLimits } from '../lib/queries'
+import { ENTRY_BLOCK_CLASS } from '../lib/entryGate'
 import {
   OPEN_SIDES,
   ORDER_SIDE_LABEL,
@@ -99,7 +100,11 @@ export function ChainOrderTicket({
   onDone,
 }: ChainOrderTicketProps) {
   const submitOpenOrder = useUIStore((s) => s.submitOpenOrder)
-  const isHalted = useUIStore((s) => s.isHalted)
+  /* The engine's halt, not the store's fixture flag (parent decision 16, spec
+     decision C12). Nothing in production sets the fixture flag, so reading
+     it let this ticket open a position on a halted engine. Closed while the
+     engine has not answered. */
+  const gate = useEntryGate()
   /* From the server, not the store. Settings writes the ceiling to the
      server now, so a store slice would agree at rest and diverge the moment
      a limit is edited — Settings and the audit log showing the new number
@@ -357,17 +362,16 @@ export function ChainOrderTicket({
         </ul>
       )}
 
-      {isHalted && (
-        <p className="mt-3 text-caption text-caution">
-          Trading is halted. Halt stops new entries — resume from the Dashboard before opening a
-          position.
+      {!gate.open && (
+        <p role="status" className={`mt-3 text-caption ${ENTRY_BLOCK_CLASS[gate.kind]}`}>
+          {gate.reason}
         </p>
       )}
 
       <div className="mt-4 flex gap-2">
         <button
           type="button"
-          disabled={errors.length > 0 || isHalted}
+          disabled={errors.length > 0 || !gate.open}
           onClick={() => setConfirming(true)}
           className="rounded bg-primary px-4 py-2 text-label-md text-on-primary transition-colors duration-base ease-standard hover:bg-primary-container hover:text-on-primary-container disabled:pointer-events-none disabled:bg-surface-container-high disabled:text-on-surface-variant"
         >
@@ -414,12 +418,18 @@ export function ChainOrderTicket({
                   on Activity until then.
                 </p>
               )}
+              {!gate.open && (
+                <span className={`mt-2 block ${ENTRY_BLOCK_CLASS[gate.kind]}`}>{gate.reason}</span>
+              )}
             </>
           }
           confirmLabel={ORDER_SIDE_LABEL[side]}
+          // The halt can land while this is open: the dead-man's switch fires
+          // on its own (rule 9), and this is the last step before submitting.
+          confirmDisabled={!gate.open}
           onConfirm={() => {
             setConfirming(false)
-            submit()
+            if (gate.open) submit()
           }}
           onCancel={() => setConfirming(false)}
         />

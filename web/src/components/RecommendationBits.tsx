@@ -110,29 +110,32 @@ export function DispositionBadge({ disposition }: { disposition: Disposition }) 
  * neither view submits an order from a click, and in Phase 6 that path runs
  * through `RiskManager.approve()`.
  *
- * Execute is disabled while the engine is halted: halting stops new entries.
- * Dismiss stays enabled — waving off a candidate is not opening a position,
- * and there is no reason a halt should stop you tidying the list.
+ * Execute is disabled while a new entry may not open: the engine is halted,
+ * or its state is still being read or could not be read. `entryBlocked` is
+ * that reason in words, from `useEntryGate()` (spec decision C12), or null
+ * when Execute may open one. The caller also shows it on the page, because a
+ * title alone is invisible on a screenshot or to a keyboard. Dismiss stays
+ * enabled — waving off a candidate is not opening a position, and there is
+ * no reason a halt should stop you tidying the list.
  *
  * `compact` shortens Execute to "Trade" for the Dashboard's half-width panel,
  * which is the wording §8.1 uses. */
 export function RecommendationActions({
   recommendation,
   disposition,
-  halted,
+  entryBlocked,
   compact = false,
   onExecute,
   onDismiss,
 }: {
   recommendation: Recommendation
   disposition: Disposition
-  halted: boolean
+  entryBlocked: string | null
   compact?: boolean
   onExecute: () => void
   onDismiss: () => void
 }) {
   const title = recommendationTitle(recommendation)
-  const haltedTitle = 'Trading is halted — resume to open new positions'
   const acted = disposition === 'executed'
 
   const button =
@@ -143,8 +146,8 @@ export function RecommendationActions({
       <button
         type="button"
         onClick={onExecute}
-        disabled={halted || acted}
-        title={halted ? haltedTitle : acted ? 'Already acted on' : `Trade ${title}`}
+        disabled={entryBlocked !== null || acted}
+        title={acted ? 'Already acted on' : (entryBlocked ?? `Trade ${title}`)}
         className={`${button} border-primary text-primary hover:bg-primary-container hover:text-on-primary-container`}
       >
         {compact ? 'Trade' : 'Execute'}

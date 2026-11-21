@@ -13,6 +13,8 @@ import {
 import { Chip } from '../components/Chip'
 import { TargetIcon, TrendingUpIcon } from '../components/icons'
 import { useUIStore } from '../lib/store'
+import { useEntryGate } from '../lib/queries'
+import { ENTRY_BLOCK_CLASS } from '../lib/entryGate'
 import {
   LLM_ORIGINATION,
   MARKET_PULSE,
@@ -42,13 +44,16 @@ export function Research() {
   const executeRecommendation = useUIStore((s) => s.executeRecommendation)
   const dismissRecommendation = useUIStore((s) => s.dismissRecommendation)
   const refreshRecommendations = useUIStore((s) => s.refreshRecommendations)
-  const isHalted = useUIStore((s) => s.isHalted)
-  const executionMode = useUIStore((s) => s.executionMode)
+  // The engine's halt, not the store's fixture flag, and in Manual as in
+  // Auto: halt stops new entries, and a clicked entry is still one (spec
+  // decision C12, parent decision 16). Closed while the engine has not
+  // answered, so it never reads "not halted" before it knows.
+  const gate = useEntryGate()
+  const entryBlocked = gate.open ? null : gate.reason
 
   const [tradeTarget, setTradeTarget] = useState<Recommendation | null>(null)
 
   const visible = visibleRecommendations(RECOMMENDATIONS, dispositions)
-  const engineHalted = executionMode === 'auto' && isHalted
 
   // Derived from the components rather than stored, so this can never disagree
   // with the breakdown the News page prints underneath the same number.
@@ -153,6 +158,17 @@ export function Research() {
           </div>
         </div>
 
+        {/* Why Execute is off, on the page and not only in each button's
+            title, which does not exist on a screenshot or to a keyboard. */}
+        {!gate.open && visible.length > 0 && (
+          <p
+            role="status"
+            className={`border-b border-outline-variant px-4 py-2 text-caption ${ENTRY_BLOCK_CLASS[gate.kind]}`}
+          >
+            {gate.reason}
+          </p>
+        )}
+
         {visible.length === 0 ? (
           <p className="px-4 py-6 text-body-md text-on-surface-variant">
             Every candidate has been dismissed. Refresh to bring them back — the scanner rebuilds its
@@ -225,7 +241,7 @@ export function Research() {
                           <RecommendationActions
                             recommendation={r}
                             disposition={disposition}
-                            halted={engineHalted}
+                            entryBlocked={entryBlocked}
                             onExecute={() => setTradeTarget(r)}
                             onDismiss={() => dismissRecommendation(r.id)}
                           />
@@ -252,12 +268,18 @@ export function Research() {
               {tradeTarget.unvalidated
                 ? ' This is an unvalidated origination: no setup matched, so it is capped at a third of normal size.'
                 : ''}
+              {/* The halt can land while this is open: the dead-man's
+                  switch fires on its own (rule 9). */}
+              {!gate.open && (
+                <span className={`mt-2 block ${ENTRY_BLOCK_CLASS[gate.kind]}`}>{gate.reason}</span>
+              )}
             </>
           )
         }
         confirmLabel="Submit to risk manager"
+        confirmDisabled={entryBlocked !== null}
         onConfirm={() => {
-          if (tradeTarget) executeRecommendation(tradeTarget.id)
+          if (tradeTarget && entryBlocked === null) executeRecommendation(tradeTarget.id)
           setTradeTarget(null)
         }}
         onCancel={() => setTradeTarget(null)}

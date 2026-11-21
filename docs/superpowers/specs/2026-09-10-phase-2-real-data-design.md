@@ -3883,6 +3883,15 @@ already fixed costs the next session a dispatch to rediscover that.
   static `READ_ONLY_REASON` prop; `CommandPalette.tsx` deliberately reads
   *both* and ORs them. Only Dashboard cleanly matches the original claim. The
   underlying hazard is unchanged and still Phase 4's.
+- ***Closed 2026-11-17*** by Phase 3 step 8's U10
+  (`2026-11-17-phase-3-step-8-composite.md`, decision C12, which carries
+  parent decision 16). Research, `ChainOrderTicket.tsx` and the command
+  palette now share one gate on the engine's halt (`web/src/lib/entryGate.ts`,
+  `useEntryGate()`). It applies in Manual as in Auto, and it is closed, with
+  its reason stated, while the engine state is unread or its read has failed.
+  The palette's OR is gone, and `haltSource.test.ts` fails if a production
+  module outside the store reads `isHalted` again. The *"Submits to the risk
+  manager"* item is not touched: it stays Phase 6's.
 
 ### Two notes owed to step 12's web half — from the 2026-09-16 audit
 
