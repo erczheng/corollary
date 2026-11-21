@@ -17,6 +17,8 @@ labelled a parent-session assumption.
 on the owner. Q17–Q19, recorded the same day, are under *Owner decisions*.
 **Resumed 2026-10-10 (Q22) for steps 5, 6 and 7.** Steps 8 and 9 stay paused
 under Q20.
+**Resumed 2026-11-17 (Q27) for step 8**, carried by
+`2026-11-17-phase-3-step-8-composite.md`. Step 9 stays paused under Q20.
 **Amended 2026-11-09 (Q23) and 2026-11-11 (Q24)** by
 `2026-11-09-phase-3-steps-5-7-remainder.md`, which carries what was left of
 steps 5–7. It amends decision 13 (a five-session eligibility floor) and Q6
@@ -1190,6 +1192,18 @@ Recorded in full, with the owner's words, under *Owner decisions — 2026-11-11
 - **Q24d:** the weekday runner runs from 08:30 ET to the later of the close +
   30 minutes and 18:05 ET, so economic first prints are fetched on their
   release day.
+
+**Q27 and Q28 — Step 8 is released, and its as-of rule is set (2026-11-17).**
+Recorded in full, with the owner's words, under *Owner decisions — 2026-11-17
+(Q27, Q28)* in `2026-11-17-phase-3-step-8-composite.md`, which carries step 8.
+In short:
+- **Q27** lifts Q20 for step 8. Its unit U10 comes first: decision 16's
+  real halt on Research, the chain ticket and the command palette, plus the
+  Manual-mode Execute gap. The rest of step 8 follows U10. Step 9 stays
+  paused under Q20.
+- **Q28:** the composite is as of the latest close. VIX and junk, which FRED
+  posts mid-morning, may lag it by one session, and each prints its own date.
+  While any component lags, the composite says it is provisional.
 
 ---
 
@@ -2653,7 +2667,8 @@ company news covers the whole watch universe, and a discovery tier is added
 and sector column wait on Q17's guard decision, and Q20 pauses step 5 and
 everything after it until the owner says to go on. *Since 2026-10-10 (Q22):*
 the sector leaders landed with step 4 (Q21, Q17), and steps 5, 6 and 7 are
-released. Steps 8 and 9 remain paused under Q20.
+released. Steps 8 and 9 remain paused under Q20. *Since 2026-11-17 (Q27):*
+step 8 is released, U10 first. Step 9 remains paused under Q20.
 
 **0. Keyed probes.** One script, run with the launcher's `--env-file .env` so no
 agent reads the file, recording redacted fixtures. Checks: Finnhub's premium
@@ -3056,6 +3071,14 @@ geopolitical.**
 - *Status:* not started. *Depends on:* 2, 3, the holdings seed from 4 —
   which has no accepted snapshot until Q17's guard decision lands. Paused by
   Q20.
+  *Amended 2026-11-17:* **scoped, not started.** The work is broken into
+  units U0–U11 by `2026-11-17-phase-3-step-8-composite.md`, which is blocked
+  on two owner questions: Q27 (does it release step 8 from Q20?) and Q28
+  (which close the composite describes before FRED posts). The seed
+  dependency above is stale: the 2026-06-30 N-PORT snapshot was accepted on
+  2026-10-01 (Q17), so the only block is Q20.
+  *Amended 2026-11-17, later:* **released.** Q27 lifts Q20 for step 8, with
+  U10 first, and Q28 sets the as-of rule. Nothing is blocked on a question.
 - *Files:* `corollary/data/macro/{components,composite}.py`, migration for
   `composite_component_value`, `/api/news/composite`, `/api/markets/pulse`,
   `SentimentGauge`, `web/src/pages/Research.tsx`,
