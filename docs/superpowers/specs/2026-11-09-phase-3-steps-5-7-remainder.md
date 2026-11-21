@@ -311,6 +311,8 @@ assumptions**. Q24a, Q24b and Q24c are built on `phase3-rem-grading`
     hour late once daylight saving starts. The weekday trigger was fixed on
     2026-11-14. The weekly-audit trigger carries the same offset and has
     not been changed; that waits on the owner.
+    *Verified 2026-11-20:* the Weekly Audit task's `StartBoundary` is
+    `2026-11-09T09:45:00`, with no offset, so it was fixed after 2026-11-14.
 
 ## Owner decisions — 2026-11-16 (Q25)
 
@@ -350,6 +352,16 @@ the daily refresh write a verdict for every off-watch label's ticker.
     scheduled Saturday 10:00 ET slot, before or after. *Not in the rulings;
     added with L3 below and flagged for the owner:* the job now holds the
     run lock, and a scheduled run that finds it held skips for the week.
+    *Amended 2026-11-20 (owner request):* a scheduled run refused by the
+    backfill now waits, polling every `SENTIMENT_AUDIT_LOCK_POLL` (30 s), up
+    to `SENTIMENT_AUDIT_LOCK_WAIT` (30 min) -- well inside the 2 h
+    `RUN_DEADLINE` of `scripts/weekly_audit.py` -- logging each refusal with
+    the rule, the holder, the elapsed wait and the instant. Freed in time,
+    it is an ordinary scheduled run; still held at the bound, it skips for
+    the week as before, and the skip says how long it waited. Refused by
+    another audit run, it still skips at once. The start-up catch-up does
+    not wait: the backfill stands aside until the catch-up has settled, so
+    the catch-up cannot meet its lock.
   - **Never before the start-up catch-up has settled** (re-audit finding 1).
     The job has no catch-up of its own and first runs at the next 15-min
     grid slot, which can fall seconds after start while the sentiment
