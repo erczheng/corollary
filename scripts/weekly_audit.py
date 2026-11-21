@@ -120,7 +120,11 @@ from typing import Protocol
 import httpx
 
 from corollary.calendars import NYSE_TZ, nyse_session_close
-from corollary.engine.scheduler import SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS
+from corollary.engine.scheduler import (
+    SENTIMENT_AUDIT_AT,
+    SENTIMENT_AUDIT_DAYS,
+    SENTIMENT_AUDIT_LOCK_WAIT,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = REPO_ROOT / "logs"
@@ -137,8 +141,11 @@ SENTIMENT_PATH = "/api/settings/sentiment"
 HEALTH_TIMEOUT = timedelta(minutes=3)
 HEALTH_POLL = timedelta(seconds=2)
 #: How long to wait for the audit run to finish, from the latest of the
-#: start, the slot, and today's session close.
-RUN_DEADLINE = timedelta(hours=2)
+#: start, the slot, and today's session close. Two hours for the run, plus
+#: the scheduler's bounded wait for the daily backfill's run lock
+#: (SENTIMENT_AUDIT_LOCK_WAIT, 2026-11-20), which comes before the run starts
+#: and must not eat into its two hours.
+RUN_DEADLINE = timedelta(hours=2) + SENTIMENT_AUDIT_LOCK_WAIT
 RUN_POLL = timedelta(seconds=30)
 #: How long the graceful stop may take before the kill. The lifespan drains
 #: the context sessions and the Discord sink on the way out.

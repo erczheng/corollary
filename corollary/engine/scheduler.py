@@ -3449,7 +3449,10 @@ def _log_audit_lock_wait(
     refused: AuditAlreadyRunning, *, waited: timedelta, bound: timedelta, at: datetime
 ) -> None:
     """One refusal while the slot waits for the backfill's lock: rule, holder, wait, instant."""
-    logger.info(
+    # The first refusal at WARNING, so a headless run's console (uvicorn shows
+    # WARNING and up) says the slot is waiting; the polls after it at INFO.
+    logger.log(
+        logging.WARNING if waited == timedelta(0) else logging.INFO,
         "the scheduled sentiment audit was refused: the run lock is held by %s; "
         "trying again in %d s (waited %d s of %d s)",
         refused.holder,
