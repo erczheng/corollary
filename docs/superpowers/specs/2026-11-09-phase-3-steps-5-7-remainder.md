@@ -1184,6 +1184,12 @@ each, struck through by the dated status that replaces it.
   rules**, on `master` without Q24a or Q24b. **A re-grade under Q24 is
   planned once the grading branch deploys:** void run 4, then run 3 (newest
   first, since the tool voids only the latest standing run), relink, restart.
+  *Done, verified 2026-11-17 against the live database (read-only):* run 4
+  was voided at 2026-11-16 23:49:53Z, then run 3 at 23:50:04Z. **Run 5**
+  (trigger `scheduled`, started 23:50:56Z) re-graded under Q24 and succeeded.
+  It moved **rules to `active`** and **Massive to `demoted`**, both
+  `changed_at` 23:50:56Z. Owner decision Q25 followed from run 5's verdict
+  backfill.
   *Depends on:* U1 to U4 merged and the app restarted.
 - *Files:* none. The spec's statuses are updated once it is done.
 - *Done when:*
@@ -1211,6 +1217,10 @@ each, struck through by the dated status that replaces it.
   - **The next release after deploy fills on its day: pending.** The first
     is 2026-11-17 at 08:30 ET (Retail Sales, Import and Export Prices), then
     G.17 at 09:15 ET.
+    *Met, verified 2026-11-17 against the live database (read-only):* all
+    three filled on their release day, with outcome `figure`. RSAFS was
+    stored at 13:40Z (08:40 ET), IR at 14:10Z (09:10 ET, on a retry) and
+    INDPRO at 14:25Z (09:25 ET). Every U6 done-when is now met.
 
   *Depends on:* nothing. It
   runs **in parallel** with U1 to U4.

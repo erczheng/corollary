@@ -195,7 +195,8 @@ def _lock_waits(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
 
 
 def test_the_lock_wait_constants_fit_inside_the_weekly_audit_scripts_deadline() -> None:
-    """``scripts/weekly_audit.py`` waits ``RUN_DEADLINE`` (2 h) for the run's row.
+    """``scripts/weekly_audit.py`` waits ``RUN_DEADLINE`` for the run's row: 2 h for
+    the run, plus the lock wait, which comes before the run starts.
 
     Read from the source rather than imported: loading the script runs its
     module-level setup, which its own tests fence with monkeypatching.
@@ -206,9 +207,14 @@ def test_the_lock_wait_constants_fit_inside_the_weekly_audit_scripts_deadline() 
     assert scheduler.SENTIMENT_AUDIT_LOCK_WAIT == timedelta(minutes=30)
     assert scheduler.SENTIMENT_AUDIT_LOCK_POLL == timedelta(seconds=30)
     script = Path(__file__).resolve().parents[2] / "scripts" / "weekly_audit.py"
-    found = re.search(r"^RUN_DEADLINE = timedelta\(hours=(\d+)\)$", script.read_text("utf-8"), re.M)
+    found = re.search(
+        r"^RUN_DEADLINE = timedelta\(hours=(\d+)\) \+ SENTIMENT_AUDIT_LOCK_WAIT$",
+        script.read_text("utf-8"),
+        re.M,
+    )
     assert found is not None, "RUN_DEADLINE moved; re-check the lock wait against it"
-    assert scheduler.SENTIMENT_AUDIT_LOCK_WAIT < timedelta(hours=int(found.group(1)))
+    # The run keeps its full two hours however long the lock wait ran.
+    assert int(found.group(1)) == 2
 
 
 def test_a_slot_that_meets_the_backfills_lock_waits_and_runs_once_it_frees(
@@ -234,6 +240,9 @@ def test_a_slot_that_meets_the_backfills_lock_waits_and_runs_once_it_frees(
     assert slept == [30.0, 30.0, 30.0]
     assert _scheduled_runs(db_engine) == [("scheduled", "succeeded")]
     assert len(_lock_waits(caplog)) == 3
+    # The first refusal reaches a headless console (uvicorn shows WARNING and
+    # up); the polls after it stay at INFO.
+    assert [r.levelno for r in _lock_waits(caplog)] == [logging.WARNING, logging.INFO, logging.INFO]
     assert not audit_runner._RUN_LOCK.locked()
 
 
@@ -263,7 +272,9 @@ def test_a_wait_logs_the_rule_the_holder_the_elapsed_wait_and_the_instant(
         assert getattr(record, "bound_seconds") == 1800
         assert getattr(record, "poll_seconds") == 30
         assert getattr(record, "at") == SATURDAY_10.isoformat()
-        assert record.levelno == logging.INFO
+    # The first refusal at WARNING so a headless console shows the wait.
+    assert first.levelno == logging.WARNING
+    assert second.levelno == logging.INFO
     assert getattr(first, "waited_seconds") == 0
     assert getattr(second, "waited_seconds") == 30
 

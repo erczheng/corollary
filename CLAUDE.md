@@ -430,6 +430,18 @@ expect.** Every item below produced working-looking code that was wrong:
   archived, **never both**: `store.openChat` files what is on screen on
   the way out, so switching never discards a transcript and the two copies
   never have to agree on every keystroke.
+- `web/src/lib/entryGate.ts` — **the one rule for "may a new position open
+  now"**, read through `useEntryGate()`. It reads the engine's halt from
+  `GET /api/engine/state`, never the store's fixture `isHalted`, which
+  nothing in production sets. It applies in Manual as in Auto, and it is
+  **closed while the answer is unknown**: in flight, failed, or anything but
+  an explicit `halted: false`. Research's Execute, the chain ticket's Review
+  and the palette's Execute rows use it, and so must the next surface that
+  opens a position (Activity's *Add to position* when Phase 6 enables it).
+  `haltSource.test.ts` fails if a production module outside the store reads
+  `isHalted`. Engine state and the bell poll every 15 s **while the window
+  is unfocused too**, because they are local reads and the halt must reach
+  a visible screen. Dismiss is never gated.
 - `web/src/lib/theme.ts` — the **only** state that survives a reload, and
   the boundary is the point: rule 5 requires every cold start to come up in
   Paper, so a general "persist the store" helper is exactly the change that

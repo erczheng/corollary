@@ -1103,7 +1103,7 @@ Each lands with the unit that makes it true, or in U11.
 - **CLAUDE.md, Layout.** `data/macro/` is no longer *"(stub)"*:
   `components.py`, `composite.py`, the store and the three jobs.
 - **CLAUDE.md, "Where frontend logic lives".** *(Added 2026-11-17 by U10;
-  lands in U11.)* An entry for `web/src/lib/entryGate.ts`: the one
+  lands in U11.)* *(Applied early, 2026-11-21, at the owner's request.)* An entry for `web/src/lib/entryGate.ts`: the one
   "may a new position open now" rule, read from the engine's halt and closed
   while it is unknown. It should name `useEntryGate()` and
   `haltSource.test.ts`, so the next surface that opens a position reaches

@@ -32,6 +32,11 @@ UTC = timezone.utc
 #: Saturday 21 Nov 2026 (EST): 09:45 ET is 14:45 UTC, the slot 15:00 UTC.
 SAT_0945 = datetime(2026, 11, 21, 14, 45, tzinfo=UTC)
 SLOT = datetime(2026, 11, 21, 15, 0, tzinfo=UTC)
+#: How long the script waits for the run: two hours for the run itself, plus
+#: the scheduler's 30-minute wait for the backfill's run lock, which comes
+#: before the run starts (2026-11-20). Written out rather than read from the
+#: script, so a change to either constant fails here.
+RUN_WINDOW = timedelta(hours=2, minutes=30)
 NEXT_SLOT = SLOT + timedelta(days=7)
 LAST_WEEK = "2026-11-14T15:00:00Z"
 
@@ -83,25 +88,25 @@ def test_the_slot_refuses_a_naive_instant(wa: ModuleType) -> None:
     ("now", "deadline"),
     [
         # The 09:45 launch: counted from the 10:00 slot, not from 09:45.
-        (SAT_0945, SLOT + timedelta(hours=2)),
+        (SAT_0945, SLOT + RUN_WINDOW),
         # A launch before 08:00 ET would otherwise give up before the slot.
-        (datetime(2026, 11, 21, 12, 0, tzinfo=UTC), SLOT + timedelta(hours=2)),
+        (datetime(2026, 11, 21, 12, 0, tzinfo=UTC), SLOT + RUN_WINDOW),
         # Later the same Saturday: from now.
-        (SLOT + timedelta(hours=1), SLOT + timedelta(hours=3)),
+        (SLOT + timedelta(hours=1), SLOT + RUN_WINDOW + timedelta(hours=1)),
         # In a Monday session, the catch-up defers to the 16:00 ET close.
         (
             datetime(2026, 11, 23, 16, 0, tzinfo=UTC),
-            datetime(2026, 11, 23, 21, 0, tzinfo=UTC) + timedelta(hours=2),
+            datetime(2026, 11, 23, 21, 0, tzinfo=UTC) + RUN_WINDOW,
         ),
         # The half-day after Thanksgiving closes at 13:00 ET -- the calendar's.
         (
             datetime(2026, 11, 27, 16, 0, tzinfo=UTC),
-            datetime(2026, 11, 27, 18, 0, tzinfo=UTC) + timedelta(hours=2),
+            datetime(2026, 11, 27, 18, 0, tzinfo=UTC) + RUN_WINDOW,
         ),
-        # After a close, two hours from now.
+        # After a close, the run window from now.
         (
             datetime(2026, 11, 23, 22, 0, tzinfo=UTC),
-            datetime(2026, 11, 23, 22, 0, tzinfo=UTC) + timedelta(hours=2),
+            datetime(2026, 11, 23, 22, 0, tzinfo=UTC) + RUN_WINDOW,
         ),
     ],
     ids=["saturday_0945", "saturday_early", "saturday_late", "in_session", "half_day",
