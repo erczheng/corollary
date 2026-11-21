@@ -745,15 +745,31 @@ async def test_a_close_instant_tie_leaves_the_run_lock_to_the_deferred_catch_up(
 async def test_while_the_backfill_holds_the_lock_a_refused_audit_names_it(
     db_engine: Engine,
 ) -> None:
-    """Re-audit 2: not "another sentiment audit run", and no claim it grades labels."""
+    """Re-audit 2: not "another sentiment audit run", and no claim it grades labels.
+
+    Since 2026-11-20 the slot waits out ``SENTIMENT_AUDIT_LOCK_WAIT`` for the
+    backfill first; the sleeper here returns at once, so the wait expires
+    instantly and the skip says how long it waited.
+    """
     services = _news_services(
         db_engine, alpaca=RecordingAlpaca(directory=directory("XA")), seed_loader=make_seed
     )
+
+    async def no_wait(_: float) -> None:
+        return None
+
+    jobs = {
+        job.name: job
+        for job in scheduler_module.context_jobs(
+            services, clock=lambda: SATURDAY_10, sleep=no_wait
+        )
+    }
     with audit_runner.try_run_lock("tradeability_cache") as taken:
         assert taken
-        outcome = await _jobs_by_name(services, lambda: SATURDAY_10)[SENTIMENT_AUDIT_JOB].run()
+        outcome = await jobs[SENTIMENT_AUDIT_JOB].run()
     assert isinstance(outcome, JobSkipped)
     assert "tradeability_cache" in outcome.reason
+    assert "after waiting 30 minutes" in outcome.reason
     assert "grades the same labels" not in outcome.reason
     assert "another sentiment audit run" not in outcome.reason
     assert not audit_runner._RUN_LOCK.locked()

@@ -6,7 +6,9 @@ runs to Saturday 10:00 ET so this job's real body runs there with the rest.
 """
 
 import asyncio
-from collections.abc import Callable, Iterator
+import contextlib
+import logging
+from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -71,12 +73,20 @@ def _services(engine: Engine, bars: object | None, **overrides: object) -> Conte
     return ContextServices(**fields)  # type: ignore[arg-type]
 
 
+async def _never_sleeps(seconds: float) -> None:
+    raise AssertionError(f"the job slept {seconds} s where it must not wait at all")
+
+
 def _audit_job(
-    services: ContextServices, clock: Callable[[], datetime] | None = None
+    services: ContextServices,
+    clock: Callable[[], datetime] | None = None,
+    sleep: Callable[[float], Awaitable[None]] = _never_sleeps,
 ) -> ScheduledJob:
     jobs = {
         job.name: job
-        for job in context_jobs(services, clock=clock or TickingClock(SATURDAY_10))
+        for job in context_jobs(
+            services, clock=clock or TickingClock(SATURDAY_10), sleep=sleep
+        )
     }
     return jobs[SENTIMENT_AUDIT_JOB]
 
@@ -159,6 +169,174 @@ def test_a_run_in_progress_makes_the_scheduled_slot_a_skip(db_engine: Engine) ->
     finally:
         audit_runner._RUN_LOCK.release()
     assert isinstance(outcome, JobSkipped) and "in progress" in outcome.reason
+
+
+# --------------------- 2026-11-20: the slot waits out the daily backfill's lock
+#
+# Owner decision Q25 made the tradeability job's verdict backfill hold the
+# audit's run lock. A scheduled run that met it used to skip for the week;
+# now it polls, bounded by ``SENTIMENT_AUDIT_LOCK_WAIT``. Another audit run
+# holding the lock is still an immediate skip: it grades the same labels.
+
+
+def _scheduled_runs(engine: Engine) -> list[tuple[str, str]]:
+    with Session(engine) as session:
+        return [
+            (r.trigger, r.status) for r in session.scalars(select(AuditRun).order_by(AuditRun.id))
+        ]
+
+
+def _lock_waits(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "sentiment_audit_awaiting_run_lock"
+    ]
+
+
+def test_the_lock_wait_constants_fit_inside_the_weekly_audit_scripts_deadline() -> None:
+    """``scripts/weekly_audit.py`` waits ``RUN_DEADLINE`` (2 h) for the run's row.
+
+    Read from the source rather than imported: loading the script runs its
+    module-level setup, which its own tests fence with monkeypatching.
+    """
+    import re
+    from pathlib import Path
+
+    assert scheduler.SENTIMENT_AUDIT_LOCK_WAIT == timedelta(minutes=30)
+    assert scheduler.SENTIMENT_AUDIT_LOCK_POLL == timedelta(seconds=30)
+    script = Path(__file__).resolve().parents[2] / "scripts" / "weekly_audit.py"
+    found = re.search(r"^RUN_DEADLINE = timedelta\(hours=(\d+)\)$", script.read_text("utf-8"), re.M)
+    assert found is not None, "RUN_DEADLINE moved; re-check the lock wait against it"
+    assert scheduler.SENTIMENT_AUDIT_LOCK_WAIT < timedelta(hours=int(found.group(1)))
+
+
+def test_a_slot_that_meets_the_backfills_lock_waits_and_runs_once_it_frees(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Held through two polls, freed during the third sleep: the third poll runs."""
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    slept: list[float] = []
+    held = contextlib.ExitStack()
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == 3:
+            held.close()  # the backfill finishes its pairs and lets go
+
+    with held:
+        assert held.enter_context(audit_runner.try_run_lock("tradeability_cache"))
+        with caplog.at_level(logging.INFO, logger="corollary"):
+            outcome = asyncio.run(_audit_job(services, sleep=sleep).run())
+
+    assert outcome is None
+    assert slept == [30.0, 30.0, 30.0]
+    assert _scheduled_runs(db_engine) == [("scheduled", "succeeded")]
+    assert len(_lock_waits(caplog)) == 3
+    assert not audit_runner._RUN_LOCK.locked()
+
+
+def test_a_wait_logs_the_rule_the_holder_the_elapsed_wait_and_the_instant(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rule 8: every refusal while waiting is a structured line."""
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    held = contextlib.ExitStack()
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == 2:
+            held.close()
+
+    with held:
+        assert held.enter_context(audit_runner.try_run_lock("tradeability_cache"))
+        with caplog.at_level(logging.INFO, logger="corollary"):
+            asyncio.run(_audit_job(services, _frozen, sleep).run())
+
+    first, second = _lock_waits(caplog)
+    for record in (first, second):
+        assert "Q25" in getattr(record, "rule")
+        assert getattr(record, "holder") == "tradeability_cache"
+        assert getattr(record, "bound_seconds") == 1800
+        assert getattr(record, "poll_seconds") == 30
+        assert getattr(record, "at") == SATURDAY_10.isoformat()
+        assert record.levelno == logging.INFO
+    assert getattr(first, "waited_seconds") == 0
+    assert getattr(second, "waited_seconds") == 30
+
+
+def test_a_backfill_that_holds_past_the_bound_makes_the_slot_a_skip_naming_the_wait(
+    db_engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    with audit_runner.try_run_lock("tradeability_cache") as taken:
+        assert taken
+        with caplog.at_level(logging.INFO, logger="corollary"):
+            outcome = asyncio.run(_audit_job(services, sleep=sleep).run())
+
+    assert isinstance(outcome, JobSkipped)
+    assert "tradeability_cache" in outcome.reason
+    assert "30 minutes" in outcome.reason
+    assert "grades the same labels" not in outcome.reason
+    # Sixty sleeps of thirty seconds is the bound; the sixty-first refusal skips.
+    assert slept == [30.0] * 60
+    assert len(_lock_waits(caplog)) == 60
+    assert _scheduled_runs(db_engine) == []
+
+
+def test_another_audit_run_holding_the_lock_skips_at_once_without_waiting(
+    db_engine: Engine,
+) -> None:
+    """It grades the same labels, so there is nothing to wait for."""
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    with audit_runner.try_run_lock(audit_runner.AUDIT_RUN_HOLDER) as taken:
+        assert taken
+        # ``_never_sleeps`` fails the test on any wait.
+        outcome = asyncio.run(_audit_job(services).run())
+    assert isinstance(outcome, JobSkipped) and "grades the same labels" in outcome.reason
+    assert "minutes" not in outcome.reason
+    assert _scheduled_runs(db_engine) == []
+
+
+def test_a_cancel_during_the_lock_wait_ends_the_job_at_once_and_writes_nothing(
+    db_engine: Engine,
+) -> None:
+    """Q26: shutdown's first cancel ends a waiting run inside the grace, not after it."""
+    _the_week(db_engine)
+    services = _services(db_engine, FakeBars())
+    parked = asyncio.Event()
+
+    async def park(seconds: float) -> None:
+        parked.set()
+        await asyncio.Event().wait()
+
+    async def cancel_while_waiting() -> float:
+        job = _audit_job(services, sleep=park)
+        task: asyncio.Task[object] = asyncio.create_task(job.run())
+        await asyncio.wait_for(parked.wait(), timeout=5)
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        task.cancel()
+        await scheduler.await_cancelled_audit(task, job=SENTIMENT_AUDIT_JOB, grace=5.0)
+        assert task.cancelled()
+        return loop.time() - began
+
+    with audit_runner.try_run_lock("tradeability_cache") as taken:
+        assert taken
+        elapsed = asyncio.run(cancel_while_waiting())
+    assert elapsed < 1.0
+    assert _scheduled_runs(db_engine) == []
+    assert not audit_runner._RUN_LOCK.locked()
 
 
 # ------------------------------------- fix B: a degraded universe never runs

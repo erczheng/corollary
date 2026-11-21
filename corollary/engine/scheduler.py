@@ -2413,10 +2413,12 @@ TRADEABILITY_EVERY = timedelta(minutes=15)
 TRADEABILITY_BACKFILL_BOUND: Final = MAX_TICKERS_PER_RUN
 #: The backfill stands aside when a scheduled sentiment-audit slot is this
 #: close, before or after (inclusive). It holds the audit's run lock while it
-#: works (audit finding L3), and a scheduled run that finds the lock held
-#: skips -- for the week. One job interval either side means no backfill
-#: starts at the slot itself, or close enough before it to still be holding
-#: the lock when the slot fires.
+#: works (audit finding L3), and a scheduled run that finds the lock held by
+#: it waits, up to ``SENTIMENT_AUDIT_LOCK_WAIT``, then skips for the week
+#: (2026-11-20; before that it skipped at once). One job interval either side
+#: means no backfill starts at the slot itself, or close enough before it to
+#: still be holding the lock when the slot fires -- so the wait is for the
+#: rare backfill that started before this window and is still running.
 TRADEABILITY_BACKFILL_AUDIT_CLEARANCE: Final = TRADEABILITY_EVERY
 #: Retention: nightly at 03:00 ET. 03:00 exists exactly once on both DST
 #: change days -- spring forward skips 02:00-03:00 and lands *on* 03:00 EDT,
@@ -3372,37 +3374,125 @@ async def run_sentiment_audit_now(
         raise SentimentAuditUnavailable(str(exc)) from exc
 
 
-async def _sentiment_audit(services: ContextServices, clock: UtcClock) -> JobSkipped | None:
-    """The Saturday ``sentiment_audit`` body."""
+#: How long the Saturday slot's run waits for the daily tradeability job's
+#: verdict backfill to release the run lock before it skips (2026-11-20).
+#: Owner decision Q25 made that backfill hold the lock; a slot that met it
+#: used to skip for the week, leaving the audit to the next start's catch-up
+#: (typically Monday 08:30). ``TRADEABILITY_BACKFILL_AUDIT_CLEARANCE`` keeps a
+#: backfill from *starting* near the slot, but one that started before the
+#: clearance window can still hold the lock when the slot fires. The backfill
+#: is bounded at ``TRADEABILITY_BACKFILL_BOUND`` pairs a run (one standard-root
+#: request each, plus a bars request per session), so it lets go in minutes;
+#: thirty is generous for that and still well inside the two hours
+#: ``scripts/weekly_audit.py`` waits for the run (its ``RUN_DEADLINE``). A
+#: backfill still holding the lock after this is a problem of its own, and
+#: the slot skips as it used to, saying how long it waited.
+#:
+#: Only the backfill is waited for. Another audit run holding the lock grades
+#: the same labels, so the slot skips at once, as before. The start-up
+#: catch-up does not wait at all: the backfill stands aside until the
+#: catch-up has settled (``ContextServices.audit_catch_up_settled``), so the
+#: catch-up's run cannot meet the backfill's lock.
+SENTIMENT_AUDIT_LOCK_WAIT: Final = timedelta(minutes=30)
+#: How often that wait tries the lock again. The lock is a non-blocking
+#: ``threading.Lock`` with no event to await, so the wait polls. Counted in
+#: polls slept, as the SPDR directory wait is, so a test's sleeper makes it
+#: exact and a real ``asyncio.sleep`` can only make it longer, never shorter.
+#: A refused try fails the runner's first check and touches no database or vendor.
+SENTIMENT_AUDIT_LOCK_POLL: Final = timedelta(seconds=30)
+
+_SENTIMENT_AUDIT_LOCK_WAIT_RULE: Final = (
+    "one sentiment audit run lock (owner decision Q25): a scheduled run that finds it "
+    "held by the daily tradeability job's verdict backfill waits, bounded by "
+    "SENTIMENT_AUDIT_LOCK_WAIT, for it to be released"
+)
+
+
+async def _sentiment_audit(
+    services: ContextServices,
+    clock: UtcClock,
+    sleep: Sleeper,
+    *,
+    lock_wait: timedelta = SENTIMENT_AUDIT_LOCK_WAIT,
+) -> JobSkipped | None:
+    """The Saturday ``sentiment_audit`` body: one ``trigger = 'scheduled'`` run.
+
+    A run refused because the daily backfill holds the run lock is tried
+    again every :data:`SENTIMENT_AUDIT_LOCK_POLL`, up to ``lock_wait``, each
+    refusal logged (rule 8); a run the lock frees in time is an ordinary
+    scheduled run. Refused by another audit run, or still refused at the
+    bound, this skips. The wait sleeps on the job's injected sleeper, so it
+    never blocks the event loop or the heartbeat, and a cancellation
+    (shutdown, Q26) ends it at once with nothing written. Nothing here
+    touches the runtime: rule 9 is out of reach, as for every context job.
+    """
     deps = sentiment_audit_deps(services, clock)
     if deps is None:
         return JobSkipped(_SENTIMENT_AUDIT_NO_BARS)
-    try:
-        await run_sentiment_audit(deps, trigger="scheduled")
-    except AuditAlreadyRunning as exc:
-        return JobSkipped(_audit_lock_refusal(exc))
-    except WatchUniverseUnavailable as exc:
-        return JobSkipped(str(exc))
-    return None
+    waited = timedelta(0)
+    while True:
+        try:
+            await run_sentiment_audit(deps, trigger="scheduled")
+            return None
+        except AuditAlreadyRunning as exc:
+            refused = exc
+        except WatchUniverseUnavailable as exc:
+            return JobSkipped(str(exc))
+        if refused.held_by_audit_run or waited >= lock_wait:
+            return JobSkipped(_audit_lock_refusal(refused, waited=waited))
+        _log_audit_lock_wait(refused, waited=waited, bound=lock_wait, at=_require_utc(clock()))
+        await sleep(SENTIMENT_AUDIT_LOCK_POLL.total_seconds())
+        waited += SENTIMENT_AUDIT_LOCK_POLL
 
 
-def _audit_lock_refusal(exc: AuditAlreadyRunning) -> str:
+def _log_audit_lock_wait(
+    refused: AuditAlreadyRunning, *, waited: timedelta, bound: timedelta, at: datetime
+) -> None:
+    """One refusal while the slot waits for the backfill's lock: rule, holder, wait, instant."""
+    logger.info(
+        "the scheduled sentiment audit was refused: the run lock is held by %s; "
+        "trying again in %d s (waited %d s of %d s)",
+        refused.holder,
+        int(SENTIMENT_AUDIT_LOCK_POLL.total_seconds()),
+        int(waited.total_seconds()),
+        int(bound.total_seconds()),
+        extra={
+            "event": "sentiment_audit_awaiting_run_lock",
+            "rule": _SENTIMENT_AUDIT_LOCK_WAIT_RULE,
+            "holder": refused.holder,
+            "waited_seconds": int(waited.total_seconds()),
+            "bound_seconds": int(bound.total_seconds()),
+            "poll_seconds": int(SENTIMENT_AUDIT_LOCK_POLL.total_seconds()),
+            "at": at.isoformat(),
+        },
+    )
+
+
+def _audit_lock_refusal(exc: AuditAlreadyRunning, *, waited: timedelta = timedelta(0)) -> str:
     """A refused scheduled run's skip reason, naming who holds the lock (re-audit finding 2).
 
     Only another audit run "grades the same labels". The daily tradeability
     job's verdict backfill holds the lock to store verdicts and grades
-    nothing, so its refusal says so.
+    nothing, so its refusal says so -- and, when the slot waited for it
+    (:data:`SENTIMENT_AUDIT_LOCK_WAIT`), how long.
     """
     if exc.held_by_audit_run:
         return (
             "another sentiment audit run is in progress (a manual one, or another "
             "process's); it grades the same labels"
         )
-    return (
+    held = (
         f"the run lock is held by {exc.holder} -- the daily job's verdict backfill "
         "(owner decision Q25), which stores tradeability verdicts and grades no label -- "
-        "so this run did not start; the next start's catch-up or the next slot runs it"
     )
+    if waited > timedelta(0):
+        minutes = int(waited.total_seconds()) // 60
+        poll = int(SENTIMENT_AUDIT_LOCK_POLL.total_seconds())
+        held += (
+            f"and was still held after waiting {minutes} minutes for it (tried every "
+            f"{poll} s), "
+        )
+    return held + "so this run did not start; the next start's catch-up or the next slot runs it"
 
 
 #: How long the start-up catch-up waits for the paper positions refresher's
@@ -3666,7 +3756,10 @@ async def _sentiment_audit_catch_up_body(
     # ``run_now`` is the run being started, after every wait; the run's own
     # preconditions can still skip it, so the outcome is stated as well.
     _log_audit_catch_up("run_now", slot=slot, runs=runs, at=_require_utc(clock()))
-    outcome = await _sentiment_audit(services, clock)
+    # No lock wait here: the backfill stands aside until this catch-up has
+    # settled (``audit_catch_up_settled``), so it cannot be what refuses this
+    # run; any refusal skips at once, as it always has (2026-11-20).
+    outcome = await _sentiment_audit(services, clock, sleep, lock_wait=timedelta(0))
     if outcome is None:
         _log_audit_catch_up("ran", slot=slot, runs=runs, at=_require_utc(clock()))
     else:
@@ -3682,7 +3775,7 @@ def _sentiment_audit_job(
     return ScheduledJob(
         name=SENTIMENT_AUDIT_JOB,
         schedule=AtTime(SENTIMENT_AUDIT_AT, SENTIMENT_AUDIT_DAYS),
-        run=functools.partial(_sentiment_audit, services, clock),
+        run=functools.partial(_sentiment_audit, services, clock, sleep),
         catch_up=functools.partial(_sentiment_audit_catch_up, services, clock, sleep),
         catch_up_settled=services.audit_catch_up_settled,
         shutdown_grace=AUDIT_SHUTDOWN_GRACE,
