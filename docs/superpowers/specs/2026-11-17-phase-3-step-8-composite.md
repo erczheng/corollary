@@ -1207,8 +1207,38 @@ is option (b), with the provisional marker (Q28, C8).
   are clean.
 
 **U2. Scoring and the composite, pure.**
-- *Status:* not started. ~~Blocked on Q27 and **Q28**.~~ Released
-  2026-11-17, to follow U10 (Q27). The as-of rule is option (b) (Q28).
+- *Status:* ~~not started. Blocked on Q27 and **Q28**.~~ ~~Released
+  2026-11-17, to follow U10 (Q27).~~ **Built 2026-11-21, except one case
+  open with the owner,** on `phase3-step8-u2-composite`, stacked on U1's
+  branch; not yet merged. The as-of rule is option (b) (Q28). *Evidence:*
+  `test_composite.py` passes (83), `pytest -m risk` passes (723), the full
+  suite passes (7,332), and `mypy corollary` is clean (121 files). Φ agrees with an
+  independent series to better than 1E-45. Ten deliberate mutations each
+  fail at least one test (rounding half-to-even, the population standard
+  deviation, a lag of 2 accepted, the 60-minute delay dropped, *x_D* left
+  out of the window, forming at 59, no orientation, s = 0 treated as z = 0,
+  a changed set not noticed, a lag of 0 marked provisional).
+  *Open, with the owner:* what *D* is when some, but not all, of the five
+  Alpaca components have no row (U5's "No seed, no row ... The other five are
+  unaffected", and put/call before its first run, since it has no history to
+  load). Read literally, C8 gives no *D* until all five have rows.
+  `read_composite` raises `AsOfUndetermined` rather than guess, and that
+  fires on every fresh install until put/call's first write, so **U7 must
+  not ship before the answer**. The same question covers a component whose
+  rows *stopped*: that case follows C8 literally today (D freezes at the
+  last common session and C14 marks it stale), and the two must be answered
+  together. Related: under C8 a put/call gap on the latest session moves *D*
+  back for all seven components, even while put/call is forming, which sits
+  uneasily with C13's reason for separate jobs.
+  *Carried into U3 and U7:* `read_composite(rows, *, now, loaded_from)` takes
+  the first session the caller loaded. It raises `IncompleteLoad(needed_from)`
+  rather than score a short window, and `load_start(as_of)` sizes the load.
+  U7 loads from `load_start(expected_as_of(now))` and reloads once on
+  `IncompleteLoad`. U3's loader must return every row on or after
+  `loaded_from`. Verdicts that rest on a row's absence (`no_value`, no rows,
+  no common session) cannot see rows from before `loaded_from`. That needs
+  data dead for most of a year to matter, and it is documented in
+  `composite.py`.
 - *Depends on:* U1 (the enum and the orientation table).
 - *What it does:* C6–C10.
   - The window over rows.
