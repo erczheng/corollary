@@ -25,13 +25,13 @@ job.
 
 ---
 
-## Owner decisions — 2026-11-17 (Q27, Q28)
+## Owner decisions — 2026-11-17 (Q27, Q28) and 2026-11-23 (Q29)
 
 *Heading amended 2026-11-17; it read "Open questions: blocking".* These were
 not put to the owner during planning, because no question tool was available
 to the planning session. Each one was written for the owner to answer. No
-answer was assumed. Both were answered on 2026-11-17, and each answer is
-recorded at the top of its question, with the owner's words quoted. The
+answer was assumed. Q27 and Q28 were answered on 2026-11-17, and Q29 on
+2026-11-23. Each answer is recorded at the top of its question, with the owner's words quoted. The
 question text below each answer is kept as it was asked.
 
 **Q27: Does this spec release step 8 for implementation?**
@@ -124,6 +124,49 @@ recommendation:* (b), since it is the only option that meets *Done when* item
 it until the owner answers.
 *Blocks:* U2's as-of rule, and through it U7, U8 and U9. The other units do
 not depend on the answer.
+
+**Q29: What is *D* when some, but not all, of the five Alpaca components have
+no row?** *Added 2026-11-23. This question was raised while U2 was being
+built, not during planning. It was asked and answered the same way as Q27
+and Q28.*
+- **Answer, 2026-11-23:** *"ii for the decision"*. Option (ii) is taken, and
+  it is read as below. The reading is the parent session's, and it applies
+  uniformly to every case where a component has no rows or its rows have
+  stopped.
+  - ***D* is the newest session among the five Alpaca components' newest
+    rows.** It is still subject to C8's fixed rule that *D* is never a
+    session whose close + 60 minutes has not passed. A row dated after that
+    session is not a candidate: *D* is always a session with an Alpaca row,
+    never a capped date that has none.
+  - Every component, Alpaca or FRED, uses its newest value dated *D* or
+    earlier, at most one session older than *D*. This is Q28's lag rule,
+    unchanged.
+  - A component with **no rows at all** is excluded as `no_value`. One whose
+    newest row is **more than one session older than *D*** is excluded as
+    `stale`. The count ("N of 7") drops in both cases.
+  - **A one-session lag on an Alpaca component** is included as a lag and
+    sets the provisional marker, naming the component, exactly as VIX and
+    junk do. An example is a put/call gap on *D*. This means a put/call
+    outage no longer holds *D* back for the other six, which matches C13's
+    reason for running separate jobs.
+  - **No Alpaca rows at all** means no *D* and no composite. The result
+    states the reason, and the code does not raise.
+  - `previous` is derived by the same rule as of the session before *D*
+    (C9). Like-with-like (C9) and stale (C14) are unchanged.
+
+*As asked:* C8 read literally (*"D is the latest session for which the five
+Alpaca components have values"*) conflicts with U5's *"No seed, no row ...
+The other five are unaffected"*. It also conflicts with put/call before its
+first run, because put/call has no history to load. Read literally, C8 gives
+no *D*, and so no composite, until all five have rows. A component whose rows
+*stopped* would also freeze *D* for all seven.
+- **(i) C8 read literally.** There is no composite until every Alpaca
+  component has a row, and *D* freezes at the last session all five share.
+- **(ii) *D* comes from the components that have rows.** Absent components
+  are excluded as `no_value` and stopped ones as `stale`, and the count
+  drops.
+*Blocked:* U7, whose route would otherwise have raised on every fresh
+install until put/call's first write.
 
 ---
 
@@ -613,17 +656,27 @@ one pure function with a test per boundary.
 
 *Amended 2026-11-17, Q28 answered:* **the rule is (b).**
 
-- ***D* is the latest session for which the five Alpaca components have
-  values**, subject to the close + 60 minutes rule above.
-- **A component may lag *D* by at most one session.** It then uses its newest
-  value dated on or before *D*, and its `lagSessions` is 1. A value more than
-  one session older than *D* is excluded with reason `stale`, and the count
-  ("N of 7") drops.
+- ~~***D* is the latest session for which the five Alpaca components have
+  values**, subject to the close + 60 minutes rule above.~~ *Amended
+  2026-11-23 (Q29):* ***D* is the newest session among the five Alpaca
+  components' newest rows**, subject to the close + 60 minutes rule above.
+  Rows dated after the latest session whose close + 60 minutes has passed
+  are not candidates, so *D* is always a session with an Alpaca row.
+  A component with no rows at all is excluded with reason `no_value`. If no
+  Alpaca component has a row, there is no *D* and no composite, and the
+  result states why.
+- **A component may lag *D* by at most one session.** This applies to Alpaca
+  and FRED components alike (Q29). It then uses its newest value dated on or
+  before *D*, and its `lagSessions` is 1. A value more than one session
+  older than *D* is excluded with reason `stale`, and the count ("N of 7")
+  drops.
 - **`provisional` is true whenever any included component has `lagSessions`
-  > 0.** The read result carries it, U7 serves it, and U8 and U9 render it in
-  words, naming each lagged component and its date. It is derived on read
-  like everything else, never stored, so it clears by itself once FRED's
-  values for *D* land.
+  > 0.** That includes an Alpaca component, such as put/call missing *D*. The
+  read result carries it, U7 serves it, and U8 and U9 render it in words,
+  naming each lagged component and its date. It is derived on read like
+  everything else, never stored, so it clears by itself once the lagging
+  values for *D* land, or once *D* moves on past a gap that will never be
+  filled (a put/call session with no snapshot, a bond-holiday junk gap).
 - **Yesterday's change (C9) is unaffected.** A lagged component is still
   in the set, so lagging alone never trips *"component set changed"*.
 
@@ -746,12 +799,20 @@ carry-forward), and pruning the store is Phase 6's question.
 - **Failure.** A raise is logged by the scheduler with the job's rule and
   inputs, and the job's next slot comes round. Nothing notifies: a stale
   composite says so on its panel (C14), as every other context feed does.
+  *Amended 2026-11-23 (Q29):* the whole panel reads stale only when **both**
+  Alpaca jobs fail, since either job's row moves *D*. When one job fails,
+  its components show as lagged on the first session (the composite is
+  provisional and names them). From the second session they are excluded,
+  each with reason `stale`, and the count drops. The failure is still on the
+  panel in words, but as lags and exclusions rather than as C14's stale
+  sentence.
 
 *Rejected:*
 - **One combined job.** A put/call outage would then stop momentum.
 - **Running at 16:30 ET** (the parent's row). The indicative feed is 15
   minutes behind SPY's 16:15 option close.
-- **A new notification event.** A composite failure is a stale panel, not an
+- **A new notification event.** A composite failure is a stale panel, or
+  under Q29 a provisional or reduced one (see *Failure* above), not an
   alert. No `notification_route` row, so no migration for one.
 
 ### C14. "Stale" is derived from the rows and the calendar
@@ -878,7 +939,7 @@ components: [{
   key, name, description,      # description says what it is a proxy of (C2)
   proxyOf, proxy, source,      # e.g. "S&P 500 vs its 125-day MA" / "SPY vs its 125-session MA" / "alpaca_daily:sip"
   rawValue, rawLabel,          # display only (C15); rawLabel e.g. "SPY 2.1% above its 125-session MA"
-  valueDate, lagSessions,      # lagSessions per C8: 0 or 1 (Q28 option b)
+  valueDate, lagSessions,      # lagSessions per C8: 0 or 1 when included; a stale component reports its actual lag
   observations, formingNeeds: 60, forming: bool,
   z, score: int | null,
   orientation: "greed_up" | "fear_up",
@@ -988,8 +1049,12 @@ wrong number originates. Everything else gets the standard coverage.
     asserted over random fixtures, not one.
   - forming and excluded components are not averaged and are counted.
   - zero usable components gives no composite and a reason.
-- **The as-of rule (C8, Q28 option b):** one test per boundary. A
-  lag of 0 and of 1 session, and a lag of 2, which is stale. A bond-holiday
+- **The as-of rule (C8, Q28 option b, Q29):** one test per boundary. A
+  lag of 0 and of 1 session, and a lag of 2, which is stale, for FRED and
+  Alpaca components alike. *D* is the newest Alpaca row, and rows after the
+  latest closed session + 60 minutes are not candidates. An Alpaca component
+  with no rows is `no_value`, and the rest still average. No Alpaca rows at
+  all gives no composite and a stated reason, not an exception. A bond-holiday
   junk gap. The close + 60 minute boundary for *D*. `provisional` is true
   exactly when an included component lags *D*, false once every included
   component is dated *D*, and its note names each lagged component and date.
@@ -1208,37 +1273,49 @@ is option (b), with the provisional marker (Q28, C8).
 
 **U2. Scoring and the composite, pure.**
 - *Status:* ~~not started. Blocked on Q27 and **Q28**.~~ ~~Released
-  2026-11-17, to follow U10 (Q27).~~ **Built 2026-11-21, except one case
-  open with the owner,** on `phase3-step8-u2-composite`, stacked on U1's
-  branch; not yet merged. The as-of rule is option (b) (Q28). *Evidence:*
-  `test_composite.py` passes (83), `pytest -m risk` passes (723), the full
-  suite passes (7,332), and `mypy corollary` is clean (121 files). Φ agrees with an
-  independent series to better than 1E-45. Ten deliberate mutations each
-  fail at least one test (rounding half-to-even, the population standard
-  deviation, a lag of 2 accepted, the 60-minute delay dropped, *x_D* left
-  out of the window, forming at 59, no orientation, s = 0 treated as z = 0,
-  a changed set not noticed, a lag of 0 marked provisional).
-  *Open, with the owner:* what *D* is when some, but not all, of the five
-  Alpaca components have no row (U5's "No seed, no row ... The other five are
-  unaffected", and put/call before its first run, since it has no history to
-  load). Read literally, C8 gives no *D* until all five have rows.
-  `read_composite` raises `AsOfUndetermined` rather than guess, and that
-  fires on every fresh install until put/call's first write, so **U7 must
-  not ship before the answer**. The same question covers a component whose
-  rows *stopped*: that case follows C8 literally today (D freezes at the
-  last common session and C14 marks it stale), and the two must be answered
-  together. Related: under C8 a put/call gap on the latest session moves *D*
-  back for all seven components, even while put/call is forming, which sits
-  uneasily with C13's reason for separate jobs.
-  *Carried into U3 and U7:* `read_composite(rows, *, now, loaded_from)` takes
+  2026-11-17, to follow U10 (Q27).~~ ~~Built 2026-11-21, except one case
+  open with the owner.~~ **Built 2026-11-21 and amended 2026-11-23 for Q29**,
+  on `phase3-step8-u2-composite`, stacked on U1's branch; not yet merged.
+  The as-of rule is option (b) (Q28), with *D* taken from the Alpaca
+  components that have rows (Q29).
+  - *Evidence, 2026-11-21:* Φ agrees with an independent series to better
+    than 1E-45. Ten deliberate mutations each fail at least one test:
+    - rounding half-to-even
+    - the population standard deviation
+    - a lag of 2 accepted
+    - the 60-minute delay dropped
+    - *x_D* left out of the window
+    - forming at 59
+    - no orientation
+    - s = 0 treated as z = 0
+    - a changed set not noticed
+    - a lag of 0 marked provisional
+  - *Evidence, 2026-11-23 (Q29):*
+    - `test_composite.py` and `test_components.py` pass (152).
+    - `pytest -m risk` passes (723).
+    - The full suite passes (7,336).
+    - `mypy corollary` is clean (121 files).
+    - The Q29 tests were run against the old rule before the code changed,
+      and six failed.
+    - `AsOfUndetermined` and `NO_COMMON_SESSION` are gone. The two
+      unavailable reasons that are still reachable are `no_rows` and
+      `no_usable_components`.
+  - *A consequence of Q29 to know about:* a failure of **one** Alpaca job no
+    longer makes the panel stale (C13 is amended to say so). Its components
+    lag for a session, which marks the composite provisional and names them.
+    After that they are excluded as `stale`, and the count drops. The whole
+    panel reads stale only when both Alpaca jobs fail.
+  - *Carried into U3 and U7:* `read_composite(rows, *, now, loaded_from)` takes
   the first session the caller loaded. It raises `IncompleteLoad(needed_from)`
   rather than score a short window, and `load_start(as_of)` sizes the load.
   U7 loads from `load_start(expected_as_of(now))` and reloads once on
   `IncompleteLoad`. U3's loader must return every row on or after
-  `loaded_from`. Verdicts that rest on a row's absence (`no_value`, no rows,
-  no common session) cannot see rows from before `loaded_from`. That needs
-  data dead for most of a year to matter, and it is documented in
-  `composite.py`.
+  `loaded_from`. Verdicts that rest on a row's absence (`no_value`, no rows)
+  cannot see rows from before `loaded_from`. Under Q29 the reload no longer
+  repairs this. A component dead for more than a year reads `no_value` in
+  U7's exact load, but `stale` in a load of everything. The composite and
+  the count are the same either way. That needs data dead for most of a
+  year to matter, and it is documented in `composite.py`.
 - *Depends on:* U1 (the enum and the orientation table).
 - *What it does:* C6–C10.
   - The window over rows.
@@ -1258,7 +1335,8 @@ is option (b), with the provisional marker (Q28, C8).
   - `corollary/data/macro/composite.py`.
   - `tests/data/macro/test_composite.py`.
 - *Done when:* U2's tests in *Testing* pass, including the as-of boundaries
-  for the rule Q28 chose (option b, C8) and the `provisional` flag.
+  for the rule Q28 chose (option b, C8), as amended by Q29, and the
+  `provisional` flag.
 
 **U3. Schema and store.**
 - *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow

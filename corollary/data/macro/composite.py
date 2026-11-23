@@ -29,7 +29,8 @@ one session earlier and so bounds the load. :func:`load_start` gives that
 first session for a given as-of session.
 
 The caller cannot size the load exactly in advance, because *D* depends on
-the rows: when *D* is stale by k sessions, its windows start k sessions
+the rows: when *D* is behind ``expected_as_of`` by k sessions (every Alpaca
+component's rows stopped k sessions ago), its windows start k sessions
 earlier than ``load_start(expected_as_of(now))``. So :func:`read_composite`
 takes a required ``loaded_from``, the first session the caller's load covers
 (every stored row dated on or after it is in ``rows``), and once *D* is known
@@ -45,19 +46,23 @@ computes on a truncated window. The intended caller (U7) does::
             load(short.needed_from), now=now, loaded_from=short.needed_from
         )
 
-The reload cannot raise again unless rows are deleted between the two loads:
-rows earlier than the first ``loaded_from`` can only add sessions older than
-*D*, and a row written in between can only move *D* later, which needs a
-later start, not an earlier one. Rows dated before
-``loaded_from`` may be passed and are read like any other.
+The reload cannot raise again unless rows are deleted between the two loads.
+*D* is a maximum over the Alpaca rows (Q29, below), and in the call above
+every row in the first load is dated on or after its ``loaded_from``, so *D*
+is too. The reload adds only rows dated before that, which are older than
+*D*, and a maximum does not move for rows below it: the reload cannot move
+*D*. A row written in between can move *D*, but only later, which needs a
+later start, not an earlier one. Rows dated before ``loaded_from`` may be
+passed and are read like any other; if a caller passes only some of them,
+the reload can find a later *D* among the rest, never an earlier one, so it
+still cannot raise again.
 
 What ``loaded_from`` cannot fix: the verdicts that depend on there being *no*
-row -- :attr:`ExclusionReason.NO_VALUE`, :attr:`UnavailableReason.NO_ROWS`,
-:attr:`UnavailableReason.NO_COMMON_SESSION` and :class:`AsOfUndetermined` --
-are statements about the rows loaded, and their details name ``loaded_from``
-where they can. A component whose newest row predates the load reads as
-``no_value`` rather than ``stale``, and Alpaca rows that predate the load
-entirely read as never-had-rows.
+row -- :attr:`ExclusionReason.NO_VALUE` and :attr:`UnavailableReason.NO_ROWS`
+-- are statements about the rows loaded, and their details name
+``loaded_from``. A component whose newest row predates the load reads as
+``no_value`` rather than ``stale``, and when every Alpaca row predates the
+load the result is ``NO_ROWS`` rather than a stale *D*.
 
 Decimal, and the only two roundings
 -----------------------------------
@@ -77,60 +82,45 @@ Every one of the seven components appears in the result, always, in
 :class:`ExclusionReason` and a detail naming its inputs. A missing composite
 carries an :class:`UnavailableReason` and a detail.
 
-The as-of rule (C8, Q28 option b), as implemented
--------------------------------------------------
+The as-of rule (C8, Q28 option b, Q29 option ii), as implemented
+----------------------------------------------------------------
 
 * ``expected_as_of`` is the latest NYSE session whose close + 60 minutes is
   at or before ``now`` (C14). The close comes from the calendar, so a
   half-day's boundary is 14:00 ET. *Interpretation:* "has passed" is read as
   ``now >= close + 60 minutes``.
-* *D* (``as_of``) is the latest session on or before ``expected_as_of`` for
-  which all five Alpaca components (momentum, strength, breadth, put_call,
-  safe_haven) have a row. Forming components count: they have values. Rows
-  dated after ``expected_as_of`` are not read at all.
-* Every component uses its newest value dated on or before *D*. A value dated
-  *D* has ``lag_sessions`` 0; the session before *D*, 1 (included, and makes
-  the result ``provisional``); older, ``stale``. No row on or before *D* is
-  ``no_value``.
+* *D* (``as_of``) is the newest session among the five Alpaca components'
+  (momentum, strength, breadth, put_call, safe_haven) newest rows dated on
+  or before ``expected_as_of`` (Q29). Rows dated after ``expected_as_of`` are
+  not *D* candidates, which keeps C8's fixed rule that *D* is never a session
+  whose close + 60 minutes has not passed. Forming components count: they
+  have values. The five need not share a session, so one Alpaca component
+  that stopped or never started does not hold *D* back for the other six.
+* No Alpaca row at all on or before ``expected_as_of`` means no *D* and no
+  composite: :attr:`UnavailableReason.NO_ROWS`, returned, never raised. FRED
+  rows alone do not make a *D*.
+* Every component, Alpaca or FRED, then uses its newest value dated on or
+  before *D*. A value dated *D* has ``lag_sessions`` 0; the session before
+  *D*, 1 (included, and makes the result ``provisional``, named in the note
+  exactly as a VIX or junk lag is -- a put/call gap on *D* is one); more than
+  one session older, ``stale``. No row on or before *D* at all is
+  ``no_value``. Both exclusions drop the count ("N of 7").
 * The window is the 252 NYSE sessions ending *D* (C6) for every component,
   lagged or not.
-* ``stale`` is true when *D* is older than ``expected_as_of`` (C14).
+* ``stale`` is true when *D* is older than ``expected_as_of`` (C14). Under
+  Q29 that happens only when every Alpaca component's rows stop short of
+  ``expected_as_of``; one stopped component is ``stale`` on its own row
+  instead.
+* ``previous`` is the same derivation as of the session before *D* (C9):
+  the same lag, ``stale`` and ``no_value`` rule, over windows ending there.
+  The change is printed only when both days average the same component set;
+  otherwise the note is :data:`COMPONENT_SET_CHANGED`.
 * ``provisional_note`` names each lagged component by its key (C2's table
   gives no display name per component) with its value date, ISO-formatted;
   C8's own example is "VIX: Nov 13 close".
 * ``change`` and ``change_note`` are both ``None`` when there is no composite
   today: there is nothing to compare, and no set changed to say so about.
   ``previous`` is still served, so U8 can show yesterday's figure.
-
-**When the five Alpaca components do not all reach ``expected_as_of``.**
-C8 and U5 pull against each other here, and the tension has three shapes.
-The code follows C8 read literally for the first two and refuses the third.
-The open owner question covers the first and third together: if U5's "the
-other five are unaffected" governs a never-had-rows component, it governs a
-stopped one too, and changing only one branch would make a machine that
-never had a seed show a current composite while one whose seed lapsed
-freezes.
-
-* *Rows stopped* -- all five have rows, but the latest session all five
-  share is older than ``expected_as_of`` (strength and breadth have history
-  to Nov 18, then the seed lapses; read on Nov 25). This follows **C8** read
-  literally ("*D* is the latest session for which the five Alpaca components
-  have values"), and **C14** then marks it stale: "The composite is
-  **stale** when its *D* is older than the latest NYSE session whose close +
-  60 minutes has passed". *D* is that last common session and ``stale`` is
-  true. Pending the owner question above.
-* *Rows, but no common session* -- all five have rows, and no session has all
-  five. Decided by **C8** read literally: "*D* is the latest session for
-  which the five Alpaca components have values." There is none, so there is
-  no *D*, and the result is :attr:`UnavailableReason.NO_COMMON_SESSION`.
-* *Never had rows* -- **open, with the owner.** Some, but not all, of the five
-  have no row at all on or before ``expected_as_of`` (U5: "No seed, no row"
-  for strength and breadth; also put/call before its first run). C8 read
-  literally gives no *D* ever, while U5 says "the other five are
-  unaffected". :func:`read_composite` raises :class:`AsOfUndetermined` (a
-  ``NotImplementedError``) rather than guess. When *none* of the five has a
-  row, both readings agree there is no *D*, and the result is
-  :attr:`UnavailableReason.NO_ROWS`.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -157,7 +147,6 @@ __all__ = [
     "PI",
     "SATURATION",
     "WINDOW_SESSIONS",
-    "AsOfUndetermined",
     "ComponentReading",
     "ComponentRow",
     "CompositeReading",
@@ -191,7 +180,7 @@ SATURATION: Final = Decimal(7)
 #: pi to 65 significant digits. A test checks it against a Machin series.
 PI: Final = Decimal("3.1415926535897932384626433832795028841971693993751058209749445923")
 
-#: C8: the five components whose common session sets *D*.
+#: C8 / Q29: the five components whose newest rows set *D*.
 ALPACA_COMPONENTS: Final = (
     ComponentKey.MOMENTUM,
     ComponentKey.STRENGTH,
@@ -227,30 +216,8 @@ class UnavailableReason(StrEnum):
 
     #: None of the five Alpaca components has a row on or before ``expected_as_of``.
     NO_ROWS = "no_rows"
-    #: Every Alpaca component has rows, but no session on which all five do.
-    NO_COMMON_SESSION = "no_common_session"
     #: *D* exists, but every component is forming or excluded (C7).
     NO_USABLE_COMPONENTS = "no_usable_components"
-
-
-class AsOfUndetermined(NotImplementedError):
-    """Some, not all, of the five Alpaca components have no row at all.
-
-    The spec does not decide what *D* is then (see the module docstring), so
-    this module refuses rather than invent as-of semantics.
-    """
-
-    def __init__(self, missing: tuple[ComponentKey, ...], expected: date) -> None:
-        self.missing = missing
-        self.expected = expected
-        names = ", ".join(key.value for key in missing)
-        super().__init__(
-            f"as-of undetermined: {names} have no row on or before {expected}, "
-            "while the other Alpaca components do. C8 makes D the latest "
-            "session all five Alpaca components have values for, and U5 says "
-            "a missing seed leaves 'the other five unaffected'; the spec does "
-            "not say which governs. Unresolved spec question, refused in U2."
-        )
 
 
 class IncompleteLoad(Exception):
@@ -710,20 +677,20 @@ def read_composite(
     (U3's store, through U7's routes) has loaded: every row dated on or after
     ``loaded_from``. ``now`` must be timezone-aware. Raises
     :class:`IncompleteLoad` when *D*'s windows start before ``loaded_from``
-    (reload from its ``needed_from``; see the module docstring), and
-    :class:`AsOfUndetermined` for the one as-of shape the spec leaves open.
+    (reload from its ``needed_from``; see the module docstring). Every as-of
+    shape returns a result; none raises.
     """
     _require_aware(now, "now")
     _require_date(loaded_from, "loaded_from")
     expected = expected_as_of(now)
     by_key = _index(rows)
 
-    # C8: rows dated after expected_as_of are not read.
-    alpaca_sessions = {
-        key: {d for d in by_key[key] if d <= expected} for key in ALPACA_COMPONENTS
-    }
-    missing = tuple(key for key in ALPACA_COMPONENTS if not alpaca_sessions[key])
-    if len(missing) == len(ALPACA_COMPONENTS):
+    # C8 / Q29: D is the newest session among the five Alpaca components'
+    # newest rows. Rows dated after expected_as_of are not D candidates.
+    candidates = [
+        d for key in ALPACA_COMPONENTS for d in by_key[key] if d <= expected
+    ]
+    if not candidates:
         return _unavailable(
             expected,
             UnavailableReason.NO_ROWS,
@@ -731,18 +698,7 @@ def read_composite(
             f"{expected} in the rows loaded from {loaded_from}; the composite "
             "is first computed after a close",
         )
-    if missing:
-        raise AsOfUndetermined(missing, expected)
-
-    common = set.intersection(*alpaca_sessions.values())
-    if not common:
-        return _unavailable(
-            expected,
-            UnavailableReason.NO_COMMON_SESSION,
-            f"no session on or before {expected} has values for all five "
-            f"Alpaca components, in the rows loaded from {loaded_from}",
-        )
-    as_of = max(common)
+    as_of = max(candidates)
 
     # F3: never compute on a truncated window. previous's window starts
     # first and contains today's, so one check covers both.

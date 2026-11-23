@@ -25,7 +25,6 @@ from corollary.data.macro.components import ComponentKey
 from corollary.data.macro.composite import (
     FORMING_NEEDS,
     WINDOW_SESSIONS,
-    AsOfUndetermined,
     ComponentRow,
     CompositeReading,
     ExclusionReason,
@@ -464,7 +463,7 @@ def test_only_fred_rows_gives_no_composite_and_a_reason() -> None:
     assert result.unavailable_reason is UnavailableReason.NO_ROWS
 
 
-# --- The as-of rule (C8, Q28 option b) -------------------------------------------------
+# --- The as-of rule (C8, Q28 option b, Q29) --------------------------------------------
 
 
 def test_every_component_dated_d_has_lag_zero_and_is_not_provisional() -> None:
@@ -612,79 +611,154 @@ def test_d_older_than_the_latest_completed_session_is_stale() -> None:
     assert result.composite is not None
 
 
-def test_d_is_the_latest_session_all_five_alpaca_components_have() -> None:
-    # Put/call missed END (a gap); the other six have it. C8: D is the latest
-    # session for which the five Alpaca components have values.
+def test_d_is_the_newest_session_among_the_alpaca_components_newest_rows() -> None:
+    # Q29: D is the newest of the five Alpaca components' newest rows, so one
+    # component reaching END is enough, whichever it is.
+    rows = full_store(
+        stop={K.MOMENTUM: FRIDAY, K.STRENGTH: FRIDAY, K.BREADTH: FRIDAY, K.PUT_CALL: FRIDAY}
+    )
+    result = read(rows, now=after_close(END))
+    assert result.as_of == END
+    assert result.stale is False
+    assert reading_for(result, K.SAFE_HAVEN).lag_sessions == 0
+    assert reading_for(result, K.MOMENTUM).lag_sessions == 1
+
+
+def test_alpaca_rows_after_expected_as_of_are_not_d_candidates() -> None:
+    # C8's fixed rule survives Q29: a row dated after expected_as_of cannot
+    # make D, even when it is the newest Alpaca row there is.
+    rows = full_store(end=FRIDAY)
+    rows += [row(K.MOMENTUM, END, Decimal(5))]
+    result = read(rows, now=after_close(END) - timedelta(microseconds=1))
+    assert result.expected_as_of == FRIDAY
+    assert result.as_of == FRIDAY
+    assert reading_for(result, K.MOMENTUM).value_date == FRIDAY
+
+
+def test_a_one_session_alpaca_gap_is_included_as_a_lag_and_provisional() -> None:
+    # Q29: "A one-session lag on an Alpaca component is included as a lag and
+    # sets the provisional marker, naming the component, exactly as VIX and
+    # junk do. An example is a put/call gap on D."
     rows = full_store(skip={K.PUT_CALL: {END}})
     result = read(rows, now=after_close(END))
-    assert result.as_of == FRIDAY
-    assert result.stale is True
+    assert result.as_of == END
+    assert result.stale is False
+    put_call = reading_for(result, K.PUT_CALL)
+    assert put_call.value_date == FRIDAY
+    assert put_call.lag_sessions == 1
+    assert put_call.excluded_reason is None
+    assert put_call.score is not None
     for c in result.components:
-        assert c.value_date == FRIDAY
-        assert c.lag_sessions == 0
+        if c.key is not K.PUT_CALL:
+            assert c.value_date == END and c.lag_sessions == 0
+    assert result.components_averaged == 7
+    assert result.provisional is True
+    assert result.lagged == ((K.PUT_CALL, FRIDAY),)
+    assert result.provisional_note == (
+        "Provisional: as of the 2026-11-16 close, put_call uses the 2026-11-13 close"
+    )
+    # previous (FRIDAY) has put/call at lag 0: the same seven, so a change.
+    assert result.previous is not None
+    assert result.previous.components_averaged == 7
+    assert result.change is not None and result.change_note is None
 
 
-def test_an_alpaca_component_with_no_row_at_all_is_refused_as_undetermined() -> None:
-    # U5: "No seed, no row" -- strength and breadth may have no rows at all,
-    # while C8 makes D the latest session all five Alpaca components have.
-    # The spec does not decide this case; U2 refuses it rather than guess.
+def test_an_alpaca_component_that_never_had_rows_is_no_value_and_the_rest_average() -> None:
+    # Q29, and U5's "No seed, no row ... The other five are unaffected":
+    # strength and breadth have no rows at all.
     rows = [r for r in full_store() if r.component not in (K.STRENGTH, K.BREADTH)]
-    with pytest.raises(AsOfUndetermined) as raised:
-        read(rows, now=after_close(END))
-    assert raised.value.missing == (K.STRENGTH, K.BREADTH)
-    assert isinstance(raised.value, NotImplementedError)
+    result = read(rows, now=after_close(END))
+    assert result.as_of == END
+    assert result.stale is False
+    assert result.unavailable_reason is None
+    assert result.provisional is False
+    for key in (K.STRENGTH, K.BREADTH):
+        c = reading_for(result, key)
+        assert c.excluded_reason is ExclusionReason.NO_VALUE
+        assert c.value_date is None and c.lag_sessions is None and c.score is None
+        assert c.excluded_detail and key.value in c.excluded_detail
+    assert len(result.components) == 7  # rule 8: excluded, never dropped
+    assert result.components_averaged == 5  # "5 of 7"
+    assert result.components_total == 7
+    included = [c.score for c in result.components if c.score is not None]
+    assert len(included) == 5
+    assert result.composite == composite_of(included)
+    # previous averages the same five, so the change is printed.
+    assert result.previous is not None
+    assert result.previous.components_averaged == 5
+    assert result.change is not None and result.change_note is None
 
 
-def test_alpaca_rows_that_stopped_give_a_stale_d_at_the_last_common_session() -> None:
-    """C8 read literally picks *D*, and C14 marks it stale. Pending the owner.
+def test_alpaca_rows_that_stopped_are_stale_and_d_advances() -> None:
+    """Q29: the stopped component is ``stale``; *D* does not freeze for the rest.
 
-    The open owner question (see composite.py's docstring) covers this shape
-    together with never-had-rows; this test pins the current literal-C8
-    behaviour, not a settled one. C14: "The composite is **stale** when its
-    *D* is older than the latest
-    NYSE session whose close + 60 minutes has passed ... the panel reads
-    'stale: as of Nov 13; Nov 14's close not computed'". Strength and
-    breadth have history to 2026-11-10 and then stop (a lapsed seed); the
-    other five components run to 2026-11-16.
+    Strength and breadth have history to 2026-11-10 and then stop (a lapsed
+    seed); the other five components run to 2026-11-16. *D* is the newest
+    Alpaca session, END, so C14's flag (*D* older than ``expected_as_of``)
+    is false.
     """
     stopped = date(2026, 11, 10)
     rows = full_store(stop={K.STRENGTH: stopped, K.BREADTH: stopped})
     result = read(rows, now=after_close(END))
-    assert result.as_of == stopped
+    assert result.as_of == END
     assert result.expected_as_of == END
-    assert result.stale is True
+    assert result.stale is False
     assert result.unavailable_reason is None
     assert result.composite is not None
-    assert result.components_averaged == 7
-    # Every component reads its value at D, not its newer rows (C8).
-    for c in result.components:
+    for key in (K.STRENGTH, K.BREADTH):
+        c = reading_for(result, key)
+        assert c.excluded_reason is ExclusionReason.STALE
         assert c.value_date == stopped
-        assert c.lag_sessions == 0
+        assert c.lag_sessions == 4  # 11-11, 11-12, 11-13, 11-16
+        assert c.score is None
+        assert c.excluded_detail and "2026-11-10" in c.excluded_detail
+    assert result.components_averaged == 5
+    # A stale component is not included, so it does not make D provisional.
+    assert result.provisional is False
+    # previous, as of FRIDAY, applies the same rule: still stale there (lag 3).
     assert result.previous is not None
-    assert result.previous.as_of == date(2026, 11, 9)
+    assert result.previous.as_of == FRIDAY
+    assert result.previous.components_averaged == 5
+    assert result.change is not None and result.change_note is None
 
 
-def test_alpaca_rows_with_no_common_session_give_no_composite_and_a_reason() -> None:
-    """Decided by C8 read literally, not open.
+def test_a_component_stopping_between_previous_and_d_changes_the_set() -> None:
+    # Strength's newest row is Thursday: at FRIDAY (previous) it lags one and
+    # is included; at END it lags two and is stale. 6 against 7 is a
+    # different claim, not a move (C9).
+    thursday = date(2026, 11, 12)
+    rows = full_store(stop={K.STRENGTH: thursday})
+    result = read(rows, now=after_close(END))
+    assert result.as_of == END
+    assert reading_for(result, K.STRENGTH).excluded_reason is ExclusionReason.STALE
+    assert result.components_averaged == 6
+    assert result.previous is not None
+    assert result.previous.components_averaged == 7
+    assert result.change is None
+    assert result.change_note == "component set changed"
 
-    C8: "*D* is the latest session for which the five Alpaca components have
-    values." All five have rows here, but momentum has only even-numbered
-    sessions and put/call only odd-numbered ones, so no session has all
-    five, there is no *D*, and the result is ``NO_COMMON_SESSION``.
-    """
-    days = sessions_ending(END, 100)
-    rows = [r for r in full_store() if r.component not in (K.MOMENTUM, K.PUT_CALL)]
-    rows += series(K.MOMENTUM, days[0::2])
-    rows += series(K.PUT_CALL, days[1::2])
+
+def test_no_alpaca_rows_at_all_gives_no_composite_and_a_reason_without_raising() -> None:
+    # Q29: "No Alpaca rows at all means no D and no composite. The result
+    # states the reason, and the code does not raise." An Alpaca row dated
+    # after expected_as_of does not count.
+    rows = [r for r in full_store() if r.component in FRED]
+    rows += [row(K.MOMENTUM, date(2026, 11, 17), Decimal(1))]
     result = read(rows, now=after_close(END))
     assert result.as_of is None
     assert result.expected_as_of == END
-    assert result.unavailable_reason is UnavailableReason.NO_COMMON_SESSION
-    assert result.unavailable_detail and "all five" in result.unavailable_detail
     assert result.composite is None
+    assert result.unavailable_reason is UnavailableReason.NO_ROWS
+    assert result.unavailable_detail and "Alpaca" in result.unavailable_detail
     assert result.components == ()
     assert result.previous is None
     assert result.change is None and result.change_note is None
+
+
+def test_the_unavailable_reasons_are_exactly_the_reachable_ones() -> None:
+    # Q29 leaves "no common session" no meaning: any Alpaca row gives a D.
+    assert {r.value for r in UnavailableReason} == {"no_rows", "no_usable_components"}
+    assert not hasattr(composite, "AsOfUndetermined")
 
 
 # --- previous and the change (C9) -------------------------------------------------------
