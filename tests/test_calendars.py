@@ -19,6 +19,7 @@ from corollary.calendars import (
     nyse_session_close,
     nyse_session_containing,
     nyse_session_open,
+    nyse_sessions_between,
 )
 
 
@@ -256,3 +257,81 @@ def test_the_next_open_is_at_or_after_the_instant() -> None:
     assert nyse_next_open(_et(2026, 10, 6, 9, 30)) == _et(2026, 10, 6, 9, 30)
     assert nyse_next_open(_et(2026, 10, 6, 9, 30, 1)) == _et(2026, 10, 7, 9, 30)
     assert nyse_next_open(_et(2026, 12, 24, 13, 0)) == _et(2026, 12, 28, 9, 30)
+
+
+# --- nyse_sessions_between: the session ranges step 8's windows count in ----
+
+
+def test_sessions_between_skip_a_holiday_and_keep_a_half_day() -> None:
+    """Thanksgiving week 2025: the Thursday is absent, the Friday half-day is in.
+
+    A half-day is a whole session for counting purposes -- a window of N
+    sessions that dropped it would reach one session further back than the
+    exchange did.
+    """
+    assert nyse_sessions_between(date(2025, 11, 24), date(2025, 12, 1)) == (
+        date(2025, 11, 24),
+        date(2025, 11, 25),
+        date(2025, 11, 26),
+        date(2025, 11, 28),  # half-day, 13:00 close
+        date(2025, 12, 1),
+    )
+
+
+def test_sessions_between_across_christmas_eve_and_christmas() -> None:
+    assert nyse_sessions_between(date(2025, 12, 23), date(2025, 12, 29)) == (
+        date(2025, 12, 23),
+        date(2025, 12, 24),  # half-day
+        date(2025, 12, 26),
+        date(2025, 12, 29),
+    )
+
+
+def test_sessions_between_is_inclusive_at_both_ends() -> None:
+    assert nyse_sessions_between(date(2026, 10, 6), date(2026, 10, 6)) == (
+        date(2026, 10, 6),
+    )
+    assert nyse_sessions_between(date(2026, 10, 5), date(2026, 10, 7)) == (
+        date(2026, 10, 5),
+        date(2026, 10, 6),
+        date(2026, 10, 7),
+    )
+
+
+def test_sessions_between_non_session_endpoints_bound_without_being_included() -> None:
+    """A weekend at either end narrows nothing and adds nothing."""
+    assert nyse_sessions_between(date(2026, 10, 3), date(2026, 10, 11)) == (
+        date(2026, 10, 5),
+        date(2026, 10, 6),
+        date(2026, 10, 7),
+        date(2026, 10, 8),
+        date(2026, 10, 9),
+    )
+    assert nyse_sessions_between(date(2026, 11, 26), date(2026, 11, 26)) == ()
+
+
+def test_sessions_between_a_year_counts_the_exchange_s_sessions() -> None:
+    """2025 had 250 NYSE sessions, per XNYS -- not 252, and not 365."""
+    assert len(nyse_sessions_between(date(2025, 1, 1), date(2025, 12, 31))) == 250
+
+
+def test_sessions_between_refuses_a_reversed_range() -> None:
+    with pytest.raises(ValueError, match="after"):
+        nyse_sessions_between(date(2026, 10, 7), date(2026, 10, 6))
+
+
+def test_sessions_between_refuses_a_range_past_the_published_schedule() -> None:
+    """No invented sessions: a short answer would read as a quiet market."""
+    with pytest.raises(ValueError, match="published"):
+        nyse_sessions_between(date(2026, 1, 1), date(2099, 1, 1))
+    with pytest.raises(ValueError, match="published"):
+        nyse_sessions_between(date(1900, 1, 1), date(2026, 1, 1))
+
+
+def test_sessions_between_refuses_a_datetime() -> None:
+    """``datetime`` is a ``date`` subclass; an instant is not a session date."""
+    with pytest.raises(TypeError, match="date"):
+        nyse_sessions_between(
+            datetime(2026, 10, 5, tzinfo=timezone.utc),
+            date(2026, 10, 7),
+        )
