@@ -84,10 +84,16 @@ EXPECTED_TABLES = {
     # 0019 -- U6d: economic first prints (Q22: numbered at merge, after 0018)
     "econ_release_value",
     "econ_release_fetch",
+    # 0021 -- step 8, U3: the composite's raw components (Q22: numbered at merge)
+    "composite_component_value",
 }
 
-#: Everything 0019 created.
-_0019_TABLES = {"econ_release_value", "econ_release_fetch"}
+#: Everything 0021 created.
+_0021_TABLES = {"composite_component_value"}
+
+#: Everything 0019 created -- and 0021's with it: 0020 adds no table, and
+#: 0021 revises 0020, which revises 0019, so a downgrade below 0019 takes it.
+_0019_TABLES = {"econ_release_value", "econ_release_fetch"} | _0021_TABLES
 
 #: Everything 0018 created -- and 0019's tables with it, which revise it.
 _0018_TABLES = {"label_outcome_voided"} | _0019_TABLES
@@ -195,10 +201,10 @@ def test_there_is_exactly_one_head(db_path: Path) -> None:
     the tables rule 9's halt alert lands in, and ``0004`` ``ledger_rejection``.
     """
     script = ScriptDirectory.from_config(_config(sqlite_url(db_path)))
-    # 0020 (Q24a's off_watch_unverdicted) revises 0019 (U6d's econ tables),
-    # which revises 0018 (R4's void tool): Q22 numbers a revision at merge,
-    # and Q24a merged second.
-    assert script.get_heads() == ["0020"]
+    # 0021 (step 8 U3's composite_component_value) revises 0020 (Q24a's
+    # off_watch_unverdicted), which revises 0019 (U6d's econ tables), which
+    # revises 0018 (R4's void tool): Q22 numbers a revision at merge.
+    assert script.get_heads() == ["0021"]
 
 
 VERSIONS_DIR = REPO_ROOT / "corollary" / "db" / "migrations" / "versions"

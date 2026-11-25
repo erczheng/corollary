@@ -81,6 +81,9 @@ __all__ = [
     "CALENDAR_EVENT_KINDS",
     "CALENDAR_EVENT_SOURCES",
     "CalendarEvent",
+    "COMPOSITE_COMPONENTS",
+    "COMPOSITE_UNIVERSE_COMPONENTS",
+    "CompositeComponentValue",
     "CASH_SESSION_ACTIVE_PREFIX",
     "CASH_SESSION_AUDIT_FIELD",
     "CASH_SESSION_INACTIVE",
@@ -2753,3 +2756,78 @@ class EconReleaseFetch(Base):
     attempted_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+#: C2's seven component keys, as ``composite_component_value.component`` stores
+#: them. A **literal copy** of ``corollary.data.macro.components.ComponentKey``:
+#: ``db`` does not import ``corollary.data.macro``, and
+#: ``tests/db/test_composite_component_value.py`` parses the CHECK below and
+#: asserts it is the enum's value set, so the two cannot drift silently.
+COMPOSITE_COMPONENTS: tuple[str, ...] = (
+    "momentum",
+    "strength",
+    "breadth",
+    "put_call",
+    "volatility",
+    "safe_haven",
+    "junk_bond",
+)
+
+#: The two components computed over the SPDR seed (C3), and so the only two
+#: that carry ``universe_as_of``.
+COMPOSITE_UNIVERSE_COMPONENTS: tuple[str, ...] = ("strength", "breadth")
+
+
+class CompositeComponentValue(Base):
+    """One raw Fear & Greed component for one NYSE session (step 8, U3; migration ``*_composite_component_value``).
+
+    Spec ``2026-11-17-phase-3-step-8-composite.md``, C1 and *Design ->
+    Database*. One row per ``(date, component)``. Stores raw values only --
+    never z, scores or the composite (parent decision 5), which are computed
+    on read by ``corollary.data.macro.composite.read_composite``.
+
+    **Written through one function.** ``corollary.data.macro.store.upsert_values``
+    enforces C1's five-session recheck window (rows older than five sessions
+    before a component's newest row are frozen); no CHECK can see that rule,
+    so nothing else should write here.
+
+    ``raw_value`` is ``Money`` (TEXT, exact ``Decimal``; SQL comparison
+    refused), signed, quantized to ``1E-10`` by the store. ``members`` is the
+    count behind the value: names counted for strength and breadth, contracts
+    counted for put/call, else NULL. ``universe_as_of`` is the SPDR seed's
+    report date and is set exactly for strength and breadth -- CHECK-enforced.
+    """
+
+    __tablename__ = "composite_component_value"
+    __table_args__ = (
+        CheckConstraint(
+            _in_list("component", COMPOSITE_COMPONENTS),
+            name="ck_composite_component_value_component",
+        ),
+        CheckConstraint(
+            _money_shape("raw_value"), name="ck_composite_component_value_raw_value"
+        ),
+        CheckConstraint("trim(source) <> ''", name="ck_composite_component_value_source"),
+        CheckConstraint(
+            "members IS NULL OR members >= 0", name="ck_composite_component_value_members"
+        ),
+        CheckConstraint(
+            f"({_in_list('component', COMPOSITE_UNIVERSE_COMPONENTS)} "
+            f"AND universe_as_of IS NOT NULL) "
+            f"OR (NOT {_in_list('component', COMPOSITE_UNIVERSE_COMPONENTS)} "
+            f"AND universe_as_of IS NULL)",
+            name="ck_composite_component_value_universe_as_of",
+        ),
+    )
+
+    #: The NYSE session the value describes. A date, not an instant.
+    date: Mapped[dt.date] = mapped_column(Date, primary_key=True)
+    component: Mapped[str] = mapped_column(String(16), primary_key=True)
+    raw_value: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    #: The feed or series, e.g. ``alpaca_daily:sip`` or ``fred:VIXCLS``.
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    members: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: The SPDR seed's report date, for strength and breadth only.
+    universe_as_of: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    #: The last write, UTC.
+    computed_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

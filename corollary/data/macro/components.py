@@ -261,9 +261,10 @@ class NoValue:
 class RawValue:
     """One raw value, quantized to :data:`RAW_QUANTUM`.
 
-    ``members`` is the count behind it -- eligible names for strength and
-    breadth, contracts counted for put/call, ``None`` for the rest -- which
-    is what ``composite_component_value.members`` stores.
+    ``members`` is the count behind it -- eligible names for strength, the
+    names counted for breadth (owner decision 3a, 2026-11-24), contracts
+    counted for put/call, ``None`` for the rest -- which is what
+    ``composite_component_value.members`` stores.
     """
 
     value: Decimal
@@ -602,7 +603,13 @@ def breadth(universe: Sequence[BarSeries], session: date) -> RawValue | NoValue:
     A name counts when it has a bar on *t* and on the NYSE session before
     *t* -- the calendar's previous session, not the name's previous bar.
     Advancing is close above the previous close, declining below; unchanged
-    adds its volume to the total only. ``members`` is the names counted.
+    adds its volume to the total only. ``members`` is the names counted --
+    the names behind the volume totals, not the denominator, which is a
+    volume (owner decision 3a, 2026-11-24).
+
+    Split-adjusted volume is rescaled by a later split, so a value recomputed
+    inside the recheck window after a split can differ from the stored one;
+    accepted and documented, C1's 2026-11-24 amendment.
     """
     _require_session(session)
     _require_universe(universe, ComponentKey.BREADTH)

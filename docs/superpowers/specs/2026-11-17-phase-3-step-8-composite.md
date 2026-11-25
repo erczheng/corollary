@@ -168,6 +168,18 @@ no *D*, and so no composite, until all five have rows. A component whose rows
 *Blocked:* U7, whose route would otherwise have raised on every fresh
 install until put/call's first write.
 
+**3. a: What does `members` store for breadth?** *Added 2026-11-24, raised
+while U3 was being built.*
+- **Answer, 2026-11-24: option (a).** For breadth, `members` is the number
+  of names counted, the names behind the volume totals. That matches the
+  *Database* table ("eligible names") and U1's `breadth()`. C3's
+  "`members` stores the denominator" read wrongly for breadth, whose
+  denominator is a volume, and is amended there.
+- *Also 2026-11-24, recorded in C1:* a `breadth` recomputed inside the
+  recheck window after a split can differ from the stored one, because
+  split adjustment rescales earlier volume. Accepted and documented, with
+  no code change.
+
 ---
 
 ## Problem
@@ -438,8 +450,18 @@ parent decision 5 requires. Step 8 adds three rules.
 - **Ratios, not prices.** Each raw value is a ratio, a difference of returns,
   a fraction, or (for the two FRED series) the published level. A later split
   or dividend adjustment rescales every earlier price by one factor, which
-  leaves a ratio unchanged. So a stored value never goes stale against
-  re-adjusted bars.
+  leaves a ratio unchanged. So a stored value ~~never goes stale against
+  re-adjusted bars~~ built from prices never goes stale against re-adjusted
+  bars. *Amended 2026-11-24 (owner decision, accept and document, no code
+  change):* volume is the exception. A split rescales a name's earlier
+  split-adjusted volume, so a `breadth` recomputed inside the five-session
+  recheck window after a split can differ from the stored one. Frozen rows
+  never change. This is accepted because:
+  - split adjustment is required, or a split reads as a crash;
+  - the up/down classification uses adjusted prices and is unaffected;
+  - it touches about 1 of 503 names for at most five sessions;
+  - the recheck window exists for revisions;
+  - fetching raw volume as well would double the job's requests.
 - **A rolling recheck.** Every run recomputes, and upserts, each session from
   `RECHECK_SESSIONS = 5` sessions before the newest stored row through the
   latest completed session. Older rows are never rewritten. A 17:00 ET bar is
@@ -512,8 +534,10 @@ The universe is every symbol in the latest accepted SPDR snapshot
   Advancing means close above the previous close, declining means below, and
   unchanged counts only toward the total.
 - **A fraction, not a count,** so a 497-name day and a 503-name day are
-  comparable. `members` stores the denominator, and `universe_as_of` stores
-  the seed's report date.
+  comparable. ~~`members` stores the denominator,~~ `members` stores the
+  names counted: the denominator for strength, and the names behind the
+  volume totals for breadth *(amended 2026-11-24, owner decision 3a)*. And
+  `universe_as_of` stores the seed's report date.
 - **No seed, no row.** Without an accepted snapshot the two components are
   not computed, and the run logs why. The other five are unaffected.
 - **A new snapshot applies from the next run on.** Rows already stored keep
@@ -1346,8 +1370,34 @@ is option (b), with the provisional marker (Q28, C8).
   `provisional` flag.
 
 **U3. Schema and store.**
-- *Status:* not started. ~~Blocked on Q27.~~ Released 2026-11-17, to follow
-  U10 (Q27).
+- *Status:* ~~not started.~~ ~~Blocked on Q27.~~ Released 2026-11-17, to follow
+  U10 (Q27). **Built 2026-11-24.**
+  - *Evidence, 2026-11-24:*
+    - `uv run python -m pytest`: 7433 passed.
+    - `-m risk`: 723 passed.
+    - `uv run python -m mypy corollary`: no issues in 123 source files (`compiled: no`).
+    - `uv run alembic heads`: `0021 (head)`, one head.
+    - On a scratch DB: `upgrade head`, then `downgrade -1` (0020, table
+      gone), then `upgrade head` (0021, table back).
+    - Both component CHECK lists, the model's and the migrated table's, are
+      parsed and tied to `ComponentKey`.
+  - *Departures, recorded above:*
+    - `load_window` takes `loaded_from`, U2's contract, not a session count.
+    - Each floor is anchored on the later of the caller's `newest_stored`
+      and the table's own newest, so a caller can narrow the recheck
+      window but never widen it.
+    - A batch with any value outside the window is refused whole and logged
+      with `composite_recheck_window`.
+  - *Carried into U4–U6:*
+    - `upsert_values` refuses a date that is not an NYSE session.
+    - FRED can publish `junk_bond` on a day bonds trade and the NYSE does
+      not (Good Friday). U4 must drop those observations before calling the
+      store, or the whole batch raises.
+    - The store does not refuse a future-dated session. Writing only
+      through the latest completed session is the job's duty (C1). A
+      future-dated row would become the newest, move the floor forward, and
+      freeze real rows; later rechecks would then be refused loudly, not
+      written silently.
 - *Depends on:* nothing (the CHECK list is literal, and a test ties it to
   U1's enum once both exist). Runs in parallel with U1.
 - *What it does:*
@@ -1355,10 +1405,19 @@ is option (b), with the provisional marker (Q28, C8).
   - The `CompositeComponentValue` model.
   - `store.py`: `upsert_values(session, values, *, newest_stored)`, which
     writes only inside the recheck window.
-  - `load_window(session, components, end_session, sessions=252)`.
+  - ~~`load_window(session, components, end_session, sessions=252)`.~~
+    `load_window(session, components, *, loaded_from)`, every stored row
+    dated on or after `loaded_from`, with no end cap *(amended 2026-11-24)*.
+    U2's contract requires it: `read_composite` needs every row on or after
+    `loaded_from`, its `previous` window needs 253 sessions (`load_start`),
+    and `IncompleteLoad.needed_from` is a date, so a count of 252 would
+    silently short the load.
   - `newest_dates(session)`.
-- *Rule 9:* imports only `db`. Used by context jobs and read routes, never
-  by the runtime.
+- *Rule 9:* ~~imports only `db`.~~ imports only `corollary.db`,
+  `corollary.calendars`, and the pure siblings
+  `corollary.data.macro.components` and `corollary.data.macro.composite`
+  *(amended 2026-11-24)*. Used by context jobs and read routes, never by
+  the runtime.
 - *Rule 8:* an upsert outside the recheck window is refused with a logged
   rule, `composite_recheck_window`, and its inputs. It never writes
   silently.
